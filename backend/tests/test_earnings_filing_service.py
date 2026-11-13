@@ -18,11 +18,13 @@ they hang on, and a mark printed as a character is never read as a digit or a sc
 before it.
 
 The SEC side is pinned too, because its limiter and 600 s throttle circuit are SHARED with
-Learn, the buyback check and the Trillion stake finder: the cap on tickers at a time, the
-release-window cadence, the stop once the release is read, the rest with no slot while a record
-shows foreign forms alone, one extraction per accession, and parking every symbol on a throttle.
-So is which report a filing belongs to: by the day it was accepted, and a filing date on EDGAR's
-own calendar.
+Learn, the buyback check and the Trillion stake finder: the cap on tickers at a time, the cadence
+of each company's own release windows, read from the acceptance times of its past releases on the
+record the watch fetches anyway, and what a report day costs by them, the read of every company in
+EDGAR's last minute, the stop once the release is read, the rest with no slot while a record shows
+foreign forms alone, one extraction per accession, and parking every symbol on a throttle.
+So is which report a filing belongs to: by the ET day it was accepted, read from SEC's stamp,
+which is UTC, and a filing date on EDGAR's own calendar.
 
 Each read of a filing settles one of three things. RETRY: the read failed, so the same accession
 goes again on a widening ladder. NOT_RELEASE: it was read and is not the results release, so it is
@@ -34,9 +36,10 @@ cadence, the stop once a filing is found, one extraction per accession, and park
 symbol on a throttle.
 
 So is the round's timing, because the card reads the record while a round runs: a figure is
-handed over the moment it verifies, every symbol of a round comes due again a minute after that
-round started, and a filing waiting on its next attempt rests its step of the ladder from the end
-of its own failed read, and for at least a minute after any round that spent an attempt.
+handed over the moment it verifies, every symbol of a round comes due again on its own cadence
+counted from the start of that round, and a filing waiting on its next attempt rests its step of
+the ladder from the end of its own failed read, and for at least a minute after any round that
+spent an attempt.
 
 And so is what a verifier fix can reach: a filing an older verifier kept is read again while its
 report is today's, pending and the watch open, or else dropped, never restored, and the verifier
@@ -76,6 +79,7 @@ from app.integrations.sec_edgar import (
     SECUnavailableException,
 )
 from app.schemas.tracking import EarningsLiveResponse
+from app.services import chat_security
 from app.utils import filing_text
 from app.utils.market_hours import ET
 
@@ -94,13 +98,6 @@ RELEASE = (
 OUTLOOK = "Intel expects revenue of $17.5 billion to $18.5 billion and non-GAAP EPS of $0.48."
 GAAP_QUOTE = ("Third-quarter GAAP earnings per share (EPS) attributable to Intel was a loss of "
               "$(0.12);")
-
-
-def _q(start: str, length: int = 0) -> str:
-    """A verbatim span of RELEASE that starts at `start` and is at least 40 characters."""
-    i = RELEASE.index(start)
-    end = i + max(len(start), length or 0, 40)
-    return RELEASE[i:min(end, len(RELEASE))]
 
 
 def _good_answer(**overrides) -> Dict[str, Any]:
@@ -167,10 +164,18 @@ def test_a_loss_must_read_as_a_loss_in_its_quote():
     assert efs.eps_from_quote("diluted EPS of $(0.46)", -0.46) == -0.46
 
 
-def test_a_quote_that_cuts_a_number_is_refused():
-    """`verify_peg_span` refuses "$1" quoted out of "$17.1 billion"."""
-    quote = "Third-quarter revenue was $1"
-    assert not efs.verify_peg_span(quote + " " * 20, RELEASE)
+@pytest.mark.parametrize("kept", ["$1", "$17", "$17."])
+def test_a_quote_that_cuts_a_number_is_refused(kept):
+    """`verify_peg_span` refuses "$1" quoted out of "$17.1 billion". The span is 40+ characters
+    on purpose: a shorter one is refused on length alone, and padding does nothing because
+    outer whitespace is stripped. The twin, the same span with the number whole, verifies, so
+    the cut is the only thing refused."""
+    start = RELEASE.index("Intel Corporation today reported")
+    at = RELEASE.index("$17.1 billion")
+    cut, whole = RELEASE[start:at + len(kept)], RELEASE[start:at + len("$17.1 billion")]
+    assert len(cut) >= efs.PEG_SPAN_MIN_CHARS
+    assert efs.verify_peg_span(whole, RELEASE), "the twin: the same span with the number whole"
+    assert not efs.verify_peg_span(cut, RELEASE)
 
 
 # ── the outlook: the company's own sentence ──────────────────────────────────
@@ -594,9 +599,32 @@ def test_a_cut_is_seen_at_every_place_the_release_prints_the_quote():
     " Through the first nine months sales grew.",
     " On a reported basis sales grew 4%.",
     " As of September 30 Acme held $1 billion.",
+    # Behind a line of prose a joining word opens the next line whatever follows it: only a line
+    # set in capitals capitalises its own joining words.
+    " For 2027, Acme expects growth.",
+    " In August 2026, Acme announced an agreement.",
+    " On October 29, Acme raised its dividend.",
+    " In Q3 sales grew.",
+    " For More Information",
+    " In-store sales grew 5%.",
+    " To $18.5 billion in the year ahead",
 ])
 def test_a_quote_ending_where_its_line_does_stands(after):
     quote = "Expected revenue of $17.5 billion to $18.5 billion for the quarter"
+    figures, reasons = _verify_in(f"Acme reported results. {quote}{after}",
+                                  guidance={"quote": quote})
+    assert figures.guidance == quote and reasons["guidance"] == "ok"
+
+
+@pytest.mark.parametrize("ending", ["for Q4", "for Q4 FY27", "in Fiscal Q4",
+                                    "for the quarter at Acme"])
+@pytest.mark.parametrize("after", [" For 2027, Acme expects growth.",
+                                   " In August 2026, Acme announced an agreement."])
+def test_a_line_of_prose_ending_on_a_name_or_two_stands_before_the_next_sentence(ending, after):
+    """A line is set in capitals only when its last three words are: one or two capitalised words
+    at the end of a sentence are names, and a capitalised joining word behind them opens the next
+    sentence."""
+    quote = f"Expected revenue of $17.5 billion to $18.5 billion {ending}"
     figures, reasons = _verify_in(f"Acme reported results. {quote}{after}",
                                   guidance={"quote": quote})
     assert figures.guidance == quote and reasons["guidance"] == "ok"
@@ -852,6 +880,34 @@ def test_a_quote_opening_on_punctuation_is_cut_too():
     "Company-operated coffeehouses for the quarter (5.5)% 81.3 % Licensed follows here",
     "Profit Margin for the quarter 19.9 % 20.7 % (80) bps Continuing EPS follows here",
     "Return on average assets 0.79 % 0.93 % 0.96 % Return on average equity follows",
+    # A cell that says how rough it is, or carries its scale, is still a cell: "~", "≈", "+" and
+    # "approx." in front of the second, "B" or "bn" behind the first, and "Y/Y" between two rates.
+    "Fourth Quarter Outlook Revenue ~$17,500 ~$18,500 Non-GAAP EPS ~$0.48 ~$0.52",
+    "Fourth Quarter Outlook Revenue \u2248$17,500 \u2248$18,500 Non-GAAP EPS \u2248$0.48 \u2248$0.52",
+    "Fourth Quarter Outlook Revenue $17.5B approx. $18.5B for the quarter and the year",
+    "Fourth Quarter Outlook Revenue $3.46B $3.52B Operating income $0.9B $1.1B",
+    "Fourth Quarter Outlook Revenue $3.46bn $3.52bn for the quarter and the full year",
+    "Fourth Quarter Outlook Revenue $3,460mm $3,520mm for the quarter and the full year",
+    "Outlook Q4 FY Operating margin ~12% ~11.5% for the quarter and the full year",
+    "Outlook Q4 FY Revenue growth +4% +6% for the quarter and the full year",
+    "Outlook Q4 FY Operating margin \u224812% \u224811.5% for the quarter and the year",
+    "Outlook Q4 FY Operating margin 12% approx. 11.5% for the quarter and the year",
+    "Fourth Quarter Outlook GMS growth +5-7% Y/Y ~7% for the quarter and the year",
+    "Fourth Quarter Outlook GMS growth 5% YoY 7% for the quarter and the year",
+    # Ranges side by side, a sign on each: Procter & Gamble's estimate table.
+    "Core EPS Growth FY 2027 (Outlook) +1% to +5% -1% to -2% -% to +3% for the year",
+    "Organic Sales Growth FY 2027 (Outlook) +2% to +4% -1% +1% to +3% for the year",
+    "Organic Sales Growth FY 2027 (Outlook) +2% to +4% \u22121% +1% to +3% for the year",
+    # Two columns of a guide, each cell a rate with the same word behind it, or the columns'
+    # headings side by side: Coca-Cola's "Current Prior" table.
+    "Full Year 2026 Guidance Current Prior Organic revenues (non-GAAP) At least 5% growth Approx. "
+    "5% growth",
+    "Full Year 2026 Guidance Organic revenues (non-GAAP) At least 5% growth Approx. 5% growth",
+    "Full Year Outlook Comparable EPS (non-GAAP) At least 9% growth 7% to 8% growth for the year",
+    "Full Year 2026 Guidance Current Prior Organic revenues of about 5% for the full year",
+    "Full Year 2026 Guidance CURRENT PRIOR Organic revenues of about 5% for the full year",
+    "Full Year 2026 Guidance Revised Previous Organic revenues of about 5% for the full year",
+    "Full Year 2026 Guidance Updated Initial Organic revenues of about 5% for the full year",
 ])
 def test_the_rows_of_a_flattened_table_are_never_the_outlook(quote):
     """A table's "$" is a cell of its own, and only a table sets two amounts side by side. Its
@@ -873,6 +929,29 @@ def test_the_rows_of_a_flattened_table_are_never_the_outlook(quote):
     "Acme expects diluted EPS of $4.05 to $4.25 ($4.50 to $4.70 adjusted) for fiscal 2027.",
     "Acme expects diluted EPS of $4.05 ($4.50 adjusted) for the full year of fiscal 2027.",
     "Acme expects a loss per share of $(0.40) ($0.20 adjusted) for the fourth quarter.",
+    # The marks of a rough figure and a scale's letter in a sentence, which words join.
+    "Acme expects revenue of ~$17.5B to ~$18.5B for the fourth quarter of 2026.",
+    "Acme expects revenue of \u2248$17.5B to \u2248$18.5B for the fourth quarter of 2026.",
+    "Acme expects revenue growth of +4% to +6% for the full year of 2027.",
+    "Acme expects revenue growth of 4% \u00b11% for the full year of 2027.",
+    "Acme expects revenue of $17.5B, or growth of ~5%, for the fourth quarter of 2026.",
+    "Acme expects revenue of about $17.5B, up ~5% Y/Y, for the fourth quarter of 2026.",
+    "Acme expects GMS growth of 5% Y/Y and 7% for the full year of 2027.",
+    # A rate's word said twice where words join the two, and a guide's words in a sentence.
+    "Acme expects 5% growth in the fourth quarter and 7% growth for the full year of 2027.",
+    "Acme expects at least 5% growth, and about 7% growth in 2027, on its current plans.",
+    "Acme now expects revenue growth of at least 5%, compared with its prior outlook of 4%.",
+    "Acme's current outlook replaces its prior outlook of revenue growth of 4% for 2026.",
+    "Acme raised its full-year guidance: revenue growth of about 5%, up from a prior 4%.",
+    # A joining word said behind both rates of a range is no column's word.
+    "Acme expects fiscal 2027 revenue to increase 3% to 4% to approximately $5.0 billion.",
+    "Acme expects fiscal 2027 revenue to grow 8% to 10% to between $5.0 billion and $5.1 billion.",
+    "Acme expects fiscal 2027 net sales to decline 1% to 2% to about $4.9 billion.",
+    "Acme expects fiscal 2027 adjusted EPS to rise 5% to 7% to $4.10 to $4.20.",
+    "Acme expects revenue to grow 3% in the fourth quarter and 4% in fiscal 2027.",
+    # A range a sentence writes with a dash is no signed cell.
+    "Acme expects revenue growth of 4% - 5% for the full year of 2027.",
+    "Acme expects revenue growth of 4%-5% and margin of 12% \u2013 13% for 2027.",
 ])
 def test_figures_in_a_sentence_are_no_table(quote):
     figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
@@ -897,6 +976,144 @@ def test_a_table_costs_only_the_outlook():
     assert figures.revenue == 17.1e9 and figures.eps_adjusted == 0.44
 
 
+_GUIDE = "Acme expects revenue of $17.5 billion to $18.5 billion for the fourth quarter."
+#: A segment's table right behind the outlook's sentence, flat in `html_to_text`'s text.
+_SEGMENT_TABLE = ("Propulsion Systems (PSG) Three months ended September 30 Nine months ended "
+                  "September 30 (Dollars in millions) 2026 2025 Year on Year 2026 2025 Year on Year "
+                  "Orders $4,269 $3,607 18 % $14,581 $10,979 33 %")
+#: A guide given as a table behind the sentence that leads into it.
+_LEAD_INTO_A_TABLE = ("Acme's guidance for the fourth quarter of 2026 includes both GAAP and non-GAAP "
+                      "estimates as follows: Q4 2026 GAAP Non-GAAP Revenue ($B) $15.0 - $16.0 Gross "
+                      "margin 37.1% 38.0% Tax Rate 31% 11%")
+
+
+@pytest.mark.parametrize("text,quote", [
+    (f"Acme reported results. {_GUIDE} {_SEGMENT_TABLE}", f"{_GUIDE} Propulsion Systems (PSG)"),
+    (f"Acme reported results. {_GUIDE} {_SEGMENT_TABLE}",
+     f"{_GUIDE} Propulsion Systems (PSG) Three months ended September 30"),
+    (f"Acme reported results. {_GUIDE} {_SEGMENT_TABLE}",
+     f"{_GUIDE} Propulsion Systems (PSG) Three months ended September 30 Nine months ended "
+     "September 30 (Dollars in millions) 2026 2025"),
+    (f"Acme reported results. {_LEAD_INTO_A_TABLE}", _LEAD_INTO_A_TABLE.split(" Gross")[0]),
+    # Two columns' headings side by side inside the one sentence, with no full stop before them.
+    ("Acme reported results. Acme expects revenue for 2026 2025 of $17.5 billion to $18.5 "
+     "billion. Revenue grew.",
+     "Acme expects revenue for 2026 2025 of $17.5 billion to $18.5 billion."),
+    ("Acme reported results. Acme expects Q4 revenue GAAP Non-GAAP of $17.5 billion to $18.5 "
+     "billion. Revenue grew.",
+     "Acme expects Q4 revenue GAAP Non-GAAP of $17.5 billion to $18.5 billion."),
+    ("Acme reported results. Acme expects Q4 revenue Three months ended December 31 Twelve months "
+     "ended December 31 of $17.5 billion. Revenue grew.",
+     "Acme expects Q4 revenue Three months ended December 31 Twelve months ended December 31 of "
+     "$17.5 billion."),
+    ("Acme reported results. Acme expects Q4 revenue Non-GAAP GAAP of $17.5 billion to $18.5 "
+     "billion. Revenue grew.",
+     "Acme expects Q4 revenue Non-GAAP GAAP of $17.5 billion to $18.5 billion."),
+    # A row of bare cells behind the full stop, the last one with a decimal point: that point is
+    # no full stop of a sentence.
+    ("Acme reported results. For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. "
+     "Diluted EPS 1.25 1.10 Net income was $120 million.",
+     "For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. Diluted EPS 1.25 1.10"),
+    ("Acme reported results. For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. Gross "
+     "margin 45.2 44.8 Net income was $120 million.",
+     "For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. Gross margin 45.2 44.8"),
+    ("Acme reported results. For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. "
+     "Revenue ($B) 0.0 0.5 1.0 1.5 2.0 2.5 Net income was $120 million.",
+     "For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. Revenue ($B) 0.0 0.5 1.0 1.5 "
+     "2.0 2.5"),
+    ("Acme reported results. For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. "
+     "Diluted EPS 125 110 Net income was $120 million.",
+     "For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. Diluted EPS 125 110"),
+    # A cell shaped like a year behind another cell is still a cell, its decimal point no stop.
+    ("Acme reported results. For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. "
+     "Revenue ($M) 1,980.2 2025.5 Net income was $120 million.",
+     "For 2027, Acme expects revenue of $5.0 billion to $5.2 billion. Revenue ($M) 1,980.2 2025.5"),
+])
+def test_an_outlook_that_runs_on_into_a_tables_headings_is_refused(text, quote):
+    """Every word is verbatim, and the sheet would still print a table's headings, or its cells,
+    under the company's sentence as if they were its words: "Three months ended September 30 Nine
+    months ended September 30 (Dollars in millions) 2026 2025"."""
+    figures, reasons = _verify_in(text, guidance={"quote": quote})
+    assert figures is None and reasons["guidance"] == "table_cell"
+
+
+@pytest.mark.parametrize("text,quote", [
+    (f"Acme reported results. {_GUIDE} {_SEGMENT_TABLE}", _GUIDE),
+    (f"Acme reported results. {_GUIDE} Acme expects gross margin of about 40% for the year. "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects gross margin of about 40% for the year."),
+    # A last sentence whose full stop the model left off, where the release prints it.
+    (f"Acme reported results. {_GUIDE} Acme expects gross margin of about 40% for the year. "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects gross margin of about 40% for the year"),
+    # A line of a list behind the sentence ends on no full stop, with its lead-in or without.
+    (f"Acme reported results. {_GUIDE} \u2022Gross margin of about 40% \u2022Tax rate of 15%",
+     f"{_GUIDE} \u2022Gross margin of about 40%"),
+    (f"Acme reported results. {_GUIDE} Acme also expects: \u2022Gross margin of about 40% \u2022Tax "
+     "rate of 15%",
+     f"{_GUIDE} Acme also expects: \u2022Gross margin of about 40%"),
+    # A headline set in capitals with no stop in it.
+    ("ACME RAISES 2026 REVENUE OUTLOOK TO $5.0 BILLION Acme reported results.",
+     "ACME RAISES 2026 REVENUE OUTLOOK TO $5.0 BILLION"),
+    # A scale in a sentence's own words, and both bases joined as a sentence joins them.
+    ("Acme reported results. Acme expects fourth quarter revenue (in millions) of $17,500 to "
+     "$18,500. Revenue grew.",
+     "Acme expects fourth quarter revenue (in millions) of $17,500 to $18,500."),
+    ("Acme reported results. Acme expects GAAP and non-GAAP EPS of $0.48 for the fourth quarter. "
+     "Revenue grew.",
+     "Acme expects GAAP and non-GAAP EPS of $0.48 for the fourth quarter."),
+    ("Acme reported results. For 2027 Acme expects revenue of $5.0 billion, up from $4.6 billion "
+     "in 2026. Revenue grew.",
+     "For 2027 Acme expects revenue of $5.0 billion, up from $4.6 billion in 2026."),
+    # A last sentence closed inside a quote mark, or behind a footnote, or by "?", in front of a
+    # table: its mark is its end, wherever the release goes on.
+    (f"Acme reported results. {_GUIDE} The CEO said \"we expect margin of about 40% for the "
+     f"year.\" {_SEGMENT_TABLE}",
+     f"{_GUIDE} The CEO said \"we expect margin of about 40% for the year.\""),
+    (f"Acme reported results. {_GUIDE} Acme expects margin of about 40% for the year.(1) "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects margin of about 40% for the year.(1)"),
+    (f"Acme reported results. {_GUIDE} Acme expects margin of about 40% for the year.** "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects margin of about 40% for the year.**"),
+    (f"Acme reported results. {_GUIDE} Acme expects margin of about 40% for the year.1 "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects margin of about 40% for the year.1"),
+    # A footnote's digit glued to the full stop behind a year, or behind a figure that already
+    # has its decimal point: that dot is the sentence's end, never a decimal point.
+    (f"Acme reported results. {_GUIDE} Acme expects adjusted EPS of $4.10 to $4.30 for fiscal "
+     f"2027.1 {_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects adjusted EPS of $4.10 to $4.30 for fiscal 2027.1"),
+    (f"Acme reported results. {_GUIDE} Acme expects gross margin of about 40% for 2027.1 "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects gross margin of about 40% for 2027.1"),
+    (f"Acme reported results. {_GUIDE} Acme expects gross margin of about 40% in Q4 2027.1 "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects gross margin of about 40% in Q4 2027.1"),
+    (f"Acme reported results. {_GUIDE} Acme expects gross margin of about 40% for the year ending "
+     f"December 31, 2027.1 {_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects gross margin of about 40% for the year ending December 31, 2027.1"),
+    (f"Acme reported results. {_GUIDE} Acme expects adjusted EPS of $4.10 to $4.30.2 "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects adjusted EPS of $4.10 to $4.30.2"),
+    # A range of rates a sentence carries on to a level: "to" behind both is no column's word.
+    (f"Acme reported results. Acme expects fiscal 2027 revenue to increase 3% to 4% to "
+     f"approximately $5.0 billion. {_SEGMENT_TABLE}",
+     "Acme expects fiscal 2027 revenue to increase 3% to 4% to approximately $5.0 billion."),
+    (f"Acme reported results. {_GUIDE} Can Acme expect margin of about 40% for the year? "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Can Acme expect margin of about 40% for the year"),
+    # A footnote the release prints between the last word and its full stop.
+    (f"Acme reported results. {_GUIDE} Acme expects margin of about 40% for the year*. "
+     f"{_SEGMENT_TABLE}",
+     f"{_GUIDE} Acme expects margin of about 40% for the year"),
+])
+def test_an_outlook_of_whole_sentences_or_list_lines_still_stands(text, quote):
+    figures, reasons = _verify_in(text, guidance={"quote": quote})
+    assert reasons["guidance"] == "ok"
+    assert figures.guidance == " ".join(quote.split()).strip(f"{efs._LIST_GLYPHS} ")
+
+
 @pytest.mark.parametrize("quote", [
     "The company introduces the following fiscal 2027 guidance for the full year.",  # Starbucks
     "Below is our outlook for Q2 and Full Year fiscal 2027.",                        # Peloton
@@ -912,6 +1129,12 @@ def test_a_table_costs_only_the_outlook():
     "Acme's guidance for the fourth quarter is set out in the table below.",
     "See the table below for Acme's guidance for the fourth quarter of 2026.",
     "Acme's guidance for the fourth quarter of 2026 is provided below.",
+    "Acme's guidance for the fourth quarter of 2026 is summarized below.",
+    # A unit with no number on it prints no figure.
+    "The company provides the following fiscal 2027 guidance in U.S. dollars.",
+    "Below is our outlook for Q2 and Full Year fiscal 2027 in U.S. dollars.",
+    "The following guidance for fiscal 2027 reflects the stronger dollar.",
+    "The table below shows our fiscal 2027 outlook as a percent of net sales.",
 ])
 def test_a_sentence_that_only_points_at_figures_is_no_outlook(quote):
     """The figures sit in bullets the sheet never shows, so the outlook block would say only that
@@ -938,6 +1161,25 @@ def test_a_sentence_that_only_points_at_figures_is_no_outlook(quote):
     "Acme expects margins to recover 5% over the following months of fiscal 2027.",
     # A bare "below" in a sentence that says something, the word in its other sense.
     "Acme expects fourth-quarter orders to come in 5% below those of the third quarter.",
+    # A figure in basis points, or with no point in it, or a number word.
+    "Our outlook is as follows: operating margin expansion of 150 bps in fiscal 2027.",
+    "Our outlook is as follows: operating margin expansion of 150 basis points in fiscal 2027.",
+    "Our outlook is as follows: revenue growth of two to four percent for the full year.",
+    "Our outlook is as follows: revenue of $17,500 million for the full year of fiscal 2027.",
+    # "Following" that counts a time.
+    "Acme expects margins to expand 150 basis points over the following 12 months.",
+    "Acme expects margins to expand 150 bps over the following two quarters of fiscal 2027.",
+    "Acme expects growth of 5% to resume over the following several quarters of fiscal 2027.",
+    # A rate given in digits, teens or a few, with no numeral.
+    "Our outlook is as follows: revenue growth in the low-single-digit percent range for fiscal "
+    "2027.",
+    "Acme expects the following for fiscal 2027: adjusted EPS growth in the high-single-digit "
+    "percent range.",
+    "Our outlook is as follows: revenue growth of a few percent for the full year.",
+    "Our outlook is as follows: revenue growth in the mid-teens percent range for fiscal 2027.",
+    "Our outlook is as follows: revenue growth of several percent for fiscal 2027.",
+    "Our outlook is as follows: revenue growth in the low double digits percent range for fiscal "
+    "2027.",
 ])
 def test_a_sentence_that_says_something_is_no_lead_in(quote):
     figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
@@ -959,6 +1201,14 @@ def test_a_sentence_that_says_something_is_no_lead_in(quote):
     "Snap Inc. will discuss its Q4 2026 outlook during its Q3 2026 Earnings Call (details below) "
     "and in its investor letter available at investor.snap.com.",
     "Snap Inc. will discuss its Q4 2026 outlook on its Q3 2026 Earnings Call (details below).",
+    "Snap Inc. will discuss its Q4 2026 outlook during its Q3 2026 Earnings Call, details below.",
+    # A "below" no pointing verb stands behind, a time the sentence counts, a count of things.
+    "Acme is withdrawing its fiscal 2026 guidance for the reasons described below.",
+    "Acme has suspended its full-year outlook because of the merger described below.",
+    "Acme expects margins to recover over the following 12 months as new plants ramp.",
+    "Acme expects growth to resume over the following two quarters of fiscal 2027.",
+    "Acme will discuss its fiscal 2027 outlook on a call the following day.",
+    "Our outlook is as follows: deliveries of 1,500,000 vehicles in fiscal year 2027.",
 ])
 def test_a_sentence_with_no_figure_to_show_is_no_lead_in_either(quote):
     figures, reasons = _verify_in(f"Acme reported results. {quote}", guidance={"quote": quote})
@@ -1285,6 +1535,10 @@ _MARKUPS = [
     "</span>",
     "<sup><font><span><b><i>{}</i></b></span></font></sup>",
     "<sup>&#160;<font>{}</font>&#160;</sup>",
+    # Five tags deep, and five empty anchors in front of the mark.
+    "<sup><font><span><b><i><u>{}</u></i></b></span></font></sup>",
+    "<sup>" + '<a name="x"></a>' * 5 + "{}</sup>",
+    '<span style="vertical-align:super"><font><b><i><u><em>{}</em></u></i></b></font></span>',
 ]
 
 
@@ -1370,7 +1624,15 @@ def test_two_marks_are_dropped_as_two_and_the_text_between_them_stays():
                  '<i style="vertical-align:super">2</i> items') == "EPS and 12 items"
 
 
-def test_a_run_with_more_tags_than_any_mark_needs_is_left_as_printed():
+def test_a_run_is_read_through_its_cap_of_inner_tags_and_no_further():
+    """The cap bounds the work a stray tag costs, and it is wide enough for a mark eight tags
+    deep. Past it the run is left as printed, so its mark still flattens: that is the residual."""
+    cap = efs._SUPERSCRIPT_RUN_TAGS
+    assert cap >= 16
+    deep = "<sup>" + "<b>" * (cap // 2) + "1" + "</b>" * (cap // 2) + "</sup>"
+    assert efs._drop_footnote_marks(f"$2.2{deep} billion") == "$2.2 billion"
+    one_more = "<sup>" + "<b>" * (cap // 2) + "1" + "</b>" * (cap // 2) + "<br></sup>"
+    assert efs._drop_footnote_marks(one_more) == one_more
     run = "<sup>" + "<b>" * 12 + "1" + "</b>" * 12 + "</sup>"
     assert efs._drop_footnote_marks(run) == run
 
@@ -1400,10 +1662,54 @@ def test_an_unclosed_superscript_changes_nothing_and_stays_fast():
     assert efs._drop_footnote_marks(junk) == junk
     junk = ("<sup>" + "<b>" * 10) * 20_000
     assert efs._drop_footnote_marks(junk) == junk
+    junk = ("<sup>" + "<b>" * (efs._SUPERSCRIPT_RUN_TAGS + 4)) * 20_000
+    assert efs._drop_footnote_marks(junk) == junk
     junk = '<span style="vertical-align:top;font-size:6pt">1' * 40_000
     assert efs._drop_footnote_marks(junk) == junk
     assert efs._drop_footnote_marks("<sup>" + "1, " * 60 + "!</sup>").startswith("<sup>")
     assert time.perf_counter() - started < 5.0, "a slow scan here would hold a thread for minutes"
+
+
+@pytest.mark.asyncio
+async def test_reading_an_exhibit_of_unclosed_runs_leaves_the_event_loop_running():
+    """The watcher reads an exhibit in a thread, but a regex holds the interpreter for the whole of
+    one call: a reader that scans the exhibit in one call stands every request and both live loops
+    still until it is done, however long that is. The loop must run while the reader works."""
+    raw = ('<b style="vertical-align:super">' + "1" * 180) * 5_000
+    ticks = 0
+    stop = asyncio.Event()
+
+    async def _count():
+        nonlocal ticks
+        while not stop.is_set():
+            await asyncio.sleep(0.001)
+            ticks += 1
+
+    counter = asyncio.create_task(_count())
+    await asyncio.sleep(0.01)
+    before = ticks
+    assert await asyncio.to_thread(efs._release_text, raw, "ex991.htm")
+    during = ticks - before
+    stop.set()
+    await counter
+    assert during >= 10, f"the loop ran {during} times while the exhibit was read"
+
+
+def test_the_reader_scans_one_run_at_a_time_and_reads_what_one_scan_read():
+    """Run by run, the reader drops the same marks and leaves the same text as one scan over the
+    whole exhibit, and a run it reads is passed whole: its inner tags open no run of their own."""
+    samples = [
+        'Revenue $2.2<sup>1</sup> billion; EPS<b style="vertical-align:super">2</b> and '
+        "<sup><b><b><b><b><b>3</b></b></b></b></b></sup>.",
+        "<sup>as adjusted<sup>1</sup></sup> and <sup>2</sup>",
+        '<span style="vertical-align:super">TM<sup>1</sup></span> $0.46<sup>(a)</sup>',
+        "<sup>" + "<b>" * 20 + "1" + "</b>" * 20 + "</sup><sup>2</sup>",
+        '<SUP>1</SUP><a href="#n"><sup>*</sup></a>x<sup>2026</sup><sup>1, 2</sup>',
+        "<sup><sup>1</sup></sup><b>bold</b><sup>",
+    ]
+    for raw in samples:
+        assert efs._drop_footnote_marks(raw) == efs._SUPERSCRIPT_RUN_RE.sub(
+            lambda run: "" if efs._is_a_mark(run) else run.group(0), raw), raw
 
 
 def test_a_mark_of_many_digits_is_refused_in_a_moment():
@@ -1756,12 +2062,13 @@ def _signs(quote: str, magnitude: float, *, loss: bool) -> List[Tuple[str, float
             "quarter", 0.46, loss=False),
     *_signs("Diluted EPS net of a loss of $0.10 per share from the sale was $0.46 in the third "
             "quarter", 0.46, loss=False),
-    # "Gains and losses" points neither way.
-    *_signs("Adjusted net income excluding investment gains and losses of $120 million, or $0.46 "
+    # "Gains and losses" points neither way. (With no comma, "excluding gains and losses of $120
+    # million" is that item's amount: test_an_amount_an_excluded_items_of_ties_to_is_the_items.)
+    *_signs("Adjusted net income excluding investment gains and losses, of $120 million, or $0.46 "
             "per share, rose", 0.46, loss=False),
-    *_signs("Adjusted net income excluding gains or losses of $120 million, or $0.46 per share, "
+    *_signs("Adjusted net income excluding gains or losses, of $120 million, or $0.46 per share, "
             "rose", 0.46, loss=False),
-    *_signs("Adjusted net income excluding losses and gains of $120 million, or $0.46 per share, "
+    *_signs("Adjusted net income excluding losses and gains, of $120 million, or $0.46 per share, "
             "rose", 0.46, loss=False),
     *_signs("Net investment gains and losses were $0.46 per share in the third quarter of the year",
             0.46, loss=False),
@@ -1907,9 +2214,2527 @@ def _signs(quote: str, magnitude: float, *, loss: bool) -> List[Tuple[str, float
     # With no verb, a comma may just be a list.
     *_signs("Revenue, $1.2 billion, net loss per share, $0.46 for the quarter of the year",
             0.46, loss=True),
+    # A comma-free clause is no aside because some comma follows it: the one tying a total to its
+    # per-share figure, or a date's, is past the sentence's own verb. Nor because a measure stands
+    # somewhere before an "after" or a "before", which are causes and times as often as asides.
+    *_signs("Revenue fell 5% after the strike and the adjusted net loss was $120 million, or $0.46 "
+            "per diluted share.", 0.46, loss=True),
+    *_signs("Revenue fell 5% after the strike and the net loss was $120 million, or $0.46 per "
+            "diluted share.", 0.46, loss=True),
+    *_signs("Excluding these items adjusted net loss was $120 million, or $0.46 per diluted share.",
+            0.46, loss=True),
+    *_signs("Excluding special items the net loss for the quarter ended September 30, 2026 was "
+            "$0.46 per share.", 0.46, loss=True),
+    *_signs("Earnings fell after the recall and the adjusted net loss was $0.46 per share in the "
+            "third quarter of 2026.", 0.46, loss=True),
+    *_signs("Net loss narrowed after the sale and adjusted net income was $120 million, or $0.46 "
+            "per diluted share.", 0.46, loss=False),
+    *_signs("Excluding special items the net loss narrowed, to $0.46 per share in the third "
+            "quarter.", 0.46, loss=True),
+    *_signs("Excluding special items the net loss narrowed 12%, to $0.46 per share in the third "
+            "quarter.", 0.46, loss=True),
+    *_signs("Excluding the loss on a sale of the plant, results were $0.46 per share in the "
+            "quarter.", 0.46, loss=False),
+    *_signs("Operating income rose 3% and excluding the charge the adjusted net loss was $0.46 per "
+            "share in the quarter.", 0.46, loss=True),
+    *_signs("After the loss on a sale, results were $0.46 per share in the third quarter.",
+            0.46, loss=False),
+    *_signs("Net income after the loss on a sale was $0.46 per share in the third quarter.",
+            0.46, loss=False),
+    # A loss a result moved TO is no loss it moved from.
+    *_signs("The company swung from a profit to a loss of $120 million due to the impairment, or "
+            "$0.46 per share.", 0.46, loss=True),
+    *_signs("The company swung from net income to a loss of $120 million owing to the recall, or "
+            "$0.46 per share.", 0.46, loss=True),
+    *_signs("Adjusted results swung from a profit to a loss attributable to common shareholders of "
+            "$0.46 per diluted share.", 0.46, loss=True),
+    *_signs("Adjusted EPS swung from a loss of $0.12 to a profit of $0.46 in the third quarter.",
+            0.46, loss=False),
+    # An excluded loss with its own amount, and one a list of excluded items carries on to.
+    *_signs("Adjusted EPS excluding a $0.05 loss per share on the sale of a business was $0.46 for "
+            "the third quarter.", 0.46, loss=False),
+    *_signs("Net income excluding a $0.05 loss per share from the fire was $0.46 per share in the "
+            "third quarter.", 0.46, loss=False),
+    *_signs("Adjusted EPS excluding interest income and the loss on sale was $0.46 for the third "
+            "quarter of 2026.", 0.46, loss=False),
+    *_signs("Adjusted EPS before income taxes and the loss on sale was $0.46 for the third quarter "
+            "of 2026.", 0.46, loss=False),
+    *_signs("Adjusted EPS excluding earnings from affiliates and losses on hedges was $0.46 in the "
+            "third quarter.", 0.46, loss=False),
+    *_signs("Adjusted EPS excluding the loss on sale and the loss on extinguishment of debt was "
+            "$0.46 in the quarter.", 0.46, loss=False),
+    *_signs("Adjusted EPS excluding earnings from Italy and losses on hedges was $0.46 in the third "
+            "quarter.", 0.46, loss=False),
+    # What is left out never holds the figure's total, and a part never holds one stated before it.
+    *_signs("Adjusted net income was $120 million, excluding a loss of $20 million, or $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    *_signs("Net loss of $120 million, including income of $10 million, or $0.46 per share, in the "
+            "third quarter.", 0.46, loss=True),
+    *_signs("Results for the third quarter, including a net loss of $120 million, or $0.46 per "
+            "share, reflected the charge", 0.46, loss=True),
+    *_signs("Results for the quarter, after a net loss of $120 million, or $0.46 per share, "
+            "reflected the charge", 0.46, loss=True),
+    # "Negative" is a figure's sign only when said of an earnings measure.
+    *_signs("Comparable store sales were negative in the third quarter and the company reported "
+            "non-GAAP $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Comparable store sales were negative in the third quarter and the company reported "
+            "$0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Organic growth was negative, and the company reported $0.46 per diluted share for the "
+            "third quarter.", 0.46, loss=False),
+    *_signs("Free cash flow turned negative in the quarter while results per diluted share were "
+            "$0.46 for the period.", 0.46, loss=False),
+    *_signs("Earnings per share came in negative at $0.46 in the third quarter of the fiscal year "
+            "2026.", 0.46, loss=True),
+    *_signs("Earnings per share were also negative at $0.46 in the third quarter of the fiscal year "
+            "2026.", 0.46, loss=True),
+    *_signs("Diluted EPS finished negative at $0.46 per share for the third quarter of fiscal 2026 "
+            "in the period.", 0.46, loss=True),
+    *_signs("Diluted EPS, as reported, was negative at $0.46 in the third quarter of fiscal 2026.",
+            0.46, loss=True),
+    *_signs("Net income was negative, at $0.46 per diluted share, in the third quarter of 2026.",
+            0.46, loss=True),
+    *_signs("Operating income was negative in the quarter but diluted EPS was $0.46 in the "
+            "period.", 0.46, loss=False),
+    *_signs("Diluted EPS rose despite a negative currency effect, to $0.46 in the third quarter.",
+            0.46, loss=False),
+    *_signs("Diluted EPS had negative growth of 5% and was $0.46 in the third quarter.",
+            0.46, loss=False),
+    # A loss stated by a verb no list names, a comma before the verb whatever the verb, and a list
+    # of excluded items read as one aside.
+    *_signs("Adjusted earnings excluding special items reported a loss of $450 million, equal to "
+            "$0.42 per share, in the quarter.", 0.42, loss=True),
+    *_signs("Adjusted earnings excluding special items recorded a loss of $450 million (or $0.42 "
+            "per share) in the quarter.", 0.42, loss=True),
+    *_signs("Adjusted EPS, compared with a loss of $0.12 a year ago, rose to $0.46 in the third "
+            "quarter of fiscal 2026.", 0.46, loss=False),
+    *_signs("Adjusted EPS, compared with a loss of $0.12 a year ago, was approximately $0.46 in the "
+            "third quarter.", 0.46, loss=False),
+    *_signs("Adjusted EPS, excluding restructuring charges, acquisition costs and the loss on sale, "
+            "was $0.46 in the quarter.", 0.46, loss=False),
+    *_signs("Adjusted EPS, excluding the loss on sale, restructuring charges and acquisition costs, "
+            "was $0.46 in the quarter.", 0.46, loss=False),
+    *_signs("For the third quarter, Acme lost money, posting $0.46 per share.", 0.46, loss=True),
+    # A next row's own amount makes its loss label the next row's, behind a "$" touching the figure.
+    *_signs("Non-GAAP EPS $0.46 GAAP loss per share $(0.12) for the third quarter of fiscal 2026 "
+            "ended", 0.46, loss=False),
+    *_signs("Non-GAAP EPS $0.46 Net Loss per Share $(0.12) for the third quarter of fiscal 2026 "
+            "ended", 0.46, loss=False),
+    *_signs("Acme reports $0.46 Net Loss per Share, compared with $0.12 a year ago in the quarter",
+            0.46, loss=True),
+    # A next row's label is told by its own amount, however long the label, and a comparison or
+    # the next clause in a headline is no next row.
+    *_signs("Non-GAAP diluted EPS $0.46 GAAP net loss per diluted share $(0.12) for the third "
+            "quarter of fiscal 2026", 0.46, loss=False),
+    *_signs("Adjusted EPS $ 0.46 Net Loss per Share attributable to common stockholders", 0.46,
+            loss=False),
+    *_signs("Acme reports $0.46 Net Loss per Share versus $0.12 a year ago in the quarter", 0.46,
+            loss=True),
+    *_signs("Acme Reports $0.46 Net Loss per Share on $1.2 Billion in Revenue", 0.46, loss=True),
+    *_signs("Acme Reports $0.46 Net Loss per Share and $1.2 Billion in Revenue", 0.46, loss=True),
+    # A list of excluded items never runs on through a clause of its own: a verb or a figure
+    # after its first item ends it, and the words past them are the sentence's again.
+    *_signs("Adjusted operating income excluding interest income rose 5% and the adjusted net loss "
+            "was $0.46 per diluted share.", 0.46, loss=True),
+    *_signs("Operating income excluding interest income rose 5% and net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating loss excluding other losses improved and net income was $0.46 per diluted "
+            "share.", 0.46, loss=False),
+    *_signs("Segment profit before the loss on sale fell 3% and net loss totaled $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Pre-tax income including equity income improved slightly and the net loss was $0.46 "
+            "per diluted share.", 0.46, loss=True),
+    *_signs("Operating income excluding interest income soared and net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating income excluding interest income up 5% and net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating income excluding interest income stabilized gradually and net loss was "
+            "$0.46 per diluted share.", 0.46, loss=True),
+    # Nor does the clause itself, when a word in it is a verb that moves a figure or opens another
+    # clause.
+    *_signs("Operating income excluding special items rose 5% and net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating income excluding special items soared and net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Earnings excluding special items fell to a loss in the quarter, at $0.46 per share.",
+            0.46, loss=True),
+    *_signs("Diluted EPS grew excluding special items but the net loss was $120 million, or $0.46 "
+            "per diluted share.", 0.46, loss=True),
+    *_signs("Net income rose 5% excluding the recall while the net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Adjusted EPS excluding increased losses from the hurricane was $0.46 in the third "
+            "quarter.", 0.46, loss=False),
+    # An "after" or a "before" qualifies a measure with words of its own between them.
+    *_signs("Net income attributable to common stockholders after the loss on the sale of the "
+            "business was $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Income from continuing operations after the loss on extinguishment of debt was $0.46 "
+            "per diluted share.", 0.46, loss=False),
+    *_signs("Diluted earnings per share for the third quarter of 2026 after the loss on the "
+            "divestiture were $0.46.", 0.46, loss=False),
+    *_signs("Earnings per diluted share for the quarter ended September 30, 2026 after the loss on "
+            "the divestiture were $0.46.", 0.46, loss=False),
+    *_signs("Net income for the third quarter before the impairment loss was $0.46 per diluted "
+            "share.", 0.46, loss=False),
+    *_signs("Adjusted EPS for the third quarter after the loss on the sale of the plant was $0.46.",
+            0.46, loss=False),
+    *_signs("Net income for the third quarter after the loss on the sale of the plant was $120 "
+            "million, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Adjusted earnings per share in the quarter before the loss on sale were $0.46.",
+            0.46, loss=False),
+    *_signs("Earnings fell before the recall and the adjusted net loss was $0.46 per share in the "
+            "third quarter.", 0.46, loss=True),
+    *_signs("Revenue in the quarter fell 5% after the strike and the net loss was $0.46 per "
+            "diluted share.", 0.46, loss=True),
+    *_signs("Income from continuing operations stabilized before interest income and the net loss "
+            "was $0.46 per diluted share.", 0.46, loss=True),
+    *_signs("Segment profit held steady before the impairment loss and net loss totaled $0.46 per "
+            "diluted share.", 0.46, loss=True),
+    # An opening exclusion closes at its comma, an amount or a year in it or not; a date's comma
+    # and the comma before the figure's own amount close nothing.
+    *_signs("Excluding the impairment loss of $120 million, adjusted results were $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    *_signs("Excluding losses from the 2026 hurricanes, results were $0.46 per diluted share for "
+            "the third quarter.", 0.46, loss=False),
+    *_signs("Excluding the loss on extinguishment of the 2027 notes, results were $0.46 per "
+            "diluted share for the third quarter.", 0.46, loss=False),
+    *_signs("Excluding the impairment loss of $120 million, the Company reported $0.46 per diluted "
+            "share for the third quarter.", 0.46, loss=False),
+    *_signs("Excluding the loss on a sale in 2025, results were $0.46 per share in the quarter.",
+            0.46, loss=False),
+    *_signs("Excluding the loss of $1,234 million on a sale, results were $0.46 per share in the "
+            "quarter.", 0.46, loss=False),
+    *_signs("Excluding special items the net loss in the third quarter, $0.46 per share, narrowed "
+            "from a year ago.", 0.46, loss=True),
+    *_signs("Excluding special items the net loss for the quarter of $120 million, or $0.46 per "
+            "share, narrowed.", 0.46, loss=True),
+    # "Negative" said of a measure a period phrase, a date or a label's words stand behind.
+    *_signs("Diluted earnings per share for the third quarter of fiscal 2026 were negative at "
+            "$0.46.", 0.46, loss=True),
+    *_signs("GAAP diluted EPS attributable to common stockholders was negative at $0.46 for the "
+            "quarter.", 0.46, loss=True),
+    *_signs("Earnings per share for the quarter ended September 30, 2026 were negative at $0.46.",
+            0.46, loss=True),
+    *_signs("Diluted EPS for the third quarter was negative at $0.46.", 0.46, loss=True),
+    *_signs("GAAP diluted EPS for the third quarter of fiscal 2026 was negative, at $0.46.", 0.46,
+            loss=True),
+    *_signs("Diluted EPS fell sharply in the third quarter and was negative at $0.46.", 0.46,
+            loss=True),
+    # An aside holds the figure's total only when its own part of the sentence states none: a
+    # total with words between it and the aside is still the one the figure is the share of.
+    *_signs("Net income was $120 million in the third quarter, including a loss of $20 million on "
+            "the sale of the plant, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Adjusted net income was $120 million for the third quarter, excluding a loss of $20 "
+            "million on the sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Net loss was $120 million in the quarter, including income of $10 million from the "
+            "sale, or $0.46 per diluted share.", 0.46, loss=True),
+    *_signs("Revenue was $1.2 billion and results for the quarter, including a net loss of $120 "
+            "million, or $0.46 per share, reflected the charge.", 0.46, loss=True),
+    # A word that moves a figure, standing as an adjective, leaves an opening exclusion to close
+    # at its comma; as the verb it is, it keeps the comma the sentence's own.
+    *_signs("Excluding the loss on the expanded credit facility, adjusted results were $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    *_signs("Excluding losses on recovered vehicles, adjusted results were $0.46 per diluted share.",
+            0.46, loss=False),
+    *_signs("Excluding the net loss from deteriorated loans, the Company reported $0.46 per diluted "
+            "share.", 0.46, loss=False),
+    *_signs("Excluding special items the adjusted net loss declined further, to $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Excluding special items the net loss for the quarter improved somewhat, at $0.46 per "
+            "diluted share.", 0.46, loss=True),
+    # A next row's loss label keeps its "basic and diluted" or "on a diluted basis" on the way to
+    # its own amount; a headline's own label still ends at a comparison or the next clause.
+    *_signs("Non-GAAP diluted EPS $0.46 Net loss per share - basic and diluted $(0.12)", 0.46,
+            loss=False),
+    *_signs("Adjusted net income per diluted share $0.46 Net loss per share—basic and diluted "
+            "$(0.12)", 0.46, loss=False),
+    *_signs("Non-GAAP EPS $0.46 GAAP Net Loss per Share on a Diluted Basis $(0.12)", 0.46,
+            loss=False),
+    *_signs("Adjusted EPS $0.46 Net Loss per Share, basic and diluted $(0.12)", 0.46, loss=False),
+    *_signs("Adjusted EPS $0.46 GAAP net loss per share (basic and diluted) $(0.12)", 0.46,
+            loss=False),
+    *_signs("Acme reports $0.46 Net Loss per Share versus a loss of $0.12 a year ago", 0.46,
+            loss=True),
+    *_signs("Acme Reports $0.46 Net Loss per Share on Revenue of $1.2 Billion", 0.46, loss=True),
+    *_signs("Acme Reports $0.46 Net Loss per Share and Revenue of $1.2 Billion", 0.46, loss=True),
+    # "Negative" a relative clause's own verb takes is said of what that clause names; past an
+    # exclusion, a demonstrative or a clause about the period it is still the measure's.
+    *_signs("Diluted EPS including a currency effect that was negative in the quarter was $0.46.",
+            0.46, loss=False),
+    *_signs("Adjusted EPS excluding currency that turned negative in the quarter was $0.46.", 0.46,
+            loss=False),
+    *_signs("Diluted EPS excluding special items was negative at $0.46 in the quarter.", 0.46,
+            loss=True),
+    *_signs("Diluted EPS for that quarter was negative at $0.46.", 0.46, loss=True),
+    *_signs("Diluted EPS for the quarter in which the charge was recorded was negative at $0.46.",
+            0.46, loss=True),
+    *_signs("Adjusted EPS which was negative at $0.46 reflected the charge.", 0.46, loss=True),
+    # A year or a quarter's name between two excluded items is no figure, so the list runs on to
+    # the second item; a figure there still ends it.
+    *_signs("Adjusted EPS excluding interest income in 2026 and losses on hedges was $0.46 in the "
+            "quarter.", 0.46, loss=False),
+    *_signs("Adjusted EPS excluding interest income in Q3 and the loss on sale was $0.46 in the "
+            "quarter.", 0.46, loss=False),
+    *_signs("Adjusted EPS excluding interest income in 3Q26 and losses on hedges was $0.46 in the "
+            "quarter.", 0.46, loss=False),
+    *_signs("Adjusted EPS excluding interest income in FY2026 and losses on hedges was $0.46 in "
+            "the quarter.", 0.46, loss=False),
+    *_signs("Operating income excluding interest income up 5% in 2026 and net loss was $0.46 per "
+            "diluted share.", 0.46, loss=True),
+    *_signs("Operating income excluding interest income of $5 million in Q3 and net loss was $0.46 "
+            "per diluted share.", 0.46, loss=True),
+    *_signs("Operating income excluding interest income at 1.5x and net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    # An opening exclusion that ran into the sentence's own loss does not close at a comma the
+    # words leading to this number stand behind; one its own amount stands behind still closes.
+    *_signs("Excluding special items the adjusted net loss in the third quarter of 2026, which was "
+            "$0.46 per diluted share, narrowed from a year ago.", 0.46, loss=True),
+    *_signs("Excluding the hurricane the adjusted net loss for fiscal 2026, at $0.46 per share, "
+            "compared with $0.60 a year ago.", 0.46, loss=True),
+    *_signs("Excluding the hurricane the adjusted net loss for fiscal 2026, totaling $0.46 per "
+            "share, compared with $0.60 a year ago.", 0.46, loss=True),
+    *_signs("Excluding the hurricane the adjusted net loss for fiscal 2026, equal to $0.46 per "
+            "diluted share, compared with $0.60 a year ago.", 0.46, loss=True),
+    *_signs("Excluding the impairment loss, totaling $40 million, adjusted results were $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    *_signs("Excluding the impairment loss, representing $0.10 per share, the Company reported "
+            "$0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Excluding the impairment loss, at the Texas plant, results were $0.46 per diluted "
+            "share.", 0.46, loss=False),
+    # A participle that names an excluded item reaches its loss; a verb's clause reaches the word
+    # that opens the next clause first, whichever word that is.
+    *_signs("Adjusted EPS excluding amounts recovered from insurance on hurricane losses was $0.46 "
+            "in the quarter.", 0.46, loss=False),
+    *_signs("Operating income excluding items declined in Q3 as net loss was $0.46 per share.",
+            0.46, loss=True),
+    *_signs("Income excluding charges rose on volume so net loss was $0.46 per share.", 0.46,
+            loss=True),
+    *_signs("Operating income excluding items declined in Q3 with net loss at $0.46 per share.",
+            0.46, loss=True),
+    *_signs("Operating income excluding items declined in Q3 — net loss was $0.46 per share.",
+            0.46, loss=True),
+    *_signs("Earnings excluding items fell in Q3 and net loss was $0.46 per share.", 0.46,
+            loss=True),
+    *_signs("Income excluding items fell in Q3 to a loss, at $0.46 per share.", 0.46, loss=True),
+    # An amount is the figure's total only when an earnings word names it in its own clause,
+    # whatever words stand around it; an amount no earnings word names is no total.
+    *_signs("Net income was $120 million in the U.S. and Canada, including a loss of $20 million on "
+            "the sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Net loss was $120 million in the U.S. and Canada, including income of $10 million "
+            "from the sale, or $0.46 per diluted share.", 0.46, loss=True),
+    *_signs("Net income in the U.S. and Canada was $120 million, including a loss of $20 million "
+            "on the sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Net income for fiscal 2026 was $120 million, including a loss of $20 million on the "
+            "sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("With $1.2 billion of revenue in the quarter, results, including a net loss of $120 "
+            "million, or $0.46 per diluted share, reflected the charge.", 0.46, loss=True),
+    *_signs("Results for the quarter, compared with $0.40 a year ago, including a net loss of $120 "
+            "million, or $0.46 per diluted share, reflected the charge.", 0.46, loss=True),
+    *_signs("Net income rose and revenue was $1.2 billion and results, including a net loss of "
+            "$120 million, or $0.46 per share, reflected the charge.", 0.46, loss=True),
+    *_signs("Net income was $120 million in the third quarter of 2026, including a loss of $20 "
+            "million on the sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("GAAP net income was $120 million, including a $20 million loss on the sale of a "
+            "business, or $0.46 per diluted share.", 0.46, loss=False),
+    # An aside of the same direction as everything in front of it reads the same kept or dropped,
+    # and a word of a direction behind the total is that total's own modifier.
+    *_signs("Net loss was $120 million, up 10%, including a loss of $20 million on the sale, or "
+            "$0.46 per diluted share.", 0.46, loss=True),
+    *_signs("Net loss was $120 million on higher losses, including income of $10 million, or $0.46 "
+            "per diluted share.", 0.46, loss=True),
+    # An aside of no direction reads the same kept or dropped.
+    *_signs("Net income was $120 million, up 10%, including charges of $20 million, or $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    # A date's comma with no closing comma behind its year.
+    *_signs("Net income for the quarter ended September 30, 2026 was $120 million, including a loss "
+            "of $20 million on the sale, or $0.46 per diluted share.", 0.46, loss=False),
+    # A total whose own words hold a comma is still the total: the comma of a date, of a company's
+    # name, of a parenthesis before the verb, or of a move carried on to its level.
+    *_signs("Net income attributable to Acme, Inc. was $120 million, including a loss of $20 "
+            "million on the sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Net income for the three months ended September 30, 2026, was $120 million, including "
+            "a loss of $20 million on the sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Net income increased 12%, to $120 million, including a loss of $20 million on the "
+            "sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Net income, as reported, was $120 million, including a loss of $20 million on the "
+            "sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Net income, on a GAAP basis, was $120 million, including a loss of $20 million on the "
+            "sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Adjusted net income, a non-GAAP measure, was $120 million, excluding a loss of $20 "
+            "million on the sale, or $0.46 per diluted share.", 0.46, loss=False),
+    *_signs("Net loss attributable to Acme, Inc. was $120 million, including income of $10 million "
+            "from the sale, or $0.46 per diluted share.", 0.46, loss=True),
+    *_signs("Net loss attributable to Acme, Inc. of $120 million, including income of $10 million, "
+            "or $0.46 per share.", 0.46, loss=True),
+    # A measure of another kind that only qualifies the subject, its verb straight behind it, is
+    # no nearer word: the amount is still the subject's total.
+    *_signs("Net income attributable to common stockholders after preferred dividends was $120 "
+            "million, including a loss of $20 million on the sale, or $0.46 per diluted share.",
+            0.46, loss=False),
+    *_signs("Net loss excluding impairment charges was $120 million, including income of $10 "
+            "million from the sale, or $0.46 per diluted share.", 0.46, loss=True),
+    # An amount in an earlier part of the sentence, behind an "and" or a "but" that opens a part
+    # with a subject of its own, is no total of this figure: the aside holds it.
+    *_signs("Operating income was $50 million, and results for the quarter, including a net loss "
+            "of $120 million, or $0.46 per diluted share, reflected the charge.", 0.46, loss=True),
+    *_signs("Operating income was $50 million and results for the quarter, including a net loss of "
+            "$120 million, or $0.46 per diluted share, reflected the charge.", 0.46, loss=True),
+    *_signs("Operating income was $50 million but results for the quarter, including a net loss of "
+            "$120 million, or $0.46 per diluted share, reflected the charge.", 0.46, loss=True),
+    *_signs("Operating income rose to $50 million, and results for the quarter, including a net "
+            "loss of $120 million, or $0.46 per diluted share, reflected the charge.", 0.46,
+            loss=True),
+    *_signs("Net income was $100 million a year ago, and results for the quarter, including a net "
+            "loss of $120 million, or $0.46 per diluted share, reflected the charge.", 0.46,
+            loss=True),
+    *_signs("Operating loss was $50 million, and results for the quarter, including net income of "
+            "$120 million, or $0.46 per diluted share, reflected the gain.", 0.46, loss=False),
+    # A word that moves a figure stands as an adjective behind an adverb or a possessive too, so an
+    # opening exclusion still closes at its comma; as the verb it is, it still keeps it open.
+    *_signs("Excluding the loss on the newly expanded credit facility, adjusted results were $0.46 "
+            "per diluted share.", 0.46, loss=False),
+    *_signs("Excluding the loss on its newly expanded facility, adjusted results were $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    *_signs("Excluding the loss on our recently expanded plant, adjusted results were $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    *_signs("Excluding the loss on Acme's expanded credit facility, adjusted results were $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    *_signs("Excluding the loss on Acme\u2019s expanded credit facility, adjusted results were $0.46 "
+            "per diluted share.", 0.46, loss=False),
+    *_signs("Excluding the loss on previously recovered vehicles, adjusted results were $0.46 per "
+            "diluted share.", 0.46, loss=False),
+    *_signs("Excluding the loss from partially recovered receivables, adjusted results were $0.46 "
+            "per diluted share.", 0.46, loss=False),
+    *_signs("Excluding the loss on the company's doubled credit line, adjusted results were $0.46 "
+            "per diluted share.", 0.46, loss=False),
+    *_signs("Excluding the loss on the newly expanded credit facility, the Company reported $0.46 "
+            "per diluted share.", 0.46, loss=False),
+    *_signs("Excluding special items the net loss in 2026 declined further, to $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Excluding special items the net loss in the quarter sharply declined, to $0.46 per "
+            "diluted share.", 0.46, loss=True),
+    *_signs("Excluding special items the net loss of the segment declined further, to $0.46 per "
+            "diluted share.", 0.46, loss=True),
+    # The words that lead to this number keep an opening exclusion open when a subject of its own
+    # stands behind the excluded item: the number is that subject's. A measure in front of the
+    # exclusion takes the number all the same.
+    *_signs("Excluding the hurricane the adjusted net loss, at $0.46 per share, compared with $0.60 "
+            "a year ago.", 0.46, loss=True),
+    *_signs("Excluding special items the net loss, which was $0.46 per diluted share, narrowed "
+            "from a year ago.", 0.46, loss=True),
+    *_signs("Adjusted EPS excluding the impairment loss, at $0.46 per diluted share, beat the "
+            "consensus estimate.", 0.46, loss=False),
+    # An exclusion in the sentence before is no item the number's words tie it to.
+    *_signs("Revenue excluding currency in Europe. Adjusted EPS, at $0.46 per share, beat the "
+            "estimate.", 0.46, loss=False),
+    # A participle's reach ends with its sentence: the next one's loss is that sentence's own.
+    *_signs("Operating income excluding items declined in Q3. Net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating income excluding items declined in 2026. Net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating income excluding items declined in the U.S. Net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating income excluding items declined from Q2. Net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating income excluding items declined during 3Q26. Net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Operating income excluding items declined in Q3. The net loss was $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    # Words that point both ways stop deciding only where a verb, a figure of their own, a clause
+    # or a subject of the figure's own stands between them.
+    *_signs("Net loss per share, on lower operating income, was $0.46.", 0.46, loss=True),
+    *_signs("Adjusted EPS, compared with a loss a year ago, was $0.46.", 0.46, loss=False),
+    *_signs("In a quarter with heavy hurricane losses, diluted EPS was $0.46.", 0.46, loss=False),
+    *_signs("In a quarter marked by higher income, the net loss per share was $0.46.", 0.46,
+            loss=True),
+    *_signs("GAAP net loss per share was $0.12 and adjusted EPS was $0.46.", 0.46, loss=False),
+    *_signs("Adjusted EPS was $0.12 and GAAP net loss per share was $0.46.", 0.46, loss=True),
+    *_signs("As losses narrowed, diluted EPS rose to $0.46 in the quarter.", 0.46, loss=False),
+    *_signs("Operating income rose 5% and the net loss was $0.46 per diluted share.", 0.46,
+            loss=True),
+    *_signs("Revenue fell on lower income. Net loss per share was $0.46.", 0.46, loss=True),
+    *_signs("Operating loss narrowed as Acme earned $0.46 per diluted share.", 0.46, loss=False),
+    # A subject of the figure's own may reach it through its total: "net loss was $120 million, or".
+    *_signs("Despite higher income, net loss was $120 million, or $0.46 per diluted share.", 0.46,
+            loss=True),
+    *_signs("Although operating income rose, net loss was $120 million, or $0.46 per diluted "
+            "share.", 0.46, loss=True),
+    *_signs("Despite higher losses, net income was $120 million ($0.46 per diluted share).", 0.46,
+            loss=False),
+    # A total's per-share figure with nothing between them but words of its own direction.
+    *_signs("Net loss was $120 million on higher losses, or $0.46 per diluted share.", 0.46,
+            loss=True),
+    # A total's per-share figure and the other year's: each takes its own direction. The other
+    # year's, tied to a total the sentence names after the measure's own per-share figure on the
+    # same basis, is no EPS of the measure's at all, in either sign.
+    *_signs("Net loss was $120 million, or $0.46 per diluted share, compared with net income of $30 "
+            "million, or $0.12 per diluted share.", 0.46, loss=True),
+    ("Net loss was $120 million, or $0.46 per diluted share, compared with net income of $30 "
+     "million, or $0.12 per diluted share.", 0.12, None),
+    ("Net loss was $120 million, or $0.46 per diluted share, compared with net income of $30 "
+     "million, or $0.12 per diluted share.", -0.12, None),
+    *_signs("Net loss per diluted share was $0.46, compared with net income per diluted share of "
+            "$0.12.", 0.12, loss=False),
+    *_signs("Earnings per share, as reported $ 0.42 Provision for credit losses (30) (10) Net "
+            "income per share $ 0.46", 0.46, loss=False),
+    *_signs("Provision for credit losses 84 13 59 71 NM 25 42 Net income per share $ 0.46 $ 0.31",
+            0.46, loss=False),
+    # The number's own sign decides over words that point both ways: its parentheses, its loss
+    # right behind it, and a zero, which has no sign to prove.
+    ("Net income per share on hurricane losses was $(0.46) in the quarter", -0.46, -0.46),
+    ("Net income per share on hurricane losses was $(0.46) in the quarter", 0.46, None),
+    ("Net loss per share on lower operating income was $0.00.", 0.0, 0.0),
+    ("Net loss per share on lower operating income was $0.00.", 0.004, 0.0),
+    *_signs("Despite higher income and lower losses, Acme reported a $0.46 net loss per diluted "
+            "share.", 0.46, loss=True),
 ])
 def test_the_sign_is_read_from_the_matched_number(quote, value, expected):
     assert efs.eps_from_quote(quote, value) == expected
+
+
+#: Labels whose own words point both ways, with nothing between the two words that tells the
+#: figure's from another's: no verb, no figure of their own, no clause and no subject of the
+#: figure's own. A modifier with no commas ("on lower operating income", "compared with a loss a
+#: year ago", "reflecting catastrophe losses") holds the other direction, a clause carried on by an
+#: earlier verb ("rose as losses narrowed and was") hides whose word comes last, and the words
+#: around them cannot say which word the number's.
+_WORDS_BOTH_WAYS = [
+    "Net loss per share on lower operating income was $0.46.",
+    "Net loss per share driven by lower operating income was $0.46.",
+    "Net loss per diluted share against operating income a year ago was $0.46.",
+    "Adjusted net loss per share on lower operating income was $0.46.",
+    "GAAP net loss per share on lower operating income was $0.46.",
+    "Net loss per share due to lower income was $0.46.",
+    "Net loss per share with income from the sale was $0.46.",
+    "Net loss per share despite higher income was $0.46.",
+    "Net loss per share compared with income a year ago was $0.46.",
+    "Net loss per share amid lower income was $0.46.",
+    "Net loss per share as a result of lower income was $0.46.",
+    "Net loss per share resulting from lower income was $0.46.",
+    "Net loss per share in a quarter with lower income was $0.46.",
+    "Net loss per share that absorbed lower income was $0.46.",
+    "Net loss per share, driven by lower income was $0.46.",
+    "Net loss widened as income fell and was $0.46 per share.",
+    "Net loss per share widened despite higher income and was $0.46.",
+    "Adjusted EPS compared with a loss a year ago was $0.46.",
+    "Diluted EPS due to losses in the trading book was $0.46.",
+    "Diluted earnings per share despite hurricane losses were $0.46.",
+    "Diluted EPS turned positive from a loss and was $0.46.",
+    "Diluted results turned positive from a loss and were $0.46 per share.",
+    "Diluted EPS turned negative from a profit and was $0.46.",
+    "Net income per diluted share reflecting catastrophe losses was $0.46.",
+    "Q3 Diluted EPS Hurt by Hurricane Losses Falls to $0.46",
+    "Diluted EPS on lower losses was $0.46.",
+    "Diluted EPS driven by lower credit losses was $0.46.",
+    "Diluted EPS against a loss a year ago was $0.46.",
+    "Diluted EPS compared with a loss of $0.12 a year ago was $0.46.",
+    "Diluted EPS with income from the sale offsetting losses was $0.46.",
+    "Diluted EPS rose as losses narrowed and was $0.46.",
+    "Diluted EPS improved as losses narrowed, to $0.46.",
+    "Diluted EPS rose despite higher losses and was $0.46.",
+    "Diluted EPS that rose as losses narrowed was $0.46.",
+    "Diluted EPS on revenue that fell despite losses was $0.46.",
+    "Diluted EPS on revenue that swung to losses in Europe was $0.46.",
+    "Diluted EPS rose and losses narrowed and was $0.46.",
+    # An "and" with no predicate in front of it may join two parts of one label as well as two
+    # clauses: a reading of the second as the figure's own would be a guess.
+    "Operating income for the quarter and after the charge the adjusted net loss was $0.46 per "
+    "share.",
+    # A subject of the figure's own decides only when it holds the one direction word after it,
+    # with or without "with ... at".
+    "In the third quarter, net loss per share on lower operating income was $0.46.",
+    "Revenue declined in Q3 with net loss per share on lower income at $0.46.",
+    # Only "and", "but", "while" and "whereas" open the figure's own clause, and only towards a
+    # word of a direction; a verb carried on by ", to" keeps the clause the sentence's.
+    "Diluted EPS rose although losses widened, finishing at $0.46.",
+    "Diluted EPS despite losses rose sharply and finished at $0.46.",
+    "Diluted EPS rose and losses narrowed, to $0.46.",
+    # A word that moves a figure behind "the" is an adjective, no predicate.
+    "Diluted EPS on the expanded losses was $0.46.",
+    # A year is no figure that ends a label, nor is one of another clause.
+    "Diluted EPS in 2026 despite hurricane losses was $0.46.",
+    "Diluted EPS, $0.40 a year ago, on hurricane losses was $0.46.",
+    # A total the number is the per-share figure of ends no label: the words between them are
+    # that total's own, and a modifier there holds the other direction just as well.
+    "Net loss was $120 million, primarily due to lower operating income, or $0.46 per diluted "
+    "share.",
+    "Net loss was $120 million on lower operating income, or $0.46 per diluted share.",
+    "The net loss widened to $120 million on lower operating income, or $0.46 per diluted share.",
+    "Net loss was $120 million, reflecting lower net investment income, or $0.46 per diluted "
+    "share.",
+    "ACME REPORTS THIRD-QUARTER NET LOSS OF $120 MILLION ON LOWER OPERATING INCOME ($0.46 PER "
+    "SHARE)",
+    "Net income was $120 million despite higher credit losses, or $0.46 per diluted share.",
+    "Net income of $120 million on lower losses ($0.46 per diluted share) beat the estimate.",
+    "Net income was $120 million on lower losses, including a gain of $20 million, or $0.46 per "
+    "diluted share.",
+    # A figure inside an aside the sentence keeps unties nothing: the number is still the total's.
+    "Net income was $120 million, on lower losses, including a gain of $20 million, or $0.46 per "
+    "diluted share.",
+    # Nor does a word that only says how exact the figure is, or another word that ties a total to
+    # its per-share figure.
+    "Net loss was $120 million on lower operating income, or approximately $0.46 per diluted "
+    "share.",
+    "Net loss was $120 million on lower operating income (approximately $0.46 per diluted share).",
+    "Net loss was $120 million on lower operating income, or about $0.46 per diluted share.",
+    "Net loss was $120 million on lower operating income, representing $0.46 per diluted share.",
+    "Net loss was $120 million on lower operating income, which equates to $0.46 per diluted "
+    "share.",
+    "Net loss was $120 million on lower operating income, equal to $0.46 per diluted share.",
+    "Net income was $120 million despite higher credit losses, or roughly $0.46 per diluted share.",
+]
+
+
+@pytest.mark.parametrize("quote", _WORDS_BOTH_WAYS)
+def test_a_label_whose_own_words_point_both_ways_proves_no_sign(quote):
+    """The last word used to decide, so the printed sign was refused and a model that slipped it
+    found its figure kept: an adjusted +0.46 against a -0.50 consensus showed a +192% beat. Neither
+    sign is proved now, and the figure waits for FMP."""
+    assert efs.eps_from_quote(quote, 0.46) is None
+    assert efs.eps_from_quote(quote, -0.46) is None
+
+
+@pytest.mark.parametrize("value", [0.46, -0.46])
+@pytest.mark.parametrize("field,quote", [
+    ("eps_gaap_diluted", "Net loss per share on lower operating income was $0.46."),
+    ("eps_adjusted_diluted", "Adjusted net loss per share on lower operating income was $0.46."),
+    ("eps_adjusted_diluted", "Adjusted EPS compared with a loss a year ago was $0.46."),
+    ("eps_gaap_diluted", "Diluted EPS due to losses in the trading book was $0.46."),
+    ("eps_gaap_diluted", "Net income per diluted share reflecting catastrophe losses was $0.46."),
+    ("eps_gaap_diluted", "Diluted EPS rose as losses narrowed and was $0.46."),
+    ("eps_adjusted_diluted", "Adjusted EPS improved as losses narrowed, to $0.46."),
+    ("eps_gaap_diluted", "In the third quarter, net loss per share on lower operating income was "
+                         "$0.46."),
+    ("eps_gaap_diluted", "Diluted EPS in 2026 despite hurricane losses was $0.46."),
+    ("eps_gaap_diluted", "Net loss was $120 million, primarily due to lower operating income, or "
+                         "$0.46 per diluted share."),
+    ("eps_gaap_diluted", "ACME REPORTS THIRD-QUARTER NET LOSS OF $120 MILLION ON LOWER OPERATING "
+                         "INCOME ($0.46 PER SHARE)"),
+    ("eps_gaap_diluted", "Net loss was $120 million on lower operating income, or approximately "
+                         "$0.46 per diluted share."),
+    ("eps_gaap_diluted", "Net loss was $120 million on lower operating income, representing $0.46 "
+                         "per diluted share."),
+])
+def test_a_figure_whose_label_points_both_ways_is_refused_in_either_slot(field, quote, value):
+    """End to end, in the release and its seat: whichever sign the model gives, nothing is kept, and
+    the reason says the words do not name the figure."""
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  **{field: {"value": value, "quote": quote}})
+    assert figures is None and reasons[field] == "wrong_metric"
+
+
+#: Sentences where an aside ", including a net loss of $120 million," ties the number to a total of
+#: one direction, and an amount an earnings word of the other direction may name stands earlier in
+#: the sentence, with more than that total's own words between it and the aside, or between it and
+#: that word: a new subject ("results for the quarter"), a clause, a comparison, a second verb,
+#: another figure. Either could be the total the number is the per-share figure of, and each
+#: reading gives the other sign.
+_TWO_TOTALS_EITHER_COULD_BE_ITS_OWN = [
+    "Although operating income rose 12%, to $50 million, results for the quarter, including a net "
+    "loss of $120 million, or $0.46 per diluted share, reflected the charge.",
+    "Although an operating loss rose 12%, to $50 million, results for the quarter, including net "
+    "income of $120 million, or $0.46 per diluted share, reflected the gain.",
+    "Although operating income rose 12%, results for the quarter were $50 million, including a net "
+    "loss of $120 million, or $0.46 per diluted share.",
+    "Despite operating income of $50 million, results for the quarter, including a net loss of $120 "
+    "million, or $0.46 per diluted share, reflected the charge.",
+    "Despite operating income, at $50 million, up 12%, results for the quarter, including a net "
+    "loss of $120 million, or $0.46 per diluted share, reflected the charge.",
+    "After net income of $80 million in the second quarter, results for the quarter, including a "
+    "net loss of $120 million, or $0.46 per diluted share, reflected the charge.",
+    "Compared with net income attributable to Acme, Inc. of $120 million a year ago, the quarter's "
+    "results, including a net loss of $20 million, or $0.46 per diluted share, reflected the "
+    "impairment.",
+    "Compared with a net loss attributable to Acme, Inc. of $120 million a year ago, the quarter's "
+    "results, including net income of $20 million, or $0.46 per diluted share, reflected the gain.",
+    "Compared with net income of $120 million a year ago, the quarter's results, including a net "
+    "loss of $20 million, or $0.46 per diluted share, reflected the impairment.",
+    "Versus net income for the three months ended September 30, 2025, of $80 million, results, "
+    "including a net loss of $120 million, or $0.46 per diluted share, reflected the charge.",
+    "Unlike net income, as reported, of $80 million a year ago, results, including a net loss of "
+    "$120 million, or $0.46 per diluted share, reflected the charge.",
+    "Net income rose, and with $1.2 billion of revenue in the quarter, results, including a net "
+    "loss of $120 million, or $0.46 per diluted share, reflected the charge.",
+    # A subject of its own between the earnings word and the amount, or between the amount and the
+    # aside, and a clause's comma there.
+    "With higher operating income our results for the quarter were $50 million, including a net "
+    "loss of $120 million, or $0.46 per diluted share.",
+    "Despite operating income of $50 million in the quarter's results, including a net loss of $120 "
+    "million, or $0.46 per diluted share.",
+    "Compared with net income of $120 million, the quarter's figure, including a net loss of $20 "
+    "million, or $0.46 per diluted share, reflected the charge.",
+    # A second verb, or another figure, between the earnings word and the amount: the amount is
+    # another clause's or the word's other figure.
+    "Operating income rose as the quarter's figure came in at $50 million, including a net loss of "
+    "$120 million, or $0.46 per diluted share.",
+    "Operating income was $80 million compared with $50 million a year ago, including a net loss of "
+    "$120 million, or $0.46 per diluted share.",
+    # A verb between the total and the aside: the aside may be its clause's.
+    "Net income was $120 million as the segment grew, including a net loss of $20 million on the "
+    "sale, or $0.46 per diluted share.",
+]
+
+
+@pytest.mark.parametrize("quote", _TWO_TOTALS_EITHER_COULD_BE_ITS_OWN)
+def test_a_figure_two_totals_of_opposite_directions_could_own_proves_no_sign(quote):
+    """Reading the earlier total as the figure's dropped the aside and kept the other direction:
+    "Although operating income rose 12%, to $50 million, results for the quarter, including a net
+    loss of ..., or $0.46" verified +0.46. Neither sign is proved now, and the figure waits for
+    FMP."""
+    assert efs.eps_from_quote(quote, 0.46) is None
+    assert efs.eps_from_quote(quote, -0.46) is None
+
+
+@pytest.mark.parametrize("value", [0.46, -0.46])
+@pytest.mark.parametrize("quote", _TWO_TOTALS_EITHER_COULD_BE_ITS_OWN[:3])
+def test_a_figure_two_totals_could_own_is_refused_in_the_release(quote, value):
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  eps_gaap_diluted={"value": value, "quote": quote})
+    assert figures is None and reasons["eps_gaap_diluted"] == "wrong_metric"
+
+
+#: A number tied by "at", "of", "totaling", "which was" and the like to an item a clause excludes
+#: or includes is that item's figure, never the EPS: "Excluding the goodwill impairment loss, which
+#: totaled $0.46 per diluted share, adjusted EPS was $1.20". So is one whose clause may name either
+#: the item or a subject ("the hurricane net loss", "special items net loss"), with no "the" to
+#: say which.
+_AN_EXCLUDED_ITEMS_FIGURE = [
+    "Excluding the goodwill impairment loss, which totaled $0.46 per diluted share, adjusted EPS "
+    "was $1.20.",
+    "Excluding the goodwill impairment loss, which totaled $(0.46) per diluted share, adjusted EPS "
+    "was $1.20.",
+    "Excluding the goodwill impairment charge, which totaled $0.46 per diluted share, adjusted EPS "
+    "was $1.20.",
+    "Including the impairment loss, which was $0.46 per diluted share, net income per share fell to "
+    "$0.20.",
+    "Excluding the impairment loss, at $0.46 per diluted share, adjusted results beat the consensus "
+    "estimate.",
+    "Excluding the hurricane net loss, at $0.46 per diluted share, adjusted results beat the "
+    "consensus estimate.",
+    "Excluding special items net loss, at $0.46 per share, compared with $0.60 a year ago.",
+    "Excluding charges on the net loss, at $0.46 per diluted share, adjusted results beat the "
+    "consensus estimate.",
+    "Before the loss on the sale, amounting to $0.46 per diluted share, adjusted EPS was $1.20.",
+    "After the loss on the sale, equal to $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the loss on the sale, representing $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the loss on the sale, totaling $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the loss on the sale, which came to approximately $0.46 per diluted share, adjusted "
+    "EPS was $1.20.",
+    "Excluding the losses, that amounted to $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the income from the sale, which equaled $0.46 per diluted share, adjusted EPS was "
+    "$1.20.",
+    # A word of the item's own that opens a clause too ("included", "after", "before") is no
+    # measure the number belongs to: the clause the first word opened still runs to the number.
+    "Excluding the goodwill impairment loss included in the third quarter, which totaled $0.46 per "
+    "diluted share, adjusted EPS was $1.20.",
+    "Including the goodwill impairment loss included in the third quarter, which was $0.46 per "
+    "diluted share, GAAP EPS was $0.20.",
+    "Excluding the hurricane net loss included in the quarter, at $0.46 per diluted share, adjusted "
+    "results beat the consensus estimate.",
+    "Excluding the impairment loss after the merger, at $0.46 per diluted share, adjusted results "
+    "beat the consensus estimate.",
+    "Excluding the impairment loss before the spin-off, totaling $0.46 per diluted share, adjusted "
+    "EPS was $1.20.",
+    "Excluding the loss on the sale, net of taxes, included in the quarter, at $0.46 per diluted "
+    "share, adjusted EPS was $1.20.",
+    # The item's per-share figure tied the way a total's is: ", or", "(", a hedge, "equates to".
+    "Excluding the goodwill impairment loss, or $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the goodwill impairment loss of $120 million, or $0.46 per diluted share, adjusted "
+    "EPS was $1.20.",
+    "Excluding the goodwill impairment loss ($0.46 per diluted share), adjusted EPS was $1.20.",
+    "Excluding the goodwill impairment loss of $120 million ($0.46 per diluted share), adjusted EPS "
+    "was $1.20.",
+    "Excluding the goodwill impairment loss, or approximately $0.46 per diluted share, adjusted EPS "
+    "was $1.20.",
+    "Excluding the goodwill impairment loss, which equates to $0.46 per diluted share, adjusted EPS "
+    "was $1.20.",
+    "Excluding the goodwill impairment loss, at approximately $0.46 per diluted share, adjusted EPS "
+    "was $1.20.",
+    "Excluding the goodwill impairment loss included in the quarter of $120 million, or $0.46 per "
+    "diluted share, adjusted EPS was $1.20.",
+    # A measure in front of the clause, and the item's figure tied with a hedge, as its twin
+    # without one is.
+    "Adjusted EPS excluding a net loss of approximately $0.46 per share beat the estimate.",
+    # Tied with no comma: the words right in front of the number name the item. MCD's real
+    # wording, with a loss where the release says "charges".
+    "Excluding the goodwill impairment loss of $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the current year impairment loss described above of $0.46 per share, diluted "
+    "earnings per share was $3.57.",
+    "Including the goodwill impairment loss of $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding income from the sale of $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the goodwill impairment loss of approximately $0.46 per diluted share, adjusted "
+    "EPS was $1.20.",
+    "Excluding the goodwill impairment loss totaling $0.46 per diluted share, adjusted EPS was "
+    "$1.20.",
+    "Excluding the goodwill impairment loss that totaled $0.46 per diluted share, adjusted EPS "
+    "was $1.20.",
+    "Excluding the goodwill impairment loss which was $0.46 per diluted share, adjusted EPS was "
+    "$1.20.",
+    "Excluding the goodwill impairment loss equal to $0.46 per diluted share, adjusted EPS was "
+    "$1.20.",
+    "Excluding the goodwill impairment loss amounting to $0.46 per diluted share, adjusted EPS was "
+    "$1.20.",
+    "Excluding the goodwill impairment loss representing $0.46 per diluted share, adjusted EPS "
+    "was $1.20.",
+    "Excluding the goodwill impairment loss at $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the goodwill impairment loss - $0.46 per diluted share, adjusted EPS was $1.20.",
+    "Excluding the goodwill impairment loss \u2014 $0.46 per diluted share \u2014 adjusted EPS was "
+    "$1.20.",
+    "Excluding the goodwill impairment loss (which totaled $0.46 per diluted share), adjusted EPS "
+    "was $1.20.",
+    "Excluding the after-tax goodwill impairment loss, which totaled $0.46 per diluted share, "
+    "adjusted EPS was $1.20.",
+    # A measure in front takes no number a relative clause or a comma-free tie gives the item, nor
+    # one a total's tie leaves with no total to be the share of, nor one it has a figure of its
+    # own beside.
+    "Results excluding the goodwill impairment loss of $0.46 per diluted share beat the estimate.",
+    "Results including the goodwill impairment loss of $0.46 per diluted share missed the "
+    "estimate.",
+    "Results excluding the goodwill impairment loss, which totaled $0.46 per diluted share, beat "
+    "the estimate.",
+    "Adjusted EPS excluding the gain on the sale, which totaled $0.46 per share, beat the "
+    "estimate.",
+    "Adjusted net income excluding income from the sale of $0.46 per share beat the estimate.",
+    "Results excluding the goodwill impairment loss, or $0.46 per diluted share, beat the "
+    "estimate.",
+    "Adjusted EPS excluding special items of $0.46 per share was $1.20.",
+    "Adjusted EPS excluding the impairment loss, at $0.46 per share, was $1.20.",
+    "Diluted EPS of $1.20 included a charge of $20 million, or $0.46 per diluted share.",
+    "Net income of $300 million ($1.20 per diluted share) included special items, at $0.46 per "
+    "diluted share.",
+    "Net income of $300 million, or $1.20 per diluted share included special items, at $0.46 per "
+    "diluted share.",
+    "GAAP EPS, including special items that totaled $0.46 per diluted share beat the estimate.",
+    # An aside about the item right in front of the tie's comma.
+    "GAAP EPS, including the impairment loss, which totaled $0.46 per share, was $1.20.",
+    "GAAP EPS, including the impairment loss, which totaled $0.46 per share, beat the estimate.",
+    "Net income of $300 million, or $1.20 per diluted share, included special items, at $0.46 per "
+    "diluted share.",
+    "GAAP EPS, including special items, which totaled $0.46 per share, was $1.20.",
+    "GAAP EPS, including the impairment loss, or $0.46 per share, beat the estimate.",
+    "The divestiture, including a loss of $120 million, or $0.46 per diluted share, closed in the "
+    "quarter.",
+    # Behind the per-share figure the sentence printed for its own measure: an included item's.
+    "Net income was $300 million, or $1.20 per diluted share, including a charge of $20 million, "
+    "or $0.46 per diluted share, related to the restructuring.",
+    "Net income was $300 million ($1.20 per diluted share), including a charge of $20 million, or "
+    "$0.46 per diluted share, related to the restructuring.",
+    "Net income was $300 million, or $1.20 per diluted share, which included a charge of $20 "
+    "million, or $0.46 per diluted share.",
+    "Net income was $300 million, or $1.20 per diluted share, including income of $20 million "
+    "from discontinued operations, or $0.46 per diluted share.",
+    "Net income was $300 million, or $1.20 per diluted share, including a charge, or $0.46 per "
+    "diluted share, related to the restructuring.",
+    "Net income was $300 million, or $1.20 per diluted share, reflecting income of $20 million "
+    "from discontinued operations, or $0.46 per diluted share.",
+    "Net income was $300 million, or $1.20 per diluted share, primarily reflecting a net loss of "
+    "$20 million, or $0.46 per diluted share, on the sale.",
+    "Diluted EPS was $1.20, reflecting a loss of $0.46 per share on the sale.",
+    "Diluted EPS was $1.20, which reflected a loss of $0.46 per share on the sale.",
+    "Diluted EPS was $1.20, compared with a loss of $0.46 per share a year ago.",
+]
+
+
+@pytest.mark.parametrize("quote", _AN_EXCLUDED_ITEMS_FIGURE)
+def test_an_excluded_items_own_figure_is_never_the_eps(quote):
+    """Before, the first verified +0.46 as the adjusted EPS, and its "$(0.46)" twin -0.46. The same
+    figure is no GAAP EPS either."""
+    for field in ("eps_adjusted_diluted", "eps_gaap_diluted"):
+        for value in (0.46, -0.46):
+            figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                          **{field: {"value": value, "quote": quote}})
+            assert figures is None and reasons[field] == "wrong_metric"
+            assert efs.eps_from_quote(quote, value) is None
+
+
+#: The pieces of a sentence that names an item a figure leaves out or takes in, with its per-share
+#: figure: every way of putting them together must cost that figure, never keep it as the EPS.
+_ITEM_OPENERS = ("Excluding", "Including", "Before", "After")
+_ITEMS = ("the goodwill impairment loss", "the hurricane net loss", "special items net loss",
+          "the income from the sale")
+_ITEMS_OWN_WORDS = ("", " included in the third quarter", " after the merger",
+                    " before the spin-off", " recorded in the quarter", " net of taxes")
+_ITEM_TIES = (", which totaled", ", at", ", representing", ", or", ", or approximately", " (")
+
+
+@pytest.mark.parametrize("opener", _ITEM_OPENERS)
+@pytest.mark.parametrize("item", _ITEMS)
+@pytest.mark.parametrize("words", _ITEMS_OWN_WORDS)
+def test_no_wording_of_an_items_clause_lets_its_figure_through(opener, item, words):
+    for tie in _ITEM_TIES:
+        close = ")," if tie.endswith("(") else ","
+        quote = (f"{opener} {item}{words}{tie} $0.46 per diluted share{close} adjusted EPS was "
+                 "$1.20.")
+        for value in (0.46, -0.46):
+            assert efs.eps_from_quote(quote, value) is None, quote
+
+
+#: Ties with no comma in front of them, and items whose own words give them a direction.
+_ITEM_TIES_WITH_NO_COMMA = (" of", " of approximately", " totaling", " that totaled", " which was",
+                            " equal to", " amounting to", " representing", " at", " -",
+                            " (which totaled")
+_ITEMS_WITH_A_DIRECTION = ("the goodwill impairment loss", "the net loss from the sale",
+                           "income from the sale", "net income from discontinued operations",
+                           "earnings from the divested unit", "a loss on debt extinguishment")
+
+
+@pytest.mark.parametrize("opener", [*_ITEM_OPENERS, "Results excluding",
+                                    "Adjusted net income excluding"])
+@pytest.mark.parametrize("item", _ITEMS_WITH_A_DIRECTION)
+def test_no_tie_with_no_comma_lets_an_items_figure_through(opener, item):
+    """A tie needed a comma in front of it, so "Excluding the goodwill impairment loss of $0.46 per
+    diluted share, adjusted EPS was $1.20" kept -0.46 as the adjusted EPS, and with income in the
+    loss's place +0.46 as the GAAP one: 788 of these 1,584 checks kept a figure. A measure in front
+    takes none of them either: read as its figure, the item's direction would give it its sign."""
+    for tie in _ITEM_TIES_WITH_NO_COMMA:
+        close = ")" if tie.startswith(" (") else ""
+        for tail in (", adjusted EPS was $1.20.", " beat the estimate."):
+            quote = f"{opener} {item}{tie} $0.46 per diluted share{close}{tail}"
+            for value in (0.46, -0.46):
+                assert efs.eps_from_quote(quote, value) is None, quote
+
+
+_HEADS_WITH_THEIR_SHARE = ("Net income was $300 million, or $1.20 per diluted share",
+                           "Net income of $300 million, or $1.20 per diluted share",
+                           "Net income was $300 million ($1.20 per diluted share)",
+                           "Diluted EPS was $1.20", "Diluted EPS of $1.20")
+_TRAILING_OPENERS = ("including", "which included", "excluding", "after", "reflecting",
+                     "which reflected")
+_TRAILING_ITEMS = ("a charge of $20 million", "a gain of $20 million",
+                   "income of $20 million from discontinued operations",
+                   "a loss of $20 million on the sale", "restructuring costs of $20 million")
+_TRAILING_TIES = (", or", ", or approximately", ", representing", ", which was", " (",
+                  ", which totaled", ", at")
+
+
+@pytest.mark.parametrize("head", _HEADS_WITH_THEIR_SHARE)
+@pytest.mark.parametrize("opener", _TRAILING_OPENERS)
+def test_an_items_share_behind_the_eps_its_sentence_printed_is_never_an_eps(head, opener):
+    """Once the sentence has printed its measure's per-share figure, the one an aside's item is
+    tied to is the item's: "Net income was $300 million, or $1.20 per diluted share, including a
+    charge of $20 million, or $0.05 per diluted share" kept +0.05 as the GAAP EPS, and 895 of these
+    2,100 checks kept a figure. The figure the sentence printed for its measure still stands."""
+    for item in _TRAILING_ITEMS:
+        for tie in _TRAILING_TIES:
+            close = ")" if tie == " (" else ""
+            quote = (f"{head}, {opener} {item}{tie} $0.46 per diluted share{close}, related to the "
+                     "quarter.")
+            for value in (0.46, -0.46):
+                assert efs.eps_from_quote(quote, value) is None, quote
+            assert efs.eps_from_quote(quote, 1.2) == 1.2, quote
+
+
+@pytest.mark.parametrize("field,quote,value", [
+    # The EPS beside an item a comma-free tie gives its figure, and the measure's own EPS.
+    ("eps_adjusted_diluted", "Excluding the goodwill impairment loss of $0.46 per diluted share, "
+                             "adjusted EPS was $1.20.", 1.20),
+    ("eps_adjusted_diluted", "Excluding special items adjusted EPS of $1.20 per share beat the "
+                             "estimate.", 1.20),
+    ("eps_gaap_diluted", "Net loss after income tax of $0.46 per share in the quarter.", -0.46),
+    # Accepted reading, pinned so it is a choice: an item with no direction of its own, no figure
+    # behind it, and the measure's words in front take a figure a tie with no comma gives them.
+    ("eps_adjusted_diluted", "Adjusted EPS excluding special items of $1.20 per share.", 1.20),
+    # The total a sentence printed with its per-share figure, ahead of an item's.
+    ("eps_gaap_diluted", "Net income was $300 million, or $1.20 per diluted share, including a "
+                         "charge of $20 million, or $0.46 per diluted share, related to the "
+                         "restructuring.", 1.20),
+    # A per-share figure of a comparison in front is not the measure's own: the aside's total is.
+    ("eps_gaap_diluted", "Results for the quarter, compared with $0.40 per share a year ago, "
+                         "including a net loss of $120 million, or $0.46 per diluted share, "
+                         "reflected the charge.", -0.46),
+    # The parenthesis twin of an aside's total reads as its comma twin does.
+    ("eps_gaap_diluted", "Results for the quarter, including a net loss of $120 million ($0.46 per "
+                         "diluted share), reflected the charge.", -0.46),
+    # A later total that is the measure's own other basis, or another measure's subject.
+    ("eps_adjusted_diluted", "Net income of $300 million, or $1.20 per diluted share, adjusted net "
+                             "income of $350 million, or $1.35 per diluted share.", 1.35),
+    ("eps_adjusted_diluted", "Net income was $300 million, or $1.20 per diluted share, and $350 "
+                             "million, or $1.35 per diluted share, on an adjusted basis.", 1.35),
+    ("eps_adjusted_diluted", "GAAP net income was $300 million, or $1.20 per diluted share, "
+                             "compared with adjusted net income of $350 million, or $1.35 per "
+                             "diluted share.", 1.35),
+    ("eps_gaap_diluted", "Adjusted net income was $350 million, or $1.35 per diluted share, "
+                         "compared with net income of $300 million, or $1.20 per diluted share.",
+     1.20),
+    # A total's per-share figure with an exclusion right behind the total.
+    ("eps_adjusted_diluted", "Net income was $120 million, excluding special items, or $0.46 per "
+                             "diluted share.", 0.46),
+    # The other basis's figure behind the one the sentence printed first.
+    ("eps_gaap_diluted", "Adjusted EPS was $1.35, compared with GAAP earnings of $1.20 per share.",
+     1.20),
+    # A move from the figure printed first to the one behind it: that one is where it went.
+    ("eps_gaap_diluted", "Results improved from a net loss of $50 million, or $0.20 per diluted "
+                         "share, a year ago to net income of $120 million, or $0.46 per diluted "
+                         "share.", 0.46),
+    ("eps_gaap_diluted", "Net income rose from $100 million, or $0.40 per share, to $120 million, "
+                         "or $0.46 per share.", 0.46),
+    ("eps_gaap_diluted", "Diluted EPS swung from a loss of $0.12 to income of $0.06 per share.",
+     0.06),
+    # A later total with a subject of its own, on the same basis.
+    ("eps_gaap_diluted", "Net income was $300 million, or $1.20 per diluted share, net income "
+                         "attributable to Acme was $290 million, or $1.16 per diluted share.",
+     1.16),
+    # The per-share figure of an item in an aside in front of the measure's verb, or of the
+    # period a lead-in compares with, is not the measure's own: the one behind the verb is. A BAC
+    # and an MCD sentence rewritten so, and the shapes around them.
+    ("eps_gaap_diluted", "Net income, including a $1.2 billion ($0.17 per share) regulatory "
+                         "settlement charge, was $6.9 billion, or $0.91 per diluted share.", 0.91),
+    ("eps_gaap_diluted", "Net income, which included $56 million ($0.06 per share) of net pre-tax "
+                         "charges, was $2.5 billion, or $3.51 per diluted share.", 3.51),
+    ("eps_gaap_diluted", "Net income, which included a $45 million ($0.12 per share) after-tax "
+                         "charge, was $300 million, or $1.20 per diluted share.", 1.20),
+    ("eps_gaap_diluted", "Net income, which included a $45 million ($0.12 per share) after-tax "
+                         "charge, was $1,200 million, or $4.80 per diluted share.", 4.80),
+    ("eps_gaap_diluted", "Net loss for the quarter, including a $45 million ($0.12 per share) gain "
+                         "on the sale, narrowed to $120 million, or $0.46 per share.", -0.46),
+    ("eps_gaap_diluted", "Net income for the quarter, which included a $40 million ($0.15 per "
+                         "diluted share) restructuring charge, was $300 million ($1.20 per diluted "
+                         "share).", 1.20),
+    ("eps_gaap_diluted", "Net income for the quarter, which included a $40 million ($0.15 per "
+                         "diluted share) restructuring charge, increased 20% to $300 million "
+                         "($1.20 per diluted share).", 1.20),
+    ("eps_gaap_diluted", "Net income for the quarter, which included a gain on the sale of $50 "
+                         "million, or $0.20 per diluted share, was $300 million, or $1.20 per "
+                         "diluted share.", 1.20),
+    ("eps_gaap_diluted", "Net income for the quarter, which included a gain of $50 million ($0.20 "
+                         "per diluted share) on the sale of the Widget business, totaled $300 "
+                         "million ($1.20 per diluted share).", 1.20),
+    ("eps_gaap_diluted", "Net income, up from $250 million, or $1.00 per diluted share, in 2025, "
+                         "was $300 million, or $1.20 per diluted share.", 1.20),
+    ("eps_gaap_diluted", "Compared to the prior year's net income of $250 million, or $1.00 per "
+                         "diluted share, the company reported net income of $300 million, or "
+                         "$1.20 per diluted share.", 1.20),
+    ("eps_gaap_diluted", "Following a net loss of $50 million, or $0.20 per diluted share, in the "
+                         "prior-year quarter, the company reported net income of $120 million, or "
+                         "$0.46 per diluted share.", 0.46),
+    ("eps_gaap_diluted", "Compared to net income of $250 million, or $1.00 per diluted share, in "
+                         "the prior-year quarter, Acme earned $300 million, or $1.20 per diluted "
+                         "share.", 1.20),
+    ("eps_gaap_diluted", "Compared to net income of $250 million, or $1.00 per diluted share, last "
+                         "year, this quarter's net income was $300 million, or $1.20 per diluted "
+                         "share.", 1.20),
+    ("eps_gaap_diluted", "Net income was $300 million, or $1.20 per diluted share, as net income "
+                         "attributable to Acme was $290 million, or $1.16 per diluted share.", 1.16),
+    ("eps_gaap_diluted", "Diluted EPS was $1.10 in the second quarter. Net income was $300 million, "
+                         "or $1.20 per diluted share.", 1.20),
+    # A list of headline figures: a label of its own behind a comma prints its own.
+    ("eps_adjusted_diluted", "Third quarter GAAP EPS of $1.20, adjusted EPS, excluding special "
+                             "items, of $1.35.", 1.35),
+    ("eps_adjusted_diluted", "GAAP diluted EPS of $1.20, non-GAAP diluted EPS, which excludes "
+                             "special items, of $1.35.", 1.35),
+    ("eps_adjusted_diluted", "Reported EPS of $1.20, adjusted EPS, excluding amortization, at "
+                             "$1.35, both ahead of guidance.", 1.35),
+    ("eps_adjusted_diluted", "Diluted earnings per share of $3.51, diluted earnings per share, "
+                             "excluding the current year charges, of $3.57, an increase of 11%.",
+     3.57),
+    ("eps_adjusted_diluted", "Third quarter GAAP EPS of $1.20, adjusted EPS excluding special "
+                             "items of $1.35.", 1.35),
+    # Behind the figure, a verb that says how it moved, by a rate or in cents: no figure of the
+    # measure's own.
+    ("eps_adjusted_diluted", "Adjusted EPS excluding special items of $1.35 per share was 12% "
+                             "higher than a year ago.", 1.35),
+    ("eps_adjusted_diluted", "Core EPS excluding notable items of $1.35 was 5 cents better than "
+                             "expected.", 1.35),
+    ("eps_adjusted_diluted", "Core EPS excluding notable items of $1.35 was 2.5 cents better than "
+                             "expected.", 1.35),
+    ("eps_adjusted_diluted", "Adjusted EPS, excluding special items, at $1.35 per share, was 12% "
+                             "higher than a year ago.", 1.35),
+    ("eps_adjusted_diluted", "Diluted earnings per share excluding the favorable impact from "
+                             "tariff refunds of $2.05 was 12 percent higher year over year.", 2.05),
+    ("eps_adjusted_diluted", "Diluted earnings per share excluding the current year charges "
+                             "described above of $3.57 was 11% higher than last year.", 3.57),
+    # Moves from the first figure to the number, with words between the verb and "from", or the
+    # measure's own verb behind the first figure; an "at" a verb arrives at.
+    ("eps_gaap_diluted", "Net income increased $20 million, or 20%, from $100 million, or $0.40 "
+                         "per diluted share, to $120 million, or $0.46 per diluted share.", 0.46),
+    ("eps_gaap_diluted", "Net income grew 20% year over year from $100 million, or $0.40 per "
+                         "diluted share, to $120 million, or $0.46 per diluted share.", 0.46),
+    ("eps_gaap_diluted", "Net income rose 20% from $100 million, or $0.40 per share, to $120 "
+                         "million, or $0.46 per share.", 0.46),
+    ("eps_gaap_diluted", "Net income of $100 million, or $0.40 per diluted share, in the third "
+                         "quarter of 2025 rose to $120 million, or $0.46 per diluted share, in the "
+                         "third quarter of 2026.", 0.46),
+    ("eps_adjusted_diluted", "Adjusted EPS excluding the loss on the sale landed at $1.20.", 1.20),
+    ("eps_adjusted_diluted", "Adjusted earnings excluding the loss on the sale stood at $1.20 per "
+                             "diluted share.", 1.20),
+    # A total the measure's words can name, its own amount in its aside or behind its verb: a
+    # relative tie, a verb stating the result, a tax that is the measure's own line.
+    ("eps_gaap_diluted", "Results for the quarter, including a net loss of $120 million, which "
+                         "equates to $0.46 per diluted share, reflected the charge.", -0.46),
+    ("eps_gaap_diluted", "Results for the quarter included a net loss of $120 million ($0.46 per "
+                         "diluted share).", -0.46),
+    ("eps_gaap_diluted", "Results for the quarter, including a net loss attributable to Acme "
+                         "Corp. of $120 million, or $0.46 per diluted share, reflected the charge.",
+     -0.46),
+    ("eps_adjusted_diluted", "Adjusted earnings excluding special items reported a loss of $450 "
+                             "million, equal to $0.42 per share, in the quarter.", -0.42),
+    ("eps_gaap_diluted", "Net income after taxes of $120 million, or $0.46 per share, rose.", 0.46),
+    # "LPS" is a per-share word, so the clause has run on into the measure.
+    ("eps_adjusted_diluted", "Excluding the impairment loss adjusted LPS of $0.46 beat the "
+                             "estimate.", -0.46),
+])
+def test_the_eps_beside_an_items_tied_figure_still_verifies(field, quote, value):
+    """The honest twins of the item rows: each figure is kept as printed, and the flipped sign is
+    refused."""
+    slot = {"eps_gaap_diluted": "eps_gaap", "eps_adjusted_diluted": "eps_adjusted"}[field]
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  **{field: {"value": value, "quote": quote}})
+    assert getattr(figures, slot) == value and reasons[field] == "ok", reasons
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  **{field: {"value": -value, "quote": quote}})
+    assert figures is None and reasons[field] == "value_mismatch", reasons
+
+
+_AFTER_TAX_LOSS = ("Third-quarter after-tax net loss of $120 million, or $0.46 per diluted share, "
+                   "widened.")
+
+
+@pytest.mark.parametrize("field,quote,value,release", [
+    ("eps_gaap_diluted", "The company's after-tax earnings of $120 million, or $0.46 per diluted "
+                         "share, rose 12%.", 0.46, None),
+    ("eps_gaap_diluted", _AFTER_TAX_LOSS, -0.46, None),
+    ("eps_adjusted_diluted", "Third-quarter after-tax adjusted operating income of $120 million "
+                             "($0.46 per diluted common share).", 0.46, None),
+    ("eps_gaap_diluted", "Before-tax income of $120 million, or $0.46 per diluted share.", 0.46,
+     None),
+    ("eps_gaap_diluted", "After-tax net income attributable to Acme was $120 million, or $0.46 per "
+                         "diluted share.", 0.46, None),
+    ("eps_gaap_diluted", "Third-quarter after\u2011tax net loss of $120 million, or $0.46 per "
+                         "diluted share, widened.", -0.46, None),
+    ("eps_gaap_diluted", "Net income, after-tax, which totaled $1.20 per diluted share, rose 12%.",
+     1.20, None),
+    # The model's quote leaves the head off, and the release puts it back in front.
+    ("eps_gaap_diluted", "net loss of $120 million, or $0.46 per diluted share", -0.46,
+     _AFTER_TAX_LOSS),
+])
+def test_a_hyphened_after_or_before_opens_no_items_clause(field, quote, value, release):
+    """"After-tax" and "before-tax" say what a total is. Read as "after" and "before", each opened
+    an item's clause that ran to the total's own tie, and the total's per-share figure was refused
+    in both signs."""
+    slot = {"eps_gaap_diluted": "eps_gaap", "eps_adjusted_diluted": "eps_adjusted"}[field]
+    text = f"Acme reported results. {release or quote}"
+    figures, reasons = _verify_in(text, **{field: {"value": value, "quote": quote}})
+    assert getattr(figures, slot) == value and reasons[field] == "ok", reasons
+    figures, reasons = _verify_in(text, **{field: {"value": -value, "quote": quote}})
+    assert figures is None and reasons[field] == "value_mismatch", reasons
+
+
+def test_a_clause_that_ran_on_into_its_measure_ties_no_number_to_its_item():
+    """With "EPS" or "per share" between the item and a tie with no comma, the clause has run on
+    into the measure the number is the figure of, so the tie gives the number to no item, though
+    the earnings word there gives the clause a direction."""
+    quote = "Excluding these items adjusted earnings per share of $1.20 beat the estimate."
+    assert efs._tied_to_an_excluded_item(quote, _printed(quote, 1.2)) is False
+    quote = "Excluding these items adjusted earnings of $1.20 beat the estimate."
+    assert efs._tied_to_an_excluded_item(quote, _printed(quote, 1.2)) is True
+
+
+def test_a_cells_own_parenthesis_ties_it_to_no_later_total():
+    """A table's "(0.46)" with no "$" is the cell's own minus: no total's per-share figure, however
+    many cells and rows stand in front of it."""
+    row = "Basic EPS (0.45) (0.30) Net income (loss) (120) 30 Diluted EPS (0.46) 0.12"
+    assert efs.eps_from_quote(row, -0.46) == -0.46
+
+
+def test_a_total_a_clause_takes_in_with_no_measure_in_front_costs_its_figure():
+    """Accepted over-refusal, pinned so it is a choice: a clause that takes in a total and ties a
+    per-share figure to it reads exactly like one that takes in an item ("Including the goodwill
+    impairment loss of $120 million, or $0.46 per diluted share, net loss was ..."), so the figure
+    is refused and FMP fills it. A measure in front of the clause takes the number."""
+    for quote in ("The quarter included a net loss of $120 million, or $0.46 per diluted share.",
+                  "Including a net loss of $120 million, or $0.46 per diluted share, results for the "
+                  "quarter reflected the charge."):
+        for value in (0.46, -0.46):
+            assert efs.eps_from_quote(quote, value) is None, quote
+    quote = "Third-quarter results included a net loss of $120 million, or $0.46 per diluted share."
+    assert efs.eps_from_quote(quote, -0.46) == -0.46
+
+
+#: An item's own amount and its per-share figure, in an aside or a clause that takes the item in or
+#: leaves it out, with no total of the measure's own for the per-share figure to be: the figure is
+#: the item's, never an EPS, in either slot or sign. (quote, the item's per-share magnitude.)
+_AN_ITEMS_AMOUNT_AND_ITS_SHARE = [
+    # The parenthesis and bare "or" spellings of an aside's total, behind a measure: kept as an EPS
+    # when an aside's total was taken for the measure's whatever its words.
+    ("Earnings per diluted share, including a $45 million ($0.12 per share) after-tax charge, were "
+     "$1.20.", 0.12),
+    ("Diluted EPS, including a $45 million ($0.12 per share) loss on the sale, rose 5% to $1.20.",
+     0.12),
+    ("Diluted EPS, including a net loss of $45 million ($0.12 per share), rose 5% to $1.20.", 0.12),
+    ("Net loss for the quarter, including a $45 million ($0.12 per share) gain on the sale, "
+     "narrowed to $120 million, or $0.46 per share.", 0.12),
+    ("Net income for the quarter, including a loss on debt extinguishment of $45 million ($0.12 "
+     "per share), rose 5%.", 0.12),
+    ("Net income for the quarter, including a charge of $45 million or $0.12 per share, rose 5%.",
+     0.12),
+    ("Net income for the quarter, including a net loss of $45 million ($0.12 per share), rose 5%.",
+     0.12),
+    ("Net income, including a $1.2 billion ($0.17 per share) regulatory settlement charge, was "
+     "$6.9 billion, or $0.91 per diluted share.", 0.17),
+    ("Diluted earnings per share, including a $75 million ($0.05 per share) favorable impact from "
+     "tariff refunds, was $2.10, up 14 percent year over year.", 0.05),
+    ("Net income, including a $50 million ($0.20 per diluted share) gain on the sale of the "
+     "business, rose 20%.", 0.20),
+    ("Net income, including a $50 million ($0.20 per diluted share) gain on the sale of the "
+     "business, rose 20%, and diluted EPS was $1.20.", 0.20),
+    ("Net income, including a $40 million ($0.15 per diluted share) after-tax charge, declined 5%.",
+     0.15),
+    ("Third-quarter earnings, including a $50 million ($0.20 per diluted share) tax benefit, rose "
+     "20%.", 0.20),
+    ("Adjusted net income, excluding a $50 million ($0.20 per diluted share) gain on the sale of "
+     "the business, rose 20%.", 0.20),
+    ("Net earnings, including a loss from discontinued operations of $20 million ($0.08 per "
+     "diluted share), declined 10%.", 0.08),
+    ("Net income for the quarter, including income from discontinued operations of $45 million "
+     "($0.12 per share), rose 5%.", 0.12),
+    ("Per share results, including a net loss of $45 million ($0.12 per share), reflected the "
+     "charge.", 0.12),
+    ("Net income was $300 million, or $1.20 per diluted share, as the loss on the sale, which "
+     "included severance, was $20 million, or $0.05 per share.", 0.05),
+    # The measure goes on to a total of its own behind the aside, or a "which also" opens it.
+    ("Results for the quarter, including a net loss of $50 million ($0.20 per diluted share), were "
+     "$300 million.", 0.20),
+    ("Results, which also included the impairment loss, or $0.46 per diluted share, reflected the "
+     "charge.", 0.46),
+    # The comma twins, and a clause a measure's own verb opens: kept before either way.
+    ("Net income, including a gain on the sale of $50 million, or $0.20 per diluted share, rose "
+     "20%.", 0.20),
+    ("Net income, including a gain on the sale of $50 million, which was $0.20 per diluted share, "
+     "rose 20%.", 0.20),
+    ("Net income including a gain on the sale of $50 million, or $0.20 per diluted share, rose "
+     "20%.", 0.20),
+    ("Results, including a net loss of $45 million, or $0.12 per share, from the sale, reflected "
+     "the charge.", 0.12),
+    ("Net income for the quarter included a loss on debt extinguishment of $45 million ($0.12 per "
+     "share).", 0.12),
+    ("Third-quarter net income included a $45 million ($0.12 per share) after-tax charge.", 0.12),
+    ("Net income included $56 million ($0.06 per share) of net pre-tax charges.", 0.06),
+    ("Net income for the quarter included a charge of $45 million, or $0.12 per share.", 0.12),
+    ("Net income included a charge recorded in the quarter of $45 million, or $0.12 per share.",
+     0.12),
+    ("Net income rose 20% from $100 million, or $0.40 per share, a year ago, due to income of $20 "
+     "million from discontinued operations, or $0.08 per share.", 0.08),
+    # Each kept before by a rule of these that is one condition short.
+    ("GAAP EPS, which included the impairment loss, or $0.46 per share, beat the estimate.", 0.46),
+    ("Net income rose 20% from $100 million, or $0.40 per share, a year ago, reflecting income of "
+     "$20 million from discontinued operations, or $0.08 per share.", 0.08),
+    ("Results excluding the goodwill impairment loss, representing $0.46 per diluted share, beat "
+     "the estimate.", 0.46),
+    ("GAAP EPS, including the impairment loss, at $0.46 per share, was $1.20.", 0.46),
+    ("Results, including the impairment loss, or $0.46 per diluted share, reflected the charge.",
+     0.46),
+    ("GAAP EPS, including a charge of $1,200 million, which totaled $0.46 per share, was $1.20.",
+     0.46),
+    ("Net income, including the gain on the sale ($0.20 per diluted share), rose 20%.", 0.20),
+    ("The divestiture, including a loss of $120 million ($0.46 per diluted share), closed in the "
+     "quarter.", 0.46),
+    ("Net income, including a loss of $50 million ($0.20 per diluted share), was $300 million.",
+     0.20),
+    ("Adjusted EPS excluding special items of $0.15 per share rose to $1.20.", 0.15),
+    # A total of the measure's own direction, or of a part, a basis or a period of it, in the aside
+    # of a measure that names a direction of its own: a component's, whatever its spelling. These
+    # were kept as the measure's own total, and the index kept the comma twins too.
+    ("Net income, including segment income of $45 million ($0.12 per share), rose 20%, and diluted "
+     "EPS was $1.20.", 0.12),
+    ("Net loss for the quarter, including a loss of $45 million ($0.12 per share), widened.", 0.12),
+    ("Net loss for the quarter, including a loss of $45 million or $0.12 per share, widened.",
+     0.12),
+    ("Net income for the quarter, including fiscal 2025 income of $45 million ($0.12 per share), "
+     "rose 20%.", 0.12),
+    ("Net income, including adjusted income of $45 million ($0.12 per share), rose 20%.", 0.12),
+    ("Net income, including income of $45 million, or $0.12 per share, rose 20%.", 0.12),
+    ("Net income included operating income of $45 million ($0.12 per share).", 0.12),
+    ("Net loss included an operating loss of $45 million, or $0.12 per share.", 0.12),
+    # Results name no direction, and a part of them is no measure's own total.
+    ("Results, including an operating loss of $45 million ($0.12 per share), reflected the charge.",
+     0.12),
+    ("Results, including a segment loss of $45 million, or $0.12 per share, reflected the charge.",
+     0.12),
+    ("Third-quarter results included a fiscal 2025 net loss of $45 million ($0.12 per share).",
+     0.12),
+    # A subject of its own that reports an item's total, a verb a relative clause gives the item,
+    # and a figure set against another period's behind the measure's verb.
+    ("Net income was $300 million, or $1.20 per diluted share, and the company recorded a loss "
+     "from discontinued operations of $20 million, or $0.05 per share.", 0.05),
+    ("Net income was $300 million, or $1.20 per diluted share, while Acme posted a net loss on the "
+     "sale of $20 million, or $0.05 per share.", 0.05),
+    ("Net income was $300 million, or $1.20 per diluted share, and the loss from discontinued "
+     "operations was $20 million, or $0.05 per share.", 0.05),
+    ("Net income was $300 million, or $1.20 per diluted share, while income from the sale was $20 "
+     "million, or $0.05 per share.", 0.05),
+    ("Net income was $300 million, or $1.20 per diluted share, as the company's income from "
+     "discontinued operations was $20 million, or $0.05 per share.", 0.05),
+    # Results that name a direction hold their total themselves too.
+    ("Third-quarter earnings results, including income of $45 million, or $0.12 per share, "
+     "reflected the gain.", 0.12),
+    # A holder that is not the company's common one, capitalized as a company's name would be.
+    ("Results, including a net loss attributable to Noncontrolling Interests of $20 million ($0.05 "
+     "per share), reflected the charge.", 0.05),
+    ("Results, including net income attributable to Preferred Stockholders of $20 million, or "
+     "$0.05 per share, reflected the gain.", 0.05),
+    ("Net income was $300 million, or $1.20 per diluted share, and the company reported net income "
+     "attributable to Noncontrolling Interests of $20 million, or $0.05 per share.", 0.05),
+    ("Adjusted EPS excluding the hedging loss that ended at $0.05 per share was $1.20.", 0.05),
+    ("Adjusted EPS excluding the hedging loss that ended at $0.05 per share.", 0.05),
+    ("Excluding the impairment loss settled at $0.05 per share, adjusted EPS was $1.20.", 0.05),
+    ("Net income, which included a $45 million ($0.12 per share) charge, was $20 million, or $0.05 "
+     "per share, lower than last year.", 0.05),
+]
+
+
+@pytest.mark.parametrize("quote,magnitude", _AN_ITEMS_AMOUNT_AND_ITS_SHARE)
+def test_an_items_amount_and_its_share_are_never_an_eps(quote, magnitude):
+    """The total in front of the per-share figure is the item's here, so the per-share figure is
+    too: refused in both slots and signs, whatever the measure in front of the aside. Only a total
+    whose words the measure's could name (`_THE_MEASURES_OWN_TOTAL_RE`: "Results for the quarter,
+    including a net loss of $120 million ($0.46 per diluted share)") is that measure's."""
+    for field in ("eps_adjusted_diluted", "eps_gaap_diluted"):
+        for value in (magnitude, -magnitude):
+            figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                          **{field: {"value": value, "quote": quote}})
+            assert figures is None and reasons[field] != "ok", (field, value, reasons)
+            assert efs.eps_from_quote(quote, value) is None, (field, value)
+
+
+def test_an_amount_an_excluded_items_of_ties_to_is_the_items():
+    """Accepted refusal, pinned so it is a choice: in a release "excluding X of $120 million" is X's
+    amount (MCD: "Excluding the current year charges described above of $0.06 per share"), so the
+    per-share figure tied to it is X's as well, whatever the measure in front. These verified +0.46
+    as an EPS before. With its own verb or a comma the amount is the measure's."""
+    for items in ("investment gains and losses", "gains or losses", "losses and gains"):
+        quote = f"Adjusted net income excluding {items} of $120 million, or $0.46 per share, rose."
+        for value in (0.46, -0.46):
+            assert efs.eps_from_quote(quote, value) is None, quote
+        for kept in (f"Adjusted net income excluding {items} was $120 million, or $0.46 per share.",
+                     f"Adjusted net income excluding {items}, of $120 million, or $0.46 per share, "
+                     "rose."):
+            assert efs.eps_from_quote(kept, 0.46) == 0.46, kept
+
+
+#: Measures that name a direction of their own, and totals in their asides that point the same way:
+#: a component's, a part's ("operating", "segment"), another basis's ("adjusted", "core") or another
+#: period's ("fiscal 2025", "2025").
+_FRONTS_WITH_A_DIRECTION = ("Net income", "Net income for the quarter", "Net earnings",
+                            "Third-quarter net income", "Net loss", "Net loss for the quarter",
+                            "Net loss attributable to Acme", "Earnings",
+                            "Net income attributable to Acme")
+_TOTALS_THE_SAME_WAY = {
+    "income": ("income of $45 million", "operating income of $45 million",
+               "segment income of $45 million", "fiscal 2025 income of $45 million",
+               "adjusted income of $45 million", "core earnings of $45 million",
+               "quarterly earnings of $45 million", "2025 net income of $45 million",
+               "comparable earnings of $45 million", "net income of $45 million"),
+    "loss": ("a loss of $45 million", "an operating loss of $45 million",
+             "a segment loss of $45 million", "a fiscal 2025 loss of $45 million",
+             "an adjusted loss of $45 million", "a total loss of $45 million",
+             "a 2025 net loss of $45 million", "a consolidated loss of $45 million",
+             "a net loss of $45 million"),
+}
+
+
+@pytest.mark.parametrize("front", _FRONTS_WITH_A_DIRECTION)
+def test_a_measure_with_a_direction_of_its_own_takes_no_total_in_its_aside(front):
+    """A measure that names a direction holds its total itself, so a total in its aside is a part
+    of it, never its own, whichever way it points: "Net loss for the quarter, including a loss of
+    $45 million ($0.12 per share), widened" kept -0.12 as the GAAP EPS, and with the parenthesis or
+    a bare "or" 735 of 780 such sentences kept a figure. The comma twins were kept everywhere."""
+    for total in _TOTALS_THE_SAME_WAY["loss" if "loss" in front.lower() else "income"]:
+        for tie, close in ((" (", ")"), (" or ", ""), (", or ", "")):
+            for tail in (", rose 20%.", ", reflected the charge.", "."):
+                quote = f"{front}, including {total}{tie}$0.12 per share{close}{tail}"
+                for value in (0.12, -0.12):
+                    assert efs.eps_from_quote(quote, value) is None, quote
+    quote = (f"{front}, including segment income of $45 million ($0.12 per share), rose 20%, and "
+             "diluted EPS was $1.20.")
+    assert efs.eps_from_quote(quote, 1.2) == 1.2
+
+
+#: Results clauses that hold the measure's own total, in the words a release prints around it.
+_RESULTS_HOLD_THEIR_TOTAL = (("Third-quarter results", " included "),
+                             ("Results for the quarter", ", including "),
+                             ("The company's third-quarter results", ", which included "))
+_THE_MEASURES_OWN_TOTALS = (("net income of $120 million", 0.46),
+                            ("record net income of $120 million", 0.46),
+                            ("net income from continuing operations of $120 million", 0.46),
+                            ("net income for the quarter of $120 million", 0.46),
+                            ("third-quarter net income of $120 million", 0.46),
+                            ("GAAP net income attributable to common stockholders of $120 million",
+                             0.46),
+                            ("a net loss of $120 million", -0.46),
+                            ("a record net loss of $120 million", -0.46),
+                            ("a net loss from continuing operations of $120 million", -0.46),
+                            ("a third-quarter net loss attributable to Acme of $120 million",
+                             -0.46))
+_BEHIND_THE_MEASURES_SHARE = ("", " on revenue of $1.2 billion", ", on net sales of $1.2 billion",
+                              ", up from $0.30 a year ago", ", in line with guidance",
+                              " for the quarter", ", in the third quarter",
+                              ", from continuing operations")
+
+
+@pytest.mark.parametrize("front,verb", _RESULTS_HOLD_THEIR_TOTAL)
+@pytest.mark.parametrize("total,value", _THE_MEASURES_OWN_TOTALS)
+def test_a_results_clause_keeps_the_eps_of_the_measures_own_total(front, verb, total, value):
+    """Results name no direction, so a total of the measure's own words in their clause is theirs,
+    whatever the release prints behind its per-share figure: "Third-quarter results included net
+    income of $120 million, or $0.46 per diluted share, on revenue of $1.2 billion" was refused
+    unless one narrow shape held, 540 of 756 such sentences that verified before. Each keeps its
+    sign, and the flipped one is refused. A total that names a quarter is theirs only when the
+    results name the same one ("Third-quarter results included third-quarter net income"): behind
+    "Results for the quarter" it may be another quarter's, and is refused
+    (`test_a_results_clauses_total_of_another_quarter_is_none_of_theirs`)."""
+    another_quarter = "third-quarter" in total and "third-quarter" not in front.lower()
+    for tie, close in ((", or ", ""), (" (", ")")):
+        for behind in _BEHIND_THE_MEASURES_SHARE:
+            tail = "." if verb == " included " else ", exceeded guidance."
+            quote = (f"{front}{verb}{total}{tie}${abs(value):.2f} per diluted share{close}"
+                     f"{behind}{tail}")
+            assert efs.eps_from_quote(quote, value) == (None if another_quarter else value), quote
+            assert efs.eps_from_quote(quote, -value) is None, quote
+
+
+def test_a_results_clauses_total_dated_or_on_another_basis_costs_its_figure():
+    """Accepted over-refusal, pinned so it is a choice: behind the per-share figure of a total in a
+    results clause, a period with a year or a date may be another period's ("..., for the quarter
+    ended September 30, 2025"), which these words cannot tell from this one, and a total on another
+    basis ("adjusted", "core") may be a part of the results, so the figure is refused and FMP fills
+    it. The same period with no year is the quarter's own."""
+    for behind in (" for the quarter ended September 30, 2026", ", in the third quarter of 2026",
+                   ", in the prior-year quarter", ", for the same quarter of 2025"):
+        quote = ("Third-quarter results included net income of $120 million, or $0.46 per diluted "
+                 f"share{behind}.")
+        for value in (0.46, -0.46):
+            assert efs.eps_from_quote(quote, value) is None, quote
+    for basis in ("adjusted", "core"):
+        quote = (f"Third-quarter results included {basis} net income of $120 million, or $0.46 per "
+                 "diluted share.")
+        for value in (0.46, -0.46):
+            assert efs.eps_from_quote(quote, value) is None, quote
+    quote = ("Third-quarter results included net income of $120 million, or $0.46 per diluted "
+             "share for the third quarter.")
+    assert efs.eps_from_quote(quote, 0.46) == 0.46
+
+
+@pytest.mark.parametrize("own", ("from continuing operations", "attributable to Acme",
+                                 "attributable to common stockholders", "for the quarter",
+                                 "for the third quarter of 2026"))
+def test_a_loss_with_words_of_its_own_before_its_amount_stays_a_loss(own):
+    """"Third-quarter results included a net loss attributable to Acme of $120 million, or $0.46
+    per diluted share" verified +0.46, in the index too: the words between the loss and "of" its
+    amount kept it from reading as this number's direction, so the clause "included a net loss"
+    was taken for an aside and out of the label, and no loss was left. A profit is never proved."""
+    quote = (f"Third-quarter results included a net loss {own} of $120 million, or $0.46 per "
+             "diluted share.")
+    assert efs._reads_as_loss(quote, _printed(quote, 0.46)), quote
+    assert efs.eps_from_quote(quote, 0.46) is None, quote
+
+
+#: Items a subject of its own reports behind the measure's own per-share figure, and the ways a
+#: clause opens on that subject.
+_AN_ITEM_A_COMPANY_REPORTS = ("a loss from discontinued operations",
+                              "net income from discontinued operations",
+                              "a net loss from discontinued operations", "a loss on the sale",
+                              "a segment loss", "an operating loss on the sale")
+
+
+@pytest.mark.parametrize("joined", ("and", "as", "while"))
+@pytest.mark.parametrize("company", ("the company", "Acme"))
+@pytest.mark.parametrize("verb", ("recorded", "posted", "reported"))
+def test_a_subject_that_reports_an_items_total_gives_the_number_to_the_item(joined, company, verb):
+    """A subject of its own behind the measure's per-share figure frees a later figure only when it
+    reports the measure's own total: "and the company recorded a loss from discontinued operations
+    of $20 million, or $0.05 per share" kept -0.05 as the GAAP EPS. Its own words are the measure's
+    alone (attributable to, from continuing operations, for the quarter): the figure it reports
+    then is that measure's, on its own basis. The company that reports it is "the company", "it"
+    or "we": behind a joining word a name may be a subsidiary's or a segment's ("and Acme Energy
+    Services reported net income of $20 million, or $0.08 per share" kept 0.08), so the figure a
+    name reports is refused, and FMP fills it."""
+    head = "Net income was $300 million, or $1.20 per diluted share"
+    for item in _AN_ITEM_A_COMPANY_REPORTS:
+        quote = f"{head}, {joined} {company} {verb} {item} of $20 million, or $0.05 per share."
+        for value in (0.05, -0.05):
+            assert efs.eps_from_quote(quote, value) is None, quote
+        assert efs.eps_from_quote(quote, 1.2) == 1.2, quote
+    for own, value in (("net income attributable to Acme", 1.16),
+                       ("net income from continuing operations", 1.16)):
+        quote = f"{head}, {joined} {company} {verb} {own} of $290 million, or $1.16 per share."
+        assert efs.eps_from_quote(quote, value) == (value if company == "the company" else None), (
+            quote)
+
+
+@pytest.mark.parametrize("item", ("hedging loss", "impairment loss", "loss on the sale"))
+def test_a_verb_that_arrives_at_an_items_figure_is_the_items(item):
+    """"At" after a verb that arrives is that verb's, so the number is the measure's: but only when
+    a measure stands in front of the clause, the verb is no relative clause's, and the measure has
+    no figure of its own behind the number. "Adjusted EPS excluding the hedging loss that ended at
+    $0.05 per share was $1.20" kept 0.05 as the adjusted EPS."""
+    for verb in ("that ended", "that settled", "that closed", "which landed", "settled", "ended",
+                 "closed", "landed"):
+        for goes_on in (" was $1.20.", " came in at $1.20.", " totaled $1.20."):
+            quote = f"Adjusted EPS excluding the {item} {verb} at $0.05 per share{goes_on}"
+            for value in (0.05, -0.05):
+                assert efs.eps_from_quote(quote, value) is None, quote
+            assert efs.eps_from_quote(quote, 1.2) == 1.2, quote
+        quote = f"Excluding the {item} {verb} at $0.05 per share, adjusted EPS was $1.20."
+        for value in (0.05, -0.05):
+            assert efs.eps_from_quote(quote, value) is None, quote
+    quote = f"Adjusted EPS excluding the {item} landed at $1.20."
+    assert efs.eps_from_quote(quote, 1.2) == 1.2
+
+
+@pytest.mark.parametrize("opener", ("which included", "including", "which reflected"))
+def test_a_figure_set_against_another_behind_the_measures_verb_is_no_eps(opener):
+    """Behind an aside the measure's verb comes to its own total, but an amount set against
+    another period's is how far it moved: "Net income, which included a $45 million ($0.12 per
+    share) charge, was $20 million, or $0.05 per share, lower than last year" kept 0.05 as the GAAP
+    EPS. A level the sentence sets against another still verifies."""
+    for against in ("lower than last year", "higher than a year ago", "below the prior year",
+                    "above the prior-year quarter"):
+        quote = (f"Net income, {opener} a $45 million ($0.12 per share) charge, was $20 million, "
+                 f"or $0.05 per share, {against}.")
+        for value in (0.05, -0.05):
+            assert efs.eps_from_quote(quote, value) is None, quote
+    quote = (f"Net income, {opener} a $45 million ($0.12 per share) charge, was $300 million, or "
+             "$1.20 per diluted share, up from $1.00 a year ago.")
+    assert efs.eps_from_quote(quote, 1.2) == 1.2
+
+
+def _kept_as_gaap(quote: str, value: float) -> bool:
+    """Is `quote`'s `value` kept as the GAAP EPS in the release, and its flipped sign refused?"""
+    text = f"Acme reported results. {quote}"
+    figures, reasons = _verify_in(text, eps_gaap_diluted={"value": value, "quote": quote})
+    flipped, _ = _verify_in(text, eps_gaap_diluted={"value": -value, "quote": quote})
+    return (figures is not None and figures.eps_gaap == value
+            and reasons["eps_gaap_diluted"] == "ok" and flipped is None)
+
+
+def _never_an_eps(quote: str, magnitude: float) -> None:
+    """`quote`'s per-share figure of this magnitude is refused in both slots and both signs."""
+    for field in ("eps_adjusted_diluted", "eps_gaap_diluted"):
+        for value in (magnitude, -magnitude):
+            figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                          **{field: {"value": value, "quote": quote}})
+            assert figures is None and reasons[field] != "ok", (quote, field, value, reasons)
+
+
+#: What a level is set against when it beats or misses what was expected of it, never another
+#: period's figure.
+_SET_AGAINST_AN_EXPECTATION = (
+    "ahead of guidance", "ahead of the consensus estimate", "above the high end of guidance",
+    "above the consensus estimate of $0.40", "better than expected",
+    "short of the consensus estimate", "below the company's outlook", "shy of analysts' estimates",
+    "behind the company's plan", "in line with guidance", "better than anticipated",
+    "ahead of forecasts", "above projections", "ahead of the company's targets")
+
+
+@pytest.mark.parametrize("opener", ("which included", "including", "which reflected",
+                                    "which includes"))
+def test_a_level_set_against_an_expectation_behind_the_measures_verb_is_its_eps(opener):
+    """Set against what was expected, the figure behind the measure's own verb is still its level:
+    "Net income, which included a $45 million ($0.12 per share) after-tax charge, was $300 million,
+    or $1.20 per diluted share, ahead of guidance" was refused, as a move would be (216 of 360 such
+    sentences, which verified before). A comparison with another period stays a move (the test
+    above), and so does one with anything the list of expectations does not name."""
+    for charge in ("a $45 million ($0.12 per share) after-tax charge",
+                   "a $45 million, or $0.12 per share, after-tax charge",
+                   "an after-tax charge of $45 million ($0.12 per share)"):
+        for front, total, value in (("Net income", "$300 million", 0.46),
+                                    ("Net loss", "$120 million", -0.46),
+                                    ("Net income attributable to Acme", "$300 million", 0.46)):
+            for against in _SET_AGAINST_AN_EXPECTATION:
+                quote = (f"{front}, {opener} {charge}, was {total}, or ${abs(value):.2f} per "
+                         f"diluted share, {against}.")
+                assert _kept_as_gaap(quote, value), quote
+    for against in ("above the $0.03 of the third quarter of 2025", "lower than in 2025",
+                    "higher than the comparable quarter", "below the guidance-free prior year"):
+        quote = (f"Net income, {opener} a $45 million ($0.12 per share) charge, was $20 million, "
+                 f"or $0.05 per share, {against}.")
+        _never_an_eps(quote, 0.05)
+
+
+#: Subjects of a later part of the sentence that are the measure's own: the company's or its common
+#: holders', and the quarter with no ordinal, year or date.
+_THE_COMPANYS_OWN_SUBJECTS = (
+    "net income attributable to Pfizer Inc. common shareholders",
+    "net income attributable to Boeing common shareholders",
+    "net income attributable to the Company", "net income attributable to Acme stockholders",
+    "net income attributable to common shareholders of Acme",
+    "net income attributable to the Company's common stockholders",
+    "net income in the quarter", "net income during the quarter",
+    "net earnings attributable to UnitedHealth Group common shareholders")
+
+
+@pytest.mark.parametrize("subject", _THE_COMPANYS_OWN_SUBJECTS)
+def test_a_later_subject_of_the_companys_holders_or_its_quarter_keeps_its_eps(subject):
+    """A later part's subject names the measure with its own words, so its figure is its own: "...,
+    and net income attributable to the Company was $300 million, or $1.20 per diluted share" was
+    refused once the first part's per-share figure counted as the measure's (54 of 66 such
+    sentences, which verified before), because the measure's words knew a holder only as
+    "(common) stockholders" or a bare name, and a quarter only as "for the quarter"."""
+    for first in ("Income from continuing operations was $280 million, or $1.10 per diluted share",
+                  "Diluted EPS from continuing operations was $1.10"):
+        for join in (", and ", ", while ", " and "):
+            for share in (", or $1.20 per diluted share.", " ($1.20 per diluted share)."):
+                quote = f"{first}{join}{subject} was $300 million{share}"
+                assert _kept_as_gaap(quote, 1.2), quote
+
+
+@pytest.mark.parametrize("subject", (
+    "net income in the third quarter of 2025",
+    "net income for the quarter ended September 30, 2025",
+    "net income in the quarter ended September 30, 2025", "net income in the prior-year quarter",
+    "net income attributable to Acme Preferred Stockholders",
+    "net income attributable to Acme Noncontrolling Interests",
+    "net income attributable to the Company's preferred stockholders",
+    "net income attributable to Acme preferred stockholders",
+    "net income attributable to common shareholders of Acme Preferred",
+    "net income attributable to holders of preferred stock",
+    "net income attributable to Minority Interests",
+    "net income attributable to Participating Securities",
+    "net income attributable to Redeemable Noncontrolling Interests",
+    "net income attributable to discontinued operations"))
+def test_a_later_subject_of_another_holder_or_period_leaves_the_figure_another(subject):
+    """A year, a date or another period behind a later subject, or a holder that is not the
+    company's common one however it is capitalized, may be another figure's: "and net income
+    attributable to Acme Preferred Stockholders was $20 million, or $0.05 per share" kept 0.05 as
+    the GAAP EPS, every word of a capitalized holder read as the company's name."""
+    quote = (f"Net income was $300 million, or $1.20 per diluted share, and {subject} was $20 "
+             "million, or $0.05 per share.")
+    _never_an_eps(quote, 0.05)
+
+
+#: Holders that may be a share class's, a unit's or another holder's: a name of more words than one
+#: and its legal form, a word of a class, a series, units, partners or a holder that is not a common
+#: one, alone too, a single letter. The first nine only the spellings that name the common holders
+#: admitted; the rest every version kept, as a bare name.
+_A_CLASSES_OR_A_UNITS_HOLDERS = (
+    "Class B common stockholders", "Class A common shareholders", "Series A common stockholders",
+    "B common stockholders", "common shareholders of Acme Europe",
+    "Georgia Power common shareholders", "Acme Europe common stockholders", "Class shareholders",
+    "Series stockholders",
+    "Class B", "Series A", "Georgia Power", "Acme Europe", "Duke Energy Carolinas", "NCI",
+    "Unvested Shareholders", "Restricted Stockholders", "Partners", "Units", "Class", "Series")
+
+
+@pytest.mark.parametrize("holder", _A_CLASSES_OR_A_UNITS_HOLDERS)
+def test_a_holder_that_may_be_a_class_or_a_units_is_none_of_the_companys(holder):
+    """"Net income was $300 million, or $1.20 per diluted share, and net income attributable to
+    Class B common stockholders was $20 million, or $0.05 per diluted share" kept 0.05 as the GAAP
+    EPS, and "Results, including net income attributable to Class B common stockholders of $45
+    million ($0.12 per share), were restated" kept 0.12: a name of up to four capitalized words in
+    front of or behind the common holders' words was read as the company's, and so was a bare one
+    (270 of 270 and 80 of 80 such sentences in the spellings that name the common holders; 108 of
+    108 with a bare name, which every version kept). The company's name is one word and its legal
+    form, and never a class's, a series' or another holder's word."""
+    _never_an_eps("Net income was $300 million, or $1.20 per diluted share, and net income "
+                  f"attributable to {holder} was $20 million, or $0.05 per diluted share.", 0.05)
+    for front, verb, tail in (("Results", ", including ", ", were restated."),
+                              ("Third-quarter results", " included ", ".")):
+        for tie, close in ((", or ", ""), (" (", ")")):
+            _never_an_eps(f"{front}{verb}net income attributable to {holder} of $45 million{tie}"
+                          f"$0.12 per share{close}{tail}", 0.12)
+
+
+def test_a_company_name_of_more_words_than_its_legal_form_costs_its_figure():
+    """Accepted over-refusal, pinned so it is a choice: the company's own name of more words ("Shake
+    Shack Inc.", "Duke Energy Corporation") reads the same as a unit's ("Duke Energy Carolinas",
+    "Georgia Power"), so its later subject's figure is refused, and FMP fills it. One word and its
+    legal form keeps it; a legal form in lower case ("Linde plc") was never read as a name's."""
+    head = "Income from continuing operations was $280 million, or $1.10 per diluted share, and"
+    for name in ("Shake Shack Inc.", "Duke Energy Corporation", "Acme Energy Services",
+                 "Linde plc"):
+        _never_an_eps(f"{head} net income attributable to {name} was $300 million, or $1.20 per "
+                      "diluted share.", 1.20)
+    for name in ("Acme Corp.", "Pfizer Inc.", "UnitedHealth Group", "Acme", "P&G"):
+        quote = (f"{head} net income attributable to {name} was $300 million, or $1.20 per diluted "
+                 "share.")
+        assert _kept_as_gaap(quote, 1.2), quote
+
+
+@pytest.mark.parametrize("period", ("in the second quarter", "during the fourth quarter",
+                                    "in the first quarter", "in the third quarter", "in the period",
+                                    "during the period"))
+def test_a_later_subject_in_a_quarter_it_names_is_another_figure(period):
+    """"Net income was $300 million, or $1.20 per diluted share, and net income in the second
+    quarter was $250 million, or $1.00 per diluted share" kept 1.00 as the GAAP EPS once the
+    measure's own words took "in" and "during" a quarter (108 of 108 such sentences). These words
+    cannot tell the release's own quarter from another, so "in the third quarter" of a third-quarter
+    release costs its figure too (accepted over-refusal, pinned so it is a choice: FMP fills it);
+    "in the quarter" and "during the quarter" keep theirs (`_THE_COMPANYS_OWN_SUBJECTS`). Neither
+    may a results clause's total name it."""
+    _never_an_eps("Net income was $300 million, or $1.20 per diluted share, and net income "
+                  f"{period} was $250 million, or $1.00 per diluted share.", 1.00)
+    _never_an_eps("Income from continuing operations was $280 million, or $1.10 per diluted share, "
+                  f"and net income {period} was $300 million, or $1.20 per diluted share.", 1.20)
+    _never_an_eps("Compared to the prior year's net income of $250 million, or $1.00 per diluted "
+                  f"share, the company reported net income {period} of $300 million, or $1.20 per "
+                  "diluted share.", 1.20)
+    for front in ("Results", "Third-quarter results"):
+        _never_an_eps(f"{front} included a net loss {period} of $45 million ($0.12 per share).",
+                      0.12)
+    for undated in ("in the quarter", "during the quarter"):
+        quote = f"Results included a net loss {undated} of $45 million ($0.12 per share)."
+        assert _kept_as_gaap(quote, -0.12), quote
+
+
+#: The company's own holders, as a results clause's own total names them.
+_THE_COMPANYS_OWN_HOLDERS = (
+    "the Company", "Acme common stockholders", "Acme Corporation common stockholders",
+    "Pfizer Inc. common shareholders", "Boeing shareholders", "shareholders of Acme",
+    "the Company's common stockholders")
+
+
+@pytest.mark.parametrize("holder", _THE_COMPANYS_OWN_HOLDERS)
+def test_a_results_clauses_own_total_of_the_companys_holders_keeps_its_eps(holder):
+    """"Results included net income attributable to the Company of $120 million, or $0.46 per
+    diluted share" was refused: the measure's own words knew no holder but "(common) stockholders"
+    or a bare name, so the total read as an item's. Each sign is kept, the flipped one refused.
+    Beside an ordinal quarter ("Third-quarter results included net income attributable to the
+    Company of") the figure may be another quarter's, and is refused
+    (`test_a_results_clause_of_the_companys_own_words_beside_an_ordinal_quarter_holds_no_total`)."""
+    for front, verb, tail in (("Results", " included ", "."),
+                              ("Results for the quarter", ", including ",
+                               ", reflected the charge."),
+                              ("The company's results", ", which included ",
+                               ", reflected the charge.")):
+        for total, value in (("net income", 0.46), ("a net loss", -0.46)):
+            for tie, close in ((", or ", ""), (" (", ")")):
+                quote = (f"{front}{verb}{total} attributable to {holder} of $120 million{tie}"
+                         f"$0.46 per diluted share{close}{tail}")
+                assert _kept_as_gaap(quote, value), quote
+
+
+#: An ordinal quarter, in the spellings a release names one.
+_ORDINAL_QUARTERS = ("second quarter", "fourth quarter", "first fiscal quarter", "2nd quarter")
+
+
+@pytest.mark.parametrize("quarter", _ORDINAL_QUARTERS)
+@pytest.mark.parametrize("subject", _THE_COMPANYS_OWN_SUBJECTS)
+def test_the_companys_own_words_beside_an_ordinal_quarter_free_no_later_figure(subject, quarter):
+    """"Net income was $300 million, or $1.20 per diluted share, and net income attributable to the
+    Company for the second quarter was $250 million, or $1.00 per diluted share" kept 1.00 as this
+    quarter's GAAP EPS once the measure's own words took the company's holders and "in" or "during
+    the quarter" (the recheck's 1,701 of 1,701 such sentences, 144 of 144 with the ordinal in front
+    and 120 of 120 with it behind the figure; the version before refused each): those words say the
+    figure is the company's and a quarter's, never which quarter's, so beside an ordinal quarter, in
+    front of the figure in its sentence or right behind it, the later figure is refused. Which
+    quarter the release reports is not read, so its own is refused too (accepted over-refusal,
+    pinned so it is a choice: FMP fills it). The bare words keep theirs as they always did
+    (`test_the_bare_words_beside_an_ordinal_quarter_keep_a_later_figure`)."""
+    head = "Net income was $300 million, or $1.20 per diluted share, and "
+    first = "net income was $300 million, or $1.20 per diluted share, and"
+    later = f"{subject} was $250 million, or $1.00 per diluted share"
+    ordinal = quarter[0].upper() + quarter[1:]
+    for quote in (f"{head}{subject} for the {quarter} was $250 million, or $1.00 per diluted "
+                  "share.",
+                  f"{head}{later}, in the {quarter}.",
+                  f"{head}{subject} was $250 million ($1.00 per diluted share) for the {quarter}.",
+                  f"{head}{later}, a {quarter} record.",
+                  f"{ordinal} {first} {later}.",
+                  f"In the {quarter}, {first} {later}.",
+                  f"For the {quarter}; {first} {later}."):
+        _never_an_eps(quote, 1.00)
+    if quarter in ("second quarter", "fourth quarter"):
+        _never_an_eps(f"{head}in the {quarter} {subject} was $250 million, or $1.00 per diluted "
+                      "share.", 1.00)
+        _never_an_eps(f"{head}{quarter.replace(' ', '-')} {subject} was $250 million, or $1.00 per "
+                      "diluted share.", 1.00)
+
+
+@pytest.mark.parametrize("quarter", ("Q2", "2Q", "Q4"))
+def test_a_numbered_quarter_beside_the_companys_own_words_frees_no_later_figure(quarter):
+    """The same with a quarter's number: "..., and net income in the quarter was $250 million, or
+    $1.00 per diluted share, in Q2" kept 1.00. A report of its own, the company's words, reads the
+    same: "the company reported net income attributable to the Company for the second quarter
+    of"."""
+    head = "Net income was $300 million, or $1.20 per diluted share, and "
+    for subject in ("net income in the quarter", "net income attributable to the Company",
+                    "net income attributable to Acme common shareholders"):
+        _never_an_eps(f"{head}{subject} was $250 million, or $1.00 per diluted share, in "
+                      f"{quarter}.", 1.00)
+        _never_an_eps(f"{quarter} net income was $300 million, or $1.20 per diluted share, and "
+                      f"{subject} was $250 million, or $1.00 per diluted share.", 1.00)
+    _never_an_eps("Compared to the prior year's net income of $250 million, or $1.00 per diluted "
+                  "share, the company reported net income attributable to the Company for the "
+                  "second quarter of $300 million, or $1.20 per diluted share.", 1.20)
+
+
+def test_the_bare_words_beside_an_ordinal_quarter_keep_a_later_figure():
+    """Control: the bare words were read the same by every version, with an ordinal quarter named
+    or not ("and net income for the third quarter was", "and net income attributable to Acme was"),
+    and still are; the company's own words keep theirs with no ordinal quarter named, a comparison's
+    period behind the figure's own end included ("..., compared with $1.00 in the second
+    quarter")."""
+    head = "Net income was $300 million, or $1.20 per diluted share, and "
+    for subject in ("net income for the third quarter", "net income attributable to Acme",
+                    "net income attributable to common stockholders for the third quarter",
+                    "net income attributable to Common Stockholders for the third quarter",
+                    "in the quarter net income for the third quarter",
+                    "in the quarter net income attributable to Acme for the third quarter"):
+        quote = f"{head}{subject} was $280 million, or $1.12 per diluted share."
+        assert _kept_as_gaap(quote, 1.12), quote
+    # The company's own words in front of the measure's own figure name no later subject's.
+    quote = ("Net income attributable to the Company was $300 million, or $1.20 per diluted share, "
+             "and net income for the third quarter was $280 million, or $1.12 per diluted share.")
+    assert _kept_as_gaap(quote, 1.12), quote
+    for subject in ("net income attributable to the Company", "net income in the quarter",
+                    "net income attributable to Acme common shareholders"):
+        for tail in (".", ", compared with $1.00 in the second quarter.",
+                     ", up from $1.00 a year ago."):
+            quote = f"{head}{subject} was $280 million, or $1.12 per diluted share{tail}"
+            assert _kept_as_gaap(quote, 1.12), quote
+
+
+@pytest.mark.parametrize("words", ("attributable to the Company",
+                                   "attributable to Acme common stockholders",
+                                   "attributable to the Company's common stockholders",
+                                   "attributable to common stockholders of Acme",
+                                   "in the quarter", "during the quarter"))
+def test_a_results_clause_of_the_companys_own_words_beside_an_ordinal_quarter_holds_no_total(
+        words):
+    """"Fourth-quarter results, including net income attributable to the Company of $45 million
+    ($0.12 per share), were restated" kept 0.12 as this quarter's GAAP EPS (the recheck's 520 of 520
+    such sentences, and 40 of 40 with "Third-quarter"; the version before refused each): beside an
+    ordinal quarter, in the results' front, in front of it or right behind the figure, a total the
+    company's own words name may be another quarter's. "Third-quarter results" in a third-quarter
+    release cost theirs too (accepted over-refusal, pinned so it is a choice: FMP fills it). The
+    bare words keep it, as every version did ("Fourth-quarter results, including net income
+    of")."""
+    for front in ("Fourth-quarter results", "Q4 results", "4Q results",
+                  "Results for the fourth quarter", "In the fourth quarter, results",
+                  "Third-quarter results", "The company's third-quarter results",
+                  "Fiscal second quarter results"):
+        for verb, tie, close, tail in ((", including ", " (", ")", ", were restated."),
+                                       (", including ", ", or ", "", ", reflected the charge."),
+                                       (" included ", ", or ", "", "."),
+                                       (", which included ", " (", ")", ", improved.")):
+            for total in ("net income", "a net loss"):
+                _never_an_eps(f"{front}{verb}{total} {words} of $45 million{tie}$0.12 per share"
+                              f"{close}{tail}", 0.12)
+    for behind in (" in the second quarter", " for the fourth quarter"):
+        _never_an_eps(f"Results, including net income {words} of $45 million ($0.12 per share)"
+                      f"{behind}, were restated.", 0.12)
+        _never_an_eps(f"Results included net income {words} of $45 million, or $0.12 per share,"
+                      f"{behind}.", 0.12)
+    _never_an_eps(f"Revenue rose 5% in the second quarter, and results, including net income "
+                  f"{words} of $45 million ($0.12 per share), were restated.", 0.12)
+    for front in ("Fourth-quarter results", "Results"):
+        quote = f"{front}, including net income of $45 million ($0.12 per share), were restated."
+        assert _kept_as_gaap(quote, 0.12), quote
+
+
+@pytest.mark.parametrize("front", ("Earnings results", "Earnings results for the quarter",
+                                   "Quarterly earnings results"))
+def test_earnings_results_name_no_direction_of_their_own(front):
+    """"Earnings" in "earnings results" says what the results are, not which way they went:
+    "Earnings results included net income of $120 million, or $0.46 per diluted share" verified
+    before and was refused once "earnings" there read as a profit. With a quarter named they may be
+    another quarter's, and are refused
+    (`test_earnings_results_that_name_a_quarter_hold_no_total_of_this_ones`). Residual, pinned so
+    it is a choice: a net loss in their clause with no comma ("... earnings results included a net
+    loss of") still reads both ways, and is refused, as it always was."""
+    for verb, tail in ((" included ", "."), (", including ", ", exceeded expectations."),
+                       (", which included ", ", exceeded expectations.")):
+        for tie, close in ((", or ", ""), (" (", ")")):
+            quote = (f"{front}{verb}net income of $120 million{tie}$0.46 per diluted share{close}"
+                     f"{tail}")
+            assert _kept_as_gaap(quote, 0.46), quote
+    for tie, close in ((", or ", ""), (" (", ")")):
+        quote = (f"{front}, including a net loss of $120 million{tie}$0.46 per diluted share{close}"
+                 ", exceeded expectations.")
+        assert _kept_as_gaap(quote, -0.46), quote
+        quote = f"{front} included a net loss of $120 million{tie}$0.46 per diluted share{close}."
+        _never_an_eps(quote, 0.46)
+
+
+@pytest.mark.parametrize("front", ("Fourth-quarter earnings results",
+                                   "Third-quarter earnings results", "Q4 earnings results",
+                                   "4Q earnings results", "Fourth quarter earnings results",
+                                   "Earnings results for the fourth quarter",
+                                   "For the fourth quarter, earnings results",
+                                   "In the third quarter, earnings results",
+                                   "Fiscal third quarter earnings results"))
+def test_earnings_results_that_name_a_quarter_hold_no_total_of_this_ones(front):
+    """"Fourth-quarter earnings results, including a net loss of $45 million ($0.12 per share),
+    were restated" kept -0.12 as this quarter's GAAP EPS once "earnings results" were admitted as
+    this quarter's results (the checkpoint refused every front with "earnings" in it): their words
+    cannot tell the release's own quarter from another, so a third-quarter release's "Third-quarter
+    earnings results" cost their figure too (accepted over-refusal, pinned so it is a choice: FMP
+    fills it). With no quarter named they keep it (the test above). Residual, recorded: "Fourth-
+    quarter results", with no "earnings", hold their total as every version did."""
+    for verb, tie, close, tail in ((", including ", " (", ")", ", were restated."),
+                                   (", including ", ", or ", "", ", exceeded expectations."),
+                                   (" included ", ", or ", "", "."),
+                                   (", which included ", " (", ")", ", reflected the charge.")):
+        for total in ("a net loss of $45 million", "net income of $45 million"):
+            _never_an_eps(f"{front}{verb}{total}{tie}$0.12 per share{close}{tail}", 0.12)
+
+
+#: In front of "earnings results", a clause of its own behind a ";" or a joining word that may make
+#: them a sold unit's or another period's.
+_A_CLAUSE_IN_FRONT_OF_EARNINGS_RESULTS = (
+    "Acme sold its European unit in the quarter; ", "Acme sold its European unit in October, and ",
+    "The divested businesses were sold in October; ", "The European unit was sold in October, and ",
+    "Acme acquired Beta Corp. in July; ")
+#: Behind the aside, words that say whose the results are or which period's.
+_NOT_THE_RESULTS_OWN_VERBS = (
+    "are reported in discontinued operations", "relate to the European unit",
+    "are for the prior-year quarter", "were excluded from adjusted results", "were restated",
+    "are presented as discontinued operations", "were those of the divested unit",
+    "and are reported in discontinued operations", "reported in discontinued operations",
+    "as restated, improved")
+
+
+@pytest.mark.parametrize("front", ("earnings results", "quarterly earnings results",
+                                   "GAAP earnings results", "consolidated earnings results"))
+def test_earnings_results_their_sentence_names_another_units_or_periods_hold_no_total(front):
+    """"Acme sold its European unit in the quarter; earnings results, including a net loss of $45
+    million ($0.12 per share), are reported in discontinued operations" and "Earnings results,
+    including a net loss of $45 million ($0.12 per share), are for the prior-year quarter" kept
+    -0.12 as this quarter's GAAP EPS once undated "earnings results" were admitted (the recheck's
+    432 of 576 such sentences; the version before refused every front with "earnings" in it): the
+    sentence made the results a sold unit's or another period's, in front of the ";" or the joining
+    word, or behind the aside, and only the front and the total were read. Now nothing may stand in
+    front of them in their sentence, the aside takes the total in, and behind it stands their own
+    verb (`_THE_RESULTS_OWN_VERB_RE`) or, behind their own "included", the end of the sentence;
+    when in doubt the figure is refused (pinned so it is a choice: FMP fills it). Residual,
+    recorded: "results" alone, with no "earnings", hold their total as every version did."""
+    title = front[0].upper() + front[1:]
+    for aside, tie, close in ((", including ", " (", ")"), (", including ", ", or ", ""),
+                              (", which included ", " (", ")"), (", which included ", ", or ", "")):
+        for total in ("a net loss of $45 million", "net income of $45 million"):
+            for verb in _NOT_THE_RESULTS_OWN_VERBS:
+                _never_an_eps(f"{title}{aside}{total}{tie}$0.12 per share{close}, {verb}.", 0.12)
+            for lead in _A_CLAUSE_IN_FRONT_OF_EARNINGS_RESULTS:
+                _never_an_eps(f"{lead}{front}{aside}{total}{tie}$0.12 per share{close}, exceeded "
+                              "expectations.", 0.12)
+            # An aside that leaves the total out makes it an item's.
+            for leaves_out in (", excluding ", ", before ", ", exclusive of "):
+                _never_an_eps(f"{title}{leaves_out}{total}{tie}$0.12 per share{close}, exceeded "
+                              "expectations.", 0.12)
+    for lead in _A_CLAUSE_IN_FRONT_OF_EARNINGS_RESULTS:
+        _never_an_eps(f"{lead}{front} included net income of $45 million, or $0.12 per share.",
+                      0.12)
+    # A clause in front that names nothing else is refused too (accepted over-refusal: these words
+    # cannot tell it from one that does).
+    _never_an_eps(f"Revenue rose 5%, and {front}, including net income of $45 million ($0.12 per "
+                  "share), exceeded expectations.", 0.12)
+    # A sentence that ends, or a quote that stops, with no verb of theirs behind the aside.
+    for total in ("a net loss of $45 million", "net income of $45 million"):
+        _never_an_eps(f"{title}, including {total} ($0.12 per share).", 0.12)
+        _never_an_eps(f"{title}, which included {total}, or $0.12 per share", 0.12)
+        _never_an_eps(f"{title}, including {total}, or $0.12 per share; the unit was sold.", 0.12)
+    _never_an_eps(f"{title} included net income of $45 million, or $0.12 per share; these results "
+                  "are reported in discontinued operations.", 0.12)
+    _never_an_eps(f"{title} included net income of $45 million, or $0.12 per share, as restated.",
+                  0.12)
+    # "Including" with no comma is no verb of theirs: the sentence still needs one.
+    _never_an_eps(f"{title} including net income of $45 million, or $0.12 per share.", 0.12)
+    _never_an_eps(f"{title} including net income of $45 million ($0.12 per share).", 0.12)
+
+
+#: Behind the comma that closes the aside, the results' own verbs (`_THE_RESULTS_OWN_VERB_RE`),
+#: each spelling of the closed list once.
+_THE_RESULTS_OWN_VERBS = (
+    "exceeded expectations", "exceed expectations", "surpassed guidance", "surpass guidance",
+    "topped estimates", "top estimates", "beat the consensus estimate", "missed expectations",
+    "miss expectations", "met guidance", "meet guidance", "came in above expectations",
+    "come in above expectations", "reflected the charge", "reflect the charge",
+    "included a gain on the sale", "include a gain on the sale", "rose 20%", "rise 20%",
+    "fell 10%", "fall 10%", "improved", "improve", "declined", "decline", "increased 20%",
+    "increase 20%", "decreased 5%", "decrease 5%", "grew 20%", "grow 20%",
+    "were in line with expectations", "were above expectations", "were below expectations",
+    "were ahead of guidance", "were better than expected", "were worse than expected",
+    "were short of expectations", "were up 20%", "were down 5%", "were higher than a year ago",
+    "were lower than a year ago", "was in line with expectations", "are in line with expectations",
+    "is in line with expectations", "were well above expectations",
+    "were slightly below expectations", "were just ahead of guidance",
+    "were significantly higher than a year ago", "were substantially above guidance",
+    "were comfortably ahead of guidance", "were modestly lower than a year ago",
+    "in line with expectations", "also exceeded expectations", "again exceeded expectations",
+    # A result named alone ("Earnings result, including ...") takes the verb's -s.
+    "exceeds expectations", "surpasses guidance", "tops estimates", "beats estimates",
+    "misses expectations", "meets guidance", "comes in above expectations", "reflects the charge",
+    "includes a gain on the sale", "rises 20%", "falls 10%", "improves", "declines",
+    "increases 20%", "decreases 5%", "grows 20%")
+
+
+@pytest.mark.parametrize("verb", _THE_RESULTS_OWN_VERBS)
+def test_earnings_results_keep_their_total_behind_their_own_verb(verb):
+    """Each verb of the closed list that may stand behind the aside of undated "earnings results"
+    keeps their figure, with each sign, the flipped one refused; so does their own "included" up to
+    the end of the sentence, or to "in line with"
+    (`test_earnings_results_name_no_direction_of_their_own`)."""
+    for front in ("Earnings results", "Quarterly earnings results",
+                  "The company said its earnings results"):
+        for aside, tie, close in ((", including ", ", or ", ""), (", including ", " (", ")"),
+                                  (", which included ", " (", ")")):
+            quote = (f"{front}{aside}net income of $120 million{tie}$0.46 per diluted "
+                     f"share{close}, {verb}.")
+            assert _kept_as_gaap(quote, 0.46), quote
+    quote = (f"Earnings results, including a net loss of $120 million ($0.46 per diluted share), "
+             f"{verb}.")
+    assert _kept_as_gaap(quote, -0.46), quote
+    quote = ("Earnings results included net income of $120 million, or $0.46 per diluted share, in "
+             "line with expectations.")
+    assert _kept_as_gaap(quote, 0.46), quote
+
+
+@pytest.mark.parametrize("front", ("Third-quarter earnings results", "Results for the quarter",
+                                   "Third-quarter results"))
+def test_a_results_clauses_bare_income_or_loss_is_no_total_of_theirs(front):
+    """A bare "income" or "a loss" in a results clause may be any line above the bottom one, an
+    item's loss as well: "Earnings results for the quarter, including a loss of $45 million ($0.12
+    per share), reflected the charge" would keep -0.12 once "earnings" there named no direction.
+    Their own total is "net income" or "a net loss" (the test above)."""
+    for total in ("income of $45 million", "a loss of $45 million", "total income of $45 million",
+                  "a GAAP loss of $45 million"):
+        for verb, tail in ((", including ", ", reflected the charge."), (" included ", ".")):
+            for tie, close in ((", or ", ""), (" (", ")"), (" or ", "")):
+                quote = f"{front}{verb}{total}{tie}$0.12 per share{close}{tail}"
+                _never_an_eps(quote, 0.12)
+
+
+@pytest.mark.parametrize("tail", (
+    ", on the sale of the business.", ", from the divestiture of its European unit.",
+    ", related to the hurricane.", " on the sale of the business.",
+    ", in discontinued operations.", ", attributable to noncontrolling interests.",
+    ", due to the sale of the business.", ", reflecting the sale of the business.",
+    ", on sales of the business.", " for the quarter, on the sale of the business.",
+    " \u2013 on the sale of the business.", ": on the sale of the business."))
+def test_a_later_subjects_figure_that_an_items_words_follow_is_the_items(tail):
+    """A later subject that reports a loss names only its direction; the words behind its per-share
+    figure may make it an item's: "Net income was $300 million, or $1.20 per diluted share, and the
+    company recorded a loss of $20 million, or $0.05 per share, on the sale of the business" kept
+    -0.05 as the GAAP EPS, and so did each of 144 such sentences."""
+    for join in ("and", "while"):
+        for company in ("the company", "Acme"):
+            for verb in ("recorded", "reported", "posted"):
+                for loss in ("a loss", "a net loss"):
+                    quote = (f"Net income was $300 million, or $1.20 per diluted share, {join} "
+                             f"{company} {verb} {loss} of $20 million, or $0.05 per share{tail}")
+                    _never_an_eps(quote, 0.05)
+
+
+@pytest.mark.parametrize("head", (
+    "Net income was $300 million, or $1.20 per diluted share, and net income was",
+    "Compared to the prior year's net income of $250 million, or $1.00 per diluted share, the "
+    "company reported net income of",
+    "Income from continuing operations was $280 million, or $1.10 per diluted share, and net "
+    "income attributable to the Company was"))
+def test_a_later_subjects_figure_set_against_another_period_is_no_eps(head):
+    """Behind a later subject's figure, words that set it against another period make its total
+    how far the measure moved, never its level: "..., and net income was $20 million, or $0.05 per
+    share, lower than last year" kept 0.05 as the GAAP EPS."""
+    for against in ("lower than last year", "higher than a year ago", "below the prior year",
+                    "above the prior-year quarter"):
+        _never_an_eps(f"{head} $20 million, or $0.05 per share, {against}.", 0.05)
+
+
+@pytest.mark.parametrize("tail", (
+    ".", ", up 20% from a year ago.", ", compared with $1.00 a year ago.", " for the quarter.",
+    ", in the third quarter.", ", from continuing operations.", ", an increase of 20%.",
+    ", a 20% increase.", ", ahead of guidance.", ", in line with guidance.",
+    ", on revenue of $1.2 billion.", ", a record.", " (a record).", ", and revenue rose 5%.",
+    ", versus $1.00 a year ago.", "; revenue rose 5%."))
+def test_a_later_subjects_figure_behind_the_end_of_its_clause_keeps_its_eps(tail):
+    """The honest twins: behind the figure, the end of its clause, a comparison or the revenue it
+    was earned on name no item, so a later subject of the measure's own keeps its figure."""
+    for head in ("Income from continuing operations was $280 million, or $1.10 per diluted share, "
+                 "and net income was $300 million, or $1.20 per diluted share",
+                 "Compared to the prior year's net income of $250 million, or $1.00 per diluted "
+                 "share, the company reported net income of $300 million, or $1.20 per diluted "
+                 "share"):
+        assert _kept_as_gaap(f"{head}{tail}", 1.2), f"{head}{tail}"
+
+
+@pytest.mark.parametrize("item", ("hedging loss", "impairment loss", "loss on the sale"))
+def test_a_relative_clauses_verb_behind_its_adverb_arrives_at_the_items_figure(item):
+    """"Adjusted EPS excluding the hedging loss that later settled at $0.05 per share" kept 0.05 as
+    the adjusted EPS: the relative clause's verb was looked for right behind "that" only. An adverb
+    between them, or one behind "has", leaves the verb the clause's, and the number the item's."""
+    for relative in ("that", "which"):
+        for between in ("later", "ultimately", "finally", "eventually", "subsequently", "then",
+                        "later finally", "has since", "has"):
+            for verb in ("settled", "ended", "landed", "closed"):
+                for tail in (".", " in the quarter."):
+                    quote = (f"Adjusted EPS excluding the {item} {relative} {between} {verb} at "
+                             f"$0.05 per share{tail}")
+                    _never_an_eps(quote, 0.05)
+    for quote in ("Adjusted EPS excluding special items finally landed at $1.20.",
+                  "Adjusted EPS excluding items that management considers unusual landed at "
+                  "$1.20."):
+        assert efs.eps_from_quote(quote, 1.2) == 1.2, quote
+
+
+#: Results of another period, a part, or a period a year or a date names, which these words cannot
+#: tell from this quarter's.
+_ANOTHER_PERIODS_OR_A_PARTS_RESULTS = (
+    "Results for the third quarter of 2025", "Prior-year results", "Last year's results",
+    "Segment results", "Discontinued operations results", "Results of discontinued operations",
+    "Results of the acquired business", "International results", "Fourth-quarter 2025 results",
+    "Results for fiscal 2025", "The divestiture's results", "Year-ago results",
+    "Results for the nine months", "Year-to-date results", "Full-year results",
+    "Full-year 2026 results", "Results for the first nine months of 2026",
+    "Results for the year ended December 31, 2025", "Third-quarter 2025 results",
+    "Results in the prior-year quarter", "Fiscal 2026 results", "Annual results",
+    "Acme's European results")
+
+
+@pytest.mark.parametrize("front", _ANOTHER_PERIODS_OR_A_PARTS_RESULTS)
+def test_results_of_another_period_or_a_part_hold_no_total_of_the_quarters(front):
+    """Only this quarter's own results hold the measure's total in their clause: "Prior-year
+    results, including a net loss of $45 million ($0.12 per share), reflected the charge" kept
+    -0.12 as the GAAP EPS, and with a comma or " included " every version kept it (390 of 396 such
+    sentences). A closed list of the words this quarter's results are named with decides, never a
+    list of the wrong ones."""
+    for verb, tails in ((" included ", (".",)), (", including ", (", reflected the charge.", ".")),
+                        (", which included ", (", reflected the charge.", ".")),
+                        (" include ", (".",))):
+        for tie, close in ((", or ", ""), (" (", ")"), (" or ", "")):
+            for tail in tails:
+                _never_an_eps(f"{front}{verb}a net loss of $45 million{tie}$0.12 per share{close}"
+                              f"{tail}", 0.12)
+
+
+def test_results_named_with_a_year_cost_their_figure():
+    """Accepted over-refusal, pinned so it is a choice: "Results for the third quarter of 2026"
+    may be this quarter's, but a year or a date reads the same for another period's, so the figure
+    in their clause is refused and FMP fills it. The same results with no year keep it."""
+    for front in ("Results for the third quarter of 2026", "Third-quarter 2026 results"):
+        quote = (f"{front}, including a net loss of $120 million, or $0.46 per diluted share, "
+                 "reflected the charge.")
+        _never_an_eps(quote, 0.46)
+    for front in ("Results for the third quarter", "Third-quarter results", "Results",
+                  "Results for the period", "Q3 GAAP results", "Third fiscal quarter results"):
+        quote = (f"{front}, including a net loss of $120 million, or $0.46 per diluted share, "
+                 "reflected the charge.")
+        assert _kept_as_gaap(quote, -0.46), quote
+
+
+#: In front of a later subject, the words that make it another period's: the full year, nine
+#: months, the prior-year quarter, a year.
+_ANOTHER_PERIOD_IN_FRONT = (
+    "for the full year", "for the year", "for fiscal 2026", "for the first nine months of 2026",
+    "for the nine months", "in the prior-year quarter", "in 2025", "a year earlier")
+
+
+@pytest.mark.parametrize("period", _ANOTHER_PERIOD_IN_FRONT)
+def test_a_later_subject_another_period_leads_into_is_another_figure(period):
+    """A period in FRONT of a later subject was never read: "For the fourth quarter, net income was
+    $300 million, or $1.20 per diluted share, and for the full year, net income was $1.2 billion, or
+    $4.80 per diluted share" kept 4.80 as the GAAP EPS, the subject opening at the comma behind the
+    period or reading the period as a lead-in of its own (318 of 384 such sentences; the adjusted
+    twin as well, and each spelling of the company's holders this round added). The same period
+    behind the measure's own words was refused all along ("net income for the full year was")."""
+    for first in ("For the fourth quarter, net income was $300 million, or $1.20 per diluted share",
+                  "Fourth-quarter net income was $300 million, or $1.20 per diluted share"):
+        for join in (", and", ", while", ", and,"):
+            for subject in ("net income was", "net income attributable to the Company was",
+                            "net income attributable to Acme was"):
+                for lead in (f"{period}, {subject}", f"{period} {subject}"):
+                    _never_an_eps(f"{first}{join} {lead} $1.2 billion, or $4.80 per diluted "
+                                  "share.", 4.80)
+        _never_an_eps(f"{first}, {period}, net income was $1.2 billion, or $4.80 per diluted "
+                      "share.", 4.80)
+    _never_an_eps("For the fourth quarter, adjusted net income was $350 million, or $1.35 per "
+                  f"diluted share, and {period}, adjusted net income was $1.3 billion, or $5.10 "
+                  "per diluted share.", 5.10)
+
+
+@pytest.mark.parametrize("possessive", ("that year's", "this year's", "the year's",
+                                        "the period's", "that quarter's", "last year's",
+                                        "Georgia Power's", "its", "their"))
+def test_a_later_subject_another_periods_or_a_parts_possessive_names_is_another_figure(possessive):
+    """"..., and that year's net income was $900 million, or $3.60 per diluted share" kept 3.60:
+    the possessive in front of a later subject is the company's or this quarter's only."""
+    _never_an_eps(f"Net income was $300 million, or $1.20 per diluted share, and {possessive} net "
+                  "income was $900 million, or $3.60 per diluted share.", 3.60)
+
+
+def test_a_later_subject_behind_a_figure_of_another_period_keeps_its_eps():
+    """The honest twins: the figure in front is another period's, a comparison's or a part of the
+    sentence's own, and the later subject this quarter's, whichever way it points."""
+    for quote, value in (
+            ("Compared to the prior year's net income of $250 million, or $1.00 per diluted share, "
+             "the company reported net income of $300 million, or $1.20 per diluted share.", 1.2),
+            ("Versus a net loss of $50 million, or $0.20 per diluted share, a year ago, the "
+             "company reported net income of $300 million, or $1.20 per diluted share.", 1.2),
+            ("Following a net loss of $50 million, or $0.20 per diluted share, in the prior-year "
+             "quarter, Acme earned $300 million, or $1.20 per diluted share.", 1.2),
+            ("Compared to the prior year's net income of $250 million ($1.00 per diluted share), "
+             "the company reported a net loss of $30 million ($0.12 per diluted share).", -0.12),
+            ("Income from continuing operations was $280 million, or $1.10 per diluted share, "
+             "compared with $250 million, or $1.00 per diluted share, in the prior-year quarter, "
+             "and net income was $300 million, or $1.20 per diluted share.", 1.2),
+            ("Income from continuing operations was $280 million, or $1.10 per diluted share, and "
+             "in the third quarter net income was $300 million, or $1.20 per diluted share.", 1.2),
+            ("Income from continuing operations was $280 million, or $1.10 per diluted share, and "
+             "the company's net income was $300 million, or $1.20 per diluted share.", 1.2),
+            ("Loss from continuing operations was $110 million, or $0.42 per share, and net loss "
+             "was $120 million, or $0.46 per share.", -0.46),
+            ("Loss from continuing operations was $110 million, or $0.42 per share, and the loss "
+             "attributable to the Company was $120 million, or $0.46 per share.", -0.46)):
+        assert _kept_as_gaap(quote, value), quote
+
+
+@pytest.mark.parametrize("lead", (
+    "Compared to the prior year's net income of $250 million, or $1.00 per diluted share,",
+    "Versus a net loss of $50 million, or $0.20 per diluted share, a year ago,",
+    "Following a net loss of $50 million, or $0.20 per diluted share, in the prior-year quarter,"))
+def test_the_sentences_own_subject_behind_another_periods_figure_is_the_companys_name(lead):
+    """Behind a figure of another period, the sentence's own subject may name the company: one word
+    and its legal form ("Acme", "Pfizer Inc.", "UnitedHealth Group"). A name of more words may be a
+    unit's: "..., a year ago, Georgia Power earned $20 million, or $0.08 per share" kept 0.08, as
+    did "Acme Discontinued Operations reported net income of"."""
+    for name in ("Acme", "Pfizer Inc.", "UnitedHealth Group", "Acme Corporation"):
+        quote = f"{lead} {name} earned $300 million, or $1.20 per diluted share."
+        assert _kept_as_gaap(quote, 1.2), quote
+    for later in ("Georgia Power earned $20 million", "Duke Energy Carolinas earned $20 million",
+                  "Acme Discontinued Operations reported net income of $20 million",
+                  "The European Unit posted net income of $20 million"):
+        _never_an_eps(f"{lead} {later}, or $0.08 per share.", 0.08)
+
+
+@pytest.mark.parametrize("later", (
+    "the company recorded a loss of $20 million", "the company recorded a net loss of $20 million",
+    "it posted a net loss of $20 million", "the loss was $20 million",
+    "the net loss was $20 million",
+    "the loss attributable to the Company was $20 million", "income was $20 million",
+    "the company reported income of $20 million", "losses totaled $20 million",
+    "Acme Discontinued Operations reported net income of $20 million",
+    "Acme Energy Services earned $20 million", "Georgia Power reported net income of $20 million",
+    "Pharmaceuticals posted net income of $20 million"))
+def test_a_later_subject_that_is_no_bottom_line_of_the_measures_is_another_figure(later):
+    """A later subject frees its figure only when it is the measure's bottom line ("net income",
+    "a net loss", "earnings", or an "income" or "loss" with words that say whose), points the
+    measure's way, and is reported by the company itself: "Net income was $300 million, or $1.20 per
+    diluted share, and the company recorded a loss of $20 million, or $0.05 per share, compared with
+    a loss of $10 million a year ago" kept -0.05, and so did a capitalized part as the reporter
+    ("and Acme Discontinued Operations reported net income of $20 million, or $0.08 per
+    share")."""
+    for tail in (".", ", compared with a loss of $10 million a year ago.", ", up 5%.",
+                 " for the quarter.", ", and the stock fell."):
+        for join in ("and", "while"):
+            _never_an_eps(f"Net income was $300 million, or $1.20 per diluted share, {join} "
+                          f"{later}, or $0.05 per share{tail}", 0.05)
+
+
+@pytest.mark.parametrize("period", ("for the full year", "for the nine months", "for fiscal 2026",
+                                    "in the third quarter", "year to date"))
+def test_a_later_subject_pointing_the_other_way_is_another_figure_unless_the_first_is_earlier(
+        period):
+    """Behind net income, a net loss in a later part is another figure, an item's as likely as not,
+    whatever period the first figure is for, unless that period is an earlier one: then the later
+    subject is this quarter's, which may have swung ("Net loss was $50 million, or $0.20 per diluted
+    share, a year ago, while net income was $300 million, or $1.20 per diluted share")."""
+    for join in ("while", "and"):
+        for later in ("the net loss was $20 million",
+                      "the company recorded a net loss of $20 million"):
+            _never_an_eps(f"Net income was $1.2 billion, or $4.80 per diluted share, {period}, "
+                          f"{join} {later}, or $0.05 per share.", 0.05)
+            # A word that may set figures against each other opens no comparison when a verb
+            # follows it: the first figure is still this quarter's.
+            _never_an_eps(f"Following the merger, net income was $300 million, or $1.20 per "
+                          f"diluted share, {join} {later}, or $0.05 per share.", 0.05)
+    for earlier in ("a year ago", "in the prior-year quarter", "in the same quarter last year"):
+        quote = (f"Net loss was $50 million, or $0.20 per diluted share, {earlier}, while net "
+                 "income was $300 million, or $1.20 per diluted share.")
+        assert _kept_as_gaap(quote, 1.2), quote
+
+
+@pytest.mark.parametrize("tail", (
+    ", basic and diluted.", " (basic and diluted).", " (diluted).", ", diluted.",
+    " of common stock.", " of Class A common stock.", "(1).", "*.", " on a fully diluted basis.",
+    ", on a basic and diluted basis.", ", as compared to $1.00 a year ago.",
+    ", which compares with $1.00 a year ago.", ", from $1.00 a year ago.",
+    " (compared with $1.00 a year ago).", ", against $1.00 a year ago.", ", year over year.",
+    ", a year-over-year increase of 20%.", ", representing an increase of 20%.", ", growth of 20%.",
+    ", or 20% higher than a year ago.", ", a record.", ", a record, driven by strong demand.",
+    ", a record for the company.", ", a record high.", ", a new quarterly record.",
+    ", which was a record.", ", both records.", ", the highest in the company's history.",
+    ", on a GAAP basis.", " (GAAP).", ", as reported.", " \u2013 up 20% from a year ago.",
+    " \u2014 a record.", ": a record.", ", which exceeded guidance.", ", surpassing guidance.",
+    ", ahead of the $1.10 consensus.", ", well ahead of guidance.", ", comfortably above guidance.",
+    ", or $1.35 on an adjusted basis.", " in the fiscal third quarter.", " in Q3.",
+    " this quarter.", " for the reporting period.", ", in the current quarter.",
+    ", but revenue fell 5%.",
+    ", whereas revenue fell 5%.", ", vs. $1.00 a year ago.", ", down 5%.",
+    " for the quarter, on a diluted basis.", ", a record, on a fully diluted basis."))
+def test_a_later_subjects_figure_behind_words_that_name_no_other_figure_keeps_its_eps(tail):
+    """Behind a later subject's figure, words that only say more of it (its per-share words, a
+    footnote's mark, the basis it is on, that it is a record, a comparison, an expectation it beat,
+    this quarter with no year) were refused once a closed list decided what may follow (430 of 430
+    such sentences, which verified before)."""
+    for head in ("Income from continuing operations was $280 million, or $1.10 per diluted share, "
+                 "and net income was $300 million, or $1.20 per diluted share",
+                 "Compared to the prior year's net income of $250 million, or $1.00 per diluted "
+                 "share, the company reported net income of $300 million, or $1.20 per diluted "
+                 "share",
+                 "Following a net loss of $50 million, or $0.20 per diluted share, in the prior-"
+                 "year quarter, Acme earned $300 million, or $1.20 per diluted share"):
+        assert _kept_as_gaap(f"{head}{tail}", 1.2), f"{head}{tail}"
+    quote = (f"Loss from continuing operations was $110 million, or $0.42 per share, and net loss "
+             f"was $120 million, or $0.46 per share{tail}")
+    assert _kept_as_gaap(quote, -0.46), quote
+    quote = ("Income from continuing operations was $280 million ($1.10 per diluted share), and "
+             f"net income was $300 million ($1.20 per diluted share){tail}")
+    assert _kept_as_gaap(quote, 1.2), quote
+
+
+@pytest.mark.parametrize("tail", (", driven by higher volumes.", ", reflecting higher sales.",
+                                  ", primarily due to higher volumes.", " as revenue rose 5%.",
+                                  ", which included a $0.05 per share charge.",
+                                  ", including a $0.05 per share charge.", ", despite the charge."))
+def test_what_drove_a_later_subjects_figure_is_its_own_unless_it_reports_a_loss(tail):
+    """What drove the figure, or what it took in, is the measure's behind a subject that names it
+    with a verb of its own or reports a profit; behind a subject that reports a loss those are the
+    words an item's loss is told in ("and the company recorded a net loss of $20 million, or $0.05
+    per share, due to the sale of the business")."""
+    for head, value in (("Income from continuing operations was $280 million, or $1.10 per diluted "
+                         "share, and net income was $300 million, or $1.20 per diluted share", 1.2),
+                        ("Compared to the prior year's net income of $250 million, or $1.00 per "
+                         "diluted share, the company reported net income of $300 million, or $1.20 "
+                         "per diluted share", 1.2),
+                        ("Net loss from continuing operations was $110 million, or $0.42 per "
+                         "share, and the net loss was $120 million, or $0.46 per share", -0.46)):
+        assert _kept_as_gaap(f"{head}{tail}", value), f"{head}{tail}"
+    _never_an_eps("Net loss from continuing operations was $110 million, or $0.42 per share, and "
+                  f"the company recorded a net loss of $20 million, or $0.05 per share{tail}", 0.05)
+
+
+@pytest.mark.parametrize("tail", (
+    ", a charge tied to the sale of the business.", ", a record loss on the sale of the business.",
+    ", a gain on the sale.", ", year to date.", ", in fiscal 2026.", ", for the nine months.",
+    " in the third quarter of 2025.", ", for the quarter ended September 30, 2025.",
+    ", in discontinued operations.", ", on the sale of the business.",
+    ", more than expected.", " above consensus."))
+def test_a_later_subjects_figure_behind_an_items_or_another_periods_words_is_another(tail):
+    """The closed list behind a later subject's figure: an item's words, another period's or a year,
+    a note that goes on into an item's words, and a distance from what was expected leave the figure
+    something else's, whatever the subject."""
+    for head in ("Net loss from continuing operations was $110 million, or $0.42 per share, and "
+                 "the company recorded a net loss of $20 million, or $0.05 per share",
+                 "Net loss from continuing operations was $110 million, or $0.42 per share, and "
+                 "the net loss was $20 million, or $0.05 per share"):
+        _never_an_eps(f"{head}{tail}", 0.05)
+
+
+def test_a_distance_from_what_was_expected_is_how_far_the_measure_moved():
+    """Behind the measure's own verb, a figure set against an expectation is its level only behind
+    a comma and with a word of where it stands: "..., was $20 million, or $0.05 per share more than
+    planned" kept 0.05 as the GAAP EPS once any comparison word before an expectation read as a
+    level (75 of 120 such sentences with no comma; 120 of 120 with "more/less/higher than" behind
+    one)."""
+    for front in ("Net income, which included a $45 million ($0.12 per share) after-tax charge,",
+                  "Net income, including a $45 million ($0.12 per share) after-tax charge,"):
+        for against in (" more than planned", ", more than planned", ", less than expected",
+                        " higher than guidance", ", greater than consensus", " above consensus",
+                        " ahead of guidance", " better than expected", ", lower than expected"):
+            _never_an_eps(f"{front} was $20 million, or $0.05 per share{against}.", 0.05)
+
+
+@pytest.mark.parametrize("item", ("hedging loss", "litigation charge", "legal settlement",
+                                  "restructuring costs", "gain on the sale", "tax benefit"))
+def test_an_items_relative_clause_that_arrives_at_the_number_gives_it_the_item(item):
+    """"Adjusted EPS excluding the litigation charge that later settled at $0.05 per share" kept
+    0.05 as the adjusted EPS: the relative clause's arrival counted only behind a loss or income
+    word, and a "was", a "came in" or a subject inside the clause ended it before the arrival was
+    read (540 of 720 such sentences; 108 of 108 with "came in at"; 252 of 336 with "was" or
+    "had")."""
+    for relative in ("that later settled", "which ultimately came in", "that was later settled",
+                     "which was settled", "that had settled", "that had been settled",
+                     "that the company later settled", "that Acme ultimately settled",
+                     "the company later settled", "we settled", "that has since finally settled",
+                     "that also settled", "which already landed", "that subsequently ended",
+                     "which then closed"):
+        for tail in (".", " in the quarter."):
+            _never_an_eps(f"Adjusted EPS excluding the {item} {relative} at $0.05 per share{tail}",
+                          0.05)
+    for relative in ("which settled", "which was later settled", "that later landed"):
+        _never_an_eps(f"Adjusted EPS excluding the {item}, {relative} at $0.05 per share.", 0.05)
+        _never_an_eps(f"Adjusted EPS excluding the {item}, {relative} at $0.05 per share, was "
+                      "$1.20.", 0.05)
+    for quote in ("Adjusted EPS, which landed at $1.20, beat estimates.",
+                  "Diluted EPS, which settled at $1.20, rose 5%."):
+        assert efs.eps_from_quote(quote, 1.2) == 1.2, quote
+    for quote in ("Adjusted EPS excluding special items finally landed at $1.20.",
+                  "Adjusted EPS excluding items that management considers unusual landed at "
+                  "$1.20.",
+                  "Adjusted EPS Excluding Items That Management Considers Unusual Landed At $1.20.",
+                  "Adjusted EPS excluding the charges we recorded landed at $1.20.",
+                  "Adjusted EPS excluding the loss on the sale came in at $1.20."):
+        assert efs.eps_from_quote(quote, 1.2) == 1.2, quote
+
+
+@pytest.mark.parametrize("front", ("its results", "their results", "Its results for the quarter",
+                                   "Its third-quarter results"))
+def test_results_a_pronoun_names_may_be_a_units_and_hold_no_total_of_the_quarters(front):
+    """"Acme sold its European unit in the quarter; its results, including a net loss of $45
+    million ($0.12 per share), are reported in discontinued operations" kept -0.12: "its" and
+    "their" were on the list of this quarter's own results. The company's own possessive keeps its
+    figure."""
+    for spell in (", including a net loss of $45 million ($0.12 per share), were restated.",
+                  ", including a net loss of $45 million, or $0.12 per share, were restated.",
+                  " included a net loss of $45 million, or $0.12 per share."):
+        _never_an_eps(f"Acme sold its European unit in the quarter. {front[0].upper()}{front[1:]}"
+                      f"{spell}", 0.12)
+    for front in ("Our results for the quarter", "The company said its third-quarter results",
+                  "Acme said that third-quarter results"):
+        quote = (f"{front} included a net loss of $120 million, or $0.46 per diluted share.")
+        assert _kept_as_gaap(quote, -0.46), quote
+
+
+@pytest.mark.parametrize("front", (
+    "Results for the fiscal third quarter", "Results for the third fiscal quarter",
+    "Results for the current quarter", "Results this quarter", "Total company results",
+    "Overall results", "Company results", "Results of operations for the quarter",
+    "Third quarter results of operations", "In the third quarter, results",
+    "For the quarter, results",
+    "Unaudited third-quarter results", "Third-quarter results for the company",
+    "The Corporation's third-quarter results", "The Bank's results for the quarter",
+    "Firmwide results", "Results for the reporting period", "Results for the 13-week period",
+    "Third-quarter fiscal results", "Results for the fiscal quarter",
+    "On a GAAP basis, third-quarter results", "On a reported basis, third-quarter results",
+    "Overall, third-quarter results", "In summary, third-quarter results",
+    "As a result, third-quarter results", "Accordingly, third-quarter results",
+    "Third-quarter consolidated results", "Third-quarter financial results",
+    "Third-quarter operating results", "Third-quarter reported results"))
+def test_this_quarters_results_named_with_more_words_hold_their_total(front):
+    """This quarter's results, named with words that name no other period or part, hold their total:
+    the closed list of results words refused 1,048 such sentences that verified before ("Results
+    for the fiscal third quarter included net income of $120 million, or $0.46 per diluted share",
+    "On a GAAP basis, third-quarter results included ...")."""
+    for verb, tail in ((" included ", "."), (", including ", ", reflected the charge.")):
+        for total, value in (("net income", 0.46), ("a net loss", -0.46)):
+            for tie, close in ((", or ", ""), (" (", ")")):
+                quote = (f"{front}{verb}{total} of $120 million{tie}$0.46 per diluted share"
+                         f"{close}{tail}")
+                assert _kept_as_gaap(quote, value), quote
+
+
+@pytest.mark.parametrize("total,value", (
+    ("income attributable to Acme of $120 million", 0.46),
+    ("a loss attributable to common stockholders of $120 million", -0.46),
+    ("income from continuing operations of $120 million", 0.46),
+    ("a loss from continuing operations of $120 million", -0.46),
+    ("net earnings of $120 million", 0.46), ("earnings attributable to Acme of $120 million", 0.46),
+    ("a profit of $120 million", 0.46)))
+def test_a_results_clauses_income_with_words_of_its_own_is_their_total(total, value):
+    """A bare "income" or "a loss" is a results clause's own total when the words behind it say
+    whose it is or that it is the continuing operations': "Third-quarter results included a loss
+    attributable to common stockholders of $120 million, or $0.46 per diluted share" was refused
+    once their total had to say "net"."""
+    for front, verb, tail in (("Third-quarter results", " included ", "."),
+                              ("Results for the quarter", ", including ",
+                               ", reflected the charge.")):
+        for tie, close in ((", or ", ""), (" (", ")")):
+            quote = f"{front}{verb}{total}{tie}$0.46 per diluted share{close}{tail}"
+            assert _kept_as_gaap(quote, value), quote
+
+
+@pytest.mark.parametrize("period", ("in the third quarter of 2025", "during the quarter of 2025",
+                                    "in the quarter of 2025", "for the third quarter of 2025",
+                                    "for the quarter of fiscal 2025"))
+def test_a_results_clauses_total_with_a_year_is_no_total(period):
+    """"Results, including net income in the third quarter of 2025, or $0.46 per diluted share,
+    reflected the charge" kept 0.46: the year was read as the total's amount ("of 2025"), and this
+    round's "in" and "during" spread the checkpoint's "for the ... quarter of 2025" to them. A
+    total is in dollars or has a scale word."""
+    for front, verb, tail in (("Results", ", including ", ", reflected the charge."),
+                              ("Third-quarter results", ", which included ",
+                               ", reflected the charge."),
+                              ("Results for the quarter", ", including ", "."),
+                              ("Third-quarter results", " included ", ".")):
+        for total in ("net income", "a net loss"):
+            for tie, close in ((", or ", ""), (" (", ")")):
+                _never_an_eps(f"{front}{verb}{total} {period}{tie}$0.46 per diluted share{close}"
+                              f"{tail}", 0.46)
+
+
+@pytest.mark.parametrize("front", ("Earnings results", "Quarterly earnings results", "Results",
+                                   "Third-quarter results", "Results for the quarter"))
+def test_a_results_clauses_total_of_another_quarter_is_none_of_theirs(front):
+    """"Earnings results, including a fourth-quarter net loss of $45 million ($0.12 per share), were
+    restated" kept -0.12 as this quarter's GAAP EPS once "earnings results" fronts were admitted,
+    and "Results" fronts kept it all along: a total that names a quarter is theirs only when they
+    name the same one."""
+    for total in ("a fourth-quarter net loss of $45 million",
+                  "first-quarter net income of $45 million", "Q4 net income of $45 million",
+                  "net income for the second quarter of $45 million",
+                  "a second-quarter net loss attributable to the Company of $45 million"):
+        for verb, tie, close, tail in ((", including ", " (", ")", ", were restated."),
+                                       (", including ", ", or ", "", ", were restated."),
+                                       (" included ", ", or ", "", ".")):
+            _never_an_eps(f"Acme reported results for the third quarter. {front}{verb}{total}{tie}"
+                          f"$0.12 per share{close}{tail}", 0.12)
+    for quote in ("Third-quarter results included third-quarter net income of $120 million, or "
+                  "$0.46 per diluted share.",
+                  "Q3 results, including Q3 net income of $120 million ($0.46 per diluted share), "
+                  "reflected the charge."):
+        assert _kept_as_gaap(quote, 0.46), quote
+
+
+@pytest.mark.parametrize("front", ("Third-quarter GAAP EPS", "Diluted EPS", "Reported EPS",
+                                   "Earnings per diluted share", "Adjusted EPS", "Net income"))
+def test_an_items_figure_the_measures_own_verb_took_in_is_no_eps(front):
+    """"Third-quarter GAAP EPS included restructuring and other charges totaling $0.12 per share"
+    kept 0.12 as the GAAP EPS, and "Adjusted EPS excludes special items totaling $0.12 per share"
+    as the adjusted one: with the measure's own verb taking the item in or leaving it out, the
+    number tied to the item is the item's (169 of 315 such sentences with "totaling", and the
+    other ties beside it)."""
+    for verb in ("included", "includes", "excluded", "excludes", "reflected", "was reduced by",
+                 "benefited from"):
+        for item in ("restructuring and other charges", "special items",
+                     "acquisition-related costs", "a litigation charge", "a discrete tax benefit"):
+            for tie in ("totaling", "totalling", "of", "of approximately", "that totaled",
+                        "amounting to"):
+                _never_an_eps(f"{front} {verb} {item} {tie} $0.12 per share.", 0.12)
+    for opener in ("Adjusted EPS excluding", "Net income excluding", "Diluted EPS including"):
+        _never_an_eps(f"{opener} special items totaling $0.46 per diluted share, adjusted EPS was "
+                      "$1.20.", 0.46)
+    for quote, value in (("Adjusted EPS excluding special items of $1.20.", 1.2),
+                         ("Diluted EPS of $1.20 included special items of $0.12 per share.", 1.2)):
+        assert efs.eps_from_quote(quote, value) == value, quote
+
+
+@pytest.mark.parametrize("item", ("losses", "a loss", "a net loss", "income", "full-year income",
+                                  "net income"))
+def test_a_total_a_direction_word_names_behind_the_measures_own_figure_holds_its_share(item):
+    """"Diluted EPS was $1.20, reflecting losses totaling $0.05 per share on investment securities"
+    kept -0.05 as the GAAP EPS, and "Net income was $300 million, or $1.20 per diluted share, with
+    full-year income totaling $4.80 per share" kept 4.80 (304 of 1728 such sentences per spelling):
+    once a bare "totaling" tied the number to a total, a total's tie with no amount printed between
+    the two figures left the number no other thing's, though the direction word right in front of
+    the tie names the total it is the share of. "Amounting to", "equal to" and "representing" did
+    the same, and every version kept those. The measure's own figure keeps its EPS."""
+    for first in ("Diluted EPS was $1.20",
+                  "Net income was $300 million, or $1.20 per diluted share", "GAAP EPS of $1.20"):
+        for link in (", reflecting", ", versus", ", compared with", ", with", ", driven by",
+                     ", hurt by", ", primarily due to", ", which reflected"):
+            for tie in ("totaling", "totalling", "totaling approximately", "amounting to",
+                        "equal to", "representing"):
+                quote = f"{first}{link} {item} {tie} $0.05 per share on investment securities."
+                _never_an_eps(quote, 0.05)
+    for quote in ("Diluted EPS was $1.20, reflecting losses totaling $0.05 per share on investment "
+                  "securities.",
+                  "Net income was $300 million, or $1.20 per diluted share, reflecting a loss "
+                  "totaling $0.05 per share."):
+        assert _kept_as_gaap(quote, 1.2), quote
+    quote = "Diluted EPS was $1.20, with adjusted earnings totaling $1.35 per share."
+    assert efs.eps_from_quote(quote, 1.35) == 1.35, quote
+
+
+def test_a_row_labelled_by_what_it_leaves_out_keeps_its_own_minus():
+    """A table's row may open on "Excluding": its cell's parenthesis, behind its "$", is the
+    figure's own minus, never the parenthesis that ties an item to its figure."""
+    assert efs.eps_from_quote("Excluding special items $ (0.46) per diluted share", -0.46) == -0.46
+    assert efs.eps_from_quote("Excluding special items $(0.46) per diluted share", -0.46) == -0.46
+
+
+def test_the_eps_behind_an_excluded_items_figure_is_still_read():
+    """The figure the sentence gives the measure keeps its sign, wherever the item's stands."""
+    quote = ("Excluding the goodwill impairment charge, which totaled $0.46 per diluted share, "
+             "adjusted EPS was $1.20.")
+    assert efs.eps_from_quote(quote, 1.20) == 1.20
+    assert efs.eps_from_quote(quote, -1.20) is None
 
 
 def test_a_loss_word_nearest_the_number_refuses_a_figure_for_another_measure():
@@ -1920,13 +4745,191 @@ def test_a_loss_word_nearest_the_number_refuses_a_figure_for_another_measure():
 
 
 def test_a_comma_free_clause_opening_the_sentence_leaves_its_loss_standing():
-    """Accepted over-refusal, pinned so it is a choice: with no measure before the clause and no
-    comma after it, the loss may be the sentence's subject. Reading it as an aside would call a
-    printed loss a profit, so a real profit written this way drops and FMP fills it."""
+    """Accepted residual, pinned so it is a choice: with no measure before the clause and no comma
+    after it, the loss may be the sentence's subject. Reading it as an aside would call a printed
+    loss a profit, so it stands: a real profit written this way is refused, and a minus a model
+    adds to it verifies."""
     quote = "Excluding the loss on a sale results were $0.46 per share in the third quarter"
     assert efs.eps_from_quote(quote, 0.46) is None
+    assert efs.eps_from_quote(quote, -0.46) == -0.46
     quote = "Excluding the loss of $1,234 on a sale results were $0.46 per share in the quarter"
     assert efs.eps_from_quote(quote, 0.46) is None, "the comma of a number closes no clause"
+    # Nor does a date's comma: "September 30, 2026" is the sentence's own words.
+    quote = ("Excluding the loss on a sale results for the quarter ended September 30, 2026 were "
+             "$0.46 per share.")
+    assert efs.eps_from_quote(quote, 0.46) is None
+
+
+_A_LOSS_BEHIND_A_CLAUSE = [
+    ("eps_gaap_diluted", "Revenue fell 5% after the strike and the net loss was $120 million, or "
+                         "$0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Revenue fell 5% after the strike and the adjusted net loss was $120 "
+                             "million, or $0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Excluding these items adjusted net loss was $120 million, or $0.46 "
+                             "per diluted share."),
+    ("eps_adjusted_diluted", "Excluding special items the net loss for the quarter ended September "
+                             "30, 2026 was $0.46 per share."),
+    ("eps_adjusted_diluted", "Earnings fell after the recall and the adjusted net loss was $0.46 "
+                             "per share in the third quarter of 2026."),
+    ("eps_gaap_diluted", "Earnings fell after the recall and the net loss was $0.46 per diluted "
+                         "share in the third quarter of 2026."),
+    ("eps_adjusted_diluted", "Adjusted operating income excluding interest income rose 5% and the "
+                             "adjusted net loss was $0.46 per diluted share."),
+    ("eps_gaap_diluted", "Operating income excluding interest income rose 5% and net loss was "
+                         "$0.46 per diluted share."),
+    ("eps_gaap_diluted", "Diluted earnings per share for the quarter ended September 30, 2026 were "
+                         "negative at $0.46."),
+    ("eps_gaap_diluted", "Net loss was $120 million in the quarter, including income of $10 "
+                         "million from the sale, or $0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Excluding special items the adjusted net loss in the third quarter "
+                             "of 2026, which was $0.46 per diluted share, narrowed from a year "
+                             "ago."),
+    ("eps_adjusted_diluted", "Excluding the hurricane the adjusted net loss for fiscal 2026, at "
+                             "$0.46 per share, compared with $0.60 a year ago."),
+    ("eps_gaap_diluted", "With $1.2 billion of revenue in the quarter, results, including a net "
+                         "loss of $120 million, or $0.46 per diluted share, reflected the charge."),
+    ("eps_gaap_diluted", "Net loss was $120 million in the U.S. and Canada, including income of "
+                         "$10 million from the sale, or $0.46 per diluted share."),
+    ("eps_gaap_diluted", "Net loss attributable to Acme, Inc. was $120 million, including income of "
+                         "$10 million from the sale, or $0.46 per diluted share."),
+    ("eps_gaap_diluted", "Operating income was $50 million, and results for the quarter, including "
+                         "a net loss of $120 million, or $0.46 per diluted share, reflected the "
+                         "charge."),
+    ("eps_gaap_diluted", "Operating income excluding items declined in Q3. Net loss was $0.46 per "
+                         "diluted share."),
+    ("eps_adjusted_diluted", "Excluding the hurricane the adjusted net loss, at $0.46 per share, "
+                             "compared with $0.60 a year ago."),
+    ("eps_gaap_diluted", "Despite higher income, net loss was $120 million, or $0.46 per diluted "
+                         "share."),
+    ("eps_gaap_diluted", "Net loss was $120 million, up 10%, including a loss of $20 million on "
+                         "the sale, or $0.46 per diluted share."),
+    # A hedge, or another word that ties a total to its per-share figure, ties it all the same.
+    ("eps_gaap_diluted", "Results for the quarter, including a net loss of $120 million, or "
+                         "approximately $0.46 per diluted share, reflected the charge."),
+    ("eps_gaap_diluted", "Results for the quarter, including a net loss of $120 million, "
+                         "representing $0.46 per diluted share, reflected the charge."),
+    ("eps_gaap_diluted", "Despite higher income, net loss was $120 million, or approximately $0.46 "
+                         "per diluted share."),
+    ("eps_gaap_diluted", "Despite higher income, net loss was $120 million (about $0.46 per "
+                         "diluted share)."),
+    ("eps_gaap_diluted", "Net loss was $120 million, or approximately $0.46 per diluted share."),
+    ("eps_gaap_diluted", "Net loss was $120 million before taxes, or $0.46 per diluted share."),
+]
+
+
+@pytest.mark.parametrize("field,quote", _A_LOSS_BEHIND_A_CLAUSE)
+def test_a_printed_loss_behind_a_clause_is_kept_and_its_flipped_sign_refused(field, quote):
+    """The clause in front ("after the strike", "Excluding these items") names no figure of its
+    own, and an aside the figure is the per-share of holds its total, so the loss is the
+    sentence's: a model that drops its sign must find no figure to keep, and the honest one is kept
+    as printed."""
+    slot = {"eps_gaap_diluted": "eps_gaap", "eps_adjusted_diluted": "eps_adjusted"}[field]
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  **{field: {"value": 0.46, "quote": quote}})
+    assert figures is None and reasons[field] == "value_mismatch"
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  **{field: {"value": -0.46, "quote": quote}})
+    assert getattr(figures, slot) == -0.46 and reasons[field] == "ok"
+
+
+_A_PROFIT_BEHIND_A_CLAUSE = [
+    ("eps_gaap_diluted", "Operating loss excluding other losses improved and net income was $0.46 "
+                         "per diluted share."),
+    ("eps_gaap_diluted", "Net income attributable to common stockholders after the loss on the "
+                         "sale of the business was $0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Net income for the third quarter before the impairment loss was "
+                             "$0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Excluding the impairment loss of $120 million, adjusted results were "
+                             "$0.46 per diluted share."),
+    ("eps_gaap_diluted", "Net income was $120 million in the third quarter, including a loss of "
+                         "$20 million on the sale of the plant, or $0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Adjusted net income was $120 million for the third quarter, "
+                             "excluding a loss of $20 million on the sale, or $0.46 per diluted "
+                             "share."),
+    ("eps_adjusted_diluted", "Excluding the loss on the expanded credit facility, adjusted results "
+                             "were $0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Non-GAAP diluted EPS $0.46 Net loss per share - basic and diluted "
+                             "$(0.12)"),
+    ("eps_gaap_diluted", "Diluted EPS including a currency effect that was negative in the quarter "
+                         "was $0.46."),
+    ("eps_adjusted_diluted", "Adjusted EPS excluding interest income in 2026 and losses on hedges "
+                             "was $0.46 in the quarter."),
+    ("eps_adjusted_diluted", "Adjusted EPS excluding amounts recovered from insurance on hurricane "
+                             "losses was $0.46 in the quarter."),
+    ("eps_gaap_diluted", "Net income was $120 million in the U.S. and Canada, including a loss of "
+                         "$20 million on the sale, or $0.46 per diluted share."),
+    ("eps_gaap_diluted", "Net income attributable to Acme, Inc. was $120 million, including a loss "
+                         "of $20 million on the sale, or $0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Adjusted net income, a non-GAAP measure, was $120 million, excluding "
+                             "a loss of $20 million on the sale, or $0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Excluding the loss on the newly expanded credit facility, adjusted "
+                             "results were $0.46 per diluted share."),
+    ("eps_adjusted_diluted", "Adjusted EPS excluding the impairment loss, at $0.46 per diluted "
+                             "share, beat the consensus estimate."),
+    # A second word of the item's that opens a clause leaves the measure in front taking it.
+    ("eps_adjusted_diluted", "Adjusted EPS excluding the impairment loss after the merger, at $0.46 "
+                             "per diluted share, beat the consensus estimate."),
+    ("eps_adjusted_diluted", "Adjusted EPS excluding the impairment loss included in the quarter, "
+                             "at $0.46 per diluted share, beat the consensus estimate."),
+    ("eps_gaap_diluted", "In a quarter with heavy hurricane losses, diluted EPS was $0.46."),
+    ("eps_gaap_diluted", "Despite higher losses, net income was $120 million ($0.46 per diluted "
+                         "share)."),
+    ("eps_gaap_diluted", "Net income for the three months ended September 30, 2026, was $120 "
+                         "million, including a loss of $20 million on the sale, or $0.46 per "
+                         "diluted share."),
+    ("eps_gaap_diluted", "Net income was $120 million, including a loss of $20 million on the "
+                         "sale, or approximately $0.46 per diluted share."),
+    ("eps_gaap_diluted", "Despite higher losses, net income was $120 million (approximately $0.46 "
+                         "per diluted share)."),
+    ("eps_gaap_diluted", "Despite higher losses, net income was $120 million, representing $0.46 "
+                         "per diluted share."),
+    # A clause behind the total qualifies it: the number is the total's per-share figure, never an
+    # item's.
+    ("eps_gaap_diluted", "Net income was $120 million after tax, or $0.46 per diluted share."),
+    ("eps_gaap_diluted", "Net income was $120 million after the gain on the sale, or $0.46 per "
+                         "diluted share."),
+]
+
+
+@pytest.mark.parametrize("field,quote,value", [
+    # The aside holds the total this figure is the share of, so its loss names the figure.
+    ("eps_gaap_diluted", "Results for the third quarter, including a net loss of $120 million, "
+                         "or $0.46 per diluted share, reflected the charge.", -0.46),
+    # A list of what the figure leaves out names no other measure.
+    ("eps_adjusted_diluted", "Adjusted EPS, excluding restructuring charges, acquisition costs and "
+                             "the loss on sale, was $0.46 in the quarter.", 0.46),
+    # An "after" qualifying the revenue right before it, or with words of its own between them.
+    ("revenue", "Revenue after the strike and the loss of the contract was $1.2 billion in the "
+                "third quarter.", 1.2),
+    ("revenue", "Revenue for the third quarter after the strike and the loss of the contract was "
+                "$1.2 billion.", 1.2),
+    # One that tells when, with no "and" opening a new subject in it.
+    ("revenue", "After the loss of the contract sales were $1.2 billion in the third quarter.",
+     1.2),
+])
+def test_the_metric_is_read_past_the_words_of_an_aside(field, quote, value):
+    if field == "revenue":
+        figures, reasons = _revenue_of(quote, value)
+        assert figures.revenue == value * 1e9 and reasons[field] == "ok"
+        return
+    slot = {"eps_gaap_diluted": "eps_gaap", "eps_adjusted_diluted": "eps_adjusted"}[field]
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  **{field: {"value": value, "quote": quote}})
+    assert getattr(figures, slot) == value and reasons[field] == "ok"
+
+
+@pytest.mark.parametrize("field,quote", _A_PROFIT_BEHIND_A_CLAUSE)
+def test_a_printed_profit_behind_a_clause_is_kept_and_its_flipped_sign_refused(field, quote):
+    """The loss in these sentences is one the figure leaves out, one its total took in or the next
+    row's, and the "negative" is said of something else: the figure is a profit, so a model that
+    adds a minus must find no figure to keep."""
+    slot = {"eps_gaap_diluted": "eps_gaap", "eps_adjusted_diluted": "eps_adjusted"}[field]
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  **{field: {"value": -0.46, "quote": quote}})
+    assert figures is None and reasons[field] == "value_mismatch"
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  **{field: {"value": 0.46, "quote": quote}})
+    assert getattr(figures, slot) == 0.46 and reasons[field] == "ok"
 
 
 @pytest.mark.parametrize("quote,value", [
@@ -2390,6 +5393,17 @@ def test_a_table_row_is_never_read_as_whole_dollars_whatever_its_header_says(hea
     assert figures is None and reasons["revenue"] == "value_mismatch"
 
 
+@pytest.mark.parametrize("header", ["(in mln)", "(thousand USD)", "(in 1000s)", ""])
+def test_a_glued_cell_with_a_letters_note_is_never_whole_dollars_whatever_its_header_says(header):
+    """The "$" touches the digits, as in a sentence, but a note of one letter is a table's: a
+    sentence goes on in a word. In thousands that row is $10.2 billion, not $10.2 million."""
+    row = ("Net sales $10,181,045 (a) $9,870,110 Cost of sales 7,000,000 for the third quarter of "
+           "the year")
+    text = f"Acme reported results. STATEMENTS {header} Three months ended. {row}"
+    figures, reasons = _revenue_of(row, 10181045, "units", text=text)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
+
+
 @pytest.mark.parametrize("quote", [
     # The next cell, in each spelling a table has.
     "Net sales for the three months ended in September $10,181,045 $9,870,110",
@@ -2402,6 +5416,10 @@ def test_a_table_row_is_never_read_as_whole_dollars_whatever_its_header_says(hea
     # A "$" cell of its own: `html_to_text` leaves the space, and a sentence never has one.
     "Net sales for the three months ended in September $ 10,181,045",
     "Net sales $ 10,181,045 for the three months ended in the third quarter",
+    # A letter's note behind the cell, and the next cell behind that.
+    "Net sales $10,181,045 (a) $9,870,110 Cost of sales 7,000,000 for the third quarter of the year",
+    "Net sales $10,181,045 (b) for the three months ended in the third quarter of the year",
+    "Net sales $10,181,045 ( a ) $9,870,110 for the three months ended in the third quarter",
 ])
 def test_a_number_in_the_shape_of_a_table_cell_is_never_whole_dollars(quote):
     figures, reasons = _revenue_of(quote, 10181045, "units")
@@ -2412,11 +5430,30 @@ def test_a_number_in_the_shape_of_a_table_cell_is_never_whole_dollars(quote):
     "", ".", ", up 12% from a year ago.", "; gross margin was 40%.", ": a record for the company.",
     " for the third quarter of the year.", " in the third quarter.",
     " compared with $41,000,000 a year ago.", " (up 12% from a year ago).", " ( up 12% ).",
+    " (a decrease of 5% from a year ago).", " a record for the third quarter.",
+    # An aside opening on a word of one letter goes on: only a letter its ")" closes is a note.
+    " (a 5% increase).", " (i.e., about $48.3 million).", " (e.g., from new stores).",
+    " (a 3% increase over the prior year quarter).",
 ])
 def test_a_whole_dollar_figure_written_in_a_sentence_stands(tail):
     quote = f"Total revenue for the third quarter of the year was $48,250,123{tail}"
     figures, reasons = _revenue_of(quote, 48250123, "units")
     assert figures.revenue == 48250123.0 and reasons["revenue"] == "ok"
+
+
+@pytest.mark.parametrize("tail", [
+    " (a 3% increase over the prior year quarter).", " (i.e., up 3% from a year ago).",
+    ", up 3% from a year ago.",
+])
+def test_a_whole_dollar_sentence_never_takes_the_scale_of_a_table_header(tail):
+    """A full amount in a sentence takes no header from a table somewhere else: read under
+    "(in thousands)" a $10.2 million quarter would be stored as $10.2 billion."""
+    quote = f"Total revenue for the third quarter was $10,181,045{tail}"
+    text = (f"Acme reported results. {quote} CONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS (in "
+            "thousands, except per share data) Total revenue $ 10,181 $ 9,870 Cost of revenue "
+            "7,000 6,900")
+    figures, reasons = _revenue_of(quote, 10181045, "thousand", text=text)
+    assert figures is None and reasons["revenue"] == "value_mismatch"
 
 
 def test_whole_dollars_are_refused_with_no_release_to_read():
@@ -2478,6 +5515,17 @@ _GAAP_ONLY_SENTENCES = [
     "Income before other operating expenses rose 4% and diluted EPS was $0.46 in the quarter.",
     "Income before other income (expense) rose 4% and diluted EPS was $0.46 in the quarter.",
     "Income before other (income) expense rose 4% and diluted EPS was $0.46 in the quarter.",
+    "Income before operating expenses rose 4% and diluted EPS was $0.46 in the third quarter ended.",
+    "Earnings before non-operating expenses were $0.46 per diluted share in the third quarter.",
+    "Net income before nonoperating expenses was $0.46 per diluted share in the quarter.",
+    # A number before a basis point or a per cent is no footnote of an adjusted label.
+    "Gross margin expanded a comparable 40 basis points and diluted EPS was $0.46 in the quarter.",
+    "Comparable 40 basis points of margin expansion lifted diluted EPS to $0.46 in the quarter.",
+    "On an underlying 40 basis points of margin gain, diluted EPS was $0.46 in the quarter.",
+    "With gross margin up an underlying 40 basis points diluted EPS was $0.46 in the quarter.",
+    "Operating income 12 per cent higher lifted diluted EPS to $0.46 in the quarter.",
+    "Operating income 12 percent higher lifted diluted EPS to $0.46 in the quarter.",
+    "Comparable 40 bps of margin expansion lifted diluted EPS to $0.46 in the quarter.",
     # A footnote never turns another measure's "Adjusted" into this figure's.
     "Net income of $120 million, or $0.46 per diluted share, Adjusted (1) EBITDA of $300 million.",
     "Net income of $120 million, or $0.46 per diluted share, Adjusted(1) EBITDA of $300 million.",
@@ -2591,6 +5639,14 @@ _ADJUSTED_LABELS = [
     "Diluted EPS, as adjusted (unaudited), was $0.46 in the third quarter of the fiscal year.",
     "Diluted EPS, as adjusted (see the reconciliation below), was $0.46 in the third quarter.",
 ]
+#: Operating expenses an exclusion names with a word of its own: only the bare line right behind
+#: "before" is a line of the statement.
+_NAMED_OPERATING_EXPENSES = [
+    "Diluted earnings per share before non-recurring operating expenses were $0.46 in the quarter.",
+    "Diluted EPS before special operating expenses was $0.46 for the third quarter.",
+    "Earnings per diluted share before acquisition-related operating expenses were $0.46 in the "
+    "quarter.",
+]
 _ADJUSTED_LOSS_MARKED = [
     "Adjusted after-tax income per diluted share was $0.46 in the third quarter.",
     "Adjusted profit per share was $0.46 in the third quarter of the year.",
@@ -2617,11 +5673,21 @@ def test_a_refused_adjusted_figure_is_never_promoted_to_gaap():
     assert figures is None and reasons["eps_adjusted_diluted"] == "not_adjusted"
 
 
-@pytest.mark.parametrize("quote", _ADJUSTED_LABELS + _ADJUSTED_LOSS_MARKED)
+@pytest.mark.parametrize("quote", _ADJUSTED_LABELS + _ADJUSTED_LOSS_MARKED
+                         + _NAMED_OPERATING_EXPENSES)
 def test_an_adjusted_figure_that_names_its_measure_stands(quote):
     figures, reasons = _verify_in(f"Acme reported results. {quote}",
                                   eps_adjusted_diluted={"value": 0.46, "quote": quote})
     assert figures.eps_adjusted == 0.46 and reasons["eps_adjusted_diluted"] == "ok"
+
+
+@pytest.mark.parametrize("quote", _NAMED_OPERATING_EXPENSES)
+def test_an_exclusion_naming_its_operating_expenses_is_never_the_gaap_figure(quote):
+    """It names neither "adjusted" nor "non-GAAP", so a model can file it as GAAP: the card would
+    then show a figure before named expenses under the GAAP label."""
+    figures, reasons = _verify_in(f"Acme reported results. {quote}",
+                                  eps_gaap_diluted={"value": 0.46, "quote": quote})
+    assert figures is None and reasons["eps_gaap_diluted"] == "wrong_metric"
 
 
 @pytest.mark.parametrize("word", [
@@ -2749,7 +5815,8 @@ def test_a_rounded_eps_print_gets_no_verdict_inside_its_own_rounding():
     def metric(est, **kw):
         return els.eps_metric(els._Record("INTC", REPORT, eps_estimate=est, filing=figures, **kw))
 
-    assert [metric(e).surprise_pct for e in (0.405, 0.4066, 0.41, 0.4123, 0.415)] == [None] * 5
+    assert [metric(e).surprise_pct for e in (0.405, 0.4066, 0.4123, 0.415)] == [None] * 4
+    assert metric(0.41).surprise_pct == 0.0, "equal to the consensus is in line, as from FMP"
     assert metric(0.4066).actual == 0.41
     assert metric(0.4066).source == els.SOURCE_FILING
     assert metric(0.4066).basis == els.BASIS_ADJUSTED
@@ -2878,6 +5945,11 @@ def test_a_rounded_print_is_announced_without_a_verdict():
     # A code touching its "$", with or without a space.
     "CAD $1.2 billion", "AUD$1.2 billion", "HKD$1.2 billion", "NZD $1.2 billion",
     "SGD$1.2 billion", "MXN$1.2 billion", "TWD$1.2 billion",
+    # "In" and a code behind the figure, and the dotted and longer spellings of a country.
+    "$1.2 billion in CAD", "$1.2 billion in AUD", "$1.2 billion in EUR", "1.2 billion in CAD",
+    "Aus $1.2 billion", "Aust $1.2 billion", "Aust$1.2 billion", "Aust. $1.2 billion",
+    "Aust.$1.2 billion", "Aus. $1.2 billion", "Can. $1.2 billion", "Can.$1.2 billion",
+    "Cdn. $1.2 billion", "Mex. $1.2 billion",
 ])
 def test_a_figure_printed_in_another_currency_is_refused(printed):
     quote = f"Revenue for the third quarter was {printed}, up from a year ago in all regions."
@@ -2966,6 +6038,7 @@ def test_a_foreign_mark_in_prose_before_a_figure_refuses_it():
     "REVENUE OF $1.2 BILLION, UP FROM A YEAR AGO IN ALL REGIONS, THE COMPANY SAID ON THURSDAY.",
     "Revenue from our Singapore unit of $1.2 billion rose 4% in the third quarter of the year.",
     "Revenue of $1.2 billion Singapore sales included, up 4% in the third quarter of the year.",
+    "Can $1.2 billion of revenue in the third quarter hold up? The company said it would.",
 ])
 def test_a_currency_named_as_a_topic_refuses_no_dollar_figure(quote):
     figures, reasons = _revenue_of(quote, 1.2)
@@ -2991,6 +6064,30 @@ def test_a_figure_printed_in_us_dollars_stands(printed):
     quote = f"Revenue for the third quarter was {printed}, up from a year ago in all regions."
     figures, reasons = _revenue_of(quote, 1.2)
     assert figures.revenue == 1.2e9 and reasons["revenue"] == "ok"
+
+
+@pytest.mark.parametrize("quote,value,unit,expected", [
+    ("(in M$) Total revenue 1,234 for the third quarter of the year ended September", 1234,
+     "million", 1.234e9),
+    ("(in MM$) Total revenue 1,234 for the third quarter of the year ended September", 1234,
+     "million", 1.234e9),
+    ("(in K$) Total revenue 48,250 for the third quarter of the year ended September", 48250,
+     "thousand", 48.25e6),
+])
+def test_a_scale_glued_to_a_dollar_sign_is_no_other_countrys_mark(quote, value, unit, expected):
+    """"(in M$)" is the table's own scale (`_quote_scale` reads it so), not a currency's capitals."""
+    figures, reasons = _revenue_of(quote, value, unit, text=f"Acme reported results. {quote}")
+    assert figures.revenue == expected and reasons["revenue"] == "ok"
+    assert efs._FOREIGN_RELEASE_RE.search(quote) is None
+
+
+def test_a_scaled_figure_beside_an_m_dollar_header_needs_its_own_mark_and_nothing_more():
+    """Another rule, not the currency's, refuses it: a number with its own scale word shows no "$"
+    of its own (`_shows_its_own_dollars`)."""
+    quote = "Revenue (M$) 1,234 million for the third quarter of the year ended September 30"
+    figures, reasons = _revenue_of(quote, 1234, "million")
+    assert figures is None and reasons["revenue"] == "no_dollar_mark"
+    assert efs._FOREIGN_MONEY_RE.search(quote) is None
 
 
 def test_a_foreign_mark_refuses_an_eps_and_a_share_class_letter_does_not():
@@ -6293,6 +9390,15 @@ def test_a_quote_with_no_mark_waits_in_a_release_that_prints_no_dollars(around):
     "Net sales of C$1.2 billion.",
     "Net sales of $1.2 billion. All amounts are in Canadian dollars.",
     "Net sales of £1.2 billion and US$1 of fees.",
+    # A code after its amount, and Australia's and Canada's dollars spelled out or dotted.
+    "Net sales of $1.2 billion. Revenue of 1.2 billion in CAD for the quarter.",
+    "Net sales of $1.2 billion. Revenue of 1.2 million in AUD for the quarter.",
+    "Net sales of Can. $1.2 billion for the quarter.",
+    "Net sales of Aus. $1.2 billion for the quarter.",
+    "Net sales of Aust. $1.2 billion for the quarter.",
+    "Net sales of Aust$1.2 billion for the quarter.",
+    "Net sales of Aus $1.2 billion for the quarter.",
+    "Net sales of Aust $1.2 billion for the quarter.",
 ])
 def test_a_quote_with_no_mark_waits_in_a_release_showing_another_currency(around):
     figures, reasons = _verify_in(f"{around} {_NO_MARK}",
@@ -6646,6 +9752,86 @@ def test_the_older_outlook_refusals_come_first():
     "and excluding ", "$1 in revenue ", "$1 EPS ", "revenue ", "EPS ", "compared to $1 ",
     "$1 above ", "$1 a year ago ", "basic ", "basic $1 ", "diluted and ", "(1) ", "- word ",
     "$1. word ", "$1 or ", "GAAP and adjusted ", "adjusted and ", "$1 | ", "net of ",
+    # A list of what a figure leaves out that never closes, a clause carried on by "and", a
+    # negative said of a measure, a loss moved from, a loss with its own amount, a tie by "or".
+    ", excluding a, a, a, a, a, a", ", excluding a and b, a, a and", "excluding the loss and ",
+    "after the strike and the ", "EPS, a, negative ", "EPS was negative at ", "from a to loss ",
+    "$1 loss per ", "excluding a $1 loss ", ", including income of $1, or ", "rose to ",
+    # A measure's own words before an "after", a list's words, a date before "negative", a next
+    # row's label, a total in the aside's own part, a clause closing past an amount.
+    "Net income for the ", "income soared and ", "EPS for the quarter ended September 30, 2026 ",
+    "Net Loss per Share versus ", ", including a loss of $1 in the quarter ",
+    "excluding the loss of $1, ",
+    # A word that moves a figure behind an adverb, read as an adjective, again and again; a total
+    # in front of an aside; an item's figure behind its exclusion.
+    "on the newly expanded ", "Excluding the loss on the newly expanded ", "Net income of $1, ",
+    "Excluding the loss, at ", "Net loss of $1 on income, or ",
+    # Words that open an item's clause one after another, each tried, and the ties of a total's
+    # per-share figure, hedged or long-winded.
+    "Excluding the loss included after ", "Excluding the loss included in the quarter, or ",
+    "Net loss of $1 on income, or approximately ", ", representing approximately ",
+    "Excluding the loss (approximately ", "or approximately ", "Excluding a loss, ",
+    # Ties with no comma, one after another; totals with their per-share figures, each one
+    # behind the last; item asides behind a printed figure; a measure going on to its own.
+    "Excluding the loss of ", "the loss of approximately ", " - ", "(which totaled ",
+    "$1 million, or $1.20 per share, ", "income of $1 million, or $1.20 per share, reflecting ",
+    ", including a loss of $1 million, or ", "Results excluding the loss, which was ",
+    "EPS of $1.20 included a loss of $1 million, or ", "$1.20 per share was ",
+    # An aside's own total, an item's amount a measure's verb takes in, the measure's verb behind
+    # an aside, a move's long reach, a subject that reports, a label of its own, an arrival.
+    "Results, including a net loss of $1 million (",
+    "Net income included a charge of $1 million, or ",
+    "Net income, which included a charge, was $1 million, or $1.20 per share, ",
+    "rose $1 million, or 1%, from ", "the company reported net income of $1 million, or ",
+    "a net loss attributable to Acme Corp. of ", ", adjusted EPS", "excluding the loss landed at ",
+    # The measure's own words behind a loss and behind its per-share figure, a subject of its own
+    # with the measure's words, a figure set against another.
+    "included a net loss from continuing operations for the quarter of ",
+    " attributable to Acme Beta Gamma Delta",
+    "$1.20 per share on revenue of $1 billion for the third quarter, ",
+    "and Acme recorded net income from continuing operations of $1 million, or ",
+    "was $1 million, or $1.20 per share, lower than ", "Acme Corp. that landed at ",
+    # The company's own holders and its undated quarter, this quarter's own results, a level set
+    # against an expectation, what may follow a later subject's figure, a relative clause's adverb.
+    " attributable to the Company's common stockholders of Acme Beta",
+    "net income attributable to Pfizer Inc. common shareholders ", " in the third quarter",
+    "the company's third-quarter GAAP earnings ", "Third-quarter earnings results, including (",
+    ", ahead of the high end of the ", "was $1 million, or $1.20 per share, above the consensus ",
+    "and the company recorded a loss of $1 million, or $1.20 per share, ",
+    "$1.20 per share for the quarter, ", "that later finally ",
+    "the loss that ultimately settled at ",
+    "Results, including income of $1 million (", "a 1% increase ",
+    # A period in front of a later subject, a figure a lead-in sets against the next, the words
+    # that may follow a later subject's figure, a relative clause's subject, an item a measure's
+    # verb takes in, results named with more words, a quarter a total names.
+    "and for the full year, net income was $1 million, or $1.20 per share, ",
+    "Versus a net loss of $1 million, or $1.20 per share, a year ago, ",
+    "$1.20 per share, basic and diluted, a record, ", "(1) a record, driven by ",
+    "the loss that the company later settled at ", "the loss we later settled at ",
+    "GAAP EPS included special items of approximately ", "EPS was reduced by special items ",
+    "On a GAAP basis, the Corporation's third-quarter results, including ",
+    "a fourth-quarter net loss of $1 million (", " in the quarter of 2025, or ",
+    # Later subjects that are no bottom line, each figure read through to the end of its checks.
+    "income of $1 million, or $1.20 per share, and income of $1 million, or $1.20 per share, ",
+    "and net income was $1 million, or $1.20 per share, a record, ",
+    "and the net loss was $1 million, or $1.20 per share, ",
+    # A total a direction word names behind the measure's own figure, a holder's class or a unit's
+    # name, an ordinal quarter in front of earnings results.
+    "Diluted EPS was $1.20, reflecting losses totaling ",
+    "$1.20 per share, with income amounting to ",
+    "and net income attributable to Class B common stockholders was $1 million, or ",
+    "attributable to Aa Inc. common shareholders of Bb Corp. ", "net income in the second quarter ",
+    "Fourth-quarter earnings results, including a net loss of $1 million (",
+    # The company's own words beside an ordinal quarter, in front of a later figure and behind it;
+    # "earnings results" behind a clause of their own, and their aside's verb.
+    "and net income attributable to the Company for the second quarter was $1 million, or $1.20 "
+    "per share, ",
+    "and in the second quarter net income in the quarter was $1 million, or $1.20 per share, in "
+    "Q2, ",
+    "Results, including net income during the quarter of $1 million ($1.20 per share) in Q2, ",
+    "Acme sold its unit; earnings results, including a net loss of $1 million (",
+    "Earnings results, including net income of $1 million, or $1.20 per share, are ",
+    "Earnings results included net income of $1 million, or $1.20 per share, ",
 ])
 def test_a_quote_as_long_as_it_may_be_is_read_in_a_moment(unit):
     quote = (unit * 400)[:efs.PEG_SPAN_MAX_CHARS]
@@ -6657,6 +9843,84 @@ def test_a_quote_as_long_as_it_may_be_is_read_in_a_moment(unit):
     for tok in efs._numbers_in(quote):
         efs._metric_at(quote, tok)
     efs._states_an_outlook(quote)
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("pattern,read,text", [
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", " " * 20_000 + "x"),
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", " per share" + " for the quarter" * 2_000 + " x"),
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", " )" * 10_000 + " a 1% x"),
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", ", ahead of" + " the" * 10_000 + " x"),
+    ("_SET_AGAINST_ANOTHER_BEHIND_RE", "match", ", above" + " the" * 10_000),
+    ("_SET_AGAINST_ANOTHER_BEHIND_RE", "match", ", ahead of" + " high end of" * 5_000 + " x"),
+    ("_THE_QUARTERS_OWN_RESULTS_RE", "fullmatch", "the " * 10_000 + "x"),
+    ("_THE_QUARTERS_OWN_RESULTS_RE", "fullmatch", "third fiscal quarter " * 5_000 + "x"),
+    ("_THE_QUARTERS_OWN_RESULTS_RE", "fullmatch", " " * 20_000 + "results x"),
+    ("_ARRIVES_RIGHT_IN_FRONT_RE", "search", "that later " * 5_000 + "x"),
+    ("_ARRIVES_RIGHT_IN_FRONT_RE", "search", "which " + "a" * 20_000 + "ly settled x"),
+    ("_ARRIVES_RIGHT_IN_FRONT_RE", "search", "which has " * 5_000 + "settled"),
+    ("_THE_MEASURES_OWN_TOTAL_RE", "fullmatch", " net" * 10_000 + " x"),
+    ("_THE_MEASURES_OWN_TOTAL_RE", "fullmatch",
+     " net income" + " attributable to Aa Bb Cc Dd" * 2_000 + " x"),
+    ("_THE_MEASURES_OWN_TOTAL_RE", "fullmatch",
+     " net loss" + " attributable to the company's common stockholders of Aa Bb" * 1_000 + " x"),
+    ("_ITS_OWN_MEASURES_SUBJECT_RE", "fullmatch",
+     " net income attributable to " + "Aa Preferred " * 5_000 + "x"),
+    ("_ITS_OWN_MEASURES_SUBJECT_RE", "fullmatch", " net income" + " in the third quarter" * 2_000),
+    ("_REPORTS_ITS_OWN_RE", "fullmatch",
+     " the company reported net income" + " attributable to common shareholders of Aa" * 2_000),
+    ("_ITS_NAME_REPORTS_ITS_OWN_RE", "fullmatch", " Aa" * 10_000 + " earned $1 x"),
+    ("_ITS_NAME_REPORTS_ITS_OWN_RE", "fullmatch",
+     " Aa Bb reported net loss" + " attributable to Aa Bb" * 2_000 + " x"),
+    ("_ITS_OWN_MEASURES_SUBJECT_RE", "fullmatch", " the company's" * 5_000 + " net income was"),
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", ", a record" * 5_000 + " loss x"),
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", " per share, basic and diluted" * 2_000 + " x"),
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", " (1)" * 10_000 + " x"),
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", " - " * 10_000 + "x"),
+    ("_ITS_CLAUSE_ENDS_BEHIND_RE", "match", ", well above the $1" + ".1" * 10_000 + " x"),
+    ("_ITS_MEASURES_CLAUSE_ENDS_BEHIND_RE", "match", ", on a GAAP basis" * 2_000 + " x"),
+    ("_ITS_MEASURES_CLAUSE_ENDS_BEHIND_RE", "match", " in the third quarter" * 2_000 + " x"),
+    ("_RIGHT_BEHIND_ITS_OWN_FIGURE_RE", "fullmatch",
+     " per share, in the prior-year" + " same" * 10_000 + " quarter"),
+    ("_RIGHT_BEHIND_ITS_OWN_FIGURE_RE", "fullmatch", " per " + "a " * 10_000 + "share x"),
+    ("_ITS_RELATIVE_CLAUSE_ARRIVES_RE", "fullmatch", "that " * 5_000 + "x"),
+    ("_ITS_RELATIVE_CLAUSE_ARRIVES_RE", "fullmatch",
+     " the loss that " + "a" * 20_000 + "ly settled"),
+    ("_ITS_RELATIVE_CLAUSE_ARRIVES_RE", "fullmatch", " the loss that later" * 2_000 + " x"),
+    ("_ITS_RELATIVE_CLAUSE_ARRIVES_RE", "fullmatch", " Aa" * 10_000 + " settled x"),
+    ("_ITS_VERB_TAKES_IN_AN_ITEM_RE", "fullmatch", "GAAP EPS included" + " special items" * 2_000),
+    ("_ITS_VERB_TAKES_IN_AN_ITEM_RE", "fullmatch", "EPS" + " included" * 5_000 + " x,"),
+    ("_THE_QUARTERS_OWN_RESULTS_RE", "fullmatch", "On a GAAP basis, " * 2_000 + "results x"),
+    ("_THE_QUARTERS_OWN_RESULTS_RE", "fullmatch", "Aa said " * 5_000 + "results x"),
+    ("_THE_MEASURES_OWN_TOTAL_RE", "fullmatch", " net income of " + "1," * 10_000 + "x"),
+    ("_A_QUARTERS_NUMBER_RE", "findall", "third fiscal " * 10_000 + "quarter"),
+    ("_ITS_OWN_MEASURES_SUBJECT_RE", "fullmatch",
+     " net income attributable to " + "Aa Inc. " * 5_000 + "x"),
+    ("_ITS_OWN_MEASURES_SUBJECT_RE", "fullmatch",
+     " net income" + " attributable to Class B common stockholders" * 2_000 + " x"),
+    ("_THE_MEASURES_OWN_TOTAL_RE", "fullmatch",
+     " net income" + " attributable to Aa Holdings common stockholders" * 2_000 + " x"),
+    ("_REPORTS_ITS_OWN_RE", "fullmatch",
+     " the company reported net income" + " during the quarter" * 2_000 + " x"),
+    ("_AN_EARNINGS_WORD_RE", "search", "earningsx " * 10_000),
+    ("_THE_COMPANYS_OWN_WORDS_RE", "search", " attributable to Aa" + " " * 20_000 + "x"),
+    ("_THE_COMPANYS_OWN_WORDS_RE", "search", " attributable to" * 5_000 + " x"),
+    ("_THE_COMPANYS_OWN_WORDS_RE", "search",
+     " attributable to common stockholders of" * 2_000 + " x"),
+    ("_THE_COMPANYS_OWN_WORDS_RE", "search", "x" + " " * 20_000 + "in the x"),
+    ("_AN_ORDINAL_QUARTER_RE", "search", "second fiscal" + " -" * 10_000 + "x"),
+    ("_AN_ORDINAL_QUARTER_RE", "findall", "2q " * 10_000),
+    ("_TAKES_THE_TOTAL_IN_RE", "match", ", which also" + " " * 20_000 + "x"),
+    ("_THE_RESULTS_OWN_VERB_RE", "match", " were well" + " " * 20_000 + "x"),
+    ("_THE_RESULTS_OWN_VERB_RE", "match", " " * 20_000 + "x"),
+])
+def test_the_measures_own_words_and_the_ends_of_its_clause_are_read_in_a_moment(pattern, read,
+                                                                               text):
+    """The allow-lists of this quarter's results, the company's holders, what may follow a later
+    subject's figure, an expectation and a relative clause's adverb, each read the way the verifier
+    reads it, on text fifty times a quote's length: a split tried both ways would take seconds."""
+    started = time.perf_counter()
+    getattr(getattr(efs, pattern), read)(text)
     assert time.perf_counter() - started < 1.0
 
 
@@ -6672,6 +9936,56 @@ def test_a_hostile_quote_is_read_in_a_moment_wherever_the_release_prints_it(unit
         _verify_in(text, **{slot: {"value": 1.2, "quote": quote}})
     _verify_in(text, revenue={"value": 1.2, "unit": "billion", "quote": quote})
     assert time.perf_counter() - started < 2.0
+
+
+def test_a_clause_of_many_adjective_phrases_is_read_in_a_moment():
+    """Each "on the newly expanded" could be read two ways, and a clause that never closed tried
+    every split: 3.5 s at 18 phrases, doubling with each one, on the one web worker's GIL. The
+    sizes are kept where that took seconds, so a return of it fails here and never hangs."""
+    started = time.perf_counter()
+    efs._CLOSES_THE_CLAUSE_RE.match(" " + "on the newly expanded facility " * 18 + "was")
+    efs._CLOSES_UNLESS_TIED_RE.match(" " + "on the newly expanded facility " * 18 + "was")
+    quote = ("on the newly expanded plant " * 10 + "adjusted EPS was $0.46 per diluted share.")
+    release = ("Acme reported results. Excluding the loss" + " on the newly expanded plant" * 7
+               + " " + quote)
+    _verify_in(release, eps_adjusted_diluted={"value": 0.46, "quote": quote})
+    assert time.perf_counter() - started < 1.0
+
+
+def test_a_totals_words_with_many_commas_are_read_in_a_moment():
+    """A comma two of a total's comma rules pass (", 2026, was" opens a date and a parenthesis)
+    would be read both ways on a failed match, the time doubling with each one: 2.5 s at 20, 10 s
+    at 22. The sizes are kept where that took seconds, so a return of it fails here."""
+    started = time.perf_counter()
+    efs._A_TOTALS_OWN_WORDS_RE.fullmatch(", 2026, was" * 21 + ", x")
+    quote = ("Net income" + ", 2026, was" * 21 + ", x was $120 million, including a loss of $20 "
+             "million, or $0.46 per diluted share.")
+    assert len(quote) <= efs.PEG_SPAN_MAX_CHARS
+    _verify_in(f"Acme reported results. {quote}", eps_gaap_diluted={"value": 0.46, "quote": quote})
+    assert time.perf_counter() - started < 1.0
+
+
+@pytest.mark.parametrize("tail", [
+    # A chart's axis flattened behind a full stop, two-digit labels, and a run of asterisks, each
+    # sized where the old check took seconds, so a return of it fails here and never hangs.
+    "Quarterly revenue trend 0.0 0.5 1.0 1.5 2.0 " + " ".join(str(i) for i in range(0, 200, 10))
+    + " Q3'25",
+    "Quarterly revenue trend 0.0 0.5 1.0 1.5 2.0 " + " ".join(str(10 + i) for i in range(24))
+    + " Revenue",
+    "Revenue trend. " + " ".join(str(10 + i) for i in range(24)) + " Revenue",
+    "growth." + "*" * 18 + " Q3'25",
+    "Notes" + " (1)" * 80 + " Q3'25",
+])
+def test_an_outlook_that_runs_on_into_a_chart_is_read_in_a_moment(tail):
+    """The closing-mark check tried every way to split a run of digits or asterisks: a 206-char
+    quote held the event loop for 8 s, and each further label tripled it."""
+    sentence = "For the fourth quarter of 2026, Acme expects revenue of $1.25 billion to $1.30 billion."
+    quote = f"{sentence} {tail}"[:efs.PEG_SPAN_MAX_CHARS]
+    started = time.perf_counter()
+    efs._A_CLOSED_SENTENCE_RE.search(tail)
+    efs._runs_past_its_sentence(quote, " Q4'25 Q1'26")
+    _verify_in(f"Acme reported results. {quote} Q4'25 Q1'26", guidance={"quote": quote})
+    assert time.perf_counter() - started < 1.0
 
 
 def test_a_quote_of_nothing_but_equal_figures_is_read_in_a_moment():
@@ -6787,8 +10101,16 @@ def _submissions(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"filings": {"recent": cols}}
 
 
+#: SEC stamps `acceptanceDateTime` in UTC, as its "Z" says: 20:02:11Z is 16:02 ET on this day.
 _8K = {"accessionNumber": ACC, "filingDate": "2026-10-29", "form": "8-K", "items": "2.02,9.01",
-       "primaryDocument": "intc-20261029.htm", "acceptanceDateTime": "2026-10-29T16:02:11.000Z"}
+       "primaryDocument": "intc-20261029.htm", "acceptanceDateTime": "2026-10-29T20:02:11.000Z"}
+
+
+def _sec_stamp(day: date, hour: int, minute: int, second: int = 0) -> str:
+    """An ET wall-clock time as SEC stamps it: the same instant in UTC, written the way
+    `filings.recent.acceptanceDateTime` writes it."""
+    at = datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=ET)
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def test_an_item_202_8k_on_the_report_date_is_found_with_its_et_acceptance_time():
@@ -6797,8 +10119,71 @@ def test_an_item_202_8k_on_the_report_date_is_found_with_its_et_acceptance_time(
     assert f.accepted_at.astimezone(ET).strftime("%H:%M") == "16:02"
 
 
+#: Real stamps from SEC's submissions records, 2026-10 and 2026-11: (ticker, accession, filing
+#: date, `acceptanceDateTime`, when the release went out in ET). Each company's known release
+#: hour fits only a UTC reading: Microsoft, Intel and Meta release about 16:05 ET, Apple at 16:30
+#: ET, the banks and UnitedHealth early in the morning. Apple's is after US clocks went back on
+#: 2026-11-01, the others before it. The filing dates fit only UTC too: an 8-K accepted after
+#: 17:30 ET is dated EDGAR's next business day, and read as ET every after-close stamp here would
+#: be after 17:30, while SEC dated each one the day it was accepted.
+_REAL_SEC_STAMPS = [
+    ("MSFT", "0001193125-26-436122", "2026-10-28", "2026-10-28T20:04:44.000Z", "2026-10-28 16:04"),
+    ("INTC", "0000050863-26-000188", "2026-10-29", "2026-10-29T20:08:53.000Z", "2026-10-29 16:08"),
+    ("META", "0001628280-26-066700", "2026-10-21", "2026-10-21T20:03:35.000Z", "2026-10-21 16:03"),
+    ("AAPL", "0000320193-26-000024", "2026-11-02", "2026-11-02T21:30:23.000Z", "2026-11-02 16:30"),
+    ("UNH", "0000731766-26-000255", "2026-10-13", "2026-10-13T10:14:45.000Z", "2026-10-13 06:14"),
+    ("JPM", "0001628280-26-065582", "2026-10-13", "2026-10-13T10:30:38.000Z", "2026-10-13 06:30"),
+    ("GS", "0000886982-26-000529", "2026-10-13", "2026-10-13T11:32:56.000Z", "2026-10-13 07:32"),
+]
+
+
+@pytest.mark.parametrize("ticker, accession, filed, stamp, released", _REAL_SEC_STAMPS,
+                         ids=[row[0] for row in _REAL_SEC_STAMPS])
+def test_secs_acceptance_stamp_is_read_as_utc(ticker, accession, filed, stamp, released):
+    row = dict(_8K, accessionNumber=accession, filingDate=filed, acceptanceDateTime=stamp)
+    report = date.fromisoformat(filed)
+    (found,) = efs.find_results_filings(_submissions([row]), report)
+    assert found.accession == accession
+    assert els.iso_utc(found.accepted_at) == stamp.replace(".000Z", "Z"), "the instant SEC gave"
+    local = found.accepted_at.astimezone(ET)
+    assert local.strftime("%Y-%m-%d %H:%M") == released
+    # EDGAR's own date agrees: accepted before 17:30 ET, so dated the day it was accepted.
+    assert local.date() == found.filing_date and local.strftime("%H:%M") < "17:30"
+
+
+@pytest.mark.parametrize("stamp, evening, et_time", [
+    ("2026-10-30T01:15:00.000Z", date(2026, 10, 29), "21:15"),
+    ("2026-11-03T01:15:00.000Z", date(2026, 11, 2), "20:15"),
+], ids=["daylight_time", "standard_time"])
+def test_an_evening_8k_stamped_after_midnight_utc_belongs_to_the_evening_before(stamp, evening,
+                                                                               et_time):
+    """01:15Z is the evening before in New York, on either side of the clocks going back on
+    2026-11-01: 21:15 EDT on a Thursday, 20:15 EST on a Monday. EDGAR dates it the next business
+    day, which is the next report day, and that report must not read it as its own."""
+    next_day = evening + timedelta(days=1)
+    row = dict(_8K, filingDate=next_day.isoformat(), acceptanceDateTime=stamp)
+    (found,) = efs.find_results_filings(_submissions([row]), evening)
+    assert found.accepted_at.astimezone(ET).strftime("%Y-%m-%d %H:%M") == f"{evening} {et_time}"
+    assert efs.find_results_filings(_submissions([row]), next_day) == []
+
+
+@pytest.mark.parametrize("report, first_instant", [
+    (date(2026, 10, 30), "2026-10-30T04:00:00.000Z"),
+    (date(2026, 11, 2), "2026-11-02T05:00:00.000Z"),
+], ids=["daylight_time", "standard_time"])
+def test_the_report_day_starts_at_midnight_et_on_either_side_of_a_clock_change(report,
+                                                                              first_instant):
+    """A day's first second in UTC moves with the clocks: 04:00Z in EDT, 05:00Z in EST. The
+    second before it is the day before."""
+    first = dict(_8K, filingDate=report.isoformat(), acceptanceDateTime=first_instant)
+    before = dict(first, acceptanceDateTime=_sec_stamp(report - timedelta(days=1), 23, 59, 59))
+    assert before["acceptanceDateTime"] < first_instant
+    assert efs.find_results_filings(_submissions([first]), report)
+    assert efs.find_results_filings(_submissions([before]), report) == []
+
+
 def test_a_late_evening_filing_dated_the_next_business_day_still_counts():
-    late = dict(_8K, filingDate="2026-10-30")
+    late = dict(_8K, filingDate="2026-10-30", acceptanceDateTime=_sec_stamp(REPORT, 21, 40))
     assert efs.find_results_filings(_submissions([late]), REPORT)
 
 
@@ -6821,7 +10206,7 @@ def test_an_evening_filing_dated_the_next_sec_business_day_counts(report, filed)
     calendar: it is open on Good Friday and shut on Columbus and Veterans Day, when the market
     trades. A Saturday holiday shuts it on the Friday too, and the market trades that Friday."""
     evening = dict(_8K, filingDate=filed.isoformat(),
-                   acceptanceDateTime=f"{report.isoformat()}T18:05:00.000Z")
+                   acceptanceDateTime=_sec_stamp(report, 18, 5))
     (found,) = efs.find_results_filings(_submissions([evening]), report)
     assert found.filing_date == filed
 
@@ -6860,7 +10245,7 @@ def test_every_evening_filing_on_the_federal_calendar_counts():
             while not _open(filed):
                 filed += timedelta(days=1)
             evening = dict(_8K, filingDate=filed.isoformat(),
-                           acceptanceDateTime=f"{day.isoformat()}T18:05:00.000Z")
+                           acceptanceDateTime=_sec_stamp(day, 18, 5))
             if not efs.find_results_filings(_submissions([evening]), day):
                 missed.append((day, filed))
         day += timedelta(days=1)
@@ -6883,35 +10268,77 @@ def test_a_filing_outside_the_window_is_not_this_report(filed):
 
 
 def test_an_evening_8k_belongs_to_the_day_it_was_accepted():
-    evening = dict(_8K, filingDate="2026-10-29", acceptanceDateTime="2026-10-28T18:05:00.000Z")
+    evening = dict(_8K, filingDate="2026-10-29", acceptanceDateTime="2026-10-28T22:05:00.000Z")
     assert efs.find_results_filings(_submissions([evening]), date(2026, 10, 28))
     assert efs.find_results_filings(_submissions([evening]), date(2026, 10, 29)) == []
 
 
 def test_a_friday_evening_8k_is_not_mondays_report():
-    evening = dict(_8K, filingDate="2026-11-02", acceptanceDateTime="2026-10-30T18:05:00.000Z")
+    evening = dict(_8K, filingDate="2026-11-02", acceptanceDateTime="2026-10-30T22:05:00.000Z")
     assert efs.find_results_filings(_submissions([evening]), date(2026, 10, 30))
     assert efs.find_results_filings(_submissions([evening]), date(2026, 11, 2)) == []
 
 
 def test_the_acceptance_day_is_the_one_on_the_et_calendar():
-    """21:30 ET is already the next day in UTC, the clock the filing's time is held on."""
-    late = dict(_8K, filingDate="2026-10-29", acceptanceDateTime="2026-10-28T21:30:00.000Z")
+    """SEC stamps in UTC, and 21:30 ET is already the next day there: 01:30Z on the 29th."""
+    late = dict(_8K, filingDate="2026-10-29", acceptanceDateTime="2026-10-29T01:30:00.000Z")
     assert efs.find_results_filings(_submissions([late]), date(2026, 10, 29)) == []
     assert efs.find_results_filings(_submissions([late]), date(2026, 10, 28))
 
 
 def test_a_filing_accepted_first_thing_on_the_report_date_is_that_report():
-    early = dict(_8K, acceptanceDateTime="2026-10-29T06:00:00.000Z")
+    """06:00 ET, when EDGAR opens."""
+    early = dict(_8K, acceptanceDateTime="2026-10-29T10:00:00.000Z")
     assert efs.find_results_filings(_submissions([early]), REPORT)
 
 
-@pytest.mark.parametrize("accepted", ["", None, 20261029, "2026-10-29", "not a date at all!!"],
-                         ids=["empty", "null", "a_number", "too_short", "garbled"])
+@pytest.mark.parametrize("accepted", ["", None, 20261029, "2026-10-29", "not a date at all!!",
+                                      "2026-10-29T20:02:11", "2026-10-29T20:02:11.000Z, 2026",
+                                      "2026-10-29T25:02:11.000Z", "0001-01-01T00:00:00.000Z",
+                                      "9999-12-31T23:59:59-05:00", ["2026-10-29T20:02:11.000Z"]],
+                         ids=["empty", "null", "a_number", "too_short", "garbled", "no_zone",
+                              "trailing_text", "no_such_hour", "before_any_et_day",
+                              "after_any_utc_day", "a_list"])
 def test_a_filing_with_no_readable_acceptance_time_is_judged_on_its_date(accepted):
+    """A stamp with no zone is not SEC's, and its clock is unknown: no time is better than one
+    four or five hours off, on the sheet and against first sight. One at the ends of the calendar
+    cannot be taken to ET, and must not take the symbol's round with it."""
     (found,) = efs.find_results_filings(
         _submissions([dict(_8K, acceptanceDateTime=accepted)]), REPORT)
     assert found.accession == ACC and found.accepted_at is None
+
+
+@pytest.mark.parametrize("stamp", ["2026-10-29T20:02:11Z", "2026-10-29T20:02:11.123456Z",
+                                   "2026-10-29T16:02:11-04:00", "2026-10-29T20:02:11+00:00",
+                                   " 2026-10-29T20:02:11.000Z\n"],
+                         ids=["no_fraction", "long_fraction", "et_offset", "utc_offset",
+                              "padded"])
+def test_a_stamp_is_read_on_the_clock_it_names(stamp):
+    (found,) = efs.find_results_filings(_submissions([dict(_8K, acceptanceDateTime=stamp)]),
+                                        REPORT)
+    assert found.accepted_at.tzinfo is not None
+    assert found.accepted_at.replace(microsecond=0) == datetime(2026, 10, 29, 20, 2, 11,
+                                                                tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("accepted, warned", [
+    ("not a date at all!!", True), ("2026-10-29T20:02:11", True), (20261029, True),
+    ("", False), (None, False), ("  ", False),
+], ids=["garbled", "no_zone", "a_number", "empty", "null", "blank"])
+def test_a_stamp_that_cannot_be_read_is_logged_with_its_filing(caplog, accepted, warned):
+    """SEC changing the field's shape would quietly drop every time from the sheet and every
+    filing's first-sight check, so a stamp that is there and cannot be read says so. An absent
+    one is only absent."""
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        efs.find_results_filings(_submissions([dict(_8K, acceptanceDateTime=accepted)]), REPORT,
+                                 symbol="INTC")
+    rows = [r for r in caplog.records if "acceptanceDateTime" in r.getMessage()]
+    assert len(rows) == (1 if warned else 0)
+    if warned:
+        line = rows[0].getMessage()
+        assert rows[0].levelno == logging.WARNING
+        assert "sym=INTC" in line and f"acc={ACC}" in line and f"day={REPORT.isoformat()}" in line
+        assert repr(accepted) in line
 
 
 @pytest.mark.parametrize("change", [
@@ -6921,10 +10348,156 @@ def test_other_filings_are_not_results(change):
     assert efs.find_results_filings(_submissions([dict(_8K, **change)]), REPORT) == []
 
 
-def test_columns_of_different_lengths_read_as_no_filing():
+def test_columns_of_different_lengths_read_as_no_filing(caplog):
+    """No accession may be paired with another filing's items, so the record reads as no filing.
+    It is read again every minute of the company's windows, so the line says whose record and
+    which column: an anonymous one could not be traced to a company."""
     data = _submissions([_8K])
     data["filings"]["recent"]["items"].append("2.02")
-    assert efs.find_results_filings(data, REPORT) == []
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        assert efs.find_results_filings(data, REPORT, symbol="INTC") == []
+    (row,) = [r for r in caplog.records if "disagree" in r.getMessage()]
+    line = row.getMessage()
+    assert row.levelno == logging.WARNING
+    assert "sym=INTC" in line and f"day={REPORT.isoformat()}" in line
+    assert "items=2" in line and "accessionNumber=1" in line
+
+
+#: INTC's two Item 2.02 rows dated 2026-10-29 on its real record: the release, accepted 16:08 ET
+#: that day, and an evening filing accepted 21:10 ET the day before, which EDGAR dated the 29th.
+_INTC_RELEASE = dict(_8K, acceptanceDateTime="2026-10-29T20:08:53.000Z")
+_INTC_THE_EVENING_BEFORE = dict(_8K, accessionNumber="0000050863-26-000120",
+                                acceptanceDateTime="2026-10-29T01:10:00.000Z")
+
+
+def _with_stamps(stamps: Any) -> Dict[str, Any]:
+    data = _submissions([_INTC_RELEASE, _INTC_THE_EVENING_BEFORE])
+    if stamps is None:
+        del data["filings"]["recent"]["acceptanceDateTime"]
+    else:
+        data["filings"]["recent"]["acceptanceDateTime"] = stamps
+    return data
+
+
+@pytest.mark.parametrize("stamps, shape", [
+    (None, "missing"),
+    (["2026-10-29T20:08:53.000Z"], "1 for 2 filings"),
+    ("2026-10-29T20:08:53.000Z", "a str"),
+    ({"0": "2026-10-29T20:08:53.000Z"}, "a dict"),
+], ids=["missing", "one_short", "a_string", "a_mapping"])
+def test_a_time_column_that_cannot_be_paired_is_said_with_the_ticker_and_the_day(caplog, stamps,
+                                                                                 shape):
+    """Without the times, every filing is judged on its date alone: the evening filing of the day
+    before reads as this report's own, and the sheet shows no time. That is the reading for a
+    record that does not say, and one that says it in a shape nobody can read is said, once a
+    read: a change in SEC's format would otherwise take every time away without a word."""
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        found = efs.find_results_filings(_with_stamps(stamps), REPORT, symbol="INTC")
+    assert {f.accession for f in found} == {ACC, _INTC_THE_EVENING_BEFORE["accessionNumber"]}
+    assert all(f.accepted_at is None for f in found)
+    (row,) = [r for r in caplog.records if "acceptanceDateTime column" in r.getMessage()]
+    line = row.getMessage()
+    assert row.levelno == logging.WARNING
+    assert "sym=INTC" in line and f"day={REPORT.isoformat()}" in line and shape in line
+
+
+def test_a_time_column_that_pairs_says_nothing_and_drops_the_evening_before(caplog):
+    stamps = [_INTC_RELEASE["acceptanceDateTime"], _INTC_THE_EVENING_BEFORE["acceptanceDateTime"]]
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        found = efs.find_results_filings(_with_stamps(stamps), REPORT, symbol="INTC")
+    assert [(f.accession, f.accepted_at) for f in found] == [
+        (ACC, datetime(2026, 10, 29, 20, 8, 53, tzinfo=timezone.utc))]
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize("filed", [None, "", "10/29/2026", "Oct 29 2026", "2026-10-32", 1.5],
+                         ids=["null", "empty", "us_order", "words", "no_such_day", "a_number"])
+def test_a_release_whose_filing_date_cannot_be_read_is_dated_by_its_stamp_and_said(caplog, filed):
+    """Its stamp says when SEC took it, which is what decides the report anyway (a filing date is
+    never earlier), so the release is still read. Dropped, it took the fast path away with no
+    word."""
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        (found,) = efs.find_results_filings(_submissions([dict(_INTC_RELEASE, filingDate=filed)]),
+                                            REPORT, symbol="INTC")
+    assert (found.accession, found.filing_date) == (ACC, REPORT)
+    assert found.accepted_at == datetime(2026, 10, 29, 20, 8, 53, tzinfo=timezone.utc)
+    (row,) = [r for r in caplog.records if "filingDate" in r.getMessage()]
+    line = row.getMessage()
+    assert row.levelno == logging.WARNING
+    assert "sym=INTC" in line and f"day={REPORT.isoformat()}" in line and f"acc={ACC}" in line
+    assert repr(filed) in line
+
+
+@pytest.mark.parametrize("row", [
+    dict(_INTC_THE_EVENING_BEFORE, filingDate=None),
+    dict(_8K, accessionNumber="0000050863-25-000077", filingDate="??",
+         acceptanceDateTime="2025-07-24T20:05:00.000Z"),
+], ids=["the_evening_before", "a_past_quarter"])
+def test_a_filing_date_that_cannot_be_read_on_another_days_filing_is_dropped_quietly(caplog, row):
+    """The stamp dates such a filing by its ET day, the day EDGAR's own clock gives it: the evening
+    filing of the day before is 10-28 at 21:10 ET, though 10-29 at 01:10 in UTC. And the line is
+    for a filing of the report's own days alone: a record lists its company's Item 2.02s of years
+    past, and is read every minute of the company's windows."""
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        assert efs.find_results_filings(_submissions([row]), REPORT, symbol="INTC") == []
+    assert [r.getMessage() for r in caplog.records] == []
+
+
+@pytest.mark.parametrize("stamp", ["", None, "garbled"], ids=["empty", "null", "garbled"])
+def test_a_release_with_neither_a_date_nor_a_time_is_dropped_and_said(caplog, stamp):
+    """Nothing then says which report it belongs to: a morning-after leftover would read as the
+    report's own. Dropped, and said."""
+    row = dict(_INTC_RELEASE, filingDate="soon", acceptanceDateTime=stamp)
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        assert efs.find_results_filings(_submissions([row]), REPORT, symbol="INTC") == []
+    lines = [r.getMessage() for r in caplog.records if "filingDate" in r.getMessage()]
+    assert len(lines) == 1 and "sym=INTC" in lines[0] and f"acc={ACC}" in lines[0]
+    assert "'soon'" in lines[0] and "not read" in lines[0]
+
+
+@pytest.mark.parametrize("change", [
+    {"accessionNumber": "0000050863-26-12"}, {"accessionNumber": None}, {"primaryDocument": ""},
+    {"primaryDocument": None},
+], ids=["accession_cut", "accession_null", "document_empty", "document_null"])
+def test_a_release_of_the_reports_dates_that_cannot_be_fetched_is_dropped_and_said(caplog,
+                                                                                  change):
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        assert efs.find_results_filings(_submissions([dict(_INTC_RELEASE, **change)]), REPORT,
+                                        symbol="INTC") == []
+    lines = [r.getMessage() for r in caplog.records if "cannot be fetched" in r.getMessage()]
+    assert len(lines) == 1
+    assert "sym=INTC" in lines[0] and f"day={REPORT.isoformat()}" in lines[0]
+
+
+def _recent_with(**columns: Any) -> Dict[str, Any]:
+    data = _submissions([_8K])
+    data["filings"]["recent"].update(columns)
+    return data
+
+
+@pytest.mark.parametrize("data", [
+    {}, {"filings": None}, {"filings": {}}, {"filings": {"recent": []}}, [],
+    _recent_with(primaryDocument="intc-20261029.htm"), _recent_with(form=None),
+], ids=["no_filings", "filings_null", "no_recent", "recent_a_list", "a_list",
+        "a_column_a_str", "a_column_null"])
+def test_a_record_shaped_wrong_reads_as_no_filing_and_says_so(caplog, data):
+    """Every read of the company finds nothing in such a record, all day: the line says whose."""
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        assert efs.find_results_filings(data, REPORT, symbol="INTC") == []
+    lines = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(lines) == 1, lines
+    assert "sym=INTC" in lines[0] and f"day={REPORT.isoformat()}" in lines[0]
+
+
+def test_a_record_sec_does_not_have_reads_as_no_filing_quietly(caplog):
+    """None is SEC's 404: no record, nothing malformed. And a record with no filing in it has no
+    time to lose, whatever its time column says."""
+    empty = _submissions([])
+    del empty["filings"]["recent"]["acceptanceDateTime"]
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        assert efs.find_results_filings(None, REPORT, symbol="INTC") == []
+        assert efs.find_results_filings(empty, REPORT, symbol="INTC") == []
+    assert caplog.records == []
 
 
 def _forms(*forms: Any) -> Dict[str, Any]:
@@ -7013,17 +10586,62 @@ def test_a_page_the_parser_chokes_on_is_a_failed_read_and_names_the_error(monkey
 
 
 @pytest.mark.parametrize("hm,expected", [
-    ((5, 59), None), ((6, 0), 60), ((9, 34), 60), ((12, 0), 300), ((16, 5), 60),
-    ((18, 30), 300), ((22, 0), None),
+    ((5, 59), None), ((6, 0), 60), ((9, 34), 60), ((9, 35), 900), ((12, 0), 900),
+    ((15, 54), 900), ((15, 55), 60), ((16, 5), 60), ((18, 29), 60), ((18, 30), 900),
+    ((21, 58), 900), ((21, 59), 60), ((22, 0), None),
 ])
 def test_the_poll_cadence_follows_the_release_windows(hm, expected):
+    """A company whose record does not say when it reports is watched in both windows, and in
+    EDGAR's last minute like every company."""
     now = datetime(2026, 10, 29, *hm, tzinfo=ET)
     assert efs.poll_interval_seconds(now) == expected
+    assert efs.poll_interval_seconds(now, efs.BOTH_RELEASE_WINDOWS) == expected
+
+
+@pytest.mark.parametrize("hm,morning,close", [
+    ((5, 59), None, None), ((6, 0), 60, 900), ((9, 34), 60, 900), ((9, 35), 900, 900),
+    ((12, 0), 900, 900), ((15, 55), 900, 60), ((16, 5), 900, 60), ((18, 29), 900, 60),
+    ((18, 30), 900, 900), ((21, 58), 900, 900), ((21, 59), 60, 60), ((22, 0), None, None),
+])
+def test_a_company_is_read_every_minute_only_in_its_own_window(hm, morning, close):
+    """Every 15 min in the other window: a company that reports before the open is not polled at
+    the minute through the evening, nor one that reports after the close through the morning.
+    EDGAR's last minute is the one exception, the same for both."""
+    now = datetime(2026, 10, 29, *hm, tzinfo=ET)
+    assert efs.poll_interval_seconds(now, frozenset({"morning"})) == morning
+    assert efs.poll_interval_seconds(now, frozenset({"close"})) == close
+
+
+@pytest.mark.parametrize("windows", [
+    frozenset({"morning"}), frozenset({"close"}), frozenset({"morning", "close"}), frozenset(),
+    frozenset({"midday"}),
+], ids=["morning", "close", "both", "none", "an_unknown_name"])
+@pytest.mark.parametrize("hm,second,expected", [
+    ((21, 58), 59, 900), ((21, 59), 0, 60), ((21, 59), 59, 60), ((22, 0), 0, None),
+], ids=["2158_59", "2159_00", "2159_59", "2200_00"])
+def test_edgars_last_minute_is_read_at_the_minute_whatever_the_companys_windows(windows, hm,
+                                                                               second, expected):
+    """The slow cadence's next read can fall past 22:00 ET, when the watch reads nothing, so the
+    last minute EDGAR takes filings in is read at the minute for every company: a release accepted
+    in the quarter hour before EDGAR closes is still read before it does."""
+    at = datetime(2026, 10, 29, *hm, second, tzinfo=ET)
+    assert efs.poll_interval_seconds(at, windows) == expected
+    saturday = datetime(2026, 10, 31, *hm, second, tzinfo=ET)
+    assert efs.poll_interval_seconds(saturday, windows) is None
+
+
+@pytest.mark.parametrize("windows", [frozenset(), frozenset({"midday"}), ("close", "evening")],
+                         ids=["none", "unknown_name", "an_unknown_name_beside_a_known_one"])
+def test_a_window_name_the_cadence_does_not_know_reads_nothing_faster(windows):
+    for hm in ((6, 0), (12, 0), (18, 29)):
+        at = datetime(2026, 10, 29, *hm, tzinfo=ET)
+        expected = 60 if "close" in windows and hm == (18, 29) else 900
+        assert efs.poll_interval_seconds(at, windows) == expected
 
 
 @pytest.mark.parametrize("day,hm,expected", [
     (date(2026, 11, 6), (16, 5), 60),
-    (date(2026, 11, 6), (21, 59), 300),
+    (date(2026, 11, 6), (21, 59), 60),
     (date(2026, 11, 7), (0, 0), None),
     (date(2026, 11, 7), (6, 0), None),
     (date(2026, 11, 7), (12, 0), None),
@@ -7046,6 +10664,225 @@ def test_the_poll_cadence_stops_for_the_weekend_because_edgar_accepts_nothing(da
 def test_a_weekday_federal_holiday_stays_polled_because_nothing_here_holds_that_calendar(day):
     now = datetime(day.year, day.month, day.day, 16, 5, tzinfo=ET)
     assert efs.poll_interval_seconds(now) == 60
+
+
+# ── when each company puts its results out ───────────────────────────────────
+
+_MORNING_ONLY = frozenset({"morning"})
+_CLOSE_ONLY = frozenset({"close"})
+_BOTH_WINDOWS = frozenset({"morning", "close"})
+
+
+def _released_at(*clocks: Tuple[int, ...], before: date = REPORT) -> List[dict]:
+    """Past 8-K Item 2.02 filings, a quarter (13 weeks) apart back from `before`, newest first,
+    each accepted at its ET (hour, minute[, second]) and stamped as SEC stamps it, in UTC."""
+    rows = []
+    for n, clock_et in enumerate(clocks, start=1):
+        day = before - timedelta(weeks=13 * n)
+        rows.append(dict(_8K, accessionNumber=f"0000050863-{day:%y}-{n:06d}",
+                         filingDate=day.isoformat(), acceptanceDateTime=_sec_stamp(day, *clock_et)))
+    return rows
+
+
+def _habit(rows: List[dict], report: date = REPORT) -> Any:
+    return efs._release_habit(_submissions(rows), report)
+
+
+def test_the_windows_carry_the_names_and_hours_the_fmp_side_reads():
+    assert (efs.RELEASE_WINDOW_MORNING, efs.RELEASE_WINDOW_CLOSE) == ("morning", "close")
+    assert efs.BOTH_RELEASE_WINDOWS == _BOTH_WINDOWS
+    assert isinstance(efs.BOTH_RELEASE_WINDOWS, frozenset)
+    assert dict(efs.RELEASE_WINDOW_HOURS) == {"morning": ((6, 0), (9, 35)),
+                                               "close": ((15, 55), (18, 30))}
+    with pytest.raises(TypeError):
+        efs.RELEASE_WINDOW_HOURS["midday"] = ((11, 0), (13, 0))
+
+
+#: The newest results release of each company in the replay corpus: SEC's own stamps, 2026-10
+#: and 2026-11, each with the window it went out in, 06:14 to 09:18 ET or 16:00 to 16:41 ET.
+_CORPUS_RELEASES = [
+    ("AAPL", "2026-11-02T21:30:23.000Z", "close"), ("AMZN", "2026-10-29T20:05:27.000Z", "close"),
+    ("BA", "2026-10-27T11:30:23.000Z", "morning"), ("BAC", "2026-10-14T10:44:44.000Z", "morning"),
+    ("CAT", "2026-10-29T10:33:40.000Z", "morning"), ("ETSY", "2026-10-28T11:07:04.000Z", "morning"),
+    ("GE", "2026-10-20T10:30:57.000Z", "morning"), ("GOOGL", "2026-10-28T20:01:33.000Z", "close"),
+    ("GS", "2026-10-13T11:32:56.000Z", "morning"), ("INTC", "2026-10-29T20:08:53.000Z", "close"),
+    ("JNJ", "2026-10-13T12:12:35.000Z", "morning"), ("JPM", "2026-10-13T10:30:38.000Z", "morning"),
+    ("KO", "2026-10-27T10:58:13.000Z", "morning"), ("LCID", "2026-10-05T20:06:06.000Z", "close"),
+    ("MCD", "2026-11-04T12:01:40.000Z", "morning"), ("META", "2026-10-21T20:03:35.000Z", "close"),
+    ("MSFT", "2026-10-28T20:04:44.000Z", "close"), ("O", "2026-11-02T21:07:03.000Z", "close"),
+    ("PFE", "2026-11-03T13:07:34.000Z", "morning"), ("PG", "2026-10-22T11:02:49.000Z", "morning"),
+    ("PLD", "2026-10-15T13:18:18.000Z", "morning"), ("PTON", "2026-11-05T11:59:12.000Z", "morning"),
+    ("RIVN", "2026-10-29T20:00:35.000Z", "close"), ("ROKU", "2026-11-02T21:09:59.000Z", "close"),
+    ("SBUX", "2026-10-29T20:07:14.000Z", "close"), ("SHAK", "2026-11-05T12:02:12.000Z", "morning"),
+    ("SNAP", "2026-11-04T21:11:55.000Z", "close"), ("TSLA", "2026-10-21T20:41:42.000Z", "close"),
+    ("UNH", "2026-10-13T10:14:45.000Z", "morning"), ("XOM", "2026-10-30T10:32:50.000Z", "morning"),
+]
+
+
+@pytest.mark.parametrize("ticker, stamp, window", _CORPUS_RELEASES,
+                         ids=[row[0] for row in _CORPUS_RELEASES])
+def test_a_companys_real_release_puts_its_next_report_in_its_own_window(ticker, stamp, window):
+    """Read the next quarter, each real release says when its company reports, on either side of
+    the clocks going back on 2026-11-01."""
+    accepted = datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(ET)
+    row = dict(_8K, filingDate=accepted.date().isoformat(), acceptanceDateTime=stamp)
+    habit = _habit([row], accepted.date() + timedelta(weeks=13))
+    assert (habit.windows, habit.releases) == (frozenset({window}), 1)
+
+
+@pytest.mark.parametrize("clocks, windows", [
+    ([(16, 5)] * 6, _CLOSE_ONLY),
+    ([(6, 30)] * 6, _MORNING_ONLY),
+    ([(16, 1), (16, 30), (16, 5), (17, 2)], _CLOSE_ONLY),
+    ([(6, 14), (7, 32), (9, 18)], _MORNING_ONLY),
+    ([(16, 5)] * 5 + [(6, 30)], _BOTH_WINDOWS),
+    ([(6, 30), (16, 5)], _BOTH_WINDOWS),
+    ([(16, 5), (12, 0)], _BOTH_WINDOWS),
+    ([(12, 0)], _BOTH_WINDOWS),
+], ids=["six_after_the_close", "six_before_the_open", "after_the_close_at_any_minute",
+        "before_the_open_at_any_minute", "one_morning_among_the_closes", "one_of_each",
+        "one_at_midday", "midday_alone"])
+def test_a_company_is_given_one_window_only_when_every_past_release_went_out_in_it(clocks,
+                                                                                windows):
+    assert _habit(_released_at(*clocks)).windows == windows
+
+
+@pytest.mark.parametrize("clock_et, windows", [
+    ((6, 0, 0), _MORNING_ONLY), ((9, 29, 59), _MORNING_ONLY), ((9, 30, 0), _BOTH_WINDOWS),
+    ((12, 0, 0), _BOTH_WINDOWS), ((15, 30, 0), _BOTH_WINDOWS), ((15, 30, 1), _CLOSE_ONLY),
+    ((21, 59, 59), _CLOSE_ONLY),
+])
+def test_before_the_open_is_before_0930_and_after_the_close_after_1530(clock_et, windows):
+    assert _habit(_released_at(clock_et, clock_et)).windows == windows
+
+
+@pytest.mark.parametrize("stamps, windows", [
+    (["2026-07-23T13:20:00.000Z", "2026-01-22T14:20:00.000Z"], _MORNING_ONLY),
+    (["2026-07-23T13:40:00.000Z"], _BOTH_WINDOWS),
+    (["2026-01-22T20:35:00.000Z", "2026-07-23T19:35:00.000Z"], _CLOSE_ONLY),
+], ids=["0920_in_summer_and_in_winter", "0940_in_summer", "1535_in_winter_and_in_summer"])
+def test_each_past_release_is_read_on_the_et_clock_of_its_own_date(stamps, windows):
+    """13:20Z is 09:20 in July and 08:20 in January, and 14:20Z is 09:20 in January: one offset for
+    every date would put one of these on the wrong side of 09:30."""
+    rows = [dict(_8K, accessionNumber=f"0000050863-26-{n:06d}", filingDate=stamp[:10],
+                 acceptanceDateTime=stamp) for n, stamp in enumerate(stamps)]
+    assert _habit(rows).windows == windows
+
+
+def test_an_evening_release_stamped_after_midnight_utc_is_the_evening_before_and_counts():
+    """01:15Z on 2026-10-30 is 21:15 ET on 2026-10-29: a past release of the report dated the
+    30th, after the close, and not that day's own filing."""
+    row = dict(_8K, filingDate="2026-10-30", acceptanceDateTime="2026-10-30T01:15:00.000Z")
+    habit = _habit([row], date(2026, 10, 30))
+    assert (habit.windows, habit.releases) == (_CLOSE_ONLY, 1)
+
+
+def test_the_report_days_own_filings_never_teach_its_window():
+    """The day's release is what the watch looks for, and an Item 2.02 that morning can be a
+    pre-announcement: neither says when the company reports."""
+    rows = [dict(_8K, accessionNumber="0000050863-26-000901"),                  # 16:02 ET today
+            dict(_8K, accessionNumber="0000050863-26-000902",
+                 acceptanceDateTime=_sec_stamp(REPORT, 8, 0))]                  # 08:00 ET today
+    habit = _habit(rows + _released_at((6, 30), (6, 45)))
+    assert (habit.windows, habit.releases) == (_MORNING_ONLY, 2)
+    assert _habit(rows).windows == _BOTH_WINDOWS
+
+
+def test_only_the_newest_six_past_releases_decide():
+    assert _habit(_released_at(*[(16, 5)] * 6, (6, 30))).windows == _CLOSE_ONLY
+    assert _habit(_released_at(*[(16, 5)] * 5, (6, 30))).windows == _BOTH_WINDOWS
+    assert _habit(_released_at(*[(16, 5)] * 9)).releases == 6
+
+
+def test_the_newest_are_found_whatever_order_the_record_lists_them_in():
+    rows = _released_at(*[(16, 5)] * 6, (6, 30))
+    assert _habit(rows[::-1]).windows == _CLOSE_ONLY
+    assert _habit(rows[1:] + rows[:1]).windows == _CLOSE_ONLY
+
+
+@pytest.mark.parametrize("days_back, windows", [(730, _MORNING_ONLY), (731, _BOTH_WINDOWS)])
+def test_a_release_more_than_two_years_back_says_nothing(days_back, windows):
+    day = REPORT - timedelta(days=days_back)
+    row = dict(_8K, filingDate=day.isoformat(), acceptanceDateTime=_sec_stamp(day, 7, 0))
+    assert _habit([row]).windows == windows
+    assert _habit(_released_at((16, 5)) + [row]).windows == (
+        _BOTH_WINDOWS if windows == _MORNING_ONLY else _CLOSE_ONLY)
+
+
+@pytest.mark.parametrize("change", [
+    {"items": "5.02,9.01"}, {"form": "8-K/A"}, {"form": "10-Q"}, {"form": "6-K"},
+    {"items": "7.01"}, {"items": "12.02"},
+], ids=["another_item", "an_amendment", "a_quarterly_report", "a_foreign_report",
+        "a_reg_fd_item", "an_item_that_only_ends_in_2_02"])
+def test_only_an_8k_carrying_item_202_is_a_past_release(change):
+    """An amendment or another item goes out at any hour, so a midday one says nothing."""
+    midday = dict(_released_at((12, 0))[0], **change)
+    assert _habit(_released_at((16, 5)) + [midday]).windows == _CLOSE_ONLY
+    assert _habit([midday]).windows == _BOTH_WINDOWS
+
+
+def test_a_record_with_no_past_release_is_both_windows_and_says_so():
+    for rows in ([], [_6K, dict(_6K, form="20-F")], [dict(_8K, items="5.02")]):
+        habit = _habit(rows)
+        assert (habit.windows, habit.releases, habit.why) == (_BOTH_WINDOWS, 0, "no past release")
+
+
+@pytest.mark.parametrize("stamp", [None, "", "2026-07-23T20:05:00", "not a time", 1784836800],
+                         ids=["absent", "blank", "no_zone", "garbage", "a_number"])
+def test_a_past_release_with_no_readable_time_cannot_say_which_window(stamp):
+    """Its hour is not known, so it is not known to be in either window."""
+    rows = _released_at((16, 5), (16, 5))
+    rows[1]["acceptanceDateTime"] = stamp
+    habit = _habit(rows)
+    assert (habit.windows, habit.why) == (_BOTH_WINDOWS, "a past release with no time")
+    # One past the newest six is not read at all.
+    rows = _released_at(*[(16, 5)] * 7)
+    rows[6]["acceptanceDateTime"] = stamp
+    assert _habit(rows).windows == _CLOSE_ONLY
+
+
+def test_a_past_release_with_neither_a_time_nor_a_date_cannot_say_which_window():
+    rows = _released_at((16, 5), (16, 5))
+    rows[1].update(acceptanceDateTime=None, filingDate="soon")
+    assert _habit(rows).windows == _BOTH_WINDOWS
+
+
+@pytest.mark.parametrize("times", [None, "missing", ["2026-07-30T20:05:00.000Z"]],
+                         ids=["not_a_list", "absent", "one_short"])
+def test_a_time_column_that_cannot_be_paired_reads_every_release_as_untimed(times):
+    """A time beside the wrong filing would put the company in the wrong window."""
+    record = _submissions(_released_at((16, 5), (16, 5)))
+    if times == "missing":
+        del record["filings"]["recent"]["acceptanceDateTime"]
+    else:
+        record["filings"]["recent"]["acceptanceDateTime"] = times
+    habit = efs._release_habit(record, REPORT)
+    assert (habit.windows, habit.why) == (_BOTH_WINDOWS, "a past release with no time")
+
+
+@pytest.mark.parametrize("record", [
+    None, "not a record", {}, {"filings": None}, {"filings": {"recent": None}},
+    {"filings": {"recent": {"form": "8-K", "items": "2.02", "filingDate": "2026-07-23"}}},
+    {"filings": {"recent": {"form": ["8-K"], "items": ["2.02"]}}},
+    {"filings": {"recent": {"form": ["8-K", "8-K"], "items": ["2.02"],
+                            "filingDate": ["2026-07-23", "2026-04-23"]}}},
+], ids=["none", "a_string", "empty", "no_filings", "no_recent", "columns_not_lists",
+        "no_dates", "columns_that_disagree"])
+def test_a_record_that_cannot_be_read_teaches_nothing(record):
+    habit = efs._release_habit(record, REPORT)
+    assert (habit.windows, habit.releases, habit.why) == (_BOTH_WINDOWS, 0, "unreadable")
+
+
+def test_odd_cells_in_a_record_never_raise():
+    rows = _released_at((16, 5), (16, 5), (16, 5), (16, 5))
+    rows[0].update(form=None, items=None)
+    rows[1].update(form=8, items=["2.02"])
+    rows[2].update(items=202, filingDate=None)
+    habit = _habit(rows)
+    assert (habit.windows, habit.releases) == (_CLOSE_ONLY, 1), "only the last is a release"
+    rows[3].update(acceptanceDateTime=1784836800, filingDate=20260101)
+    habit = _habit(rows)
+    assert (habit.windows, habit.why) == (_BOTH_WINDOWS, "a past release with no time")
 
 
 # ── the watcher ──────────────────────────────────────────────────────────────
@@ -7117,6 +10954,11 @@ async def test_a_filing_is_found_extracted_once_and_then_never_polled_again(watc
     assert gem.kwargs["temperature"] == 0 and gem.kwargs["cache"] is False
     assert gem.kwargs["system_instruction"] is efs._SYSTEM
     assert gem.kwargs["response_schema"] is efs.EXTRACTION_SCHEMA
+    # What the read costs: no thinking (billed at the output rate), the model the setting names,
+    # and the tag that tells this call's spend apart on the GEMINI_USAGE line.
+    assert gem.kwargs["thinking_budget"] == 0
+    assert gem.kwargs["model_name"] == settings.EARNINGS_LIVE_EXTRACT_MODEL
+    assert gem.kwargs["usage_tag"] == "earnings_live_extract"
     later = datetime(2026, 10, 29, 16, 30, tzinfo=ET).astimezone(timezone.utc)
     again = await watcher.run_once(later, ["INTC"], REPORT, sec=sec, gemini=gem,
                                    cik_map=_CIKS, sleep=_no_sleep)
@@ -7246,8 +11088,56 @@ async def test_a_finished_symbol_gives_its_slot_to_the_next_one(watcher, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_ticker_sec_lists_no_company_under_is_said_once_a_day_and_left_to_fmp(
+        watcher, clock, caplog):
+    """A US ticker missing from SEC's map (renamed, newly listed, or a map up to a day old) loses
+    the fast path for the day, so it says so at WARNING. A listing abroad never had one: INFO.
+    Once each, not every round."""
+    sec = _SEC()
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        for minute in range(3):
+            await watcher.run_once(_AT_16 + timedelta(minutes=minute),
+                                   ["NEWCO", "SHOP.TO", "7203.T", "INTC"], REPORT, sec=sec,
+                                   cik_map=_CIKS, sleep=_no_sleep)
+            clock.at += 60
+    assert _subs(sec) == [f"sub:{_CIKS['INTC']}"] * 3
+    rows = [r for r in caplog.records if "result=no_cik" in r.getMessage()]
+    said = {r.getMessage().split("sym=")[1].split()[0]: r.levelno for r in rows}
+    assert len(rows) == 3 and said == {"NEWCO": logging.WARNING, "SHOP.TO": logging.INFO,
+                                       "7203.T": logging.INFO}
+    assert all(f"day={REPORT.isoformat()}" in r.getMessage() for r in rows)
+
+
+#: Rows of SEC's own `company_tickers.json`, in its shape: class shares are separate rows of one
+#: company, written with a hyphen.
+_SEC_TICKER_ROWS = {
+    "0": {"cik_str": 1067983, "ticker": "BRK-B", "title": "BERKSHIRE HATHAWAY INC"},
+    "1": {"cik_str": 1652044, "ticker": "GOOGL", "title": "Alphabet Inc."},
+    "2": {"cik_str": 1652044, "ticker": "GOOG", "title": "Alphabet Inc."},
+    "3": {"cik_str": 1067983, "ticker": "BRK-A", "title": "BERKSHIRE HATHAWAY INC"},
+    "4": {"cik_str": 14693, "ticker": "BF-B", "title": "BROWN FORMAN CORP"},
+    "5": {"cik_str": 50863, "ticker": "INTC", "title": "INTEL CORP"},
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("symbol, cik", [
+    ("BRK-B", "0001067983"), ("BRK.B", "0001067983"), ("brk-b", "0001067983"),
+    ("GOOGL", "0001652044"), ("GOOG", "0001652044"), ("BF.B", "0000014693"),
+    ("BF-B", "0000014693"), ("INTC", "0000050863"),
+], ids=["brk_hyphen", "brk_dot", "lower_case", "googl", "goog", "bf_dot", "bf_hyphen", "plain"])
+async def test_a_class_share_reads_its_companys_record_whichever_way_its_ticker_is_written(
+        watcher, symbol, cik):
+    sec = _SEC()
+    await watcher.run_once(_AT_16, [symbol], REPORT, sec=sec,
+                           cik_map=signals.parse_company_tickers(_SEC_TICKER_ROWS),
+                           sleep=_no_sleep)
+    assert sec.calls == [f"sub:{cik}"]
+
+
+@pytest.mark.asyncio
 async def test_a_symbol_whose_release_is_read_gives_its_slot_while_its_record_stays_open(
-        watcher, monkeypatch):
+        watcher, monkeypatch, clock):
     """A release with EPS alone leaves the record pending and on the list, so this is the
     watcher's own call."""
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
@@ -7255,6 +11145,7 @@ async def test_a_symbol_whose_release_is_read_gives_its_slot_while_its_record_st
     for _ in range(2):
         await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=_Gemini(),
                                cik_map=_CIKS, sleep=_no_sleep)
+        clock.at += 60
     assert [c for c in sec.calls if c.startswith("sub:")] == ["sub:0000050863", "sub:0000320193"]
 
 
@@ -7272,7 +11163,7 @@ async def test_a_found_release_alone_is_enough_to_free_the_slot(watcher, monkeyp
 @pytest.mark.asyncio
 async def test_a_ticker_between_its_reads_keeps_its_slot_from_the_next_one_down(
         watcher, monkeypatch, clock):
-    """The cap comes before the cadence. Cut after it, a ticker waiting out its 5 min would hand
+    """The cap comes before the cadence. Cut after it, a ticker waiting out its 15 min would hand
     its slot down the list, and rounds a minute apart would read the tickers the cap keeps off
     the circuit SEC shares with Learn and the stake finder."""
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
@@ -7299,7 +11190,105 @@ async def test_a_symbol_between_two_reads_keeps_its_slot(watcher, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_round_never_reads_past_the_cap_with_slots_freed(watcher, monkeypatch):
+async def test_a_ticker_listed_twice_is_read_once_and_takes_one_slot(watcher, monkeypatch):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    sec = _SEC()
+    await watcher.run_once(_AT_16, ["INTC", "intc", "MSFT"], REPORT, sec=sec, cik_map=_CIKS,
+                           sleep=_no_sleep)
+    assert _subs(sec) == [f"sub:{_CIKS['INTC']}", f"sub:{_CIKS['MSFT']}"]
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_keeps_its_place_for_the_day_when_the_list_comes_back_reordered(
+        watcher, monkeypatch, clock):
+    """The watched list is read again through the day, and tickers watched as often can trade
+    places in it each time, as can a company that gains watchers on its report day. Neither moves
+    a ticker the day's watch has placed: the slot would pass back and forth, and each ticker would
+    lose its minute in turn. A ticker first seen later, listed behind them all, takes its place
+    behind them, and the next report day is placed afresh."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC()
+    lists = (["AAPL", "MSFT"], ["MSFT", "AAPL"], ["MSFT", "AAPL", "INTC"], ["INTC", "MSFT"])
+    for minute, symbols in enumerate(lists):
+        await watcher.run_once(_AT_16 + timedelta(minutes=minute), symbols, REPORT, sec=sec,
+                               cik_map=_CIKS, sleep=_no_sleep)
+        clock.at += 60
+    assert _subs(sec) == [f"sub:{_CIKS['AAPL']}"] * 3 + [f"sub:{_CIKS['MSFT']}"], \
+        "AAPL off the list, the slot goes to the ticker placed next, not to the one listed first"
+
+    next_day = date(2026, 10, 30)
+    sec.calls.clear()
+    await watcher.run_once(datetime(2026, 10, 30, 16, 3, tzinfo=ET).astimezone(timezone.utc),
+                           ["INTC", "MSFT"], next_day, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert _subs(sec) == [f"sub:{_CIKS['INTC']}"]
+    watcher.prune([next_day])
+    assert set(watcher._order) == {next_day}, "a day left behind keeps no order"
+    watcher.reset()
+    assert watcher._order == {}
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_that_leaves_the_list_and_comes_back_keeps_its_place(watcher, monkeypatch,
+                                                                            clock):
+    """A report whose record FMP's answers ended for a while, or a ticker the watched list drops
+    and lists again, comes back to the place the day gave it, even listed last: at the back, it
+    would lose its slot to every ticker placed while it was away."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC()
+    for minute, symbols in enumerate((["AAPL", "MSFT"], ["MSFT"], ["MSFT", "AAPL"])):
+        await watcher.run_once(_AT_16 + timedelta(minutes=minute), symbols, REPORT, sec=sec,
+                               cik_map=_CIKS, sleep=_no_sleep)
+        clock.at += 60
+    assert _subs(sec) == [f"sub:{_CIKS[symbol]}" for symbol in ("AAPL", "MSFT", "AAPL")]
+
+
+@pytest.mark.parametrize("lists, places", [
+    # Listed first when it joins: ahead of every ticker placed before it.
+    ((["AAPL", "MSFT"], ["INTC", "AAPL", "MSFT"]), ["INTC", "AAPL", "MSFT"]),
+    # Listed between them, between them; listed last, last.
+    ((["AAPL", "MSFT"], ["AAPL", "INTC", "MSFT"]), ["AAPL", "INTC", "MSFT"]),
+    ((["AAPL", "MSFT"], ["AAPL", "MSFT", "INTC"]), ["AAPL", "MSFT", "INTC"]),
+    # The list has turned the placed two round since: they keep their places, and INTC goes
+    # ahead of AAPL, which the list now ranks below it.
+    ((["AAPL", "MSFT"], ["MSFT", "INTC", "AAPL"]), ["INTC", "AAPL", "MSFT"]),
+    # Two joining at once keep the list's order between them, each ahead of what it outranks.
+    ((["AAPL"], ["INTC", "MSFT", "AAPL"]), ["INTC", "MSFT", "AAPL"]),
+    ((["AAPL"], ["INTC", "AAPL", "MSFT"]), ["INTC", "AAPL", "MSFT"]),
+    # A ticker away from the list holds its place, and one joining is ranked among those listed.
+    ((["AAPL", "MSFT"], ["INTC", "MSFT"], ["MSFT", "AAPL", "INTC"]), ["AAPL", "INTC", "MSFT"]),
+], ids=["first", "between", "last", "list_turned_round", "two_ahead", "two_around",
+        "one_away"])
+def test_a_ticker_that_joins_the_days_list_takes_the_place_its_rank_gives_it(watcher, lists,
+                                                                             places):
+    """The list is most-watched first, and a report can join it at any time: FMP's 15:30 memo
+    round dates a report today hours after the morning placed the rest. Behind everything placed,
+    the most-watched company's release waited for every other ticker's slot. It goes ahead of
+    every ticker placed already that the list ranks below it, and the tickers placed keep their
+    order between themselves."""
+    for symbols in lists:
+        placed = watcher._placed(symbols, REPORT)
+    assert placed == places
+
+
+@pytest.mark.asyncio
+async def test_the_most_watched_report_listed_late_is_read_ahead_of_the_ones_placed(
+        live, clock, monkeypatch):
+    """INTC, the most watched, has its report dated today after AAPL's was placed. With one slot,
+    AAPL had it until its release was read, and INTC's release waited for FMP."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    live.observe_rows(REPORT, [_pending("AAPL")], _AT_16)
+    sec = _SEC()
+    for minute in range(4):
+        at = _AT_16 + timedelta(minutes=minute)
+        if minute == 2:
+            live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], at)
+        await els.earnings_filing_tick(at, watched=["INTC", "AAPL"], sec=sec, gemini=_Gemini())
+        clock.at += 60
+    assert _subs(sec) == [f"sub:{_CIKS[symbol]}" for symbol in ("AAPL", "AAPL", "INTC", "INTC")]
+
+
+@pytest.mark.asyncio
+async def test_a_round_never_reads_past_the_cap_with_slots_freed(watcher, monkeypatch, clock):
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
     symbols = ["NEWCO", "OTHER", "AAPL", "MSFT", "INTC"]
     sec = _SEC()
@@ -7307,10 +11296,9 @@ async def test_a_round_never_reads_past_the_cap_with_slots_freed(watcher, monkey
     assert sec.calls == [], "two tickers SEC does not list took the round's two slots"
     for _ in range(3):
         sec.calls.clear()
+        clock.at += 60                                       # the 60 s cadence has passed
         await watcher.run_once(_AT_16, symbols, REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
         assert len(sec.calls) <= 2
-        for watch in watcher._watch.values():
-            watch.checked_mono = 0.0                         # the 60 s cadence has passed
     assert sec.calls == ["sub:0000320193", "sub:0000789019"]
 
 
@@ -7340,13 +11328,15 @@ def test_the_sec_cap_is_not_documented_as_daily():
 
 
 @pytest.mark.asyncio
-async def test_a_report_off_the_pending_list_frees_its_slot_for_the_next(watcher, monkeypatch):
+async def test_a_report_off_the_pending_list_frees_its_slot_for_the_next(watcher, monkeypatch,
+                                                                       clock):
     """A load limit, not a daily budget: `pending_symbols` drops a report once its figures are
     in, and the cap applies to what is left. So a day can read more tickers than the cap."""
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
     sec = _SEC()
     for pending in (["AAPL", "MSFT"], ["MSFT"]):
         await watcher.run_once(_AT_16, pending, REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+        clock.at += 60
     assert sec.calls == ["sub:0000320193", "sub:0000789019"]
 
 
@@ -7373,15 +11363,23 @@ async def test_a_throttle_parks_every_symbol_and_stops_the_round(watcher):
 
 @pytest.mark.asyncio
 async def test_our_calls_are_spaced_never_burst(watcher):
-    slept = []
+    """A second in front of each of our SEC calls but a round's first, a filing's index page and
+    exhibit included. SEC's limiter is shared with Learn, the buyback check and the stake finder,
+    and the cap's own bound counts a second a call (50 symbols fill the loop's minute)."""
+    sec = _SEC(filings={_CIKS["MSFT"]: [_later_filing(_CIKS["MSFT"])]})
 
     async def _sleep(s):
-        slept.append(s)
+        sec.calls.append(f"sleep:{s}")
 
-    sec = _SEC()
-    await watcher.run_once(_AT_16, ["AAPL", "MSFT", "INTC"], REPORT, sec=sec, cik_map=_CIKS,
-                           sleep=_sleep)
-    assert slept == [efs._CALL_SPACING_SECONDS] * 2
+    await watcher.run_once(_AT_16, ["AAPL", "MSFT", "INTC"], REPORT, sec=sec, gemini=_Gemini(),
+                           cik_map=_CIKS, sleep=_sleep)
+    assert sec.calls == [
+        "sub:0000320193",
+        "sleep:1.0", "sub:0000789019",
+        "sleep:1.0", "doc:0000789019-26-000001-index.htm",
+        "sleep:1.0", "doc:q3-26earnings.htm",
+        "sleep:1.0", "sub:0000050863",
+    ]
 
 
 @pytest.mark.asyncio
@@ -7463,6 +11461,24 @@ async def test_a_quote_past_the_models_cut_never_verifies(watcher, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_the_model_reads_the_first_40000_characters_of_a_long_release_and_no_more(watcher):
+    """Ten of the thirty releases in the replay corpus run past 40,000 characters, PLD's to
+    116,718. The headline figures, the per-share table and the outlook sit at the top of each,
+    and what the model reads past them is paid for and never used."""
+    assert efs._EXTRACT_TEXT_CHARS == 40_000
+    tail = "Reconciliation of GAAP to non-GAAP measures, row 1,234 and 5,678. " * 1800
+    sec = _DocSEC(f"{RELEASE} {tail} THE LAST WORDS OF THE RELEASE.",
+                  filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    found = await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                                   sleep=_no_sleep)
+    assert found["INTC"].eps_adjusted == 0.44
+    fenced = gem.prompt.split("<<<RELEASE>>>\n", 1)[1].rsplit("\n<<<END_RELEASE>>>", 1)[0]
+    assert efs._EXTRACT_TEXT_CHARS - 100 < len(fenced) <= efs._EXTRACT_TEXT_CHARS
+    assert fenced.startswith("SANTA CLARA") and "THE LAST WORDS" not in gem.prompt
+
+
+@pytest.mark.asyncio
 async def test_a_long_release_logs_its_cut(watcher, monkeypatch, caplog):
     monkeypatch.setattr(efs, "_EXTRACT_TEXT_CHARS", 200)
     sec = _DocSEC("Filler words of the release. " * 30, filings={_CIKS["INTC"]: [_8K]})
@@ -7511,7 +11527,7 @@ _6K = dict(_8K, accessionNumber="0000937966-26-000045", form="6-K", items="",
 
 
 _FOREIGN_FIRST_8K = dict(_8K, accessionNumber="0000937966-26-000046",
-                         acceptanceDateTime="2026-10-29T07:02:00.000Z")
+                         acceptanceDateTime="2026-10-29T11:02:00.000Z")   # 07:02 ET
 _AT_6 = datetime(2026, 10, 29, 6, 1, tzinfo=ET).astimezone(timezone.utc)
 _AT_7 = datetime(2026, 10, 29, 7, 40, tzinfo=ET).astimezone(timezone.utc)
 
@@ -7521,13 +11537,15 @@ def _subs(sec: _SEC) -> List[str]:
 
 
 @pytest.mark.asyncio
-async def test_a_foreign_filer_sec_lists_rests_and_frees_its_slot(watcher, monkeypatch, caplog):
+async def test_a_foreign_filer_sec_lists_rests_and_frees_its_slot(watcher, monkeypatch, caplog,
+                                                                 clock):
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
     sec = _SEC(filings={_ASML_CIK: [_6K]})
     with caplog.at_level(logging.INFO, logger=efs.__name__):
         for _ in range(2):
             await watcher.run_once(_AT_16, ["ASML", "INTC"], REPORT, sec=sec,
                                    cik_map=_FOREIGN_CIKS, sleep=_no_sleep)
+            clock.at += 60
     assert sec.calls == [f"sub:{_ASML_CIK}", "sub:0000050863"]
     assert watcher._watch[("ASML", REPORT)].figures is None
     rows = [r.getMessage() for r in caplog.records if "result=foreign_filer" in r.getMessage()]
@@ -7858,7 +11876,7 @@ async def test_a_quiet_round_reads_every_symbol_again_a_minute_after_it_started(
     assert [sec.calls.count(f"sub:{cik}") for cik in _CIKS.values()] == [3, 3, 3]
 
 
-@pytest.mark.parametrize("hm,cadence", [((16, 3), 60), ((12, 0), 300)], ids=["fast", "slow"])
+@pytest.mark.parametrize("hm,cadence", [((16, 3), 60), ((12, 0), 900)], ids=["fast", "slow"])
 def test_a_round_a_moment_early_still_reads_the_symbol(watcher, hm, cadence):
     """A round that wakes a few seconds short must not cost the symbol a whole cadence."""
     now_et = datetime(2026, 10, 29, *hm, tzinfo=ET)
@@ -7867,6 +11885,23 @@ def test_a_round_a_moment_early_still_reads_the_symbol(watcher, hm, cadence):
     on_time = 1000.0 + cadence - efs._DUE_SLACK_SECONDS
     assert watcher._due(key, now_et, on_time)
     assert not watcher._due(key, now_et, on_time - 0.001)
+
+
+@pytest.mark.asyncio
+async def test_a_round_a_moment_short_of_a_minute_after_the_last_still_has_its_slots(
+        watcher, monkeypatch, clock):
+    """The last minute's reads come off a round's slots with the cadence's own slack: the loop
+    can wake a moment early, and a round that found the last one's reads still counted would
+    read nothing, a whole minute lost."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC()
+    started = clock.at
+    for at in (0.0, 60 - efs._DUE_SLACK_SECONDS - 0.001, 60 - efs._DUE_SLACK_SECONDS):
+        clock.at = started + at
+        await watcher.run_once(_AT_16, ["AAPL"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert _subs(sec) == [f"sub:{_CIKS['AAPL']}"] * 2
+    assert [stamp for _, stamp in watcher._reads] == [started + 60 - efs._DUE_SLACK_SECONDS], \
+        "the first went"
 
 
 @pytest.mark.asyncio
@@ -8129,6 +12164,930 @@ async def test_a_filing_out_of_attempts_leaves_the_symbol_on_its_normal_poll(wat
     assert watcher._due(("INTC", REPORT), _AT_16.astimezone(ET), w.checked_mono + 60)
 
 
+# ── each company's own release windows ───────────────────────────────────────
+
+_CLOSE_HABIT = [(16, 5)] * 4
+_MORNING_HABIT = [(7, 0)] * 4
+
+
+def _history(**by_symbol: List[Tuple[int, int]]) -> Dict[str, List[dict]]:
+    """SEC records holding each symbol's past releases at those ET clocks, a quarter apart."""
+    return {_CIKS[symbol]: _released_at(*clocks) for symbol, clocks in by_symbol.items()}
+
+
+def test_a_ticker_not_read_today_is_watched_in_both_windows(watcher):
+    for symbol in ("INTC", "intc", "", None, 7):
+        assert watcher.release_windows(symbol) == _BOTH_WINDOWS
+    assert isinstance(watcher.release_windows("INTC"), frozenset)
+
+
+@pytest.mark.asyncio
+async def test_the_first_read_of_the_day_learns_each_companys_window_at_no_extra_call(watcher):
+    sec = _SEC(filings=_history(INTC=_CLOSE_HABIT, AAPL=_MORNING_HABIT))
+    await watcher.run_once(_AT_6, ["INTC", "AAPL", "MSFT"], REPORT, sec=sec, cik_map=_CIKS,
+                           sleep=_no_sleep)
+    assert watcher.release_windows("INTC") == _CLOSE_ONLY
+    assert watcher.release_windows(" intc ") == _CLOSE_ONLY
+    assert watcher.release_windows("AAPL") == _MORNING_ONLY
+    assert watcher.release_windows("MSFT") == _BOTH_WINDOWS, "no past release on its record"
+    assert sec.calls == [f"sub:{_CIKS[s]}" for s in ("INTC", "AAPL", "MSFT")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("habit, hm, reads", [
+    (_CLOSE_HABIT, (6, 0), [0, 15, 30]),
+    (_CLOSE_HABIT, (15, 55), list(range(31))),
+    (_MORNING_HABIT, (6, 0), list(range(31))),
+    (_MORNING_HABIT, (16, 0), [0, 15, 30]),
+    ([], (6, 0), list(range(31))),
+    ([], (16, 0), list(range(31))),
+    ([], (12, 0), [0, 15, 30]),
+], ids=["close_company_in_the_morning", "close_company_at_the_close",
+        "morning_company_in_the_morning", "morning_company_at_the_close",
+        "unknown_in_the_morning", "unknown_at_the_close", "unknown_between_the_windows"])
+async def test_a_company_is_read_every_minute_in_its_own_window_and_every_15_outside_it(
+        watcher, clock, habit, hm, reads):
+    sec = _SEC(filings={_CIKS["INTC"]: _released_at(*habit)})
+    start = datetime(2026, 10, 29, *hm, tzinfo=ET)
+    read_at: List[int] = []
+    for minute in range(31):
+        before = len(_subs(sec))
+        await watcher.run_once((start + timedelta(minutes=minute)).astimezone(timezone.utc),
+                               ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+        if len(_subs(sec)) > before:
+            read_at.append(minute)
+        clock.at += 60
+    assert read_at == reads
+
+
+@pytest.mark.asyncio
+async def test_the_window_learned_on_the_days_first_read_holds_until_midnight_et(watcher, clock):
+    """Learned once a day: a release reaching the record later that day changes nothing until the
+    next day's first read, and until that read the next day is both windows again."""
+    cik = _CIKS["INTC"]
+    sec = _SEC(filings={cik: _released_at(*_CLOSE_HABIT)})
+    learned_at = clock.at
+    await watcher.run_once(_AT_6, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    yesterday = REPORT - timedelta(days=1)
+    sec.filings[cik].append(dict(_8K, accessionNumber="0000050863-26-000777",
+                                 filingDate=yesterday.isoformat(),
+                                 acceptanceDateTime=_sec_stamp(yesterday, 12, 0)))
+    clock.at += 900
+    await watcher.run_once(_AT_6 + timedelta(minutes=15), ["INTC"], REPORT, sec=sec,
+                           cik_map=_CIKS, sleep=_no_sleep)
+    assert len(_subs(sec)) == 2 and watcher.release_windows("INTC") == _CLOSE_ONLY
+    to_midnight = 17 * 3600 + 59 * 60          # 06:01 ET to the end of the day
+    clock.at = learned_at + to_midnight - 1
+    assert watcher.release_windows("INTC") == _CLOSE_ONLY
+    clock.at = learned_at + to_midnight
+    assert watcher.release_windows("INTC") == _BOTH_WINDOWS
+    next_day = date(2026, 10, 30)
+    await watcher.run_once(datetime(2026, 10, 30, 6, 0, tzinfo=ET).astimezone(timezone.utc),
+                           ["INTC"], next_day, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert len(_subs(sec)) == 3
+    assert watcher.release_windows("INTC") == _BOTH_WINDOWS, "a midday release is newest now"
+
+
+@pytest.mark.asyncio
+async def test_the_next_report_days_first_read_learns_afresh_whatever_the_monotonic_clock_says(
+        watcher):
+    """The day ends on the monotonic clock, and a report day of its own starts a new one too: a
+    clock that lagged the calendar must not carry one day's answer into the next."""
+    cik = _CIKS["INTC"]
+    sec = _SEC(filings={cik: _released_at(*_CLOSE_HABIT)})
+    await watcher.run_once(_AT_6, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher.release_windows("INTC") == _CLOSE_ONLY
+    sec.filings[cik].append(dict(_8K, accessionNumber="0000050863-26-000777",
+                                 acceptanceDateTime=_sec_stamp(REPORT, 12, 0)))
+    next_day = date(2026, 10, 30)
+    await watcher.run_once(datetime(2026, 10, 30, 6, 0, tzinfo=ET).astimezone(timezone.utc),
+                           ["INTC"], next_day, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert len(_subs(sec)) == 2
+    assert watcher.release_windows("INTC") == _BOTH_WINDOWS
+
+
+@pytest.mark.parametrize("at, hours", [
+    (datetime(2026, 10, 29, 6, 0, tzinfo=ET), 18),
+    (datetime(2026, 10, 29, 21, 59, 59, tzinfo=ET), 2 + 1 / 3600),
+    (datetime(2026, 10, 29, 23, 59, 59, tzinfo=ET), 1 / 3600),
+    (datetime(2026, 11, 1, 0, 0, tzinfo=ET), 25),
+    (datetime(2026, 3, 8, 0, 0, tzinfo=ET), 23),
+], ids=["a_weekday_morning", "the_last_second_edgar_takes", "the_days_last_second",
+        "the_clocks_go_back", "the_clocks_go_forward"])
+def test_a_learned_window_lasts_to_midnight_et_in_real_seconds(at, hours):
+    assert efs._seconds_left_in_et_day(at.astimezone(timezone.utc)) == pytest.approx(hours * 3600)
+
+
+@pytest.mark.asyncio
+async def test_a_ticker_sec_does_not_list_or_a_foreign_filer_is_watched_in_both_windows(watcher):
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    await watcher.run_once(_AT_6, ["NEWCO", "ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    assert sec.calls == [f"sub:{_ASML_CIK}"]
+    assert watcher.release_windows("NEWCO") == _BOTH_WINDOWS
+    assert watcher.release_windows("ASML") == _BOTH_WINDOWS
+
+
+@pytest.mark.asyncio
+async def test_a_record_sec_could_not_serve_teaches_nothing_and_the_next_read_learns(watcher,
+                                                                                    clock):
+    class _OnceEmpty(_SEC):
+        async def get_submissions(self, cik):
+            if not self.calls:
+                self.calls.append(f"sub:{cik}")
+                return None
+            return await super().get_submissions(cik)
+
+    sec = _OnceEmpty(filings=_history(INTC=_CLOSE_HABIT))
+    await watcher.run_once(_AT_6, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher.release_windows("INTC") == _BOTH_WINDOWS
+    clock.at += 60
+    await watcher.run_once(_AT_6 + timedelta(minutes=1), ["INTC"], REPORT, sec=sec,
+                           cik_map=_CIKS, sleep=_no_sleep)
+    assert len(_subs(sec)) == 2, "still both windows, so read again at the minute"
+    assert watcher.release_windows("INTC") == _CLOSE_ONLY
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_raises_teaches_nothing(watcher):
+    sec = _SEC(filings=_history(INTC=_CLOSE_HABIT), throttle_on=_CIKS["INTC"])
+    await watcher.run_once(_AT_6, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher.release_windows("INTC") == _BOTH_WINDOWS
+
+
+@pytest.mark.asyncio
+async def test_a_record_the_window_rule_chokes_on_still_has_its_release_read(watcher, clock,
+                                                                            monkeypatch, caplog):
+    """Never the read's cost: both windows for the day, said once with the ticker and the day."""
+    def _chokes(data, report_date):
+        raise KeyError("filings")
+
+    monkeypatch.setattr(efs, "_release_habit", _chokes)
+    sec = _SEC(filings={_CIKS["INTC"]: _released_at(*_CLOSE_HABIT) + [_8K]})
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        found = await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec,
+                                       gemini=_Gemini(), cik_map=_CIKS, sleep=_no_sleep)
+        clock.at += 60
+        await watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, cik_map=_CIKS,
+                               sleep=_no_sleep)
+    assert found["INTC"].revenue == 17.1e9
+    assert watcher.release_windows("INTC") == _BOTH_WINDOWS
+    assert watcher.release_windows("AAPL") == _BOTH_WINDOWS
+    rows = [r for r in caplog.records if "release windows not read" in r.getMessage()]
+    assert len(rows) == 2, "one per ticker, and not again on its next read"
+    message = rows[0].getMessage()
+    assert "sym=INTC" in message and f"day={REPORT.isoformat()}" in message
+    assert "KeyError" in message and rows[0].exc_info is not None
+    assert len(_subs(sec)) == 3, "AAPL is read twice, INTC's watch ended with its release"
+
+
+@pytest.mark.asyncio
+async def test_a_restart_forgets_every_window_and_each_goes_when_its_day_ends(watcher, clock):
+    sec = _SEC(filings=_history(INTC=_CLOSE_HABIT))
+    await watcher.run_once(_AT_6, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    watcher.reset()
+    assert watcher.release_windows("INTC") == _BOTH_WINDOWS
+    await watcher.run_once(_AT_6, ["INTC"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    watcher.prune([REPORT])
+    assert watcher.release_windows("INTC") == _CLOSE_ONLY, "its day has not ended"
+    clock.at += 18 * 3600
+    watcher.prune([REPORT])
+    assert watcher._habits == {}, "nothing is held past its day"
+
+
+@pytest.mark.asyncio
+async def test_what_a_companys_record_said_is_logged_once_a_day_with_the_ticker_and_the_day(
+        watcher, clock, caplog):
+    sec = _SEC(filings=_history(INTC=_CLOSE_HABIT))
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        for _ in range(3):
+            await watcher.run_once(_AT_6, ["INTC"], REPORT, sec=sec, cik_map=_CIKS,
+                                   sleep=_no_sleep)
+            clock.at += 900
+    assert len(_subs(sec)) == 3
+    rows = [r for r in caplog.records if "windows=" in r.getMessage()]
+    assert len(rows) == 1 and rows[0].levelno == logging.INFO
+    message = rows[0].getMessage()
+    assert "sym=INTC" in message and f"day={REPORT.isoformat()}" in message
+    assert "windows=close" in message and "releases=4" in message
+
+
+@pytest.mark.asyncio
+async def test_the_minute_after_a_round_is_counted_on_each_waiting_symbols_own_cadence(watcher,
+                                                                                      clock):
+    """At 16:03 a company of the morning window waits 15 min between reads. A round that spends
+    an attempt holds its waiting filing for the minute after it, and no longer: counted on the
+    close window's minute, the hold would leave it waiting a quarter of an hour."""
+    morning_company = _SEC(filings=_history(AAPL=_MORNING_HABIT))
+    await watcher.run_once(_AT_16, ["AAPL"], REPORT, sec=morning_company, cik_map=_CIKS,
+                           sleep=_no_sleep)
+    assert watcher.release_windows("AAPL") == _MORNING_ONLY
+    key = ("AAPL", REPORT)
+    watcher._watch[key] = efs._Watch(checked_mono=clock.at + 30 - 900, retry_gap=60.0,
+                                     attempts={_MORNING: 1})
+    await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=_SEC(filings={_CIKS["INTC"]: [_8K]}),
+                           gemini=_Model(clock, stall=0), cik_map=_CIKS, sleep=_no_sleep)
+    assert watcher._watch[("INTC", REPORT)].attempts == {ACC: 1}, "the round spent one"
+    comes_due = clock.at + 60 - efs._DUE_SLACK_SECONDS
+    assert not watcher._due(key, _AT_16.astimezone(ET), comes_due - 0.001)
+    assert watcher._due(key, _AT_16.astimezone(ET), comes_due)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_outside_the_companys_window_waits_its_15_minutes(watcher, clock):
+    """The ladder never reads faster than the company's own cadence: a morning company whose
+    release went out after the close tries again every 15 min while the model fails."""
+    sec = _SEC(filings={_CIKS["INTC"]: _released_at(*_MORNING_HABIT) + [_8K]})
+    gem = _Model(clock, stall=0)
+    started = clock.at
+    for _ in range(100):
+        await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                               sleep=_no_sleep)
+        clock.at += 60
+    assert [when - started for when in gem.of("INTC")] == [0, 900, 1800, 2700, 3600, 4500]
+
+
+async def _minute_by_minute(watcher, clock, sec: _SEC, symbols: List[str], start: datetime,
+                            minutes: int, *, gemini: Any = None, each_minute: Any = None
+                            ) -> Tuple[Dict[str, List[int]], Dict[str, int]]:
+    """`run_once` every minute from `start` (ET), the stand-in clock a minute on each time.
+    Returns the minutes each symbol's record was read in, and the minute each one's figures came
+    in. `each_minute(minute)` runs before that minute's round. A round never reads past the cap."""
+    read: Dict[str, List[int]] = {symbol: [] for symbol in symbols}
+    found_at: Dict[str, int] = {}
+    cap = settings.EARNINGS_LIVE_SEC_MAX_SYMBOLS
+    for minute in range(minutes):
+        if each_minute is not None:
+            each_minute(minute)
+        before = len(_subs(sec))
+        found = await watcher.run_once((start + timedelta(minutes=minute)).astimezone(timezone.utc),
+                                       symbols, REPORT, sec=sec, gemini=gemini, cik_map=_CIKS,
+                                       sleep=_no_sleep)
+        this_round = _subs(sec)[before:]
+        assert len(this_round) <= cap, f"minute {minute} read {this_round}, past the cap of {cap}"
+        for symbol in symbols:
+            if f"sub:{_CIKS[symbol]}" in this_round:
+                read[symbol].append(minute)
+        for symbol in found:
+            found_at.setdefault(symbol, minute)
+        clock.at += 60
+    return read, found_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start, above, below, theirs, its_own", [
+    ((6, 0), ["INTC"], "AAPL", _CLOSE_HABIT, _MORNING_HABIT),
+    ((6, 0), ["INTC", "MSFT"], "AAPL", _CLOSE_HABIT, _MORNING_HABIT),
+    ((16, 0), ["AAPL"], "INTC", _MORNING_HABIT, _CLOSE_HABIT),
+    ((16, 0), ["AAPL", "MSFT"], "INTC", _MORNING_HABIT, _CLOSE_HABIT),
+], ids=["morning_one_above_cap_1", "morning_two_above_cap_2", "close_one_above_cap_1",
+        "close_two_above_cap_2"])
+async def test_a_company_outside_its_own_window_leaves_the_window_to_the_companies_it_is_for(
+        watcher, monkeypatch, clock, start, above, below, theirs, its_own):
+    """The most watched release in the other window: INTC (and MSFT) after the close, below AAPL
+    before the open; AAPL (and MSFT) before the open, still waiting at 16:00 (its release moved
+    to the close this quarter, FMP dated it a day early, or its morning read gave up), above INTC.
+    In a window their companies do not use they wait 15 min between reads. Held all that time,
+    their slots left the window's own company no read until their releases, while the cap
+    allowed a read every minute. So each holds a slot there only in the round its read is due:
+    the company below is read every minute but the ones their reads fall on, they keep their
+    15 min, and a round still reads no more than the cap (one slot each) when they come due
+    together."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", len(above))
+    sec = _SEC(filings=_history(**{below: its_own}, **{s: theirs for s in above}))
+    read, _ = await _minute_by_minute(watcher, clock, sec, [*above, below],
+                                      datetime(2026, 10, 29, *start, tzinfo=ET), 46)
+    assert all(read[symbol] == [0, 15, 30, 45] for symbol in above), read
+    assert read[below] == [minute for minute in range(1, 46) if minute not in (15, 30, 45)]
+
+
+@pytest.mark.asyncio
+async def test_a_morning_release_ranked_below_a_company_of_the_close_is_read_the_minute_it_lands(
+        watcher, monkeypatch, clock):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    records = _history(INTC=_CLOSE_HABIT, AAPL=_MORNING_HABIT)
+    sec = _SEC(filings=records)
+
+    def _lands(minute: int) -> None:
+        if minute == 20:
+            records[_CIKS["AAPL"]].append(dict(_8K, accessionNumber=f"{_CIKS['AAPL']}-26-000001",
+                                               acceptanceDateTime=_sec_stamp(REPORT, 6, 20)))
+
+    _, found_at = await _minute_by_minute(watcher, clock, sec, ["INTC", "AAPL"],
+                                          datetime(2026, 10, 29, 6, 0, tzinfo=ET), 31,
+                                          gemini=_Gemini(), each_minute=_lands)
+    assert found_at == {"AAPL": 20}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start, intc_reads", [
+    ((12, 0), [0, 15, 30]),
+    ((16, 0), list(range(31))),
+], ids=["between_the_windows", "in_its_own_window"])
+async def test_a_company_keeps_its_slot_between_reads_where_no_window_or_its_own_is_open(
+        watcher, monkeypatch, clock, start, intc_reads):
+    """Between the windows nobody's minute is at stake, and in its own window it is read every
+    minute: either way the slot stays with the most watched, and the cap keeps the next one off
+    SEC's shared circuit."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC(filings=_history(INTC=_CLOSE_HABIT, AAPL=_CLOSE_HABIT))
+    read, _ = await _minute_by_minute(watcher, clock, sec, ["INTC", "AAPL"],
+                                      datetime(2026, 10, 29, *start, tzinfo=ET), 31)
+    assert read == {"INTC": intc_reads, "AAPL": []}
+
+
+class _OnTheClock(_SEC):
+    """Notes when each record is read, in seconds after the start, and puts a filing on a record
+    from its own moment on: `landing` maps a CIK to (seconds after the start, the row). Each read
+    takes `takes` seconds."""
+
+    def __init__(self, clock: _Clock, *, filings: Dict[str, List[dict]],
+                 landing: Optional[Dict[str, Tuple[float, dict]]] = None, takes: float = 0.0):
+        super().__init__(filings=filings)
+        self.clock, self.start, self.takes = clock, clock.at, takes
+        self.landing = dict(landing or {})
+        self.read_at: List[Tuple[str, float]] = []
+
+    async def get_submissions(self, cik):
+        self.read_at.append((cik, self.clock.at - self.start))
+        landed = self.landing.get(cik)
+        if landed is not None and self.clock.at - self.start >= landed[0]:
+            self.filings[cik] = [landed[1], *self.filings.get(cik, [])]
+            del self.landing[cik]
+        self.clock.at += self.takes
+        return await super().get_submissions(cik)
+
+    def of(self, cik: str) -> List[float]:
+        return [at for read, at in self.read_at if read == cik]
+
+
+class _Thinks(_Gemini):
+    """Answers after `seconds` on the stand-in clock."""
+
+    def __init__(self, clock: _Clock, seconds: float):
+        super().__init__()
+        self.clock, self.seconds = clock, seconds
+
+    async def generate_json(self, prompt, **kwargs):
+        self.clock.at += self.seconds
+        return await super().generate_json(prompt, **kwargs)
+
+
+async def _as_the_loop_runs(watcher, clock: _Clock, sec: _OnTheClock, symbols: List[str],
+                            ciks: Dict[str, str], start: datetime, seconds: float, *,
+                            gemini: Any = None, every: float = 60.0, preamble: float = 0.0,
+                            rounds: Optional[List[Tuple[float, int]]] = None) -> Dict[str, float]:
+    """Rounds as `_forever` runs them, from `start` (ET) for `seconds`: each one `every` seconds
+    after the last one's tick started, or a second after it ended when it ran longer, each tick
+    spending `preamble` seconds on its own work before its round, with `now` still its start.
+    Returns when each symbol's figures came in, in seconds after the start. `rounds`, when given,
+    gets each round's tick, in seconds after the start, and the records it read."""
+    found_at: Dict[str, float] = {}
+
+    async def _deliver(symbol, figures):
+        found_at.setdefault(symbol, clock.at - sec.start)
+
+    while clock.at - sec.start < seconds:
+        started = clock.at
+        now = start + timedelta(seconds=started - sec.start)
+        clock.at += preamble
+        before = len(sec.read_at)
+        await watcher.run_once(now.astimezone(timezone.utc), symbols, REPORT, sec=sec,
+                               gemini=gemini, cik_map=ciks, sleep=_no_sleep, on_figures=_deliver)
+        if rounds is not None:
+            rounds.append((started - sec.start, len(sec.read_at) - before))
+        clock.at = max(started + every, clock.at + 1)
+    return found_at
+
+
+def _most_in_a_minute(rounds: List[Tuple[float, int]]) -> int:
+    """The most records read by the rounds that started in any one minute."""
+    return max((sum(reads for at, reads in rounds if start <= at < start + 60)
+                for start, _ in rounds), default=0)
+
+
+def _a_release_at(cik: str, at: Tuple[int, ...]) -> dict:
+    """The report's own release on `cik`'s record, accepted at ET (hour, minute[, second])."""
+    return dict(_8K, accessionNumber=f"{cik}-26-000777", acceptanceDateTime=_sec_stamp(REPORT, *at))
+
+
+@pytest.mark.asyncio
+async def test_a_busy_round_gives_way_once_a_ticker_read_above_is_due_again(watcher, monkeypatch,
+                                                                           clock):
+    """A round is serial, a model call a release. Five less-watched companies filed at 07:00 and
+    AAPL, the most watched, 20 s after its 07:00 read: run to its end, the round kept AAPL waiting
+    a model call for each of the five, minutes inside its own window. So once a model call has run
+    a ticker read above it into its next minute, the round stops there, and the next one starts at
+    the top: AAPL is read again within its minute and one model call, and the rest of the five in
+    the rounds after."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 6)
+    ciks = {"AAPL": _CIKS["AAPL"], **{f"LOW{n}": f"{n:010d}" for n in range(1, 6)}}
+    landing = {cik: (20.0, _a_release_at(cik, (7, 0, 20))) if symbol == "AAPL"
+               else (0.0, _a_release_at(cik, (7, 0))) for symbol, cik in ciks.items()}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_MORNING_HABIT) for cik in ciks.values()},
+                      landing=landing)
+    found_at = await _as_the_loop_runs(watcher, clock, sec, list(ciks), ciks,
+                                       datetime(2026, 10, 29, 7, 0, tzinfo=ET), 300,
+                                       gemini=_Thinks(clock, 20.0))
+    first, second = sec.of(ciks["AAPL"])[:2]
+    assert first == 0 and second <= 60 + 20 + 1, sec.of(ciks["AAPL"])
+    assert found_at["AAPL"] == second + 20
+    assert set(found_at) == set(ciks), "every release is read in the rounds after"
+
+
+@pytest.mark.asyncio
+async def test_a_round_that_runs_past_its_window_reads_on_to_its_end(watcher, monkeypatch, clock):
+    """The morning window closes at 09:35 ET. A model call that ran the 09:34:30 round past it
+    leaves the tickers read above on their 15 min, so none is due again and the round reads on:
+    given way there, INTC would lose the read it was owed in the window, and the next for 15
+    min."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 3)
+    habits = {_CIKS[symbol]: _released_at(*_MORNING_HABIT) for symbol in ("AAPL", "MSFT", "INTC")}
+    sec = _OnTheClock(clock, filings=habits,
+                      landing={_CIKS["MSFT"]: (60.0, _a_release_at(_CIKS["MSFT"], (9, 34, 20)))})
+    await _as_the_loop_runs(watcher, clock, sec, ["AAPL", "MSFT", "INTC"], _CIKS,
+                            datetime(2026, 10, 29, 9, 33, 30, tzinfo=ET), 150,
+                            gemini=_Thinks(clock, 60.0))
+    assert sec.of(_CIKS["INTC"]) == [0, 120], sec.read_at
+
+
+@pytest.mark.asyncio
+async def test_a_round_of_reads_alone_runs_to_its_end_however_long_it_takes(watcher, monkeypatch,
+                                                                           clock):
+    """Only a model call gives way. Reads alone can fill the minute: 50 tickers a second apart, or
+    SEC answering slowly. A round given way there would stop at the same ticker every time, and
+    those below it would never be read."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 3)
+    sec = _OnTheClock(clock, filings={}, takes=30.0)
+    await _as_the_loop_runs(watcher, clock, sec, ["AAPL", "MSFT", "INTC"], _CIKS,
+                            datetime(2026, 10, 29, 16, 3, tzinfo=ET), 270)
+    assert [sec.of(_CIKS[symbol]) for symbol in ("AAPL", "MSFT", "INTC")] == [
+        [0, 91, 182], [30, 121, 212], [60, 151, 242]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("every", [15, 19, 28, 30, 55, 59, 60],
+                         ids=["every_15s", "every_19s", "every_28s", "every_30s", "every_55s",
+                              "every_59s", "every_minute"])
+async def test_no_minute_reads_past_the_cap_however_often_the_loop_runs(watcher, monkeypatch,
+                                                                       clock, every):
+    """The loop's interval may be set down to 15 s. A company waiting out its 15 min in a window
+    it does not release in holds a slot only in the round its read is due, so rounds closer than
+    a minute apart could each read a different batch: the cap would count reads a round, not the
+    reads SEC sees in a minute, and the day's ceiling would not hold. So the reads of the rounds
+    that started in the minute before come off a round's slots. Not by the clock alone, which
+    needs a few seconds' slack (a round's start can fall short of its tick): with that slack, a
+    round 55-59 s after another, at a loop of 55-59 s or of 19, 28 or 29 s on its multiples, read
+    a second batch in one minute. A loop whose rounds fall on the minute reads the same minutes as
+    one a minute apart."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", every)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    ciks = {**{f"CLOSE{n}": f"{n:010d}" for n in range(1, 7)}, "AAPL": _CIKS["AAPL"]}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*(_MORNING_HABIT if symbol == "AAPL"
+                                                          else _CLOSE_HABIT))
+                                      for symbol, cik in ciks.items()})
+    rounds: List[Tuple[float, int]] = []
+    await _as_the_loop_runs(watcher, clock, sec, list(ciks), ciks,
+                            datetime(2026, 10, 29, 6, 0, tzinfo=ET), 3600, every=every,
+                            rounds=rounds)
+    assert _most_in_a_minute(rounds) <= 2, rounds
+    starts = sorted({at for _, at in sec.read_at})
+    for at in starts:
+        assert sum(at <= read < at + 60 for _, read in sec.read_at) <= 2, (at, sec.read_at)
+    if 60 % every == 0:
+        aapl = sorted({int(at // 60) for at in sec.of(ciks["AAPL"])})
+        assert aapl == [*range(3, 15), *range(18, 30), *range(33, 45), *range(48, 60)], aapl
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("every", [15, 30], ids=["every_15s", "every_30s"])
+async def test_a_round_a_long_one_left_55_s_on_shares_its_minute_on_a_loop_under_a_minute(
+        watcher, monkeypatch, clock, every):
+    """A loop under a minute starts its next round a second after a long one. A round that ran
+    55 s, on one model call, left the next to start 56 s after it began: inside its minute, though
+    past the clock's slack, so read by the clock alone it read a second batch in that minute. By
+    the loop's own rounds it is still the same minute, and it reads nothing until that is over."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", every)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    ciks = {f"W{n}": f"{n:010d}" for n in range(1, 5)}
+    sec = _OnTheClock(clock, filings={},
+                      landing={ciks["W1"]: (0.0, _a_release_at(ciks["W1"], (16, 5)))})
+    rounds: List[Tuple[float, int]] = []
+    found_at = await _as_the_loop_runs(watcher, clock, sec, list(ciks), ciks,
+                                       datetime(2026, 10, 29, 16, 6, tzinfo=ET), 240,
+                                       gemini=_Thinks(clock, 55.0), every=every, rounds=rounds)
+    assert found_at == {"W1": 55}
+    assert rounds[:2] == [(0, 2), (56, 0)], rounds
+    assert _most_in_a_minute(rounds) <= 2, rounds
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("every, thinks, expected", [
+    (15, 32.0, [(0, 2), (33, 0), (48, 0), (63, 2)]),
+    (28, 31.5, [(0, 2), (32.5, 0), (60.5, 2)]),
+], ids=["every_15s", "every_28s"])
+async def test_a_long_round_counts_as_long_as_it_ran_toward_its_minute(
+        watcher, monkeypatch, clock, every, thinks, expected):
+    """On a 15 s loop a round that ran 32 s starts the next a second after it, and the next two
+    15 s later: the fourth round starts 63 s after the first, a minute on, though three rounds
+    of 15 s would not make one. It has the whole cap; counted as 15 s, the long round would have
+    held it back another round. On a 28 s loop, a round of 31.5 s and the loop's second of rest
+    put the third round 60.5 s on: a minute, though the round alone and 28 s are not."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", every)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    ciks = {f"W{n}": f"{n:010d}" for n in range(1, 5)}
+    sec = _OnTheClock(clock, filings={},
+                      landing={ciks["W1"]: (0.0, _a_release_at(ciks["W1"], (16, 5)))})
+    rounds: List[Tuple[float, int]] = []
+    await _as_the_loop_runs(watcher, clock, sec, list(ciks), ciks,
+                            datetime(2026, 10, 29, 16, 6, tzinfo=ET), expected[-1][0] + 1,
+                            gemini=_Thinks(clock, thinks), every=every, rounds=rounds)
+    assert rounds == expected, rounds
+
+
+def test_the_watchers_rest_between_rounds_is_the_loops():
+    """The loop's clock and the give-way count on the loop resting this long after a tick."""
+    assert efs._LOOP_REST_SECONDS == els._MIN_TICK_GAP_SECONDS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after, reads", [(60 + efs._DUE_SLACK_SECONDS - 0.001, 1),
+                                          (60 + efs._DUE_SLACK_SECONDS, 2)],
+                         ids=["inside_the_slack", "past_it"])
+async def test_a_round_after_the_loop_had_nothing_to_read_for_a_minute_has_its_whole_cap(
+        watcher, monkeypatch, clock, after, reads):
+    """A tick with no report pending starts no round here, so fewer rounds than a minute holds can
+    come between two that are a minute apart. A round a minute and the slack after the last has
+    the whole cap however few came between; one inside that, with fewer, shares the minute."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", 30)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    sec = _SEC()
+    started = clock.at
+    for at in (0.0, after):
+        clock.at = started + at
+        await watcher.run_once(_AT_16, ["AAPL"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep)
+    assert _subs(sec) == [f"sub:{_CIKS['AAPL']}"] * reads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("every", [90, 120, 180], ids=["every_90s", "every_120s", "every_180s"])
+async def test_a_round_on_a_loop_slower_than_a_minute_reads_on_until_its_next_tick(
+        watcher, monkeypatch, clock, every):
+    """Five less-watched companies filed at 16:05 and AAPL, the most watched, has not yet. AAPL's
+    minute comes 55 s into the 16:06 round, but the loop starts the next round no sooner than its
+    own tick: a round that gave way at AAPL's minute left the watcher idle until then, the
+    releases below it unread. So the round reads on until it has run into its next tick: every
+    release is read in the first round, and AAPL again at the tick, or a second after a round
+    that ran past it."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", every)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 6)
+    ciks = {"AAPL": _CIKS["AAPL"], **{f"LOW{n}": f"{n:010d}" for n in range(1, 6)}}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_CLOSE_HABIT) for cik in ciks.values()},
+                      landing={cik: (0.0, _a_release_at(cik, (16, 5)))
+                               for symbol, cik in ciks.items() if symbol != "AAPL"})
+    found_at = await _as_the_loop_runs(watcher, clock, sec, list(ciks), ciks,
+                                       datetime(2026, 10, 29, 16, 6, tzinfo=ET),
+                                       max(every, 101) + 1, gemini=_Thinks(clock, 20.0),
+                                       every=every)
+    assert found_at == {f"LOW{n}": 20 * n for n in range(1, 6)}
+    assert sec.of(ciks["AAPL"]) == [0, max(every, 101)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("every", [90, 120], ids=["every_90s", "every_120s"])
+async def test_a_round_on_a_slower_loop_gives_way_once_it_has_run_into_its_next_tick(
+        watcher, monkeypatch, clock, every):
+    """Past its next tick the round gives way as one on a minute does: the next round starts a
+    second later, at the top."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", every)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 9)
+    ciks = {"AAPL": _CIKS["AAPL"], **{f"LOW{n}": f"{n:010d}" for n in range(1, 9)}}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_CLOSE_HABIT) for cik in ciks.values()},
+                      landing={cik: (0.0, _a_release_at(cik, (16, 5)))
+                               for symbol, cik in ciks.items() if symbol != "AAPL"})
+    await _as_the_loop_runs(watcher, clock, sec, list(ciks), ciks,
+                            datetime(2026, 10, 29, 16, 6, tzinfo=ET), every + 30,
+                            gemini=_Thinks(clock, 20.0), every=every)
+    gave_way_at = 20 * -(-(every - efs._DUE_SLACK_SECONDS) // 20)
+    assert sec.of(ciks["AAPL"]) == [0, gave_way_at + 1], sec.read_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start, thinks, preamble", [
+    ((9, 33, 2), 28.0, 0.0),
+    ((9, 32, 59, 500_000), 29.9, 0.0),
+    ((9, 32, 58), 29.8, 2.0),
+    ((9, 32, 54, 800_000), 29.9, 4.5),
+], ids=["two_seconds_past_the_minute", "the_next_a_second_after_the_tick",
+        "the_ticks_own_work_before_the_round", "that_work_just_short_of_the_slack"])
+async def test_a_round_reads_on_where_the_next_would_start_after_its_window_closed(
+        watcher, monkeypatch, clock, start, thinks, preamble):
+    """The morning window closes at 09:35 ET. MSFT and NVDA filed at 09:33:30, INTC at 09:33:40,
+    after their reads in the round before. The 09:34:02 round's second model call ends at
+    09:34:58, when AAPL's minute has come. Given way there, the next round starts at 09:35:02,
+    with every one of them back on its 15 min: AAPL gained nothing, and INTC lost its read in the
+    window, its figures waiting until 09:48. So the round reads on, and INTC's figures are in at
+    09:35:26. The same wherever the next round would start past 09:35: a second after a round
+    that ran past its tick, or later by the tick's own work before the round (here 2 s, and 4.5 s,
+    just short of the slack), which a round cannot see from inside."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 4)
+    symbols = ["AAPL", "MSFT", "NVDA", "INTC"]
+    ciks = {symbol: f"{n:010d}" for n, symbol in enumerate(symbols, start=1)}
+    began = datetime(2026, 10, 29, *start, tzinfo=ET)
+    filed = {"MSFT": (9, 33, 30), "NVDA": (9, 33, 30), "INTC": (9, 33, 40)}
+    landing = {ciks[symbol]: ((datetime(2026, 10, 29, *at, tzinfo=ET) - began).total_seconds(),
+                              _a_release_at(ciks[symbol], at)) for symbol, at in filed.items()}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_MORNING_HABIT) for cik in ciks.values()},
+                      landing=landing)
+    found_at = await _as_the_loop_runs(watcher, clock, sec, symbols, ciks, began, 300,
+                                       gemini=_Thinks(clock, thinks), preamble=preamble)
+    second = 60 + preamble + 2 * thinks
+    assert sec.of(ciks["INTC"]) == pytest.approx([preamble, second]), sec.read_at
+    assert found_at == pytest.approx({"MSFT": second - thinks, "NVDA": second,
+                                      "INTC": second + thinks})
+
+
+@pytest.mark.asyncio
+async def test_a_round_never_leaves_a_ticker_to_a_round_it_would_not_be_due_in(
+        watcher, monkeypatch, clock):
+    """Whatever the windows' hours. Here the close window opens as the morning one closes, at
+    09:35, so a ticker whose record does not say which it uses is due in the round after 09:35
+    while INTC, of the morning, is not: the round that would hand INTC to that round reads it
+    first."""
+    monkeypatch.setattr(efs, "RELEASE_WINDOW_HOURS",
+                        {"morning": ((6, 0), (9, 35)), "close": ((9, 35), (18, 30))})
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 4)
+    symbols = ["SAYS", "MSFT", "NVDA", "INTC"]
+    ciks = {symbol: f"{n:010d}" for n, symbol in enumerate(symbols, start=1)}
+    filed = {"MSFT": (28.0, (9, 33, 30)), "NVDA": (28.0, (9, 33, 30)), "INTC": (38.0, (9, 33, 40))}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_MORNING_HABIT)
+                                      for symbol, cik in ciks.items() if symbol != "SAYS"},
+                      landing={ciks[symbol]: (lands, _a_release_at(ciks[symbol], at))
+                               for symbol, (lands, at) in filed.items()})
+    found_at = await _as_the_loop_runs(watcher, clock, sec, symbols, ciks,
+                                       datetime(2026, 10, 29, 9, 33, 2, tzinfo=ET), 150,
+                                       gemini=_Thinks(clock, 28.0))
+    assert watcher.release_windows("SAYS") == _BOTH_WINDOWS
+    assert found_at == {"MSFT": 88, "NVDA": 116, "INTC": 144}
+    assert sec.of(ciks["SAYS"]) == [0, 60, 145], sec.read_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start, filed, habit", [
+    ((9, 31, 2), {"MSFT": (9, 32, 30), "INTC": (9, 31, 0)}, _MORNING_HABIT),
+    ((18, 26, 2), {"MSFT": (18, 27, 30), "INTC": (18, 26, 0)}, _CLOSE_HABIT),
+], ids=["morning_window", "close_window"])
+async def test_a_retry_a_give_way_leaves_keeps_its_stamp_when_the_hold_would_cost_its_window(
+        watcher, monkeypatch, clock, start, filed, habit):
+    """Every model call takes 55 s, and the first two fail. INTC's read fails in the 09:31:02
+    round, its retry due at 09:33:02. In that round MSFT's fails at 09:33:57, when AAPL's minute
+    has come, so the round gives way and leaves INTC. Held for the minute after that round like
+    the other retries, INTC came due only after the window's 09:35 close, and from then on it was
+    on its 15 min: its figures waited until 09:50:52. So it keeps its own stamp, the 09:34:02
+    round reads it, and its figures are in at 09:34:57. The same at the close window's end."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 3)
+    symbols = ["AAPL", "MSFT", "INTC"]
+    ciks = {symbol: f"{n:010d}" for n, symbol in enumerate(symbols, start=1)}
+    began = datetime(2026, 10, 29, *start, tzinfo=ET)
+    landing = {ciks[symbol]: ((datetime(2026, 10, 29, *at, tzinfo=ET) - began).total_seconds(),
+                              _a_release_at(ciks[symbol], at)) for symbol, at in filed.items()}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*habit) for cik in ciks.values()},
+                      landing=landing)
+    gemini = _Thinks(clock, 55.0)
+    gemini.fail = 2
+    found_at = await _as_the_loop_runs(watcher, clock, sec, symbols, ciks, began, 300,
+                                       gemini=gemini)
+    assert sec.of(ciks["INTC"])[:2] == [0, 180], sec.read_at
+    assert found_at["INTC"] == 235
+
+
+class _ThinksBySymbol(_Gemini):
+    """Answers each ticker's calls in turn from its `plan`, (seconds on the stand-in clock, whether
+    it answers), and any call past it after `seconds`."""
+
+    def __init__(self, clock: _Clock, plan: Dict[str, List[Tuple[float, bool]]], seconds: float):
+        super().__init__()
+        self.clock, self.seconds = clock, seconds
+        self.plan = {symbol: list(steps) for symbol, steps in plan.items()}
+
+    async def generate_json(self, prompt, **kwargs):
+        symbol = re.search(r"Company ticker: ([A-Z0-9.]+)\.", prompt).group(1)
+        steps = self.plan.get(symbol) or []
+        seconds, answers = steps.pop(0) if steps else (self.seconds, True)
+        self.clock.at += seconds
+        if not answers:
+            raise RuntimeError("gemini 503")
+        return await super().generate_json(prompt, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_retry_a_give_way_leaves_holds_in_its_place_while_its_window_lasts(
+        watcher, monkeypatch, clock):
+    """Places AAPL, MSFT, INTC1, INTC2, all morning companies. INTC1 and INTC2 filed at 09:30 and
+    their first reads failed at once. MSFT's first read, in the 09:32:40 round, failed 55 s in,
+    when AAPL (filed at 09:32:45) was due again, so the round gave way and left INTC2's retry.
+    Held for the minute after that round, INTC2 is due in the window's last round, 09:34:40,
+    behind MSFT, whose own retry comes due there too. Kept out of the hold, it was read in the
+    09:33:40 round behind AAPL and ran it past 09:35, and MSFT's figures waited for its 15 min
+    read, past 09:49, against 09:35:35."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 4)
+    filed = {"AAPL": (9, 32, 45), "MSFT": (9, 32, 0), "INTC1": (9, 30, 0), "INTC2": (9, 30, 0)}
+    ciks = {symbol: f"{n:010d}" for n, symbol in enumerate(filed, start=1)}
+    began = datetime(2026, 10, 29, 9, 29, 40, tzinfo=ET)
+    landing = {ciks[symbol]: ((datetime(2026, 10, 29, *at, tzinfo=ET) - began).total_seconds(),
+                              _a_release_at(ciks[symbol], at)) for symbol, at in filed.items()}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_MORNING_HABIT) for cik in ciks.values()},
+                      landing=landing)
+    gemini = _ThinksBySymbol(clock, {"INTC1": [(1.0, False)], "INTC2": [(1.0, False)],
+                                     "MSFT": [(55.0, False)]}, 55.0)
+    found_at = await _as_the_loop_runs(watcher, clock, sec, list(filed), ciks, began, 600,
+                                       gemini=gemini)
+    assert found_at == {"AAPL": 295, "MSFT": 355, "INTC1": 175, "INTC2": 410}, sec.read_at
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start, intc_reads, intc_found", [
+    ((8, 0, 0), [0, 177], 178),
+    ((9, 32, 10), [0, 117], 118),
+], ids=["window_lasts", "window_closes"])
+async def test_on_a_half_minute_loop_a_left_retry_holds_unless_its_window_closes_first(
+        watcher, monkeypatch, clock, start, intc_reads, intc_found):
+    """The loop runs every 30 s. INTC's first read fails at once in the first round; in the round
+    a minute on, MSFT's call fails 55 s in, when AAPL is due again, so the round gives way and
+    leaves INTC's retry. Held for the minute after that round, it is due from 55 s past the
+    round's end: the first round on the loop's cadence at or after that starts at 176 s, inside
+    the window at 08:02:56, so it holds like any retry and is read there behind MSFT. The hold's
+    judgement looked only one loop past the next round, which at 30 s is always short of that
+    minute, so every left retry kept its own stamp, and INTC was read in the 116 s round. Near the
+    window's end the 176 s round falls past 09:35, so there it keeps its own stamp, and the next
+    round reads it."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", 30)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 4)
+    symbols = ["AAPL", "MSFT", "INTC"]
+    ciks = {symbol: f"{n:010d}" for n, symbol in enumerate(symbols, start=1)}
+    began = datetime(2026, 10, 29, *start, tzinfo=ET)
+    landing = {}
+    for symbol, after in (("AAPL", 65), ("MSFT", 50), ("INTC", -60)):
+        at = began + timedelta(seconds=after)
+        landing[ciks[symbol]] = (float(after),
+                                 _a_release_at(ciks[symbol], (at.hour, at.minute, at.second)))
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_MORNING_HABIT) for cik in ciks.values()},
+                      landing=landing)
+    gemini = _ThinksBySymbol(clock, {"INTC": [(1.0, False)], "MSFT": [(55.0, False)]}, 1.0)
+    found_at = await _as_the_loop_runs(watcher, clock, sec, symbols, ciks, began, 200,
+                                       gemini=gemini, every=30.0)
+    assert sec.of(ciks["INTC"])[:2] == intc_reads, sec.read_at
+    assert found_at["INTC"] == intc_found, found_at
+
+
+@pytest.mark.asyncio
+async def test_a_retry_no_give_way_left_holds_even_when_its_window_closes_first(
+        watcher, monkeypatch, clock):
+    """Pinned so it is a choice: only a retry a give-way leaves keeps its own stamp when the hold
+    would cost its window. OWN's read fails at once in the 09:33:02 round, and MSFT's 55 s in, when
+    AAPL is due again: the round gives way and leaves LEFT, whose retry from the first round keeps
+    its own stamp and is read in the 09:34:02 round. OWN was read, not left: it is held for the
+    minute after the round, so it loses the window's last read and waits for its 15 min one. A
+    retry the give-way did not promise to the next round keeps the minute's pause the hold is for:
+    kept out of it as well, on random window-end days with a fifth of the calls failing, figures
+    moved both ways, 7 more than 10 min later against 22 earlier, and with two in five failing
+    62 later against 117 earlier, where the give-way's own exemption moved 3 and 3."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 4)
+    symbols = ["AAPL", "OWN", "MSFT", "LEFT"]
+    ciks = {symbol: f"{n:010d}" for n, symbol in enumerate(symbols, start=1)}
+    began = datetime(2026, 10, 29, 9, 32, 2, tzinfo=ET)
+    landing = {}
+    for symbol, after in (("AAPL", 65), ("OWN", 50), ("MSFT", 40), ("LEFT", -60)):
+        at = began + timedelta(seconds=after)
+        landing[ciks[symbol]] = (float(after),
+                                 _a_release_at(ciks[symbol], (at.hour, at.minute, at.second)))
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_MORNING_HABIT) for cik in ciks.values()},
+                      landing=landing)
+    gemini = _ThinksBySymbol(clock, {"LEFT": [(1.0, False)], "OWN": [(1.0, False)],
+                                     "MSFT": [(55.0, False)]}, 1.0)
+    # The first two rounds: the 09:33:02 one ends at 116 s, with LEFT's own stamp kept (its failed
+    # read's end, 1 s) and OWN held at the round's end, not its failed read's (61 s).
+    await _as_the_loop_runs(watcher, clock, sec, symbols, ciks, began, 61, gemini=gemini)
+    assert watcher._watch[("LEFT", REPORT)].checked_mono == sec.start + 1
+    assert watcher._watch[("OWN", REPORT)].checked_mono == sec.start + 116
+    found_at = await _as_the_loop_runs(watcher, clock, sec, symbols, ciks, began, 1100,
+                                       gemini=gemini)
+    assert sec.of(ciks["LEFT"])[:2] == [0, 121], sec.read_at
+    assert sec.of(ciks["OWN"])[:3] == [0, 60, 1020], sec.read_at
+    assert found_at["OWN"] == 1021, found_at
+
+
+@pytest.mark.asyncio
+async def test_a_busy_round_that_spent_an_attempt_gives_way_all_the_same(watcher, monkeypatch,
+                                                                         clock):
+    """The busy round above, its first model call failing: a round that spent an attempt gives
+    way like any other, so AAPL is still read again within its minute and one model call, and the
+    failed release in a round after."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 6)
+    ciks = {"AAPL": _CIKS["AAPL"], **{f"LOW{n}": f"{n:010d}" for n in range(1, 6)}}
+    landing = {cik: (20.0, _a_release_at(cik, (7, 0, 20))) if symbol == "AAPL"
+               else (0.0, _a_release_at(cik, (7, 0))) for symbol, cik in ciks.items()}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_MORNING_HABIT) for cik in ciks.values()},
+                      landing=landing)
+    gemini = _Thinks(clock, 20.0)
+    gemini.fail = 1
+    found_at = await _as_the_loop_runs(watcher, clock, sec, list(ciks), ciks,
+                                       datetime(2026, 10, 29, 7, 0, tzinfo=ET), 300,
+                                       gemini=gemini)
+    first, second = sec.of(ciks["AAPL"])[:2]
+    assert first == 0 and second <= 60 + 20 + 1, sec.of(ciks["AAPL"])
+    assert found_at["AAPL"] == second + 20
+    assert set(found_at) == set(ciks), "every release is read in the rounds after"
+
+
+@pytest.mark.asyncio
+async def test_a_round_in_edgars_last_minute_reads_on_to_the_tickers_it_still_holds(
+        watcher, monkeypatch, clock):
+    """In EDGAR's last minute every company still waiting is read, the close window's companies
+    after an evening on their 15 min. T2, T3 and T4 filed at 21:50. The 21:59:02 round's second
+    model call ends at 21:59:58, when T1's minute has come. Given way there, the next round starts
+    at 22:00:02, after EDGAR closed, and reads nothing: T4 and T5 lost their last read of the
+    day, and T4's release waited for FMP. So the round reads on."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 5)
+    symbols = [f"T{n}" for n in range(1, 6)]
+    ciks = {symbol: f"{n:010d}" for n, symbol in enumerate(symbols, start=1)}
+    sec = _OnTheClock(clock, filings={cik: _released_at(*_CLOSE_HABIT) for cik in ciks.values()},
+                      landing={ciks[symbol]: (238.0, _a_release_at(ciks[symbol], (21, 50)))
+                               for symbol in ("T2", "T3", "T4")})
+    found_at = await _as_the_loop_runs(watcher, clock, sec, symbols, ciks,
+                                       datetime(2026, 10, 29, 21, 46, 2, tzinfo=ET), 900,
+                                       gemini=_Thinks(clock, 28.0))
+    assert found_at == {"T2": 808, "T3": 836, "T4": 864}
+    assert [sec.of(ciks[symbol])[-1] for symbol in symbols] == [780, 780, 808, 836, 864]
+
+
+# ── EDGAR's last minute ──────────────────────────────────────────────────────
+
+_EDGARS_LAST_MINUTE = datetime(2026, 10, 29, 21, 59, tzinfo=ET)
+
+
+def _learned(watcher: efs.EarningsFilingWatcher, clock: _Clock, symbol: str,
+             windows: frozenset) -> None:
+    """As if `symbol`'s first read of the report day had learned `windows` from its record."""
+    watcher._habits[symbol] = efs._Learned(windows, REPORT, clock.at + 86_400)
+
+
+@pytest.mark.parametrize("windows", [_MORNING_ONLY, _CLOSE_ONLY, _BOTH_WINDOWS],
+                         ids=["morning", "close", "both"])
+@pytest.mark.parametrize("read_at", [(21, 44), (21, 46), (21, 49), (21, 50), (21, 58)],
+                         ids=["2144", "2146", "2149", "2150", "2158"])
+def test_every_company_still_waiting_is_read_in_edgars_last_minute_whenever_it_last_was(
+        watcher, clock, windows, read_at):
+    """A restart, SEC's park or a slot freed later in the day moves the minutes a company's slow
+    reads fall on, so its last one before 22:00 ET can be anywhere in the last quarter hour.
+    Whatever it was, the company is read once more in EDGAR's last minute, and once only."""
+    key = ("INTC", REPORT)
+    _learned(watcher, clock, "INTC", windows)
+    since = (_EDGARS_LAST_MINUTE - datetime(2026, 10, 29, *read_at, tzinfo=ET)).total_seconds()
+    watcher._watch[key] = efs._Watch(checked_mono=clock.at - since)
+    assert watcher._due(key, _EDGARS_LAST_MINUTE, clock.at)
+    watcher._watch[key].checked_mono = clock.at
+    assert not watcher._due(key, _EDGARS_LAST_MINUTE + timedelta(seconds=30), clock.at + 30)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_whose_rung_is_served_gets_its_attempt_in_edgars_last_minute(
+        watcher, clock):
+    """On the 15 min cadence, a filing whose read failed at 21:53 would go again at 22:08, when
+    the watch reads nothing. Its 5 min rung served, EDGAR's last minute gives it that attempt."""
+    key = ("INTC", REPORT)
+    _learned(watcher, clock, "INTC", _MORNING_ONLY)
+    watcher._watch[key] = efs._Watch(checked_mono=clock.at - 360, retry_gap=300.0,
+                                     attempts={ACC: 3})
+    sec, gem = _SEC(filings={_CIKS["INTC"]: _released_at(*_MORNING_HABIT) + [_8K]}), _Gemini()
+    found = await watcher.run_once(_EDGARS_LAST_MINUTE.astimezone(timezone.utc), ["INTC"],
+                                   REPORT, sec=sec, gemini=gem, cik_map=_CIKS, sleep=_no_sleep)
+    assert found["INTC"].revenue == 17.1e9 and gem.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("held", ["a_rung_not_yet_served", "a_foreign_filers_rest", "secs_park"])
+async def test_edgars_last_minute_never_cuts_a_rest_or_a_park_short(watcher, clock, held):
+    """The last minute is a cadence, never a cut to a rest: a filing whose read failed two minutes
+    before still waits out its 5 min rung, a foreign filer its half hour, and SEC's park is SEC's
+    own."""
+    symbol, ciks = ("ASML", _FOREIGN_CIKS) if held == "a_foreign_filers_rest" else ("INTC", _CIKS)
+    key = (symbol, REPORT)
+    if held == "a_rung_not_yet_served":
+        watcher._watch[key] = efs._Watch(checked_mono=clock.at - 120, retry_gap=300.0,
+                                         attempts={ACC: 3})
+    elif held == "a_foreign_filers_rest":
+        watcher._watch[key] = efs._Watch(checked_mono=clock.at - 600, foreign=True)
+    else:
+        watcher._watch[key] = efs._Watch(checked_mono=clock.at - 600)
+        watcher._parked_until = clock.at + 120
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K], _ASML_CIK: [_6K]})
+    found = await watcher.run_once(_EDGARS_LAST_MINUTE.astimezone(timezone.utc), [symbol],
+                                   REPORT, sec=sec, gemini=_Gemini(), cik_map=ciks,
+                                   sleep=_no_sleep)
+    assert (found, sec.calls) == ({}, [])
+
+
 # ── what a read settles ──────────────────────────────────────────────────────
 
 
@@ -8141,7 +13100,8 @@ _BLOCKED = {"text": "", "finish_reason": "SAFETY"}
 
 
 def _morning_filing(**change) -> dict:
-    return dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T08:00:00.000Z",
+    """An Item 2.02 8-K accepted at 08:00 ET on the report day."""
+    return dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T12:00:00.000Z",
                 **change)
 
 
@@ -8304,6 +13264,73 @@ async def test_a_model_that_cannot_be_reached_at_all_spends_an_attempt(watcher, 
 
 
 @pytest.mark.asyncio
+async def test_a_model_that_never_answers_holds_the_round_no_longer_than_its_deadline(
+        watcher, monkeypatch, caplog):
+    """The round is serial, so every company behind a read waits for its model call. One call is
+    cut at its own timeout, but its retries can stretch the read for minutes (two 5xx answers that
+    each take a minute, and the backoffs between them): a read gets its own timeout and the
+    first backoff's room, and past that it is a failed read, rested on the ladder like any other.
+    The companies behind it are read in the same round."""
+    monkeypatch.setattr(settings, "GEMINI_REQUEST_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(efs, "_MODEL_DEADLINE_MARGIN_SECONDS", 0.05)
+    assert efs._model_deadline_seconds() == pytest.approx(0.1)
+
+    class _NeverAnswers(_Gemini):
+        async def generate_json(self, prompt, **kwargs):
+            self.calls += 1
+            await asyncio.Event().wait()
+
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _NeverAnswers()
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        found = await asyncio.wait_for(
+            watcher.run_once(_AT_16, ["INTC", "AAPL"], REPORT, sec=sec, gemini=gem,
+                             cik_map=_CIKS, sleep=_no_sleep), 5.0)
+    assert found == {} and gem.calls == 1
+    assert watcher._watch[("INTC", REPORT)].attempts == {ACC: 1}
+    assert _subs(sec) == [f"sub:{_CIKS['INTC']}", f"sub:{_CIKS['AAPL']}"]
+    (line,) = [r.getMessage() for r in caplog.records if "result=gemini_failed" in r.getMessage()]
+    assert "sym=INTC" in line and f"day={REPORT.isoformat()}" in line and f"acc={ACC}" in line
+    assert "deadline" in line
+
+
+def test_a_reads_deadline_is_one_whole_model_call_and_room_for_one_quick_failure(monkeypatch):
+    """By default 90 s for a call, and 15 s for a call that failed at once and the 5 s backoff
+    after it, so a retry behind a quick failure still has its whole 90 s. Never less than that
+    room, however the call's own timeout is set."""
+    assert efs._MODEL_DEADLINE_MARGIN_SECONDS == 15.0
+    assert efs._model_deadline_seconds() == float(settings.GEMINI_REQUEST_TIMEOUT_SECONDS) + 15.0
+    monkeypatch.setattr(settings, "GEMINI_REQUEST_TIMEOUT_SECONDS", -50)
+    assert efs._model_deadline_seconds() == 15.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error, named", [
+    (gemini_integration.GeminiTimeoutError("generate_json exceeded its 90s per-request ceiling"),
+     "GeminiTimeoutError: generate_json exceeded its 90s per-request ceiling"),
+    (TimeoutError("the SDK's own read timed out"), "TimeoutError: the SDK's own read timed out"),
+    (asyncio.TimeoutError(), "TimeoutError: "),
+], ids=["the_clients_own_timeout", "a_timeout_from_inside", "a_bare_timeout_from_inside"])
+async def test_a_timeout_the_model_raises_is_named_as_itself_not_as_the_reads_deadline(
+        watcher, caplog, error, named):
+    """Every one of these is a TimeoutError, as the read's own deadline is. Told apart by type, the
+    line would say the read's deadline ran out when the call ran into its own timeout, and send
+    whoever reads it to the wrong clock."""
+    class _Raises(_Gemini):
+        async def generate_json(self, prompt, **kwargs):
+            self.calls += 1
+            raise error
+
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    with caplog.at_level(logging.WARNING, logger=efs.__name__):
+        found = await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=_Raises(),
+                                       cik_map=_CIKS, sleep=_no_sleep)
+    assert found == {} and watcher._watch[("INTC", REPORT)].attempts == {ACC: 1}
+    (line,) = [r.getMessage() for r in caplog.records if "result=gemini_failed" in r.getMessage()]
+    assert line.endswith(f"result=gemini_failed ({named})") and "deadline" not in line
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sec_for,gem_for", [
     (lambda rows: _ScriptedSEC("-index.htm", _INDEX_NO_EXHIBIT, _INDEX_NO_EXHIBIT, filings=rows),
      _Gemini),
@@ -8436,7 +13463,7 @@ async def test_a_morning_202_with_no_exhibit_does_not_end_the_watch(watcher):
 
 @pytest.mark.asyncio
 async def test_the_release_behind_a_newer_202_is_still_read(watcher):
-    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T16:04:00.000Z")
+    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T20:04:00.000Z")
     sec = _SEC(filings={"0000050863": [newer, _8K]})
     gem = _Scripted(_NOT_RESULTS)
     found = await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
@@ -8449,7 +13476,7 @@ async def test_the_release_behind_a_newer_202_is_still_read(watcher):
 async def test_a_newest_filing_on_a_retry_holds_the_older_one_until_its_rest_is_over(watcher):
     """A read that just failed says SEC or the model is failing. Reading on would buy two more
     SEC calls and a model call against the same failure."""
-    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T16:04:00.000Z")
+    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T20:04:00.000Z")
     sec = _SEC(filings={"0000050863": [newer, _8K]})
     gem = _Scripted(_BLOCKED)
     assert await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
@@ -8462,7 +13489,7 @@ async def test_a_newest_filing_on_a_retry_holds_the_older_one_until_its_rest_is_
 async def test_a_failed_read_behind_a_skipped_filing_keeps_its_own_count(watcher, clock):
     """And on every round after it: a newest filing that is not the release must not hide the one
     behind it, the same way a walk that stopped at the first filing would."""
-    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T16:04:00.000Z")
+    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T20:04:00.000Z")
     sec = _SEC(filings={"0000050863": [newer, _8K]})
     gem = _Scripted(_NOT_RESULTS, _BLOCKED)
     assert await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
@@ -8481,7 +13508,7 @@ async def test_a_failed_read_behind_a_skipped_filing_keeps_its_own_count(watcher
 @pytest.mark.asyncio
 async def test_a_filing_out_of_attempts_gives_way_to_the_older_release_in_that_round(watcher,
                                                                                     clock):
-    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T16:04:00.000Z")
+    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T20:04:00.000Z")
     sec = _PerFiling({_MORNING: None}, filings={"0000050863": [newer, _8K]})
     rounds: List[Dict[str, efs.FilingFigures]] = []
     for _ in range(_reads_allowed()):
@@ -8517,24 +13544,48 @@ async def test_a_morning_filings_failures_leave_the_evening_release_its_own_ladd
     assert _reads_of(sec, f"{_MORNING}-index.htm") == _reads_allowed(), "never read again"
 
 
+#: When each of a failing filing's six reads starts, in seconds from its first: in its company's
+#: release window, and outside the company's windows, where no rest is shorter than the 15 min
+#: cadence. WHAT A READ SETTLES in the module docstring states both spans
+#: (`test_what_a_read_settles_states_how_long_a_failing_filing_is_read_for`).
+_READS_IN_A_WINDOW = [0, 60, 180, 480, 1080, 1980]
+_READS_OUTSIDE_ONE = [0, 900, 1800, 2700, 3600, 4500]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("at,reads", [
-    (_AT_16, [0, 60, 180, 480, 1080, 1980]),
-    (_AT_NOON, [0, 300, 600, 900, 1500, 2400]),
+    (_AT_16, _READS_IN_A_WINDOW),
+    (_AT_NOON, _READS_OUTSIDE_ONE),
 ], ids=["in_a_release_window", "outside_one"])
 @pytest.mark.parametrize("error", [RuntimeError("gemini 503"), GeminiQuotaError("quota circuit")],
                          ids=["outage", "quota_breaker"])
 async def test_a_failing_model_rests_longer_after_each_read(watcher, clock, at, reads, error):
-    """Six reads over about 33 minutes, never faster than the symbol's own cadence. The quota
-    breaker sits on the same ladder: every rest outlasts its 30 s cooldown."""
+    """Six reads over about 33 minutes in a release window, never faster than the symbol's own
+    cadence: outside the company's windows that is every 15 minutes. The quota breaker sits on the
+    same ladder: every rest outlasts its 30 s cooldown."""
     sec, gem = _SEC(filings={_CIKS["INTC"]: [_8K]}), _Model(clock, stall=0, error=error)
     started = clock.at
-    for _ in range(50):
+    for _ in range(100):
         await watcher.run_once(at, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
                                sleep=_no_sleep)
         clock.at += 60
     assert [when - started for when in gem.of("INTC")] == reads
     assert sec.calls.count(f"sub:{_CIKS['INTC']}") > len(reads), "then its normal poll goes on"
+
+
+def test_what_a_read_settles_states_how_long_a_failing_filing_is_read_for():
+    """The figures the owner reads for a model outage, bounded to the RETRY bullet: a change of
+    ladder or cadence fails the test above first, then this, until the bullet says the new
+    spans."""
+    found = re.search(r"^  \* RETRY:.*?(?=^  \* NOT_RELEASE:)", efs.__doc__, flags=re.S | re.M)
+    assert found is not None, "no RETRY bullet: this guard has gone blind"
+    text = " ".join(found.group(0).split())
+    reads = len(efs._EXTRACT_RETRY_GAPS) + 1
+    assert len(_READS_IN_A_WINDOW) == len(_READS_OUTSIDE_ONE) == reads
+    word = {5: "five", 6: "six", 7: "seven", 8: "eight"}.get(reads, str(reads))
+    assert f"{word} reads" in text, f"RETRY does not state {word} reads"
+    for span in (_READS_IN_A_WINDOW[-1], _READS_OUTSIDE_ONE[-1]):
+        assert f"about {span // 60}" in text, f"RETRY does not state {span // 60} minutes"
 
 
 @pytest.mark.asyncio
@@ -8651,7 +13702,7 @@ async def test_a_throttle_behind_a_filing_out_of_attempts_still_rests_the_filing
             clock.at += 30
             return await super().get_filing_document(cik, acc, document)
 
-    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T16:04:00.000Z")
+    newer = dict(_8K, accessionNumber=_MORNING, acceptanceDateTime="2026-10-29T20:04:00.000Z")
     sec = _Slow({_MORNING: None, ACC: SECRateLimitException("429", status_code=429)},
                 filings={_CIKS["INTC"]: [newer, _8K]})
     watcher._watch[("AAPL", REPORT)] = efs._Watch(checked_mono=clock.at, retry_gap=60.0,
@@ -8682,7 +13733,7 @@ async def test_a_symbol_past_its_failed_filing_stays_on_its_poll_while_another_f
 
 
 _HOLDS = [pytest.param(at, cadence, gap, left, id=f"cadence_{cadence}-gap_{gap}-left_{left}")
-          for at, cadence in ((_AT_16, 60), (_AT_NOON, 300))
+          for at, cadence in ((_AT_16, 60), (_AT_NOON, 900))
           for gap in efs._EXTRACT_RETRY_GAPS
           for left in (-1000, 0, 30, 59, 60, 61, 300, 900)
           if left <= max(cadence, gap)]
@@ -8709,7 +13760,7 @@ async def test_a_round_that_spent_an_attempt_holds_a_waiting_filing_for_a_minute
 
 @pytest.mark.parametrize("hm,gap,short,on_time", [
     ((16, 3), 900, 894.999, 895),      # the rest is longer than the cadence
-    ((12, 0), 60, 294.999, 295),       # the cadence is longer than the rest
+    ((12, 0), 60, 894.999, 895),       # the cadence is longer than the rest
 ], ids=["rest_rules", "cadence_rules"])
 def test_a_symbol_comes_due_on_the_longer_of_its_cadence_and_its_rest(watcher, hm, gap, short,
                                                                      on_time):
@@ -8781,12 +13832,37 @@ async def test_every_way_a_read_ends_says_which_filing_on_which_day(watcher, cap
 @pytest.mark.asyncio
 @pytest.mark.parametrize("gem_for", [lambda: _Scripted(_NOT_RESULTS), _Gemini],
                          ids=["not_results", "release"])
-async def test_a_verdict_of_the_models_says_when_the_filing_was_accepted(watcher, caplog, gem_for):
+@pytest.mark.parametrize("stamp, report, et_clock", [
+    ("2026-10-29T20:02:11.000Z", REPORT, "16:02"),
+    ("2026-11-02T21:30:23.000Z", date(2026, 11, 2), "16:30"),
+], ids=["daylight_time", "standard_time"])
+async def test_a_verdict_of_the_models_says_when_the_filing_was_accepted(watcher, caplog, gem_for,
+                                                                        stamp, report, et_clock):
+    """The time the release went out, in ET, from SEC's UTC stamp, on either side of the clocks
+    going back on 2026-11-01."""
+    filing = dict(_8K, filingDate=report.isoformat(), acceptanceDateTime=stamp)
+    now = datetime(report.year, report.month, report.day, 16, 35, tzinfo=ET)
     with caplog.at_level(logging.INFO, logger=efs.__name__):
-        await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=_SEC(filings={"0000050863": [_8K]}),
-                               gemini=gem_for(), cik_map=_CIKS, sleep=_no_sleep)
+        await watcher.run_once(now.astimezone(timezone.utc), ["INTC"], report,
+                               sec=_SEC(filings={"0000050863": [filing]}), gemini=gem_for(),
+                               cik_map=_CIKS, sleep=_no_sleep)
     (row,) = [r.getMessage() for r in caplog.records if "accepted=" in r.getMessage()]
-    assert "accepted=16:02 ET " in row
+    assert f"accepted={et_clock} ET " in row
+
+
+@pytest.mark.asyncio
+async def test_the_watcher_names_its_ticker_beside_a_stamp_it_cannot_read(watcher, caplog):
+    unreadable = dict(_8K, acceptanceDateTime="2026-10-29T20:02:11")
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        found = await watcher.run_once(_AT_16, ["INTC"], REPORT,
+                                       sec=_SEC(filings={"0000050863": [unreadable]}),
+                                       gemini=_Gemini(), cik_map=_CIKS, sleep=_no_sleep)
+    assert found["INTC"].accepted_at is None, "no time rather than a guess at its clock"
+    warned = [r for r in caplog.records if "acceptanceDateTime" in r.getMessage()]
+    assert len(warned) == 1 and warned[0].levelno == logging.WARNING
+    assert "sym=INTC" in warned[0].getMessage()
+    (row,) = [r.getMessage() for r in caplog.records if "accepted=" in r.getMessage()]
+    assert "accepted=? " in row
 
 
 # ── the filing tick, on the real watcher ─────────────────────────────────────
@@ -8808,9 +13884,11 @@ def cache(monkeypatch) -> FilingCache:
 
 @pytest.fixture
 def live(watcher, cache, monkeypatch):
-    """The real live service over the real watcher, with SEC, Gemini and the table faked."""
-    svc = els.get_earnings_live_service()
-    svc.reset()
+    """The real live service over the real watcher, with SEC, Gemini and the table faked. A
+    service of this test's own where `get_earnings_live_service` finds it, so a method a test
+    patches onto it goes with it, never left on the process's for later files."""
+    svc = els.EarningsLiveService()
+    monkeypatch.setattr(els, "_service", svc)
     monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
     monkeypatch.setattr(efs, "_CALL_SPACING_SECONDS", 0)
 
@@ -8819,8 +13897,7 @@ def live(watcher, cache, monkeypatch):
 
     # `run_once` imports this inside the function, so patch the SOURCE module.
     monkeypatch.setattr(signals, "ticker_cik_map", _map)
-    yield svc
-    svc.reset()
+    return svc
 
 
 @pytest.mark.asyncio
@@ -8863,7 +13940,8 @@ async def test_the_tick_keeps_a_weekend_report_on_its_list_and_asks_sec_nothing(
 
 
 @pytest.mark.asyncio
-async def test_a_record_left_open_by_its_release_gives_the_next_ticker_its_slot(live, monkeypatch):
+async def test_a_record_left_open_by_its_release_gives_the_next_ticker_its_slot(live, monkeypatch,
+                                                                               clock):
     """A release with no revenue in it leaves the record pending, so the tick keeps handing the
     ticker over, and the slot still has to go to the next one."""
     monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
@@ -8875,7 +13953,23 @@ async def test_a_record_left_open_by_its_release_gives_the_next_ticker_its_slot(
         stats = await els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec,
                                                gemini=_Gemini(answer=answer))
         assert stats == {"watched": 2, "pending": 2, "filings": filings_read}
+        clock.at += 60
     assert [c for c in sec.calls if c.startswith("sub:")] == ["sub:0000050863", "sub:0000320193"]
+
+
+@pytest.mark.asyncio
+async def test_the_tick_keeps_each_tickers_place_while_the_watched_list_reorders(live, clock,
+                                                                                monkeypatch):
+    """Each tick prunes the watcher to the live days, today among them, so the places it gave
+    this morning hold when the watched list comes back in another order."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 1)
+    live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], _AT_16)
+    sec = _SEC()
+    for minute, watched in enumerate((["INTC", "AAPL"], ["AAPL", "INTC"], ["AAPL", "INTC"])):
+        await els.earnings_filing_tick(_AT_16 + timedelta(minutes=minute), watched=watched,
+                                       sec=sec, gemini=_Gemini())
+        clock.at += 60
+    assert _subs(sec) == [f"sub:{_CIKS['INTC']}"] * 3
 
 
 @pytest.mark.asyncio
@@ -8921,6 +14015,148 @@ async def test_a_figure_the_round_could_not_store_is_logged_and_the_round_goes_o
                for r in caplog.records)
     assert live.snapshot("AAPL", REPORT, _AT_16).revenue.actual == 17.1e9
     assert live.snapshot("INTC", REPORT, _AT_16).revenue.actual is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_seen, read_at, lands", [
+    ((16, 0), (16, 10), True),
+    ((16, 30), (16, 31), False),
+], ids=["seen_before_the_release", "seen_after_it"])
+async def test_secs_utc_stamp_decides_first_sight_and_reaches_the_sheet_unchanged(
+        live, watcher, cache, first_seen, read_at, lands):
+    """Intel's real 8-K, stamped 20:08:53Z, went out at 16:08 ET. A record first seen at 16:30 ET
+    had the release out already, so it is no landing: read as 20:08 ET it would land, and a
+    process started at 19:00 ET would announce a release three hours old. The sheet, the restart
+    table and a restored record carry the instant SEC gave."""
+    stamp = "2026-10-29T20:08:53.000Z"
+    sec = _SEC(filings={_CIKS["INTC"]: [dict(_8K, accessionNumber="0000050863-26-000188",
+                                             acceptanceDateTime=stamp)]})
+    seen, at = _on_the_report_day(*first_seen), _on_the_report_day(*read_at)
+    live.observe_rows(REPORT, [_pending("INTC")], seen)
+    await els.earnings_filing_tick(at, watched=["INTC"], sec=sec, gemini=_Gemini())
+    assert [s.symbol for s in live.landed_snapshots(at)] == (["INTC"] if lands else [])
+
+    def _filing_on_the_sheet() -> Dict[str, Any]:
+        payload = els.live_payload("INTC", REPORT, live.snapshot("INTC", REPORT, at),
+                                   company_name=None, eps_estimate=0.41,
+                                   revenue_estimate=16.6e9, extras=None, today=REPORT)
+        return EarningsLiveResponse(**payload).model_dump()["filing"]
+
+    assert _filing_on_the_sheet()["accepted_at"] == "2026-10-29T20:08:53Z"
+    assert cache.rows[("INTC", REPORT.isoformat())]["accepted_at"] == "2026-10-29T20:08:53Z"
+    _deploy(live, watcher)
+    live.observe_rows(REPORT, [_pending("INTC")], at)
+    await els.earnings_filing_tick(at, watched=["INTC"], sec=sec, gemini=_Gemini())
+    assert _filing_on_the_sheet()["accepted_at"] == "2026-10-29T20:08:53Z"
+
+
+async def _walk_the_report_day(live, clock, sec: _SEC, day: date,
+                               release_at: Optional[Tuple[int, int]] = None
+                               ) -> Tuple[int, Optional[Tuple[int, int]]]:
+    """The real filing tick, once a minute from midnight to midnight ET of `day`, over one INTC
+    report FMP lists as pending. Its release reaches INTC's record at `release_at`, accepted that
+    minute. Returns the submissions reads the day cost and the minute the release was read."""
+    start = datetime(day.year, day.month, day.day, tzinfo=ET)
+    live.observe_rows(day, [dict(_pending("INTC"), date=day.isoformat())],
+                      start.astimezone(timezone.utc))
+    base, read_at = clock.at, None
+    for minute in range(24 * 60):
+        at = start + timedelta(minutes=minute)
+        if (at.hour, at.minute) == release_at:
+            sec.filings[_CIKS["INTC"]].append(dict(
+                _8K, filingDate=day.isoformat(), acceptanceDateTime=_sec_stamp(day, *release_at)))
+        clock.at = base + 60 * minute
+        await els.earnings_filing_tick(at.astimezone(timezone.utc), watched=["INTC"], sec=sec,
+                                       gemini=_Gemini())
+        if read_at is None and live.snapshot("INTC", day, at).eps.actual is not None:
+            read_at = (at.hour, at.minute)
+    return len(_subs(sec)), read_at
+
+
+#: What one company's report day costs SEC, by when its own record says it reports, and when its
+#: release goes out: (submissions reads, the minute the release is read). Before each company had
+#: its own windows, every one was read every minute in both and every 5 min between them: 302
+#: reads for the first case, 488 for a day with no release. SEC LOAD in the module docstring states
+#: these figures (`test_sec_load_in_the_docstring_states_what_the_walk_measures`). A company of the
+#: morning window has one read more than its windows and its slow cadence make, in EDGAR's last
+#: minute: its slow reads fall at 21:34 and 21:49, while one of the close or of both has its own at
+#: 21:59.
+_AFTER_THE_CLOSE_READS = 51
+_DAY_CEILINGS = {"close": 209, "morning": 265, "both": 409}
+_DAY_WALKS = [
+    pytest.param(_CLOSE_HABIT, (16, 5), _AFTER_THE_CLOSE_READS, (16, 5),
+                 id="after_the_close_released_at_1605"),
+    pytest.param(_CLOSE_HABIT, (7, 5), 6, (7, 15), id="after_the_close_released_before_the_open"),
+    pytest.param(_CLOSE_HABIT, None, _DAY_CEILINGS["close"], None,
+                 id="after_the_close_no_release"),
+    pytest.param(_MORNING_HABIT, (7, 0), 61, (7, 0), id="before_the_open_released_at_0700"),
+    pytest.param(_MORNING_HABIT, (16, 5), 242, (16, 19), id="before_the_open_released_at_1605"),
+    pytest.param(_MORNING_HABIT, None, _DAY_CEILINGS["morning"], None,
+                 id="before_the_open_no_release"),
+    pytest.param([], (16, 5), 251, (16, 5), id="record_does_not_say_released_at_1605"),
+    pytest.param([], None, _DAY_CEILINGS["both"], None, id="record_does_not_say_no_release"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("habit, release_at, reads, read_at", _DAY_WALKS)
+async def test_a_report_day_costs_sec_what_the_companys_own_windows_ask(live, clock, habit,
+                                                                      release_at, reads,
+                                                                      read_at):
+    """A release out of its company's habit is still read, within the 15 minutes of the slow
+    cadence, and nothing is read before 06:00 or after 22:00 ET."""
+    sec = _SEC(filings={_CIKS["INTC"]: _released_at(*habit)})
+    assert await _walk_the_report_day(live, clock, sec, REPORT, release_at) == (reads, read_at)
+
+
+@pytest.mark.asyncio
+async def test_a_weekend_report_day_costs_sec_nothing(live, clock):
+    sec = _SEC(filings={_CIKS["INTC"]: _released_at(*_CLOSE_HABIT)})
+    assert await _walk_the_report_day(live, clock, sec, date(2026, 10, 31)) == (0, None)
+
+
+#: A release accepted in the quarter hour before EDGAR closes: (submissions reads, the minute it is
+#: read). The next slow read of a company of the morning window after 21:49 would be at 22:04, when
+#: the watch reads nothing, so a release after 21:49 is read in EDGAR's last minute, as a company of
+#: the close or of both is on its own cadence. Read in that minute, it was the day's last read, and
+#: the day costs its ceiling; read at 21:49, it spares the last one.
+_LAST_QUARTER_HOUR = [
+    pytest.param(_MORNING_HABIT, (21, 45), _DAY_CEILINGS["morning"] - 1, (21, 49),
+                 id="before_the_open_released_at_2145"),
+    pytest.param(_MORNING_HABIT, (21, 50), _DAY_CEILINGS["morning"], (21, 59),
+                 id="before_the_open_released_at_2150"),
+    pytest.param(_MORNING_HABIT, (21, 55), _DAY_CEILINGS["morning"], (21, 59),
+                 id="before_the_open_released_at_2155"),
+    pytest.param(_MORNING_HABIT, (21, 59), _DAY_CEILINGS["morning"], (21, 59),
+                 id="before_the_open_released_at_2159"),
+    pytest.param(_CLOSE_HABIT, (21, 50), _DAY_CEILINGS["close"], (21, 59),
+                 id="after_the_close_released_at_2150"),
+    pytest.param([], (21, 52), _DAY_CEILINGS["both"], (21, 59),
+                 id="record_does_not_say_released_at_2152"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("habit, release_at, reads, read_at", _LAST_QUARTER_HOUR)
+async def test_a_release_in_the_quarter_hour_before_edgar_closes_is_read_before_it_does(
+        live, clock, habit, release_at, reads, read_at):
+    """Past 22:00 ET the watch reads nothing and the report waits for FMP, which can take until
+    the next morning: a release accepted in the quarter hour before EDGAR closes is read by the
+    read of its last minute at the latest."""
+    sec = _SEC(filings={_CIKS["INTC"]: _released_at(*habit)})
+    assert await _walk_the_report_day(live, clock, sec, REPORT, release_at) == (reads, read_at)
+
+
+def test_sec_load_in_the_docstring_states_what_the_walk_measures():
+    """The figures the owner reads for SEC's cost, bounded to their own passage: a change of
+    cadence fails the walk first, then this, until the docstring says the new figures."""
+    found = re.search(r"^SEC LOAD\..*?(?=^WHAT A READ SETTLES)", efs.__doc__, flags=re.S | re.M)
+    assert found is not None, "no SEC LOAD passage: this guard has gone blind"
+    text = " ".join(found.group(0).split())
+    cap = type(settings).model_fields["EARNINGS_LIVE_SEC_MAX_SYMBOLS"].default
+    for figure in (_AFTER_THE_CLOSE_READS, *_DAY_CEILINGS.values(),
+                   f"{cap} x {_DAY_CEILINGS['both']}", f"{cap * _DAY_CEILINGS['both']:,}"):
+        assert str(figure) in text, f"SEC LOAD does not state {figure}"
 
 
 # ── a restart, on the real watcher ───────────────────────────────────────────
@@ -9038,7 +14274,7 @@ async def test_a_restored_watch_is_closed_and_its_accession_is_known(watcher):
 
 @pytest.mark.asyncio
 async def test_the_cap_limits_a_round_not_a_day_so_a_filing_in_frees_its_place(live, cache,
-                                                                               monkeypatch):
+                                                                               monkeypatch, clock):
     """What the cap holds down is the load on SEC's shared limiter. A report with its figures in
     leaves the pending list and the next one takes its place, so a day can read more filings than
     the cap, and the table gains a row for each."""
@@ -9049,6 +14285,7 @@ async def test_the_cap_limits_a_round_not_a_day_so_a_filing_in_frees_its_place(l
     first = await els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec, gemini=gem)
     assert (first["pending"], first["filings"]) == (2, 1)
     assert [symbol for symbol, _ in cache.rows] == ["INTC"], "one report, the most watched"
+    clock.at += 60
     second = await els.earnings_filing_tick(_AT_16 + timedelta(minutes=1),
                                             watched=["INTC", "AAPL"], sec=sec, gemini=gem)
     assert (second["pending"], second["filings"]) == (1, 1)
@@ -9078,8 +14315,8 @@ async def test_a_deploy_that_fixes_the_verifier_reaches_a_figure_the_table_holds
         live, watcher, cache, misread):
     """Before the table a deploy during the watch read a pending filing again with the fixed
     code. Restoring this row instead would show the false figure with no way to tell it from a
-    good one, and the outlook, which FMP never replaces, for all its live days. Read once more,
-    then spared."""
+    good one, and the outlook, which FMP never replaces, on every day its record is read. Read
+    once more, then spared."""
     cache.hold(_kept_by_an_older_verifier(**misread))
     sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
     gem = _Gemini()
@@ -9225,10 +14462,14 @@ async def test_a_filing_that_gave_nothing_has_no_row_so_each_new_process_reads_i
 
 
 @pytest.mark.asyncio
-async def test_a_failed_restore_after_the_watch_closes_leaves_the_report_to_fmp(live, watcher,
-                                                                                cache):
-    """A failed read is the restart there was before the table, the watch's hours included. The
-    figure went with the process, and nothing can read it back before FMP fills."""
+async def test_a_restore_that_keeps_failing_after_the_watch_closes_leaves_the_report_to_fmp(
+        live, watcher, cache, monkeypatch):
+    """A failed read is the restart there was before the table, the watch's hours included: the
+    figure went with the process, and while the table read keeps failing nothing reads it back
+    before FMP fills. The read is tried again `_FAILURE_RETRY_SECONDS` later, and the first one
+    that works brings the filing back, with no SEC or model call."""
+    clock = SimpleNamespace(at=1_000_000.0)
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=lambda: clock.at))
     sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
     gem = _Gemini()
     live.observe_rows(REPORT, [_pending("INTC")], _AT_16)
@@ -9237,12 +14478,25 @@ async def test_a_failed_restore_after_the_watch_closes_leaves_the_report_to_fmp(
 
     _deploy(live, watcher)
     cache.read_error = RuntimeError("PGRST205: could not find the table")
-    night = _on_the_report_day(22, 30)
-    live.observe_rows(REPORT, [_pending("INTC")], night)
-    await els.earnings_filing_tick(night, watched=["INTC"], sec=sec, gemini=gem)
+    reads = len(cache.reads)
+    for minute in (30, 31):
+        night = _on_the_report_day(22, minute)
+        clock.at += 60
+        live.observe_rows(REPORT, [_pending("INTC")], night)
+        await els.earnings_filing_tick(night, watched=["INTC"], sec=sec, gemini=gem)
+        assert sec.calls == read and gem.calls == 1
+        snap = live.snapshot("INTC", REPORT, night)
+        assert snap.status == els.STATUS_AWAITING and snap.eps.actual is None
+        cache.read_error = None   # the table is back, and the retry has yet to come round
+    assert len(cache.reads) - reads == 1, "one read per wait, not one per tick"
+
+    retry = _on_the_report_day(22, 33)
+    clock.at += els._FAILURE_RETRY_SECONDS
+    await els.earnings_filing_tick(retry, watched=["INTC"], sec=sec, gemini=gem)
     assert sec.calls == read and gem.calls == 1
-    snap = live.snapshot("INTC", REPORT, night)
-    assert snap.status == els.STATUS_AWAITING and snap.eps.actual is None
+    snap = live.snapshot("INTC", REPORT, retry)
+    assert (snap.status, snap.eps.actual, snap.revenue.actual) == (
+        els.STATUS_REPORTED, 0.44, 17.1e9)
 
 
 _FILING_SOURCE = Path(efs.__file__).read_text(encoding="utf-8")
@@ -9283,34 +14537,64 @@ def _no_docstrings(node: ast.AST) -> ast.AST:
     return node
 
 
-def _verifier_source() -> Dict[str, str]:
-    """`verify_extraction` and every module-level name it reaches, by name, as code: a comment or
-    a docstring is no change to what the verifier keeps. Its own module first, then the one it
-    takes "verbatim" from."""
-    top: Dict[str, ast.AST] = {}
-    for module in (filing_text, efs):
-        for node in ast.parse(Path(module.__file__).read_text(encoding="utf-8")).body:
+#: Every module whose code decides what `verify_extraction` keeps: its own, the one it takes
+#: "verbatim" from, and the chat module whose fence neutraliser writes the text the model reads
+#: (`_release_view`), which a quote is checked against too. An edit made there for chat changes
+#: which figures the filing verifier keeps.
+_VERIFIER_MODULES = (chat_security, filing_text, efs)
+
+
+def _verifier_source(texts: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """`verify_extraction`, `_release_text`, which makes the text it reads out of the exhibit, and
+    every module-level name they reach, as code, keyed "<module>.<name>". Each name is read in the
+    module that uses it: one it defines is its code, one it imports is the import as written
+    (`as` and all) and then the code it binds, in `_VERIFIER_MODULES`. So `import normalize_text as
+    neutralize_fences` moves the pin, where a walk by bare name would hash the other module's
+    `neutralize_fences`. A comment or a docstring is no change to what the verifier keeps. `texts`
+    stands in for a module's source, by module name, so a test can show an edit is seen."""
+    walked = {module.__name__: module for module in _VERIFIER_MODULES}
+    defined: Dict[Tuple[str, str], ast.AST] = {}
+    imported: Dict[Tuple[str, str], Tuple[Optional[str], str, str]] = {}
+    for module_name, module in walked.items():
+        source = (texts or {}).get(module_name)
+        if source is None:
+            source = Path(module.__file__).read_text(encoding="utf-8")
+        for node in ast.parse(source).body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                top[node.name] = node
+                defined[(module_name, node.name)] = node
             elif isinstance(node, (ast.Assign, ast.AnnAssign)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 for target in targets:
                     if isinstance(target, ast.Name):
-                        top[target.id] = node
+                        defined[(module_name, target.id)] = node
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                source_module = node.module if isinstance(node, ast.ImportFrom) else None
+                for alias in node.names:
+                    bound = alias.asname or alias.name.split(".")[0]
+                    statement = ast.unparse(type(node)(**{**node.__dict__, "names": [alias]}))
+                    imported[(module_name, bound)] = (source_module, alias.name, statement)
     reached: Dict[str, str] = {}
-    waiting = ["verify_extraction"]
+    waiting = [(efs.__name__, "verify_extraction"), (efs.__name__, "_release_text")]
     while waiting:
-        name = waiting.pop()
-        if name in reached or name not in top:
+        module_name, name = key = waiting.pop()
+        label = f"{module_name}.{name}"
+        if label in reached:
             continue
-        reached[name] = ast.unparse(_no_docstrings(top[name]))
-        waiting.extend(inner.id for inner in ast.walk(top[name])
-                       if isinstance(inner, ast.Name))
+        if key in defined:
+            node = defined[key]
+            reached[label] = ast.unparse(_no_docstrings(node))
+            waiting.extend((module_name, inner.id) for inner in ast.walk(node)
+                           if isinstance(inner, ast.Name))
+        elif key in imported:
+            source_module, original, statement = imported[key]
+            reached[label] = statement
+            if source_module in walked:
+                waiting.append((source_module, original))
     return reached
 
 
 #: `FILING_VERIFIER_VERSION` and the verifier it stands for, pinned together.
-_VERIFIER_PIN = (1, "de4055d4984b941545cf50cf8a9b66057abf00076cdd76cd31aeb3a483e96f86")
+_VERIFIER_PIN = (1, "ba57e45bd1f5f7d3676fdf706db99b5f638413ab5c5235dd10c41afb8917a4f9")
 
 
 def test_the_verifier_cannot_change_without_its_version_moving():
@@ -9319,19 +14603,40 @@ def test_the_verifier_cannot_change_without_its_version_moving():
     exactly like a good one. The constant is only as good as the memory of whoever edits the
     verifier, so this test does the remembering."""
     source = _verifier_source()
+    names = {label.rsplit(".", 1)[1] for label in source}
     for name in ("_revenue_prints", "_eps_prints", "_eps_read", "_metric_at", "_stands_as_revenue",
                  "_states_an_outlook", "_release_scale", "_Printed", "_numbers_in", "_reads_as_loss",
                  "_FOREIGN_MONEY_RE", "_DOLLAR_MARK_RE", "_ADJUSTED_MEASURE_RE", "_quote_ok",
-                 "_outlook_problem", "verify_peg_span", "normalize_peg_text"):
-        assert name in source, f"the walk no longer reaches {name}: this guard has gone blind"
-    assert "EarningsFilingWatcher" not in source and "poll_interval_seconds" not in source
-    text = "\n".join(source[name] for name in sorted(source))
+                 "_outlook_problem", "verify_peg_span", "normalize_peg_text",
+                 "_drop_footnote_marks", "_SUPERSCRIPT_RUN_RE", "html_to_text",
+                 "_release_view", "neutralize_fences", "normalize_text", "_INVISIBLE_CHARS",
+                 "_INVISIBLE_CODEPOINTS", "_OTHER_CONTROL_RE", "_ANGLE_RUN_RE"):
+        assert name in names, f"the walk no longer reaches {name}: this guard has gone blind"
+    assert f"{chat_security.__name__}.neutralize_fences" in source, "nor the code an import binds"
+    assert "EarningsFilingWatcher" not in names and "poll_interval_seconds" not in names
+    text = "\n".join(f"{label}\n{source[label]}" for label in sorted(source))
     printed = hashlib.sha256(text.encode("utf-8")).hexdigest()
     assert (efs.FILING_VERIFIER_VERSION, printed) == _VERIFIER_PIN, (
         "the verifier changed. Move FILING_VERIFIER_VERSION in earnings_filing_service.py by one, "
         "so no row the old code kept comes back, then pin _VERIFIER_PIN to (<the new version>, "
         f"\"{printed}\"). Before the first deploy of migration 209 nothing is held, so the pin "
         "alone moves.")
+
+
+@pytest.mark.parametrize("module,old,new", [
+    # The binding of the fence neutraliser, renamed onto another function of the chat module.
+    (efs, "from app.services.chat_security import neutralize_fences",
+     "from app.services.chat_security import normalize_text as neutralize_fences"),
+    # A hardening made for chat, which changes the text a quote is checked against.
+    (chat_security, "_INVISIBLE_CODEPOINTS = (", "_INVISIBLE_CODEPOINTS = (0x00AD, "),
+])
+def test_an_edit_the_verifier_reaches_in_another_form_moves_the_pin(module, old, new):
+    """The walk resolves each name in the module that uses it: an import alias, or an edit in the
+    chat module behind it, is a change to what the verifier keeps."""
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert source.count(old) == 1, "the line this test edits moved: point it at the new one"
+    edited = _verifier_source({module.__name__: source.replace(old, new)})
+    assert edited != _verifier_source()
 
 
 # ── a stalled model on the real loop ─────────────────────────────────────────

@@ -116,10 +116,14 @@ struct EarningsLiveResultsCard: View {
             } else {
                 if showsRevenueRow {
                     metricRow(title: "Revenue", outcome: revenue,
-                              format: EarningsFigureFormat.revenue)
+                              format: EarningsFigureFormat.revenueRow(actual: revenue.actual,
+                                                                      estimate: revenue.estimate,
+                                                                      beatOrMiss: revenue.isBeatOrMiss))
                 }
                 metricRow(title: eps.isGAAP ? "EPS (GAAP)" : "EPS (adjusted)", outcome: eps,
-                          format: EarningsFigureFormat.eps)
+                          format: EarningsFigureFormat.epsRow(actual: eps.actual,
+                                                              estimate: eps.estimate,
+                                                              beatOrMiss: eps.isBeatOrMiss))
 
                 if isPreliminary { preliminaryNote }
                 if let yearAgo = live?.yearAgo { yearAgoBlock(yearAgo) }
@@ -356,10 +360,13 @@ struct EarningsLiveResultsCard: View {
         _ quarters: [(quarter: String, result: EarningsQuarterResult, surprisePct: Double?)]
     ) -> some View {
         VStack(alignment: .leading, spacing: AppSpacing.sm) {
-            Text("Last \(quarters.count) quarters")
+            // A recent listing can have only one reported quarter before this report.
+            Text(quarters.count == 1 ? "Last quarter" : "Last \(quarters.count) quarters")
                 .font(AppTypography.bodySmallEmphasis)
                 .foregroundColor(AppColors.textPrimary)
-            HStack(spacing: 0) {
+            // Top-aligned: a caption that wraps at a large text size keeps its dot level with
+            // the others.
+            HStack(alignment: .top, spacing: 0) {
                 ForEach(Array(quarters.enumerated()), id: \.offset) { _, q in
                     VStack(spacing: AppSpacing.xs) {
                         EarningsResultDot(result: q.result, size: 12)
@@ -370,23 +377,49 @@ struct EarningsLiveResultsCard: View {
                         Text(Self.quarterCaption(q.result, q.surprisePct))
                             .font(AppTypography.captionEmphasis)
                             .foregroundColor(q.result.dotColor)
-                            .lineLimit(1)
+                            .multilineTextAlignment(.center)
+                            .lineLimit(2)
                             .minimumScaleFactor(0.8)
                     }
                     .frame(maxWidth: .infinity)
-                    .accessibilityElement(children: .combine)
+                    // The verdict in words for VoiceOver too: combined, the column read only its
+                    // caption's size, the same "<0.1%" for a beat and a miss.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Self.quarterSpoken(q.quarter, q.result, q.surprisePct))
                 }
             }
         }
     }
 
+    /// The caption under one quarter's dot: the verdict in words, then how far ("Beat +7.3%",
+    /// "Miss -26.8%"). The word carries the direction, never the colour alone: a one-cent beat
+    /// and a one-cent miss on a $35 consensus are both under 0.05%, and both sizes read "<0.1%".
     private static func quarterCaption(_ result: EarningsQuarterResult, _ pct: Double?) -> String {
         switch result {
         case .noEstimate, .pending: return "—"
         case .matched: return "In line"
         case .beat, .missed:
-            guard let pct, pct.isFinite else { return result == .beat ? "Beat" : "Miss" }
-            return EarningsQuarterData.surpriseText(pct, isMatch: false)
+            let word: String = result == .beat ? "Beat" : "Miss"
+            guard let pct, pct.isFinite else { return word }
+            return word + " " + EarningsQuarterData.surpriseText(pct, isMatch: false)
+        }
+    }
+
+    /// What VoiceOver reads for one quarter: "Q3 '25: missed by 26.8%". The size is the caption's
+    /// own with its sign dropped, since the verb says which way (`EarningsResultChips.spoken`).
+    private static func quarterSpoken(_ quarter: String, _ result: EarningsQuarterResult,
+                                      _ pct: Double?) -> String {
+        var by: String = ""
+        if let pct, pct.isFinite {
+            let text: String = EarningsQuarterData.surpriseText(pct, isMatch: false)
+            by = " by " + String(text.drop(while: { $0 == "+" || $0 == "-" }))
+        }
+        switch result {
+        case .beat: return "\(quarter): beat\(by)"
+        case .missed: return "\(quarter): missed\(by)"
+        case .matched: return "\(quarter): in line"
+        case .noEstimate: return "\(quarter): no analyst consensus"
+        case .pending: return "\(quarter): not reported yet"
         }
     }
 

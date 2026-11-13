@@ -17,10 +17,18 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from app.services.earnings_live_service import eps_is_unfilled
+from app.services.earnings_live_service import (
+    BASIS_ADJUSTED,
+    SOURCE_FILING,
+    SOURCE_FMP,
+    STATUS_REPORTED,
+    LiveMetric,
+    LiveSnapshot,
+)
 from app.services.notification_kinds import KIND_CONGRESS_TRADE, KIND_WHALE_13F
 from app.services.notification_senders.earnings_sender import (
     MIN_SURPRISE,
+    FoldedRecord,
     in_result_window,
     result_copy,
     select_results,
@@ -240,8 +248,13 @@ def test_the_legacy_eps_key_is_read_the_same_way():
     assert select_results([row], TODAY) == []
 
 
-def test_a_row_with_no_eps_is_not_an_unfilled_eps():
-    assert not eps_is_unfilled(None, {"revenueActual": 0, "revenueEstimated": 16.6e9})
+def test_a_row_with_no_eps_is_not_an_unfilled_eps(caplog):
+    """No result, and nothing logged as refused: there was no EPS to refuse."""
+    row = {"symbol": "AAPL", "date": TODAY.isoformat(), "epsEstimated": 0.41,
+           "epsActual": None, "revenueActual": 0, "revenueEstimated": 16.6e9}
+    with caplog.at_level("WARNING", logger="app.services.notification_senders.earnings_sender"):
+        assert select_results([row], TODAY) == []
+    assert caplog.records == []
 
 
 def test_an_unfilled_row_is_logged_with_its_symbol_and_day(caplog):
@@ -256,6 +269,368 @@ def test_a_row_with_no_actual_yet_is_not_a_result():
     """Tomorrow's row is in the same response; it must not produce a 'results are out'
     notification just because it has an estimate."""
     assert select_results([_cal(when=TOMORROW, est=1.0)], TODAY) == []
+
+
+# ── a report FMP lists twice ─────────────────────────────────────────────────
+#
+# The owner's choice, 2026-11-11: "Follow the record". The live record takes a report's EPS from
+# the row it ranks strongest (results first, then FMP's own `lastUpdated`), and the pass reads
+# that row too, so the banner says what the sheet it opens says. Another row of the same report
+# never speaks for it, even when the record's own row says nothing. These read the rows alone,
+# as the pass does with no live record to follow; the record's own reading is further down.
+
+OLDER, NEWER = f"{TODAY.isoformat()} 13:40:00", f"{TODAY.isoformat()} 13:50:00"
+_LISTED_ORDER = {"argnames": "newer_first", "argvalues": [False, True],
+                 "ids": ["older_listed_first", "newer_listed_first"]}
+_SENDER_LOG = "app.services.notification_senders.earnings_sender"
+
+
+def _listed(est, act, touched, *, when=TODAY):
+    """One of a report's rows: its (estimate, actual) beside a real revenue, touched then."""
+    return {**_with_revenue(_cal(when=when, est=est, act=act), 17.1e9, 16.6e9),
+            "lastUpdated": touched}
+
+
+def _in_order(older, newer, newer_first):
+    return [newer, older] if newer_first else [older, newer]
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+@pytest.mark.parametrize("older,newer,surprise", [
+    ((0.41, 0.60), (0.70, 0.60), -0.1429),
+    ((0.70, 0.60), (0.41, 0.60), 0.4634),
+    ((0.41, 0.30), (0.41, 0.60), 0.4634),
+], ids=["the_newer_consensus_says_missed", "the_newer_consensus_says_beat",
+        "a_stale_miss_beside_the_newer_beat"])
+def test_a_report_listed_twice_is_told_from_the_row_its_record_reads(
+        older, newer, surprise, newer_first):
+    rows = _in_order(_listed(*older, OLDER), _listed(*newer, NEWER), newer_first)
+    (picked,) = select_results(rows, TODAY)
+    assert picked[:2] == ("AAPL", TODAY.isoformat())
+    assert picked[2] == pytest.approx(surprise, abs=1e-4)
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+@pytest.mark.parametrize("newer", [
+    _listed(0.41, 0.40, NEWER),
+    _listed(None, 0.44, NEWER),
+    _listed(1.65, 0.169, NEWER),
+], ids=["under_the_bar", "no_estimate_of_its_own", "in_doubt"])
+def test_a_twin_past_the_bar_never_speaks_for_a_report_whose_own_row_says_nothing(
+        newer, newer_first):
+    """The newer row is the one the record reads: a 2% miss, a figure with no estimate of its own
+    to divide by, a figure in doubt. The stale row's 46% beat must not speak for it."""
+    older = _listed(0.41, 0.60, OLDER)
+    assert select_results([older], TODAY) != [], "alone, the stale row would be told"
+    assert select_results(_in_order(older, newer, newer_first), TODAY) == []
+
+
+def test_a_report_passed_over_leaves_the_symbols_report_under_another_date_free_to_speak():
+    """One push per symbol per pass, and today's report, read as its record reads it, is under
+    the bar: yesterday's report speaks."""
+    today = [_listed(0.41, 0.60, OLDER), _listed(0.41, 0.40, NEWER)]
+    yesterday = _listed(1.0, 1.5, OLDER, when=YESTERDAY)
+    (picked,) = select_results([*today, yesterday], TODAY)
+    assert picked[1] == YESTERDAY.isoformat()
+
+
+@pytest.mark.parametrize("zero_first", [True, False])
+def test_a_zero_beside_a_reported_revenue_never_goes_out_as_a_100_percent_move(zero_first):
+    """Alone, a zero against a tiny consensus is a pre-revenue name's real report. Beside a row
+    with a revenue, that row holds the report's results, and the record keeps no EPS."""
+    zero = _with_revenue(_cal(when=TODAY, est=-0.02, act=0), 0, 30e6)
+    revenue = _with_revenue(_cal(when=TODAY, est=-0.02), 31e6, 30e6)
+    assert select_results([zero], TODAY) != [], "alone, the zero is a result"
+    assert select_results([zero, revenue] if zero_first else [revenue, zero], TODAY) == []
+
+
+@pytest.mark.parametrize("zero_first", [True, False])
+def test_a_zero_is_judged_by_the_largest_consensus_any_row_of_its_report_states(zero_first):
+    """The record reads every row's consensus before it folds one: a material one makes the
+    zero FMP's unfilled field, whichever row states it."""
+    zero = _with_revenue(_cal(when=TODAY, est=-0.02, act=0), 0, 30e6)
+    pending = _with_revenue(_cal(when=TODAY, est=-0.02), None, 16.6e9)
+    assert select_results([zero, pending] if zero_first else [pending, zero], TODAY) == []
+
+
+@pytest.mark.parametrize("revenue_first", [False, True])
+def test_an_eps_row_beside_a_newer_revenue_only_twin_is_told_from_the_eps_row(revenue_first):
+    """The card's one row is the newer twin, which has only the revenue: the EPS, and the push,
+    come from the other row."""
+    eps_row = {**_cal(when=TODAY, est=0.41, act=0.44), "lastUpdated": OLDER}
+    revenue_row = {**_with_revenue(_cal(when=TODAY, est=0.41), 17.1e9, 16.6e9),
+                   "lastUpdated": NEWER}
+    rows = [revenue_row, eps_row] if revenue_first else [eps_row, revenue_row]
+    (picked,) = select_results(rows, TODAY)
+    assert picked[2] == pytest.approx(0.0732, abs=1e-4)
+    (picked,) = select_results(rows, TODAY, record=_record_reading(0.44, 0.41, took=eps_row))
+    assert picked[2] == pytest.approx(0.0732, abs=1e-4)
+
+
+def _twin_line(caplog) -> str:
+    (line,) = [r.getMessage() for r in caplog.records]
+    assert line.startswith(f"earnings notifications: AAPL {TODAY.isoformat()} is listed more "
+                           "than once — ")
+    return line
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+@pytest.mark.parametrize("older,newer,told,passed_over", [
+    ((0.41, 0.60), (0.70, 0.60), "EPS 0.6 vs estimate 0.7", "EPS 0.6 vs estimate 0.41"),
+    ((0.41, 0.30), (0.41, 0.60), "EPS 0.6 vs estimate 0.41", "EPS 0.3 vs estimate 0.41"),
+], ids=["two_estimates", "two_actuals"])
+def test_a_twin_passed_over_is_logged_once_with_what_was_told_first(
+        caplog, newer_first, older, newer, told, passed_over):
+    """How often FMP lists one report with two verdicts is unknown: each pass says so, once, with
+    the figures it told and the ones it passed over, in that order."""
+    rows = _in_order(_listed(*older, OLDER), _listed(*newer, NEWER), newer_first)
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        (picked,) = select_results(rows, TODAY)
+    line = _twin_line(caplog)
+    assert line.endswith(f"— told, from the row its live record would read: {told}; passed over: "
+                         f"{passed_over}")
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+def test_a_twin_passed_over_beside_a_report_not_told_says_it_was_not_told_and_why(
+        caplog, newer_first):
+    rows = _in_order(_listed(0.41, 0.60, OLDER), _listed(0.41, 0.40, NEWER), newer_first)
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        assert select_results(rows, TODAY) == []
+    assert _twin_line(caplog).endswith(
+        "— not told (no surprise past the bar), from the row its live record would read: "
+        "EPS 0.4 vs estimate 0.41; passed over: EPS 0.6 vs estimate 0.41")
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+def test_a_report_listed_twice_with_the_same_figures_is_told_once_and_logs_nothing(
+        caplog, newer_first):
+    rows = _in_order(_listed(0.41, 0.60, OLDER), _listed(0.41, 0.60, NEWER), newer_first)
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        (picked,) = select_results(rows, TODAY)
+    assert picked[2] == pytest.approx(0.4634, abs=1e-4)
+    assert caplog.records == []
+
+
+# ── a report FMP lists twice, told as its live record reads it ───────────────
+#
+# With live results on, the pass folds what it read into the live records before it tells anyone
+# (`_fold_into_live_records`), and hands `select_results` a reader of them, each with the row the
+# fold took its EPS from. A report FMP lists more than once is told as its record reads it, which
+# can hold what no row of the answer says: the consensus read while the report was pending, or
+# one the zero rules weigh a row of zeros against. So is a report whose EPS is 0, which the zero
+# rules weigh against what its record already holds. Only an EPS this answer gave the record is
+# told. Any other report listed once is told from its row, as the pass always was: what that
+# leaves untold is `earnings_live_sender`'s list of what off costs.
+
+def _record_reading(eps, est, *, took=None, source=SOURCE_FMP, checking=False, reads_as=None,
+                    symbol="AAPL", day=TODAY):
+    """A reader of one report's live record, which shows `eps` against `est` after a fold that
+    took its EPS from the row `took`, None when it took none. Notes each ask."""
+    snap = LiveSnapshot(
+        symbol=symbol, day=day, status=STATUS_REPORTED, company_name=None,
+        eps=LiveMetric(est, eps, None, source if eps is not None else None,
+                       BASIS_ADJUSTED if eps is not None else None, checking=checking),
+        revenue=LiveMetric(16.6e9), preliminary=False, checked_at=None, filing=None,
+        reads_as=reads_as)
+    asked = []
+
+    def read(sym, when):
+        asked.append((sym, when))
+        return FoldedRecord(snap, took) if (sym, when) == (symbol, day) else None
+
+    read.asked = asked
+    return read
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+@pytest.mark.parametrize("newer,record,surprise", [
+    ((None, 0.60), (0.60, 0.41), 0.4634),
+    ((None, 0.44), (0.44, 0.41), 0.0732),
+    ((None, 0.60), (0.60, 0.70), -0.1429),
+], ids=["the_record_keeps_the_consensus_the_row_lacks", "a_newer_figure_without_one",
+        "the_record_keeps_an_older_consensus"])
+def test_a_report_listed_twice_is_told_as_its_live_record_reads_it(
+        newer, record, surprise, newer_first):
+    """The newer row has no estimate of its own, so the record keeps the one it read while the
+    report was pending, and the sheet shows that surprise. So does the push."""
+    newer_row = _listed(*newer, NEWER)
+    rows = _in_order(_listed(0.41, 0.60, OLDER), newer_row, newer_first)
+    (picked,) = select_results(rows, TODAY, record=_record_reading(*record, took=newer_row))
+    assert picked[:2] == ("AAPL", TODAY.isoformat())
+    assert picked[2] == pytest.approx(surprise, abs=1e-4)
+
+
+@pytest.mark.parametrize("row,told", [
+    (_listed(None, 0.60, NEWER), None),
+    (_listed(0.41, 0.60, NEWER), 0.4634),
+], ids=["no_estimate_of_its_own", "its_own_estimate"])
+def test_a_report_listed_once_with_an_eps_other_than_0_is_told_from_its_row_alone(row, told):
+    """The pass as it always was, its record never read: the record reads such a row as it reads
+    alone. A row filled with no estimate of its own stays untold, a cost of the live result push
+    being off, whatever the record holds."""
+    read = _record_reading(0.60, 0.70, took=row)
+    picked = select_results([row], TODAY, record=read)
+    assert [p[2] for p in picked] == ([] if told is None else [pytest.approx(told, abs=1e-4)])
+    assert read.asked == []
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+@pytest.mark.parametrize("record", [
+    dict(eps=0.30, est=0.41),
+    dict(eps=None, est=0.41, checking=True),
+    dict(eps=None, est=0.41),
+    dict(eps=0.60, est=0.41, source=SOURCE_FILING),
+    dict(eps=0.60, est=0.41, reads_as=YESTERDAY),
+], ids=["a_figure_it_held_before", "being_confirmed", "no_figure", "the_filings_figure",
+        "read_as_the_report_before"])
+def test_a_report_listed_twice_is_told_only_with_an_eps_this_answer_gave_its_record(
+        caplog, record, newer_first):
+    """FMP's own figure from this answer, on the record's own report, or nobody is told: a
+    figure the record kept from before is one FMP has since taken back."""
+    newer = _listed(0.41, 0.60, NEWER)
+    rows = _in_order(_listed(0.41, 0.60, OLDER), newer, newer_first)
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        assert select_results(rows, TODAY, record=_record_reading(**record, took=newer)) == []
+    assert "not told (its live record does not show this answer's EPS 0.6)" in _twin_line(caplog)
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+def test_a_report_listed_twice_with_no_record_to_follow_is_told_from_its_row(newer_first):
+    """Live results off, or the pass could not fold that day: the row the record would read."""
+    rows = _in_order(_listed(0.41, 0.60, OLDER), _listed(0.70, 0.60, NEWER), newer_first)
+    for record in (None, _record_reading(0.60, 0.41, symbol="MSFT")):
+        (picked,) = select_results(rows, TODAY, record=record)
+        assert picked[2] == pytest.approx(-0.1429, abs=1e-4)
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+def test_a_report_listed_twice_keeps_the_dropped_digit_guard_off_the_filings_gaap_eps(
+        caplog, newer_first):
+    """The record shows 0.46 against 0.05 because the filing's GAAP EPS bears it out. The pass
+    judges the signature without it and tells nobody: the owner's choice of 2026-11-11, "Keep it
+    quiet", for a report listed twice as for one listed once."""
+    filled = _listed(0.05, 0.46, OLDER)
+    pending = {**_cal(when=TODAY, est=0.05), "lastUpdated": NEWER}
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        assert select_results(_in_order(filled, pending, newer_first), TODAY,
+                              record=_record_reading(0.46, 0.05, took=filled)) == []
+    assert "not told (the dropped-digit signature)" in _twin_line(caplog)
+
+
+def _zeros(revenue_estimate=None):
+    """FMP's row of zeros for a small name expected to lose 5 cents a share."""
+    return {**_with_revenue(_cal(when=TODAY, est=-0.05, act=0), 0, revenue_estimate),
+            "lastUpdated": OLDER}
+
+
+def _zeros_and_a_twin(zero_first):
+    zeros = _zeros()
+    twin = {**_with_revenue(_cal(when=TODAY, est=-0.05), None, 95e6), "lastUpdated": OLDER}
+    return [zeros, twin] if zero_first else [twin, zeros]
+
+
+@pytest.mark.parametrize("zero_first", [True, False])
+def test_a_row_of_zeros_listed_twice_is_told_only_when_its_record_shows_the_zero(
+        caplog, zero_first):
+    """The twin's $95M stands behind the zero, read alone. Beside a $105M consensus the record
+    read in the morning it is FMP's unfilled row, and the record shows no EPS: no 100% beat."""
+    rows = _zeros_and_a_twin(zero_first)
+    (zeros,) = [row for row in rows if "epsActual" in row]
+    assert [p[2] for p in select_results(rows, TODAY)] == [1.0]
+    assert [p[2] for p in select_results(
+        rows, TODAY, record=_record_reading(0.0, -0.05, took=zeros))] == [1.0]
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        assert select_results(rows, TODAY, record=_record_reading(None, -0.05, took=zeros)) == []
+    assert _twin_line(caplog).endswith(
+        "— not told (its live record does not show this answer's EPS 0.0), from its live record: "
+        "EPS None vs estimate -0.05")
+
+
+@pytest.mark.parametrize("listed", ["beside_a_pending_twin", "the_pending_twin_first", "twice"])
+def test_a_row_of_zeros_listed_twice_that_its_record_keeps_is_told_as_the_record_reads_it(
+        caplog, listed):
+    """No row states a revenue consensus, so read alone the zeros are FMP's unfilled row and say
+    nothing. The record kept them against the $50M it read in the morning, under the floor, and
+    shows a 100% beat: that is told, and nothing is logged as refused."""
+    zeros = _zeros()
+    pending = {**_with_revenue(_cal(when=TODAY, est=-0.05), None, None), "lastUpdated": OLDER}
+    rows = {"beside_a_pending_twin": [zeros, pending], "the_pending_twin_first": [pending, zeros],
+            "twice": [zeros, dict(zeros)]}[listed]
+    assert select_results(rows, TODAY) == []
+    caplog.clear()
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        picked = select_results(rows, TODAY, record=_record_reading(0.0, -0.05, took=zeros))
+    assert [p[2] for p in picked] == [1.0]
+    assert caplog.records == []
+
+
+@pytest.mark.parametrize(**_LISTED_ORDER)
+def test_a_row_of_zeros_listed_twice_beside_a_figure_its_record_holds_is_told_to_nobody(
+        caplog, newer_first):
+    """Zeros under a tiny consensus beside a pending twin: read alone, a small name's 100% miss.
+    The record holds 0.60 and takes no EPS from this answer, so nobody is told, and the line
+    says what the record shows."""
+    zeros = {**_with_revenue(_cal(when=TODAY, est=0.41, act=0), 0, 30e6), "lastUpdated": OLDER}
+    pending = {**_with_revenue(_cal(when=TODAY, est=0.41), None, 30e6), "lastUpdated": NEWER}
+    rows = _in_order(zeros, pending, newer_first)
+    assert [p[2] for p in select_results(rows, TODAY)] == [-1.0]
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        assert select_results(rows, TODAY, record=_record_reading(0.60, 0.41)) == []
+    assert _twin_line(caplog).endswith(
+        "— not told (its live record keeps no EPS from this answer), from its live record: "
+        "EPS 0.6 vs estimate 0.41; passed over: EPS 0.0 vs estimate 0.41")
+
+
+def _only_row_with_an_eps_of_0(case):
+    """(the row, its record after the fold, told read alone, told from the record) for a report
+    whose only row has an EPS of 0, in cases where what the record already held decides."""
+    if case == "kept_on_an_earlier_consensus":
+        row = _zeros()
+        return row, _record_reading(0.0, -0.05, took=row), [], [1.0]
+    if case == "an_estimate_the_row_lacks":
+        row = {**_with_revenue(_cal(when=TODAY, act=0), 31e6, 30e6), "lastUpdated": NEWER}
+        return row, _record_reading(0.0, -0.05, took=row), [], [1.0]
+    if case == "unfilled_beside_a_held_zero":
+        row = {**_with_revenue(_cal(when=TODAY, est=-0.30, act=0), None, 105e6),
+               "lastUpdated": NEWER}
+        return row, _record_reading(None, -0.30, took=row), [1.0], []
+    row = {**_with_revenue(_cal(when=TODAY, est=0.41, act=0), 0, 30e6), "lastUpdated": NEWER}
+    return row, _record_reading(0.60, 0.41), [-1.0], []
+
+
+@pytest.mark.parametrize("case", ["kept_on_an_earlier_consensus", "an_estimate_the_row_lacks",
+                                  "unfilled_beside_a_held_zero", "refused_beside_a_held_figure"])
+def test_a_report_listed_once_with_an_eps_of_0_is_told_as_its_live_record_reads_it(case):
+    """The zero rules weigh a 0 against what the record already holds, which the row cannot show.
+    Zeros with no consensus of their own, kept on the $50M the record read in the morning: a 100%
+    beat. A breakeven filled with no estimate of its own: the record keeps the one it held, as for
+    a report listed twice. A 0 with no revenue beside the 0 revenue the record holds, under a
+    consensus now material: FMP's unfilled row, so the sheet shows no EPS. Zeros under a tiny
+    consensus beside the 0.60 the record holds: no EPS from this answer, and the sheet keeps 0.60.
+    The push says what the sheet says."""
+    row, record, alone, told = _only_row_with_an_eps_of_0(case)
+    assert [p[2] for p in select_results([row], TODAY)] == alone
+    assert [p[2] for p in select_results([row], TODAY, record=record)] == told
+    assert record.asked == [("AAPL", TODAY)]
+
+
+@pytest.mark.parametrize("case,line", [
+    ("unfilled_beside_a_held_zero",
+     "not told (its live record does not show this answer's EPS 0.0), from its live record: "
+     "EPS None vs estimate -0.3"),
+    ("refused_beside_a_held_figure",
+     "not told (its live record keeps no EPS from this answer), from its live record: EPS 0.6 vs "
+     "estimate 0.41; passed over: EPS 0.0 vs estimate 0.41"),
+], ids=["unfilled_beside_a_held_zero", "refused_beside_a_held_figure"])
+def test_a_zero_its_record_does_not_tell_is_logged_once_with_what_the_record_shows(
+        caplog, case, line):
+    row, record, _alone, _told = _only_row_with_an_eps_of_0(case)
+    with caplog.at_level("WARNING", logger=_SENDER_LOG):
+        assert select_results([row], TODAY, record=record) == []
+    (logged,) = [r.getMessage() for r in caplog.records]
+    assert logged == (f"earnings notifications: AAPL {TODAY.isoformat()} is listed once, with an "
+                      f"EPS of 0 — {line}")
 
 
 def test_result_copy_states_direction_and_magnitude_without_a_verdict():

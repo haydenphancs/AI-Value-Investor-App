@@ -182,6 +182,13 @@ def test_a_prior_year_figure_past_the_clause_is_refused():
 # ── EPS ──────────────────────────────────────────────────────────────────────
 
 
+_CSCO_BOTH_TOTALS = ("Cisco reported first quarter revenue of $18.5 billion, net income on a "
+                     "generally accepted accounting principles (GAAP) basis of $4.6 billion or "
+                     "$1.14 per share, and non-GAAP net income of $5.6 billion or $1.40 per share.")
+_DDS_TWO_YEARS = ("Dillard's reported net income for the 13 weeks ended October 31, 2026 of $130.9 "
+                  "million, or $8.38 per share, compared to $129.8 million, or $8.31 per share, "
+                  "for the 13 weeks ended November 1, 2025.")
+
 _GAAP_ROWS = [
     ("Diluted earnings per share was $2.10, up 14 percent year over year, and included a "
      "favorable impact of $0.05 from tariff refunds.", 2.1),                        # AAPL
@@ -235,6 +242,10 @@ _GAAP_ROWS = [
      "SHARE) EXCLUDING A SIGNIFICANT ITEM", 5.57),                                  # JPM
     ("Earnings per share: EPS grew 8% to $0.93, and comparable EPS (non-GAAP) grew 11% to $0.91.",
      0.93),                                                                         # KO
+    # Releases of 2026-11-12: a second total behind the per-share figure the sentence printed is
+    # another basis's, with a subject of its own, or another period's.
+    (_CSCO_BOTH_TOTALS, 1.14),                                                      # CSCO
+    (_DDS_TWO_YEARS, 8.38),                                                         # DDS
 ]
 
 _ADJUSTED_ROWS = [
@@ -271,6 +282,10 @@ _ADJUSTED_ROWS = [
      "SHARE) EXCLUDING A SIGNIFICANT ITEM", 5.75),                                  # JPM
     ("Earnings per share: EPS grew 8% to $0.93, and comparable EPS (non-GAAP) grew 11% to $0.91.",
      0.91),                                                                         # KO
+    (_CSCO_BOTH_TOTALS, 1.4),                                                       # CSCO
+    ("Adjusted net loss per common share, diluted (1) was $0.03 for the third quarter of 2026 "
+     "compared to adjusted net income per share, diluted (1) of $0.13 for the third quarter of "
+     "2025.", -0.03),                                                               # KLC
 ]
 
 
@@ -335,6 +350,20 @@ def test_an_amount_that_is_a_charge_stands_nowhere():
     for value in (0.06, 0.17):
         figures, reasons = _eps("eps_gaap_diluted", quote, value)
         assert figures is None and reasons["eps_gaap_diluted"] == "wrong_metric"
+
+
+@pytest.mark.parametrize("quote,value", [
+    (_DDS_TWO_YEARS, 8.31),                                                         # DDS
+    ("Net income decreased to $20.7 billion in the third quarter, or $1.89 per diluted share, "
+     "compared with $21.2 billion, or $1.95 per diluted share, in third quarter 2025.", 1.95),
+])
+@pytest.mark.parametrize("field", ["eps_adjusted_diluted", "eps_gaap_diluted"])
+def test_the_share_of_a_total_behind_the_one_the_sentence_printed_is_no_eps(field, quote, value):
+    """The sentence printed its measure's total and per-share figure first: the per-share figure of
+    the total behind them is another period's here, refused in both signs."""
+    for signed in (value, -value):
+        figures, reasons = _eps(field, quote, signed)
+        assert figures is None and reasons[field] == "wrong_metric", (signed, reasons)
 
 
 def test_a_prior_year_eps_past_the_comparison_is_refused():
@@ -762,6 +791,64 @@ def test_a_sentence_that_only_introduces_the_guidance_stays_a_lead_in():
     figures, reasons = _outlook(
         "The company introduces the following fiscal 2027 guidance for the full year.")     # SBUX
     assert figures is None and reasons["guidance"] == "lead_in"
+
+
+#: Etsy's outlook table as `html_to_text` leaves it, with the sentences around it: the model's
+#: stored answer quoted the table as the outlook, and two columns of it read as one.
+_ETSY_TABLE = ("Q4 26 Outlook FY 26 Outlook GMS $3.46B to $3.52B +5-7% Y/Y ~7% Take Rate ~25.6% "
+               "~25.8% Adjusted EBITDA Margin ~30% ~30%")
+_ETSY = ("Our outlook assumes currency exchange rates remain unchanged at current spot levels. "
+         f"{_ETSY_TABLE} With respect to our outlook, a reconciliation of Adjusted EBITDA margin "
+         "guidance to the closest corresponding GAAP measure is not available without "
+         "unreasonable efforts on a forward-looking basis.")
+#: GE Aerospace's outlook sentence with the segment table behind it.
+_GE_GUIDE = ("Operating profit is expected to be in the range of $10.5-$10.6 billion, up from our "
+             "prior guide of $10.25-$10.35 billion, driven by higher services growth and reduced "
+             "GE9X impact.")
+_GE = (f"{_GE_GUIDE} Defense & Propulsion Technologies (DPT) Three months ended September 30 Nine "
+       "months ended September 30 (Dollars in millions) 2026 2025 Year on Year 2026 2025 Year on "
+       "Year Orders $4,269 $3,607 18 % $14,581 $10,979 33 %")
+#: Intel's guidance table behind the sentence that leads into it.
+_INTC = ("Business Outlook Intel's guidance for the fourth quarter of 2026 includes both GAAP and "
+         "non-GAAP estimates as follows: Q4 2026 GAAP Non-GAAP Revenue ($B) $15.0 - $16.0 Gross "
+         "margin 37.1% 38.0% Tax Rate 31% 11% Earnings (Loss) Per Share Attributable to "
+         "Intel\u2014Diluted $0.10 $0.25 Reconciliations between GAAP and non-GAAP financial "
+         "measures are included below.")
+#: Coca-Cola's guidance table, this outlook and the last one in two columns: "Current Prior".
+_KO = ("The unavailable information could have a significant impact on the company\u2019s full year "
+       "2026 and full year 2027 reported financial results. 6 Full Year 2026 Guidance Current Prior "
+       "Organic revenues (non-GAAP) At least 5% growth Approx. 5% growth Comparable net revenues "
+       "(non-GAAP) \u2022Approx. 1% currency tailwind1 \u2022Approx. 2% headwind from acquisitions "
+       "and divestitures2 \u2022Approx. 1% currency tailwind1 \u20222% to 3% headwind from "
+       "acquisitions and divestitures2 Underlying effective tax rate (non-GAAP)3 19.7% 19.9% "
+       "Comparable currency neutral EPS excluding acquisitions and divestitures (non-GAAP) At least "
+       "9% growth 7% to 8% growth")
+
+
+@pytest.mark.parametrize("text,quote", [
+    (_ETSY, _ETSY_TABLE),                                                           # ETSY
+    (_GE, f"{_GE_GUIDE} Defense & Propulsion Technologies (DPT) Three months ended September 30 "
+          "Nine months ended September 30 (Dollars in millions) 2026 2025"),         # GE
+    (_GE, f"{_GE_GUIDE} Defense & Propulsion Technologies (DPT)"),                 # GE
+    (_INTC, "Intel's guidance for the fourth quarter of 2026 includes both GAAP and non-GAAP "
+            "estimates as follows: Q4 2026 GAAP Non-GAAP Revenue ($B) $15.0 - $16.0"),  # INTC
+    (_KO, "Full Year 2026 Guidance Current Prior Organic revenues (non-GAAP) At least 5% growth "
+          "Approx. 5% growth"),                                                     # KO
+    (_KO, "Organic revenues (non-GAAP) At least 5% growth Approx. 5% growth Comparable net "
+          "revenues"),                                                              # KO
+    (_KO, "Comparable currency neutral EPS excluding acquisitions and divestitures (non-GAAP) At "
+          "least 9% growth 7% to 8% growth"),                                       # KO
+])
+def test_a_table_quoted_as_the_outlook_is_refused(text, quote):
+    """The ETSY row is a stored model answer that verified: its figures are the release's, and the
+    sheet would have shown "~25.6% ~25.8%" with nothing to say which is the quarter's."""
+    figures, reasons = _verify(text, guidance={"quote": quote})
+    assert figures is None and reasons["guidance"] == "table_cell"
+
+
+def test_the_sentence_in_front_of_a_table_is_still_the_outlook():
+    figures, reasons = _verify(_GE, guidance={"quote": _GE_GUIDE})                # GE
+    assert reasons["guidance"] == "ok" and figures.guidance == _GE_GUIDE
 
 
 # ── a real row that names no such figure ─────────────────────────────────────

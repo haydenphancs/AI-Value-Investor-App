@@ -234,12 +234,30 @@ def test_a_cent_print_from_fmp_has_no_verdict_with_the_consensus_inside_its_half
     assert (m.actual, m.source, m.surprise_pct) == (actual, els.SOURCE_FMP, None)
 
 
-def test_the_same_print_reads_the_same_from_the_release_and_from_fmp():
-    """No colour flip when FMP replaces the filing's figure with the same number."""
-    filed = els.eps_metric(_rec(eps_estimate=0.4134,
-                                filing=_filing(eps_adjusted=0.41, eps_rounding=0.005)))
-    confirmed = els.eps_metric(_rec(eps_estimate=0.4134, fmp_eps=0.41))
+@pytest.mark.parametrize("actual,estimate,pct", [
+    (0.41, 0.4134, None),        # the consensus inside the half cent: no verdict either way
+    (0.41, 0.41, 0.0),           # equal to it: in line either way
+    (-0.41, -0.41, 0.0),         # a loss equal to it
+    (1.2, 1.2, 0.0),             # a one-decimal print equal to it, read by its own band
+    (0.41, 0.4151, -1.23),       # past the band: the same miss either way
+], ids=["inside_the_band", "equal", "an_equal_loss", "equal_one_decimal", "past_the_band"])
+def test_the_same_print_reads_the_same_from_the_release_and_from_fmp(actual, estimate, pct):
+    """No colour flip when FMP replaces the filing's figure with the same number: an EPS equal to
+    the consensus read as no verdict from the release and "in line" once FMP said the same."""
+    rounding = 0.05 if actual == 1.2 else 0.005
+    filed = els.eps_metric(_rec(eps_estimate=estimate,
+                                filing=_filing(eps_adjusted=actual, eps_rounding=rounding)))
+    confirmed = els.eps_metric(_rec(eps_estimate=estimate, fmp_eps=actual))
+    assert filed.source == els.SOURCE_FILING and confirmed.source == els.SOURCE_FMP
     assert (filed.actual, filed.surprise_pct) == (confirmed.actual, confirmed.surprise_pct)
+    assert filed.surprise_pct == (pytest.approx(pct, abs=0.01) if pct is not None else None)
+
+
+def test_a_release_eps_with_no_band_of_its_own_keeps_its_verdict():
+    """A filing figure whose rounding the verifier did not record is read as exact, as before."""
+    m = els.eps_metric(_rec(eps_estimate=0.4134, filing=_filing(eps_adjusted=0.41,
+                                                                eps_rounding=None)))
+    assert m.surprise_pct == pytest.approx(-0.82, abs=0.01)
 
 
 @pytest.mark.parametrize("actual,estimate,pct", [
@@ -500,8 +518,11 @@ def test_no_mix_of_sources_and_consensus_shows_a_wrong_revenue():
         judged_by = est if est is not None else guard
         figures = [v for v in (fmp, filed) if v is not None]
         read_by_filing = m.source == els.SOURCE_FILING and not fmp and m.estimate == guard
-        printed = m.estimate == est or read_by_filing or (m.estimate is None and any(
-            els._estimate_overtaken(rec, v) for v in figures))
+        # A filing on no stated consensus is held against the largest, in either row order.
+        held_by_filing = (m.checking and filed is not None and not fmp and est is not None
+                          and m.estimate == guard)
+        printed = m.estimate == est or read_by_filing or held_by_filing or (
+            m.estimate is None and any(els._estimate_overtaken(rec, v) for v in figures))
         assert printed, case
         assert m.checking is (any_figure and m.actual is None), case
         assert m.due is (not any_figure and judged_by is not None), case
@@ -872,6 +893,32 @@ def test_a_filing_on_neither_twin_stays_held(filed):
         600e6, checking=True)
 
 
+def test_a_filing_on_no_consensus_is_read_against_the_largest_however_the_twins_were_touched():
+    """The estimate on show is only the row FMP touched last: the tiny twin on show used to show
+    -90% where the material one on show held the figure."""
+    rec = replace(_twins(filing=_filing(revenue=5.9e6)), revenue_estimate=60e6)
+    assert els.revenue_metric(rec) == els.LiveMetric(600e6, checking=True)
+    rec = _rec(revenue_estimate=30e6, revenue_guard_estimate=90e6, revenue_smallest_estimate=30e6,
+               filing=_filing(revenue=10e6))
+    assert els.revenue_metric(rec) == els.LiveMetric(90e6, 10e6, -88.89, els.SOURCE_FILING)
+
+
+def test_a_filing_on_no_consensus_never_reads_one_smaller_than_the_estimate_on_show():
+    """An older estimate on show can be larger than what the latest answer stated: the largest the
+    record holds is that estimate, and it stays."""
+    rec = _rec(revenue_estimate=600e6, revenue_guard_estimate=60e6, revenue_smallest_estimate=60e6,
+               filing=_filing(revenue=5.9e6))
+    assert els.revenue_metric(rec) == els.LiveMetric(600e6, checking=True)
+
+
+def test_a_filing_on_no_consensus_with_none_on_show_is_measured_against_none():
+    """No row chose an estimate, so no order can decide one, and a guard-only consensus never
+    gives a surprise."""
+    rec = _rec(revenue_estimate=None, revenue_guard_estimate=30e6, revenue_smallest_estimate=30e6,
+               filing=_filing(revenue=100e6))
+    assert els.revenue_metric(rec) == els.LiveMetric(None, 100e6, None, els.SOURCE_FILING)
+
+
 def test_a_filing_on_the_estimate_on_show_never_reads_the_twin():
     rec = _twins(filing=_filing(revenue=590e6))
     assert els.revenue_metric(rec) == els.LiveMetric(600e6, 590e6, -1.67, els.SOURCE_FILING)
@@ -1084,6 +1131,71 @@ def test_a_year_ago_gaap_eps_is_never_compared_with_an_adjusted_actual():
                                eps_estimate=0.41, revenue_estimate=16.6e9, extras=extras,
                                today=REPORT)
     assert payload["year_ago"]["eps"] is None and payload["year_ago"]["eps_growth_pct"] is None
+    assert payload["year_ago"]["revenue"] == 13.7e9, "the revenue line keeps the block"
+    reported = els.snapshot_of(_rec(fmp_eps=0.46, fmp_revenue=17.1e9), REPORT, _et(REPORT, 17))
+    block = els.live_payload("INTC", REPORT, reported, company_name="Intel", eps_estimate=0.41,
+                             revenue_estimate=16.6e9, extras=extras, today=REPORT)["year_ago"]
+    assert (block["eps"], block["eps_growth_pct"]) == (None, None), "no growth off a GAAP base"
+    assert block["revenue_growth_pct"] == pytest.approx(24.82, abs=0.01)
+
+
+def _pre_revenue_history(*, comparable: bool = True) -> els.HistoryExtras:
+    """A company with no revenue yet: its revenue rows are 0, so there is no year-ago revenue,
+    and the year-ago EPS is all the block can show."""
+    eps = [
+        _q("Q3 '25", "2025-09-27", -0.52, -0.55, has_estimate=comparable),
+        _q("Q2 '26", "2026-06-27", -0.48, -0.50),
+        _q("Q3 '26", "2026-09-26", None, -0.50),
+    ]
+    rev = [_q("Q3 '25", "2025-09-27", 0.0, 0.0), _q("Q3 '26", "2026-09-26", None, 0.0)]
+    return els.history_extras_from(SimpleNamespace(eps_quarters=eps, revenue_quarters=rev),
+                                   REPORT)
+
+
+def _year_ago(snap, extras):
+    return els.live_payload("BIOX", REPORT, snap, company_name=None, eps_estimate=-0.50,
+                            revenue_estimate=None, extras=extras, today=REPORT)["year_ago"]
+
+
+def _biox(**kw) -> els._Record:
+    return _rec(symbol="BIOX", eps_estimate=-0.50, revenue_estimate=None, **kw)
+
+
+def test_a_year_ago_block_is_sent_only_with_a_figure_to_draw_under_its_heading():
+    """The sheet draws the block's heading whenever the block is sent, and each line only with
+    its figure. A GAAP-only release takes the year-ago EPS off, so with no year-ago revenue the
+    block would be a heading over nothing, until FMP's adjusted figure puts the EPS back."""
+    extras = _pre_revenue_history()
+    assert (extras.year_ago_revenue, extras.year_ago_eps) == (None, -0.52)
+    assert _year_ago(None, extras) == {"quarter": "Q3 '25", "revenue": None, "eps": -0.52,
+                                       "revenue_growth_pct": None, "eps_growth_pct": None}
+    gaap_only = _biox(filing=_filing(eps_gaap=-0.45))
+    snap = els.snapshot_of(gaap_only, REPORT, _et(REPORT, 16, 5))
+    assert (snap.status, snap.eps.basis) == (els.STATUS_REPORTED, els.BASIS_GAAP)
+    assert _year_ago(snap, extras) is None
+    confirmed = els.snapshot_of(replace(gaap_only, fmp_eps=-0.42), REPORT, _et(REPORT, 17))
+    assert confirmed.eps.basis == els.BASIS_ADJUSTED
+    assert _year_ago(confirmed, extras)["eps"] == -0.52
+
+
+def test_a_year_ago_eps_on_another_basis_and_no_revenue_send_no_block():
+    """The year-ago EPS fell to GAAP (no consensus that quarter), so it is never shown beside an
+    adjusted figure: before the release, and after it."""
+    extras = _pre_revenue_history(comparable=False)
+    assert extras.year_ago_eps_comparable is False and extras.year_ago_quarter == "Q3 '25"
+    assert _year_ago(None, extras) is None
+    reported = els.snapshot_of(_biox(fmp_eps=-0.42), REPORT, _et(REPORT, 17))
+    assert _year_ago(reported, extras) is None
+
+
+@pytest.mark.parametrize("extras,block", [
+    (els.HistoryExtras((), "Q3 '25", None, None, True), None),
+    (els.HistoryExtras((), None, None, 0.0, True),
+     {"quarter": None, "revenue": None, "eps": 0.0, "revenue_growth_pct": None,
+      "eps_growth_pct": None}),
+], ids=["a_label_alone_is_no_block", "a_breakeven_year_is_a_figure"])
+def test_a_year_ago_block_is_judged_on_its_figures_never_on_its_label(extras, block):
+    assert _year_ago(None, extras) == block
 
 
 def test_yoy_growth_needs_two_positive_figures():

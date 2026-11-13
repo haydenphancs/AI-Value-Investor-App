@@ -127,13 +127,32 @@ async def test_yesterdays_result_survives_a_season_the_single_request_would_cut(
 
 @pytest.mark.asyncio
 async def test_todays_row_wins_over_yesterdays_for_the_same_symbol(monkeypatch):
-    """`select_results` keeps the FIRST row per symbol. FMP's multi-day answer listed the
-    newest day first, so today's row won; the per-day rows keep that order."""
+    """`select_results` tells ONE report per symbol, the first listed that clears the bar. FMP's
+    multi-day answer listed the newest day first, so today's report won; the per-day rows keep
+    that order."""
     rows = [_cal("NVDA", _YESTERDAY, est=1.0, act=1.3), _cal("NVDA", _TODAY, est=1.0, act=1.1)]
     run, dispatched, _ = _wire(monkeypatch, _FMP(rows), {"NVDA"})
     await es.run_earnings_notifications(now=_NOW)
     (only,) = dispatched
     assert only["kind"] == es.KIND_EARNINGS_RESULT and only["when"] == _TODAY.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_report_nobody_watches_is_neither_judged_nor_logged(monkeypatch, caplog):
+    """The result pass judges the watched rows alone, so a line about a report FMP lists twice
+    is about a report someone can be told of. ZZZZ's two rows, two verdicts, are the whole
+    market's noise."""
+    rows = [{**_cal("ZZZZ", _TODAY, est=0.41, act=0.60), "lastUpdated": "2026-11-05 13:40:00"},
+            {**_cal("ZZZZ", _TODAY, est=0.70, act=0.60), "lastUpdated": "2026-11-05 13:50:00"},
+            {**_cal("NVDA", _TODAY, est=1.0, act=1.3), "lastUpdated": "2026-11-05 13:40:00"},
+            {**_cal("NVDA", _TODAY, est=1.0, act=1.1), "lastUpdated": "2026-11-05 13:50:00"}]
+    run, dispatched, _ = _wire(monkeypatch, _FMP(rows), {"NVDA"})
+    with caplog.at_level("WARNING", logger=es.__name__):
+        await es.run_earnings_notifications(now=_NOW)
+    assert [(d["symbol"], d["kind"]) for d in dispatched] == [("NVDA", es.KIND_EARNINGS_RESULT)]
+    lines = [r.getMessage() for r in caplog.records]
+    assert not [line for line in lines if "ZZZZ" in line]
+    assert [line for line in lines if "NVDA" in line], "the watched twin is still logged"
 
 
 @pytest.mark.asyncio

@@ -1,8 +1,35 @@
 # Live earnings — independent review findings (partial)
 
-Source: a multi-agent review of commit `28a7438` (7 reviewers, one per area; each finding then judged by a 3-member panel — `trace` reproduces it, `refute` tries to disprove it, `intent` checks it against the design). The review was **stopped early** when the cloud session ended: every reviewer finished, but only some findings were judged.
+> **Status, 2026-11-12: every finding below is fixed.** R1–R39 in code and tests, each with a test
+> that failed before its fix (R36 and R37 are test-only and were checked by hand mutation); R40 is a
+> doc fix, the corrected one-push query in `documents/OWNER_TASKS.md`. This review read the first
+> commit, `28a7438`, so its file and line references point into that commit, not the current code,
+> and its statuses (CONFIRMED, UNVERIFIED…) are the panel's at the time.
+>
+> **Later reviews** (summaries only):
+> * 2026-11-05, a full check of the branch, its code run in memory and the rest traced: all 40
+>   findings real (R5, R17 and R29 included) and about 55 more claims, which the same fix rounds
+>   took up. Each fix was reviewed again before it was merged.
+> * Two replays of 30 real earnings releases through the model and the verifier, the second on
+>   2026-11-11: `LIVE_EARNINGS_HANDOFF.md` §5.
+> * 2026-11-11, a review of the whole change against `main`: 13 defects confirmed (1 high, 6 medium,
+>   6 low), none refuted. All 13 are fixed.
+> * 2026-11-12, a second read-only review of the whole change: 20 defects confirmed (2 high,
+>   9 medium, 9 low), 4 refuted. All 20 are fixed, and each fix was checked again. The rechecks'
+>   own leftovers in the filing verifier and the SEC watcher were fixed on 2026-11-13 in four more
+>   verifier rounds, each with its own review and recheck, and the held-push wake fix had a review
+>   of its own (6 low gaps confirmed, all fixed). What stays open is in `LIVE_EARNINGS_HANDOFF.md`
+>   §7: the shapes the verifier's last recheck found (medium and low; none in the 34 stored real
+>   releases) and the recorded residuals.
+> * None of these fixes was committed when this was written; the owner commits them.
+>
+> Their full results, every finding with its trace and its fix, are kept outside git, in
+> `.claude/session-state/live-earnings-pause-2026-11-06/` on the owner's Mac (`.claude/` is
+> gitignored).
 
-Status per finding: **CONFIRMED** = at least 2 of 3 panelists said real · **REJECTED** = at least 2 said not real · **PARTIAL** = some votes in, no majority yet · **UNVERIFIED** = not judged yet. Treat UNVERIFIED / PARTIAL items as leads to check, not facts. Several reviewers found the same issue independently; those are grouped in the fix list in `LIVE_EARNINGS_HANDOFF.md`.
+Source: a multi-agent review of commit `28a7438` (7 reviewers, one per area; each finding then judged by a 3-member panel — `trace` reproduces it, `refute` tries to disprove it, `intent` checks it against the design). The review was **stopped early**: every reviewer finished, but only some findings were judged.
+
+Status per finding: **CONFIRMED** = at least 2 of 3 panelists said real · **REJECTED** = at least 2 said not real · **PARTIAL** = some votes in, no majority yet · **UNVERIFIED** = not judged yet. Treat UNVERIFIED / PARTIAL items as leads to check, not facts. Several reviewers found the same issue independently.
 
 
 

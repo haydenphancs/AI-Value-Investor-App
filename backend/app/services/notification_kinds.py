@@ -216,7 +216,13 @@ class NotificationKind:
     # Hours toggle the user did touch always wins, off included. Such a kind's wake also asks
     # again: the flush holds a row once more on a good read that puts it in the user's night,
     # and takes its text from `earnings_live_sender.copy_at_wake`, so a third kind here needs
-    # copy there too (with none, it keeps the row's text).
+    # copy there too (with none, it keeps the row's text). At the landing it changes two more
+    # things (`PushDispatchService.decide`): a hold past the user's midnight meets the cap of the
+    # day it wakes on, and a failed preference read waits for the next flush instead of buzzing
+    # on ET's clock. At the wake, a row the user's settings turn off goes on as the kind sharing its
+    # key when the user takes that one and its sender would start it now
+    # (`earnings_live_sender.instead_at_wake`), and is otherwise deleted rather than ended, because
+    # these kinds share their key (`PushDispatchService.flush_deferred`).
     night_hold_by_default: bool = False
 
     def __post_init__(self) -> None:

@@ -566,6 +566,7 @@ enum AppAlert: Identifiable {
     /// "Revenue $17.1B vs $16.6B est · EPS $0.44 vs $0.41 est". A metric not out yet says so, a
     /// held one says it is being confirmed (the push's own words), and a metric nothing is
     /// coming for says nothing: a finished report with no consensus for it (`is_complete`).
+    /// Each pair in its row's format, so a beat never reads "$2.5B vs $2.5B est".
     static func earningsResultsLine(_ data: EarningsData) -> String {
         func part(_ label: String, _ actual: Double?, _ estimate: Double?, checking: Bool,
                   _ format: (Double) -> String) -> String? {
@@ -579,15 +580,20 @@ enum AppAlert: Identifiable {
         let epsLabel = data.epsIsGAAP ? "GAAP EPS" : "EPS"
         let parts: [String?] = [
             part("Revenue", data.revenueActual, data.revenueEstimate,
-                 checking: data.revenueChecking, EarningsFigureFormat.revenue),
+                 checking: data.revenueChecking,
+                 EarningsFigureFormat.revenueRow(actual: data.revenueActual,
+                                                 estimate: data.revenueEstimate,
+                                                 beatOrMiss: data.revenueOutcome.isBeatOrMiss)),
             part(epsLabel, data.epsActual, data.epsIsGAAP ? nil : data.epsEstimate,
-                 checking: data.epsChecking, EarningsFigureFormat.eps),
+                 checking: data.epsChecking,
+                 EarningsFigureFormat.epsRow(actual: data.epsActual, estimate: data.epsEstimate,
+                                             beatOrMiss: data.epsOutcome.isBeatOrMiss)),
         ]
         return parts.compactMap { $0 }.joined(separator: " · ")
     }
 
     /// True while the report is LIVE — the card draws the red label, and the Tracking poll
-    /// keeps running past 20:00 ET for it.
+    /// keeps asking about it, through its own route, once no price on the tab can move.
     var isLiveEarnings: Bool {
         if case .earnings(let data) = self { return data.status == .live }
         return false

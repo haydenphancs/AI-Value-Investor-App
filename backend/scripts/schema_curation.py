@@ -655,7 +655,8 @@ CURATION: dict[str, TableDoc] = {
              "guidance", "computed_at"),
         note="Migration 209. Figures from SEC filings only, never FMP data. One row per (symbol, "
              "report date), written when a verified filing reaches its record and read back "
-             "once per process for the live days, so report_date is its TTL: no expires_at and "
+             "once per process for the days a record stays readable (the live days and the "
+             "trading day before them), so report_date is its TTL: no expires_at and "
              "no clean-up job. A restored figure is never a landing, and a row of another "
              "verifier_version reads as no row. service_role only. Owner: "
              "earnings_live_service.py."),

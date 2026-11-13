@@ -127,13 +127,15 @@ extension AlertDestination {
         // An earnings result leads with its own live results — the figures the banner was
         // about, estimate vs actual — before the ticker screen.
         //
-        // ONLY while the endpoint serves that report. It answers 400 for a date before the
-        // previous trading day (`MarketHoursUtil.previousTradingDayKey`), on a row the inbox
-        // keeps for 90 days, and a row with no date would be answered with some other report.
-        // Both keep "Open" and "See the numbers", which show that quarter's figures. Keyed on
-        // the route's date, never `createdAt`: a pushed copy's `createdAt` is its delivery time.
+        // ONLY while the endpoint serves that report. It answers 400 for a date before the first
+        // of its `sheet_days`, two trading days back (`MarketHoursUtil.liveResultsFloorKey`):
+        // the live days and the trading day before them, so a result held for the user's
+        // morning still opens on the day it wakes. The inbox keeps a row for 90 days, and a row
+        // with no date would be answered with some other report. Both keep "Open" and "See the
+        // numbers", which show that quarter's figures. Keyed on the route's date, never
+        // `createdAt`: a pushed copy's `createdAt` is its delivery time.
         if isEarningsResult(item.kind), let reportDate = route["report_date"],
-           reportDate >= MarketHoursUtil.previousTradingDayKey() {
+           reportDate >= MarketHoursUtil.liveResultsFloorKey() {
             out.append(AlertDestination(
                 label: "See live results",
                 systemImage: "bolt.horizontal.circle",

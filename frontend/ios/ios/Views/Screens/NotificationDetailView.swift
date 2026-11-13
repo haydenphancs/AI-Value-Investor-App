@@ -115,8 +115,9 @@ struct NotificationDetailView: View {
     private var receivedCard: some View {
         card {
             detailRow(label: "Received", value: absoluteTime(item))
-            // Only when the user's quiet hours held it back — the same rule the row's footnote
-            // follows. Saying "delivered" on every other row would carry no information.
+            // Only while the buzz is held back (the user's Quiet Hours, or an earnings result's
+            // night hold) — the same rule the row's footnote follows. Saying "delivered" on every
+            // other row would carry no information.
             if let note = deliveryNote(item) {
                 detailRow(label: "Delivery", value: note)
             }
@@ -190,11 +191,13 @@ struct NotificationDetailView: View {
         return NotificationDetailView.display.string(from: date)
     }
 
-    /// Same rule as `NotificationInboxSection.footnote`: only quiet hours, which the user chose.
-    /// `no_device` / `failed` were removed from both on request — see the note there.
+    /// Same rule and words as `NotificationInboxSection.footnote`: only a held buzz, said in words
+    /// true of the user's own Quiet Hours and of the earnings night hold alike, promising no
+    /// buzz the wake may never send — see the note there, as for `no_device` / `failed`, which
+    /// were removed from both on request.
     private func deliveryNote(_ event: NotificationEventDTO) -> String? {
         switch event.deliveryState {
-        case "deferred":  return "Held during quiet hours"
+        case "deferred":  return "Held back"
         default:          return nil
         }
     }

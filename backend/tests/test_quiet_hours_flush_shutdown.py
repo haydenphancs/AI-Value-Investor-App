@@ -90,7 +90,7 @@ async def test_the_unprocessed_rows_are_returned_to_deferred(monkeypatch):
                         raising=False)
     monkeypatch.setattr(
         svc, "mark_state",
-        lambda uid, key, state, error=None, sent=False, only_if_state=None:
+        lambda uid, key, state, error=None, sent=False, only_if_state=None, attempts=None:
             marks.append((uid, key, state, only_if_state)),
         raising=False,
     )

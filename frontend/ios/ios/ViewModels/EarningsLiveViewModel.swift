@@ -11,10 +11,13 @@
 //  With no answer yet there is no `poll_seconds` to read, so a failed first load asks again by
 //  itself every 30 s, on either route: a dropped connection at 16:00 ET must not freeze the
 //  sheet while the Tracking card behind it updates. That retry is bounded (`maxFailedLoads`),
-//  and a request the server refuses as invalid ends the poll at once, shown answer or not: a
-//  `report_date` can age out under an open sheet, and the 400 it then gets is permanent.
+//  and an answer that asking again cannot change ends the poll at once, shown answer or not:
+//  a 400 (a `report_date` can age out under an open sheet) or a 404 (a backend without this
+//  route: an older one, after a rollback).
 //  Either way nothing is asking any more, so the card stops saying LIVE (`pollEnded`).
 //  `start()` clears all of it, so Try Again and a return to the foreground always ask again.
+//  Every failure is logged through `os.Logger` with the ticker, the report date and the raw
+//  error (`logFailure`).
 //
 //  Lifecycle mirrors the detail screens' polls (`TickerDetailView`): `start()` on appear and
 //  on `didBecomeActive`, `stop()` on disappear and `willResignActive`. `start()` cancels any
@@ -23,6 +26,7 @@
 
 import Combine
 import Foundation
+import os
 import SwiftUI
 
 @MainActor
@@ -44,8 +48,12 @@ final class EarningsLiveViewModel: ObservableObject {
     private var pollTask: Task<Void, Never>?
     /// Failed loads in a row with no answer to show.
     private var failedLoads = 0
-    /// The server refused this request as invalid, so asking again gets the same answer.
+    /// The server refused this request for good (a 400 for a date outside its window, a 404 from
+    /// a backend without the route), so asking again gets the same answer.
     private var refused = false
+
+    /// `nonisolated`: an immutable `Logger` (Sendable), the same lever as `TrackingViewModel.log`.
+    nonisolated private static let log = Logger(subsystem: "com.phan.caydex", category: "earnings-live")
 
     /// Floor on the server's cadence, so a malformed `poll_seconds` cannot hammer the route.
     private static let minimumPollSeconds = 15
@@ -130,10 +138,34 @@ final class EarningsLiveViewModel: ObservableObject {
             // superseding `start()` land here. Neither is a failure.
             guard !Task.isCancelled else { return }
             let appError = AppError.from(error)
-            print("[EarningsLiveVM] ❌ live results for \(ticker) failed: \(appError.title)")
+            logFailure(error, as: appError)
+            // Answers that asking again cannot change end the poll at once. A 400 refusal: the
+            // date left the endpoint's window. A 404: `APIClient` turns FastAPI's plain
+            // `{"detail": "Not Found"}` into `.notFound`, the answer of a backend without this
+            // route (an older one, after a rollback), which would otherwise be asked 20 times,
+            // 30 s apart.
             if case .validationFailed = appError { refused = true }
+            if case .notFound = appError { refused = true }
             if live == nil { failedLoads += 1 }
             loadFailed = live == nil || refused
+        }
+    }
+
+    /// One line a failure can be diagnosed from with no repro: which report, how the app read the
+    /// failure, and the raw error (a `DecodingError` names the key that broke, which `AppError`
+    /// folds into a generic "Something Went Wrong"). `.error` for an answer this build could not
+    /// decode, which is backend↔iOS contract drift; `.warning` for the handled rest: offline, a
+    /// 5xx, a refusal, a backend without the route. Public: a ticker, a date and an error's
+    /// description carry no personal data, and a `<private>` line would say nothing.
+    private func logFailure(_ error: Error, as appError: AppError) {
+        let symbol: String = ticker
+        let date: String = reportDate ?? "none"
+        let code: String = appError.analyticsCode
+        let detail: String = "\(String(describing: type(of: error))): \(String(describing: error))"
+        if let apiError = error as? APIError, case .decodingError = apiError {
+            Self.log.error("earnings live \(symbol, privacy: .public) report_date=\(date, privacy: .public): the answer did not decode (\(code, privacy: .public)): \(detail, privacy: .public)")
+        } else {
+            Self.log.warning("earnings live \(symbol, privacy: .public) report_date=\(date, privacy: .public) failed (\(code, privacy: .public)): \(detail, privacy: .public)")
         }
     }
 }

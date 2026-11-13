@@ -66,7 +66,8 @@ class NotificationLookupResponse(BaseModel):
 
 
 class MarkReadRequest(BaseModel):
-    """What to mark read. Empty selectors + `all=True` marks everything.
+    """What to mark read. Empty selectors + `all=True` marks everything but a held row, one still
+    waiting for its wake (`NotificationInboxService.mark_read`).
 
     `dedup_keys` addresses rows by the other half of the `(user_id, dedup_key)` unique
     key. The notification's own "Mark as Read" action has no `notification_events.id` —

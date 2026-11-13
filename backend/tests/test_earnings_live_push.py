@@ -13,7 +13,8 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     "Keep it off at first", 2026-11-05);
   * the daily 16:00 ET pass reads neither switch, and neither does the wake of a row it held: as
     shipped it is what tells a result, in the words it always used, from 16:00 ET and not before;
-  * what off costs beyond the wait: the kinds of report nobody is told, each with its sheet;
+  * what off costs beyond the wait: the kinds of report nobody is told, each with its sheet,
+    each named on a line of its own, never counted or placed;
   * a lock-screen banner prints an absolute figure only from the company's own release;
   * each report is dispatched once per process (the 60 s loop re-hands every landing);
   * a failed watcher read is the one exception: it told nobody, so the key goes back, the round
@@ -24,8 +25,9 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     such a report is handled once, for good;
   * the daily pass keeps the EPS the live path keeps, so a row the fold reads as unfilled never
     goes out at 16:00 ET either;
-  * a row of zeros shown to be unfilled sends no false miss, whatever FMP fills next, and a
-    report left with nothing on show sends nothing at all;
+  * a row of zeros shown to be unfilled, stored first or refused at once, sends no false miss,
+    whatever FMP fills next or sends again, and a report left with nothing on show sends nothing
+    at all;
   * a digit off a consensus straddling the guard's floor is never announced as a -90% miss;
   * a round sends oldest first, so the cap cannot run a report out of that window;
   * the round cap's warning counts the reports still owed a push, nothing else;
@@ -33,6 +35,9 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     in which order, across a restart, across a closed day and past the daily pass: the real loop
     runs those over the real dispatcher and a fake ledger, and the keys it holds are what they
     assert;
+  * after a restart the leftover row reads as its report from the filing `earnings_filing_cache`
+    kept, as it did before the restart; with no table (not applied yet, or a failed read) it
+    reads as its own, with no figure, and the ledger alone keeps the report to one push;
   * who was told is the ledger's answer, so a report nobody heard about holds nothing back;
   * a cent print with the consensus inside its half cent has no verdict, so neither kind and no
     pass states one, and the Financials tab's raw compare is pinned beside it.
@@ -40,13 +45,26 @@ kinds — and the daily 16:00 ET sender — claim the SAME key. What is pinned h
     claimed at once, one buzz at the wake, across both kinds and the daily pass, through a
     restart and past the window above;
   * what that wake says and opens is the report as it stands then: the text comes from the
-    record, a surprise the record no longer holds is never buzzed, and the sheet still takes the
-    report's date on any day such a row can wake;
+    record, a surprise the record no longer holds is never buzzed, nor is what a wake wrote while
+    it waited for FMP, a restart included, and the sheet still takes the report's date on any day
+    such a row can wake;
   * the record it reads is never older than the row: the daily pass folds what it read first;
+  * a report FMP lists twice is told by the pass as its record reads it, so every phone and the
+    sheet say one thing (the owner's "Follow the record", 2026-11-11), and so is a report whose
+    EPS is 0, which the zero rules weigh against what its record already holds; each from the row
+    the record would read when the pass could not fold into it;
   * a figure still being confirmed is no answer, so the row asks again, a bounded number of
-    times, instead of ending.
+    times, instead of ending, and each ask has the report read just before the next look, so a
+    closed day's 2 h cadence cannot hide FMP's recovery from every look: timed from the instant
+    the row is held to, however far into a hand-out the row was, one read shared by the rows of
+    a hand-out and by looks under a tick apart, none once the report has answered, and none for
+    a wake that sends or ends its row;
+  * a held live row the user's settings turn off at its wake goes out as the result they take,
+    while the result push is on and the record holds a surprise it would start now, and is
+    otherwise deleted, so the key is free for the round or the pass that can still tell it.
 The dispatcher is a recorder, or the real one over a fake table where a failed read or the
-ledger is the point — nothing here reaches APNs or Supabase.
+ledger is the point, and the real loop keeps its filings in an in-memory `earnings_filing_cache`
+(`_filing_cache_fake.FilingCache`) — nothing here reaches APNs or Supabase.
 """
 from __future__ import annotations
 
@@ -61,7 +79,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -82,6 +100,7 @@ from app.services.earnings_live_service import (
     EARNINGS_LIVE_UNLISTED_END_SECONDS,
     SOURCE_FILING,
     SOURCE_FMP,
+    STATUS_AWAITING,
     STATUS_LIVE,
     STATUS_REPORTED,
     EarningsLiveService,
@@ -99,6 +118,8 @@ from app.services.notification_kinds import (
 from app.services.push_service import PushOutcome
 from app.utils.market_hours import ET, previous_trading_day
 
+from _filing_cache_fake import FilingCache
+
 REPORT = date(2026, 10, 29)
 NOW = datetime(2026, 10, 29, 20, 5, tzinfo=timezone.utc)
 FRIDAY, SATURDAY, SUNDAY, MONDAY, TUESDAY = (date(2026, 11, day) for day in (6, 7, 8, 9, 10))
@@ -114,6 +135,25 @@ def _snap(symbol="INTC", *, eps=None, eps_source=SOURCE_FMP, eps_basis=BASIS_ADJ
         revenue=LiveMetric(rev_est, rev, rev_pct, rev_source if rev is not None else None),
         preliminary=preliminary, checked_at=NOW, filing=None,
     )
+
+
+def _methods_left_on(service: Optional[EarningsLiveService]) -> List[str]:
+    """The class methods `service` holds on the instance itself, each hiding the class's."""
+    if service is None:
+        return []
+    return sorted(name for name, value in vars(service).items()
+                  if callable(value) and hasattr(type(service), name))
+
+
+@pytest.fixture(autouse=True)
+def _a_test_leaves_no_method_on_the_process_record():
+    """monkeypatch undoes a patch on an INSTANCE by writing the original back onto it, so a method
+    patched onto the process's live record outlives the test and hides every later patch of the
+    class, in this file and the ones after it. Patch a test's own record (`live`), or the class.
+    With no fixture of its own it is set up first and torn down last, after monkeypatch's undo."""
+    yield
+    left = _methods_left_on(els._service)
+    assert not left, f"this test left methods on the process's live record: {left}"
 
 
 class _Dispatch:
@@ -1232,17 +1272,42 @@ class _Duplicate(Exception):
 
 
 class _Update:
-    def __init__(self, rows, patch):
+    """An UPDATE, or with no patch a DELETE, over the rows its filters match."""
+
+    def __init__(self, rows, patch=None):
         self.rows, self.patch, self.filters = rows, patch, {}
+        self.nulls, self.within, self.unlike = set(), {}, {}
 
     def eq(self, column, value):
         self.filters[column] = value
         return self
 
+    def neq(self, column, value):
+        self.unlike[column] = value
+        return self
+
+    def is_(self, column, value):
+        """Only `is.null`, as the inbox's `mark_read` sends it."""
+        assert value == "null", value
+        self.nulls.add(column)
+        return self
+
+    def in_(self, column, values):
+        self.within[column] = set(values)
+        return self
+
     def execute(self):
-        for row in self.rows:
-            if all(row.get(c) == v for c, v in self.filters.items()):
+        hit = [row for row in self.rows
+               if all(row.get(c) == v for c, v in self.filters.items())
+               and all(row.get(c) != v for c, v in self.unlike.items())
+               and all(row.get(c) is None for c in self.nulls)
+               and all(row.get(c) in v for c, v in self.within.items())]
+        if self.patch is None:
+            self.rows[:] = [row for row in self.rows if not any(row is h for h in hit)]
+        else:
+            for row in hit:
                 row.update(self.patch)
+        return SimpleNamespace(data=[dict(row) for row in hit])
 
 
 class _HoldersRead:
@@ -1287,6 +1352,9 @@ class _Ledger:
 
     def update(self, patch):
         return _Update(self.rows, patch)
+
+    def delete(self):
+        return _Update(self.rows)
 
     def select(self, *_):
         """Who holds a key (`PushDispatchService._holders_of`): the unique index, read as such."""
@@ -1579,6 +1647,82 @@ async def test_a_night_of_reports_still_stops_at_the_daily_cap(monkeypatch, clea
     assert all("cap_reached:earnings:4" in r["last_error"] for r in capped)
 
 
+TUE_1605 = datetime(2026, 11, 10, 16, 5, tzinfo=ET)     # 22:05 in Berlin, 06:05 Wednesday in Tokyo
+WED_0700_BERLIN = datetime(2026, 11, 11, 7, 0, tzinfo=ZoneInfo("Europe/Berlin"))
+IN_BERLIN = {"u1": {qh.PREF_TIMEZONE: "Europe/Berlin"}}
+
+
+def _spent_today(ledger, at, *, user="u1", n=4):
+    """The `n` earnings buzzes `user` had in the hours before `at`, the same day."""
+    for i in range(n):
+        ledger.rows.append({
+            "user_id": user, "dedup_key": f"earlier:{i}", "kind": "earnings_upcoming",
+            "category": "earnings", "push_state": "sent", "attempts": 0,
+            "sent_at": (at - timedelta(hours=i + 1)).isoformat(),
+        })
+
+
+@pytest.mark.asyncio
+async def test_a_result_held_past_midnight_meets_the_cap_of_the_morning_it_buzzes_on(
+        monkeypatch, clean_sender):
+    """Berlin's Tuesday already holds four earnings alerts when the 16:00 ET pass reaches it at
+    22:05. The result buzzes at 07:00 on Wednesday, so Wednesday's budget is the one it spends: the
+    row is written at once and buzzes then. Judged on Tuesday's, it got no row at all."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=IN_BERLIN)
+    _flags_as_shipped(monkeypatch)
+    _spent_today(ledger, TUE_1605)
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, TUE_1605), day=TUESDAY)
+    (row,) = [r for r in ledger.rows if r["kind"] == KIND_EARNINGS_RESULT]
+    assert (row["push_state"], _stamp(row["deliver_after"])) == ("deferred", WED_0700_BERLIN)
+    assert phones.buzzes == []
+
+    _clock_at(monkeypatch, WED_0700_BERLIN)
+    assert (await svc.flush_deferred())["sent"] == 1
+    assert [b["data"]["kind"] for b in phones.buzzes] == [KIND_EARNINGS_RESULT]
+    assert row["push_state"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_a_live_landing_at_23_30_behind_a_full_day_still_buzzes_at_7(
+        monkeypatch, clean_sender):
+    """No daily pass stands behind the live kind: an in-line report dropped here was never told."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _spent_today(ledger, FRI_2330)
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, FRI_2330))
+    (row,) = [r for r in ledger.rows if r["kind"] == KIND_EARNINGS_LIVE]
+    assert (row["push_state"], _stamp(row["deliver_after"])) == ("deferred", SAT_0700)
+
+    _clock_at(monkeypatch, SAT_0700)
+    assert (await svc.flush_deferred())["sent"] == 1
+    assert len(phones.buzzes) == 1 and row["push_state"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_a_tokyo_evening_behind_a_full_day_buzzes_on_tokyos_next_morning(
+        monkeypatch, clean_sender):
+    """09:30 in New York is 22:30 in Tokyo, and the 07:00 wake there is still Friday in New York:
+    the day it buzzes on is Tokyo's Saturday, with its four untouched."""
+    tokyo = ZoneInfo("Asia/Tokyo")
+    landing = datetime(2026, 10, 30, 9, 30, tzinfo=ET)
+    wake = datetime(2026, 10, 31, 7, 0, tzinfo=tokyo)
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones,
+                           prefs={"u1": {qh.PREF_TIMEZONE: "Asia/Tokyo"}})
+    _spent_today(ledger, landing)
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, landing))
+    (row,) = [r for r in ledger.rows if r["kind"] == KIND_EARNINGS_LIVE]
+    assert (row["push_state"], _stamp(row["deliver_after"])) == ("deferred", wake)
+
+    _clock_at(monkeypatch, wake)
+    assert (await svc.flush_deferred())["sent"] == 1
+    assert len(phones.buzzes) == 1 and row["push_state"] == "sent"
+
+
 @pytest.mark.asyncio
 async def test_a_user_who_changed_timezone_is_held_once_more_and_then_told(
         monkeypatch, clean_sender):
@@ -1650,10 +1794,11 @@ _PASS_CALENDAR = {
 
 def _pass_send(symbol: str, day: str, kind: str, title: str, body: str) -> Dict[str, Any]:
     """A result names the keys of the same report under a neighbouring date, so one report is
-    one push whichever row FMP dated it by (`neighbouring_result_keys`)."""
+    one push whichever row FMP dated it by (`neighbouring_result_keys`). Every send asks to hear
+    about a failed read of who to tell (`strict`), so the pass can leave the day open for it."""
     held = daily.neighbouring_result_keys(symbol, day) if kind == "earnings_result" else []
     return {"ticker": symbol, "title": title, "body": body, "kind": kind,
-            "dedup_key": f"{kind}:{symbol}:{day}", "unless_claimed": held,
+            "dedup_key": f"{kind}:{symbol}:{day}", "unless_claimed": held, "strict": True,
             "data": {"route": "ticker", "ticker": symbol, "asset_type": "stock",
                      "tab": "financials", "report_date": day}}
 
@@ -1691,8 +1836,9 @@ async def _pass_over_the_calendar(monkeypatch):
 @pytest.mark.parametrize("result_push", [False, True], ids=["result_off", "result_on"])
 async def test_the_16_00_pass_says_the_same_whichever_way_the_switches_stand(
         monkeypatch, clean_sender, live, live_push, result_push):
-    """Every word, key and route it sends, and nothing else: no `strict`, which would end the
-    whole pass on one failed watcher read, and the same counts on the job's claim."""
+    """Every word, key and route it sends, and nothing else, and the same counts on the job's
+    claim. Each send is `strict`: a failed read of who to tell ends that ticker's send, never the
+    pass (`test_a_failed_read_of_who_to_tell_leaves_the_day_open_for_the_next_wake`)."""
     rec = _Dispatch()
     monkeypatch.setattr(daily, "get_push_dispatch_service", lambda: rec)
     monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
@@ -1848,16 +1994,20 @@ class _Calendar:
 
 @pytest.fixture
 def live(monkeypatch):
-    """The real record the sender, the flush and the sheet all read, and a sheet with no extras."""
+    """The real record the sender, the flush and the sheet all read, and a sheet with no extras.
+
+    A record of this test's own, put where `get_earnings_live_service` finds it, never the
+    process's: a method a test patches onto it goes with it. Patched onto the process's record,
+    monkeypatch's undo writes the original back onto the instance, where it hides every later
+    patch of the class for the rest of the run."""
     async def _no_extras(self, symbol, report_day, *, loader=None):
         return None
 
     monkeypatch.setattr(EarningsLiveService, "history_extras", _no_extras)
-    service = get_earnings_live_service()
-    service.reset()
+    service = EarningsLiveService()
+    monkeypatch.setattr(els, "_service", service)
     ts.reset_earnings_calendar_cache()
     yield service
-    service.reset()
     ts.reset_earnings_calendar_cache()
 
 
@@ -2167,8 +2317,11 @@ async def test_a_broken_re_read_costs_the_new_text_never_the_buzz(
 
     assert (stats["sent"], stats["requeued"]) == (1, 0)
     assert phones.buzzes[0]["body"].startswith("EPS beat consensus by 46%")
-    assert any("RuntimeError" in r.getMessage() and "INTC" in r.getMessage()
-               for r in caplog.records)
+    (record,) = [r for r in caplog.records if "could not re-read" in r.getMessage()]
+    assert "RuntimeError" in record.getMessage() and "INTC" in record.getMessage()
+    # Only a bug reaches that except, and its line is the one trace it leaves: the stack goes too.
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None and record.exc_info[0] is RuntimeError
 
 
 @pytest.mark.asyncio
@@ -2237,6 +2390,81 @@ def test_a_held_row_reads_back_from_the_inbox_as_held():
     assert (dto.delivery_state, dto.kind, dto.category) == (
         "deferred", KIND_EARNINGS_RESULT, "earnings")
     assert dto.route["report_date"] == "2026-10-29" and dto.sent_at is None
+
+
+async def _two_results_held_in_berlin(monkeypatch, ledger, phones) -> Dict[str, Dict[str, Any]]:
+    """The 16:05 ET pass (22:05 in Berlin) holds INTC's and CSCO's beats for 07:00. By ticker."""
+    calendar = [{**_beat_on(TUESDAY), "symbol": symbol} for symbol in ("INTC", "CSCO")]
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, TUE_1605), day=TUESDAY, rows=calendar)
+    held = {row["route"]["ticker"]: row for row in ledger.rows}
+    assert {row["push_state"] for row in held.values()} == {"deferred"} and phones.buzzes == []
+    return held
+
+
+def _inbox_over(ledger) -> NotificationInboxService:
+    inbox = object.__new__(NotificationInboxService)
+    inbox.supabase = ledger
+    return inbox
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landing_read", ["good", "failed"])
+async def test_a_held_row_opened_in_the_app_is_not_buzzed_at_its_wake(
+        monkeypatch, clean_sender, landing_read):
+    """Every evening result of a default-settings user in Europe is held and listed at once, so it
+    is often opened before its wake. At 07:00 the opened row ends unbuzzed, and the unread one
+    beside it is the only buzz, its badge counting itself alone. After a failed read at the pass,
+    07:00 is the rows' second hand-out: the first, a minute on, held them for Berlin's morning."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=IN_BERLIN)
+    _flags_as_shipped(monkeypatch)
+    if landing_read == "failed":
+        answers = iter([{"u1": None}, {"u1": None}])      # one read per ticker the pass tells
+        svc._preferences_bulk = lambda ids: next(answers, IN_BERLIN)
+        calendar = [{**_beat_on(TUESDAY), "symbol": symbol} for symbol in ("INTC", "CSCO")]
+        await _daily_pass(monkeypatch, _clock_at(monkeypatch, TUE_1605), day=TUESDAY,
+                          rows=calendar)
+        _clock_at(monkeypatch, TUE_1605 + timedelta(minutes=1))
+        assert (await svc.flush_deferred())["requeued"] == 2
+        held = {row["route"]["ticker"]: row for row in ledger.rows}
+        assert {_stamp(row["deliver_after"]) for row in held.values()} == {WED_0700_BERLIN}
+    else:
+        held = await _two_results_held_in_berlin(monkeypatch, ledger, phones)
+
+    held["INTC"]["id"] = "row-intc"      # the table's own id, which the inbox hands the app
+    assert _inbox_over(ledger).mark_read("u1", ids=["row-intc"]) == 1
+
+    _clock_at(monkeypatch, WED_0700_BERLIN)
+    await svc.flush_deferred()
+
+    assert [(buzz["data"]["ticker"], buzz["badge"]) for buzz in phones.buzzes] == [("CSCO", 1)]
+    intc = held["INTC"]
+    assert (intc["push_state"], intc.get("sent_at")) == ("failed", None)
+    assert intc["last_error"] == "suppressed on flush: read in the app before its wake"
+
+
+@pytest.mark.asyncio
+async def test_opening_alerts_reads_no_held_row_so_its_wake_still_buzzes(monkeypatch, clean_sender):
+    """The Alerts screen marks everything read on sight, over rows a filter chip or the fold keeps
+    off the screen; a price move delivered at 22:20 is what sets it off here. That proves nothing
+    about a held row, so it stays unread and buzzes at 07:00, each badge counting it."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=IN_BERLIN)
+    _flags_as_shipped(monkeypatch)
+    held = await _two_results_held_in_berlin(monkeypatch, ledger, phones)
+    ledger.rows.append({
+        "id": "row-move", "user_id": "u1", "dedup_key": "ticker_move:AAPL:2026-11-10",
+        "kind": "ticker_move", "category": "watchlist", "push_state": "sent", "attempts": 0,
+        "sent_at": (TUE_1605 + timedelta(minutes=15)).isoformat(), "read_at": None,
+    })
+
+    assert _inbox_over(ledger).mark_read("u1", mark_all=True) == 1
+    assert [row.get("read_at") for row in held.values()] == [None, None]
+
+    _clock_at(monkeypatch, WED_0700_BERLIN)
+    assert (await svc.flush_deferred())["sent"] == 2
+    assert sorted(buzz["data"]["ticker"] for buzz in phones.buzzes) == ["CSCO", "INTC"]
+    assert [buzz["badge"] for buzz in phones.buzzes] == [1, 2]
 
 
 # ── a row from the daily pass, and the record that reads it at the wake ───────
@@ -2406,20 +2634,29 @@ async def test_off_a_report_filled_after_the_last_pass_that_can_tell_it_is_told_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("listed", ["once", "twice"])
 @pytest.mark.parametrize("result_push", [False, True], ids=["as_shipped", "result_push_on"])
 @pytest.mark.parametrize("estimate,eps,gaap,body,surprise", [
     (0.05, 0.46, 0.39, "EPS beat consensus by 820%. Tap for the full picture.", 820.0),
     (0.11, 0.01, -0.02, "EPS missed consensus by 91%. Tap for the full picture.", -90.91),
 ], ids=["ten_times_the_estimate", "a_tenth_of_it"])
 async def test_off_a_surprise_only_the_filing_can_clear_is_told_by_nobody(
-        monkeypatch, clean_sender, live, result_push, estimate, eps, gaap, body, surprise):
+        monkeypatch, clean_sender, live, result_push, estimate, eps, gaap, body, surprise,
+        listed):
     """FMP's figure has the dropped-digit signature and the filing's GAAP EPS says it is real, so
-    the record shows it. The pass reads rows, with no GAAP beside them, and refuses it."""
+    the record shows it. The pass judges that signature without the GAAP EPS and refuses it, a
+    report FMP lists twice included, which the pass reads as its record does. Kept that way by
+    the owner's choice of 2026-11-11, "Keep it quiet": the guard is not handed the filing's GAAP
+    EPS, so as shipped nobody is told."""
     ledger, phones = _Ledger(), _Phones()
     _dispatcher_over(monkeypatch, ledger, phones)
     _set_result_push(monkeypatch, result_push)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
     pending = {**_fmp_row(TUESDAY), "epsEstimated": estimate}
     filled = {**_fmp_row(TUESDAY, eps=eps, revenue=17.1e9), "epsEstimated": estimate}
+    read = [filled] if listed == "once" else [
+        {**filled, "lastUpdated": f"{TUESDAY.isoformat()} 13:40:00"},
+        {**pending, "lastUpdated": f"{TUESDAY.isoformat()} 13:50:00"}]
 
     live.observe_rows(TUESDAY, [pending], TUE_2005 - timedelta(hours=8), fetched=True)
     live.absorb_filing("INTC", TUESDAY, FilingFigures(
@@ -2428,7 +2665,7 @@ async def test_off_a_surprise_only_the_filing_can_clear_is_told_by_nobody(
     await sender.dispatch_landings(live.landed_snapshots(TUE_2005),
                                    _clock_at(monkeypatch, TUE_2005))
     stats = await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
-                              row=filled)
+                              rows=read)
 
     assert stats["results"] == 0
     told = [body] if result_push else []
@@ -2528,20 +2765,24 @@ async def _off_the_calendar(live, day, at) -> List[Dict[str, Any]]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("result_push", [False, True], ids=["as_shipped", "result_push_on"])
-@pytest.mark.parametrize("taken_back", ["blank_again", "off_the_calendar"])
+@pytest.mark.parametrize("taken_back", ["blank_again", "zeros_in_its_place", "off_the_calendar"])
 async def test_off_a_figure_fmp_takes_back_before_the_pass_is_told_by_nobody(
         monkeypatch, clean_sender, live, result_push, taken_back):
-    """Filled on Tuesday evening, and by Wednesday's pass blank again or off the calendar. The
-    record keeps a figure through either, so the sheet has it, while the pass knows only what it
-    read."""
+    """Filled on Tuesday evening, and by Wednesday's pass blank again, a row of zeros under a tiny
+    consensus, or off the calendar. The record keeps its figure through each, beside which the
+    zeros are FMP's unfilled row, so the sheet has it, while the pass tells only an EPS its own
+    answer gave the record: never the zeros as a 100% miss."""
     ledger, phones = _Ledger(), _Phones()
     _dispatcher_over(monkeypatch, ledger, phones)
     _set_result_push(monkeypatch, result_push)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
 
     _lands(live, TUE_2005, day=TUESDAY)
     await sender.dispatch_landings(live.landed_snapshots(TUE_2005),
                                    _clock_at(monkeypatch, TUE_2005))
+    zeros = {**_fmp_row(TUESDAY, eps=0, revenue=0), "revenueEstimated": 30e6}
     rows = ([_fmp_row(TUESDAY)] if taken_back == "blank_again"
+            else [zeros] if taken_back == "zeros_in_its_place"
             else await _off_the_calendar(live, TUESDAY, TUE_2030))
     stats = await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
                               rows=rows)
@@ -2555,15 +2796,71 @@ async def test_off_a_figure_fmp_takes_back_before_the_pass_is_told_by_nobody(
         STATUS_REPORTED, 0.60, 46.34)
 
 
-def test_the_senders_list_of_what_off_costs_has_a_line_for_every_kind_pinned_here():
-    """An owner reads that list before leaving the switch off, so a kind pinned above and missing
-    there is a cost nobody was told about. The prose counts none of them: a kind found later
-    must leave no wrong number behind."""
+#: Each kind pinned above, by its test: the words its own line in `earnings_live_sender`'s list of
+#: what off costs must hold, and whether no captured calendar shows FMP doing it, which the list
+#: says by naming it after the lines.
+_WHAT_OFF_COSTS = {
+    "test_off_a_report_filled_after_the_last_pass_that_can_tell_it_is_told_by_nobody":
+        ("FMP fills after the pass on the day after its date", False),
+    "test_off_a_surprise_only_the_filing_can_clear_is_told_by_nobody":
+        ("the dropped-digit signature that the filing's GAAP EPS clears", False),
+    "test_off_a_report_past_the_passs_cap_is_told_by_nobody":
+        ("past `MAX_SYMBOLS_PER_PASS` on a pass's list", False),
+    "test_off_a_filled_row_with_no_estimate_of_its_own_is_told_by_nobody":
+        ("filled row with no estimate of its own", True),
+    "test_off_a_figure_fmp_takes_back_before_the_pass_is_told_by_nobody":
+        ("figure FMP takes back before the pass reads it", True),
+}
+
+
+def _what_off_costs() -> tuple:
+    """(the whole passage; its lines, each on one line; what follows them), from the sender's
+    docstring."""
     doc = sender.__doc__
     costs = doc[doc.index("With both off"):doc.index("`push_dispatch_service` claims the key")]
-    pinned = [name for name in globals() if name.startswith("test_off_")]
-    assert len(re.findall(r"^  \* ", costs, re.MULTILINE)) == len(pinned)
-    assert not re.search(r"\b(?:two|three|four|five|six|seven) kinds\b", costs, re.IGNORECASE)
+    lines: List[str] = []
+    after: List[str] = []
+    for line in costs.splitlines():
+        if line.startswith("  * "):
+            lines.append(line[4:].strip())
+        elif line.startswith("    ") and lines and not after:
+            lines[-1] += " " + line.strip()
+        elif lines and line.strip():
+            after.append(line.strip())
+    return costs, lines, " ".join(after)
+
+
+#: Words that place a line in the list instead of naming it ("the last two", "the final pair
+#: above"): a line added or moved later leaves them pointing at the wrong ones.
+_PLACED = re.compile(
+    r"\b(?:former|latter|above|below|preceding|pair)\b"
+    r"|\b(?:first|last|final|second|third|fourth|fifth|next|previous)\s+"
+    r"(?:ones?|kinds?|lines?|bullets?|items?|entries|of\s+(?:them|these|those))\b",
+    re.IGNORECASE)
+
+
+def test_the_senders_list_of_what_off_costs_has_a_line_for_every_kind_pinned_here():
+    """An owner reads that list before leaving the switch off, so a kind pinned above and missing
+    there is a cost nobody was told about. Each kind is its own line, found by its words in that
+    line and no other, and the kinds no captured calendar shows are named, never counted or placed
+    ("the last two"): a kind found later must leave no wrong number and no wrong pair behind. A
+    number in digits is a count too; a date, a clock time or an EPS of 0 is not one."""
+    costs, lines, after = _what_off_costs()
+    pinned = {name for name in globals() if name.startswith("test_off_")}
+    assert pinned == set(_WHAT_OFF_COSTS), "a kind pinned with no words for its line, or the reverse"
+    assert len(lines) == len(_WHAT_OFF_COSTS), lines
+    for line in lines:
+        held = [name for name, (words, _) in _WHAT_OFF_COSTS.items() if words in line]
+        assert len(held) == 1, (line, held)
+    for name, (words, unseen) in _WHAT_OFF_COSTS.items():
+        assert sum(words in line for line in lines) == 1, (name, lines)
+        assert (words in after) is unseen, (name, after)
+    counted = re.findall(r"\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
+                         costs, re.IGNORECASE)
+    counted += re.findall(r"\d+", re.sub(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}:\d{2}\b|\b0(?:\.\d+)?\b",
+                                         "", costs))
+    assert counted == [], counted
+    assert _PLACED.findall(costs) == [], _PLACED.findall(costs)
 
 
 @pytest.mark.asyncio
@@ -2742,6 +3039,648 @@ async def test_a_record_that_will_not_fold_costs_the_pass_nothing(
                for r in caplog.records)
 
 
+# ── a report FMP lists twice ─────────────────────────────────────────────────
+#
+# The owner's choice, 2026-11-11: "Follow the record". FMP can list one report twice, one actual
+# beside two consensus figures. The record reads the row FMP touched last, and the 16:00 ET pass
+# tells the report as that record reads it once it has folded what it read, so New York's banner,
+# Berlin's held row and the sheet both open say one thing, whichever row FMP lists first and
+# however the push switches stand. The record can hold what neither row says: the consensus it
+# read in the morning, or a consensus the zero rules weigh a row of zeros against. That last holds
+# for a report listed once too, so one whose EPS is 0 is told as its record reads it as well.
+
+def _twins(older: tuple, newer: tuple, *, newer_first: bool) -> List[Dict[str, Any]]:
+    """INTC's Tuesday report listed twice, each row (estimate, actual) beside the same revenue,
+    the second touched by FMP ten minutes after the first."""
+    rows = [{**_fmp_row(TUESDAY, eps=actual, revenue=17.1e9), "epsEstimated": estimate,
+             "lastUpdated": f"{TUESDAY.isoformat()} {touched}"}
+            for (estimate, actual), touched in ((older, "13:40:00"), (newer, "13:50:00"))]
+    return rows[::-1] if newer_first else rows
+
+
+async def _flush_every_wake(svc, ledger, monkeypatch) -> None:
+    """The flush at each held row's wake, the earliest first, until no row is held."""
+    for _ in range(len(ledger.rows) * (pds.PushDispatchService.MAX_FLUSH_ATTEMPTS + 2)):
+        held = [row for row in ledger.rows if row["push_state"] == "deferred"]
+        if not held:
+            return
+        _clock_at(monkeypatch, min(_stamp(row["deliver_after"]) for row in held))
+        await svc.flush_deferred()
+    assert not [row for row in ledger.rows if row["push_state"] == "deferred"], "a row stays held"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result_push", [False, True], ids=["as_shipped", "result_push_on"])
+@pytest.mark.parametrize("newer_first", [False, True],
+                         ids=["older_listed_first", "newer_listed_first"])
+@pytest.mark.parametrize("older,newer,told,surprise", [
+    ((0.41, 0.60), (0.70, 0.60), "EPS missed consensus by 14%. Tap for the full picture.", -14.29),
+    ((0.70, 0.60), (0.41, 0.60), "EPS beat consensus by 46%. Tap for the full picture.", 46.34),
+    ((0.41, 0.30), (0.41, 0.60), "EPS beat consensus by 46%. Tap for the full picture.", 46.34),
+    ((0.41, 0.60), (0.41, 0.40), None, -2.44),
+    ((0.41, 0.60), (None, 0.60), "EPS beat consensus by 46%. Tap for the full picture.", 46.34),
+    ((0.41, 0.60), (None, 0.44), "EPS beat consensus by 7%. Tap for the full picture.", 7.32),
+], ids=["the_newer_consensus_says_missed", "the_newer_consensus_says_beat",
+        "a_stale_miss_beside_the_newer_beat", "a_stale_beat_beside_a_newer_figure_under_the_bar",
+        "the_newer_row_has_no_estimate_of_its_own",
+        "a_newer_figure_with_no_estimate_of_its_own"])
+async def test_a_report_fmp_lists_twice_reads_one_way_on_every_phone_and_on_the_sheet(
+        monkeypatch, clean_sender, live, result_push, newer_first, older, newer, told, surprise):
+    """Seen pending, then both rows at 20:05 on Tuesday, then Wednesday's 16:00 ET pass over the
+    same two. New York is told at once, Berlin at 07:00 on its own clock, by whichever sender
+    reaches the report first; a figure under the bar is told to nobody. A newer row with no
+    estimate of its own leaves the record on the 0.41 it read while the report was pending, and
+    the pass tells what the record says."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _set_result_push(monkeypatch, result_push)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    twins = _twins(older, newer, newer_first=newer_first)
+
+    live.observe_rows(TUESDAY, [_fmp_row(TUESDAY)], TUE_2005 - timedelta(hours=8), fetched=True)
+    live.observe_rows(TUESDAY, twins, TUE_2005, fetched=True)
+    await sender.dispatch_landings(live.landed_snapshots(TUE_2005),
+                                   _clock_at(monkeypatch, TUE_2005))
+    await _flush_every_wake(svc, ledger, monkeypatch)
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY, rows=twins)
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    expected = [told] if told else []
+    assert [buzz["body"] for buzz in phones.of("ny")] == expected
+    assert [buzz["body"] for buzz in phones.of("berlin")] == expected
+    assert sorted((row["user_id"], row["body"]) for row in ledger.rows) == (
+        [("berlin", told), ("ny", told)] if told else [])
+    answer = await _tap(monkeypatch, {"ticker": "INTC", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.eps.actual, answer.eps.surprise_pct) == (newer[1], surprise)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revenue_first", [False, True],
+                         ids=["eps_row_listed_first", "revenue_row_listed_first"])
+async def test_an_eps_row_beside_a_newer_revenue_only_twin_reads_one_way_everywhere(
+        monkeypatch, clean_sender, live, revenue_first):
+    """The card's one row is the newer, revenue-only twin, but the EPS comes from the other row:
+    its 7% beat is what every phone is told and what the sheet shows."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _flags_as_shipped(monkeypatch)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    eps_row = {**_fmp_row(TUESDAY, eps=0.44), "lastUpdated": f"{TUESDAY.isoformat()} 13:40:00"}
+    revenue_row = {**_fmp_row(TUESDAY, revenue=17.1e9),
+                   "lastUpdated": f"{TUESDAY.isoformat()} 13:50:00"}
+    rows = [revenue_row, eps_row] if revenue_first else [eps_row, revenue_row]
+
+    live.observe_rows(TUESDAY, [_fmp_row(TUESDAY)], TUE_2005 - timedelta(hours=8), fetched=True)
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY, rows=rows)
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    told = ["EPS beat consensus by 7%. Tap for the full picture."]
+    assert [buzz["body"] for buzz in phones.of("ny")] == told
+    assert [buzz["body"] for buzz in phones.of("berlin")] == told
+    answer = await _tap(monkeypatch, {"ticker": "INTC", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.eps.actual, answer.eps.surprise_pct, answer.revenue.actual) == (
+        0.44, 7.32, 17.1e9)
+
+
+TUE_0900 = datetime(2026, 11, 10, 9, 0, tzinfo=ET)
+
+
+def _smol(eps, revenue, revenue_estimate) -> Dict[str, Any]:
+    """SMOL's Tuesday report: a small name expected to lose 5 cents a share. FMP's own
+    `lastUpdated` is a date, so two rows of one day tie on it."""
+    return {"symbol": "SMOL", "date": TUESDAY.isoformat(), "time": "amc",
+            "companyName": "Smol Co", "epsEstimated": -0.05, "epsActual": eps,
+            "revenueEstimated": revenue_estimate, "revenueActual": revenue,
+            "lastUpdated": TUESDAY.isoformat()}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zero_first", [True, False],
+                         ids=["zeros_listed_first", "zeros_listed_second"])
+@pytest.mark.parametrize("morning,told,status,eps,surprise", [
+    (105e6, None, STATUS_AWAITING, None, None),
+    (None, "EPS beat consensus by 100%. Tap for the full picture.", STATUS_REPORTED, 0.0, 100.0),
+], ids=["a_morning_consensus_over_the_floor", "no_earlier_answer"])
+async def test_a_row_of_zeros_listed_twice_is_told_only_when_its_record_shows_the_zero(
+        monkeypatch, clean_sender, live, zero_first, morning, told, status, eps, surprise):
+    """FMP's row of zeros, with no revenue consensus of its own, beside a twin stating $95M, under
+    the $100M floor. The record judges the zero against the consensus it has held too: after a
+    morning read of $105M it is FMP's unfilled row and the sheet shows no EPS, so nobody is told a
+    100% beat. With no earlier answer the $95M stands behind it, a small name's real zero."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _flags_as_shipped(monkeypatch)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    if morning is not None:
+        live.observe_rows(TUESDAY, [{**_smol(None, None, morning), "lastUpdated": "2026-11-09"}],
+                          TUE_0900, fetched=True)
+    zeros, twin = _smol(0.0, 0, None), _smol(None, None, 95e6)
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
+                      rows=[zeros, twin] if zero_first else [twin, zeros])
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    expected = [told] if told else []
+    assert [buzz["body"] for buzz in phones.of("ny")] == expected
+    assert [buzz["body"] for buzz in phones.of("berlin")] == expected
+    answer = await _tap(monkeypatch, {"ticker": "SMOL", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.status, answer.eps.actual, answer.eps.surprise_pct) == (status, eps, surprise)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("listed", ["beside_a_pending_twin", "the_pending_twin_first", "twice",
+                                    "once"])
+async def test_a_row_of_zeros_its_record_keeps_on_an_earlier_consensus_is_told_as_it_is_kept(
+        monkeypatch, clean_sender, live, listed):
+    """No row of Wednesday's answer states a revenue consensus, so read alone the zeros are FMP's
+    unfilled row. The record still holds the $50M it read on Tuesday morning, under the $100M
+    floor, so it keeps them as a small name's real report and the sheet shows a 100% beat. Every
+    phone is told that, however FMP lists the zeros."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _flags_as_shipped(monkeypatch)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    live.observe_rows(TUESDAY, [{**_smol(None, None, 50e6), "lastUpdated": "2026-11-09"}],
+                      TUE_0900, fetched=True)
+    zeros, pending = _smol(0.0, 0, None), _smol(None, None, None)
+    rows = {"beside_a_pending_twin": [zeros, pending], "the_pending_twin_first": [pending, zeros],
+            "twice": [zeros, dict(zeros)], "once": [zeros]}[listed]
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY, rows=rows)
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    told = ["EPS beat consensus by 100%. Tap for the full picture."]
+    assert [buzz["body"] for buzz in phones.of("ny")] == told
+    assert [buzz["body"] for buzz in phones.of("berlin")] == told
+    answer = await _tap(monkeypatch, {"ticker": "SMOL", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.status, answer.eps.actual, answer.eps.surprise_pct) == (
+        STATUS_REPORTED, 0.0, 100.0)
+
+
+TUE_1205 = datetime(2026, 11, 10, 12, 5, tzinfo=ET)
+
+
+@pytest.mark.asyncio
+async def test_a_zero_eps_its_record_reads_as_unfilled_is_told_to_nobody(
+        monkeypatch, clean_sender, live):
+    """SMOL filled on Tuesday at 20:05: a loss of 25 cents a share against 30 expected, and a
+    revenue of 0 under a $30M consensus. Wednesday's pass reads one row, an EPS of 0 with no
+    revenue under a $105M consensus. Read alone that is a 100% beat. Beside the 0 revenue the
+    record holds, against a consensus now material, it is FMP's unfilled row, so the sheet shows
+    no figure, and nobody is told one."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _flags_as_shipped(monkeypatch)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+
+    def _row(eps, revenue, revenue_estimate, touched):
+        return {**_smol(eps, revenue, revenue_estimate), "epsEstimated": -0.30,
+                "lastUpdated": touched}
+
+    live.observe_rows(TUESDAY, [_row(None, None, 30e6, "2026-11-09")], TUE_1205, fetched=True)
+    live.observe_rows(TUESDAY, [_row(-0.25, 0, 30e6, "2026-11-10")], TUE_2005, fetched=True)
+    stats = await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
+                              rows=[_row(0.0, None, 105e6, "2026-11-11")])
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    assert stats["results"] == 0
+    assert phones.buzzes == [] and ledger.rows == []
+    answer = await _tap(monkeypatch, {"ticker": "SMOL", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.status, answer.eps.actual, answer.eps.surprise_pct) == (
+        STATUS_AWAITING, None, None)
+
+
+def _joby_on_tuesday(eps=None, revenue=None, *, consensus=30e6) -> Dict[str, Any]:
+    """JOBY's Tuesday report, a small name under a $30M consensus unless told otherwise."""
+    return {"symbol": "JOBY", "date": TUESDAY.isoformat(), "time": "amc", "companyName": "Joby",
+            "epsEstimated": 0.41, "epsActual": eps, "revenueEstimated": consensus,
+            "revenueActual": revenue, "lastUpdated": TUESDAY.isoformat()}
+
+
+TUE_2003 = datetime(2026, 11, 10, 20, 3, tzinfo=ET)
+_THE_RELEASE = FilingFigures(accession="a", accepted_at=None, url=None, revenue=33e6,
+                             eps_adjusted=0.44)
+
+#: How FMP's row of zeros reaches the record: (the consensus, when the release is read, if at
+#: all, and the EPS the sheet then shows as (figure, surprise, source)).
+_ZEROS_THAT_TURN_OUT_UNFILLED = {
+    "stored_until_the_release_reads_after_them": (30e6, TUE_2005, (0.44, 7.32, "filing")),
+    "refused_beside_the_release_read_before_them": (30e6, TUE_2003, (0.44, 7.32, "filing")),
+    "refused_beside_a_material_consensus": (16.6e9, None, (None, None, None)),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result_push", [False, True], ids=["as_shipped", "result_push_on"])
+@pytest.mark.parametrize("consensus,release_at,sheet", _ZEROS_THAT_TURN_OUT_UNFILLED.values(),
+                         ids=_ZEROS_THAT_TURN_OUT_UNFILLED.keys())
+async def test_a_zero_fmp_sends_again_after_its_row_of_zeros_gave_way_is_never_told_as_a_miss(
+        monkeypatch, clean_sender, live, result_push, consensus, release_at, sheet):
+    """FMP's row of zeros at 20:05 is its unfilled row: kept as a small name's real report until
+    the release, $33M and $0.44, shows it, or refused at once, beside a release already read or a
+    material consensus. FMP then sends an EPS of 0 with no revenue: the same unfilled field, so
+    nobody is told "missed consensus by 100%", by the live sender or by the 16:00 ET pass, and the
+    sheet shows the release's $0.44, or no EPS at all."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _set_result_push(monkeypatch, result_push)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    live.observe_rows(TUESDAY, [_joby_on_tuesday(consensus=consensus)], TUE_1205, fetched=True)
+    if release_at == TUE_2003:
+        live.absorb_filing("JOBY", TUESDAY, _THE_RELEASE, TUE_2003)
+    live.observe_rows(TUESDAY, [_joby_on_tuesday(0.0, 0.0, consensus=consensus)], TUE_2005,
+                      fetched=True)
+    if release_at == TUE_2005:
+        live.absorb_filing("JOBY", TUESDAY, _THE_RELEASE, TUE_2005)
+    zero_again = _joby_on_tuesday(0.0, consensus=consensus)
+    live.observe_rows(TUESDAY, [zero_again], TUE_2030, fetched=True)
+    await sender.dispatch_landings(live.landed_snapshots(TUE_2030),
+                                   _clock_at(monkeypatch, TUE_2030))
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
+                      rows=[zero_again])
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    assert not [row for row in ledger.rows if "missed" in row["body"]], ledger.rows
+    assert not [buzz for buzz in phones.buzzes if "missed" in buzz["body"]], phones.buzzes
+    answer = await _tap(monkeypatch, {"ticker": "JOBY", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.eps.actual, answer.eps.surprise_pct, answer.eps.source) == sheet
+
+
+#: A field FMP sends alone as 0 before its row of zeros, and the other field it sends alone as 0
+#: after them: (first, other).
+_A_LONE_ZERO_BEFORE_ITS_ZEROS = {
+    "its_eps": (dict(eps=0.0), dict(revenue=0.0)),
+    "its_revenue": (dict(revenue=0.0), dict(eps=0.0)),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result_push", [False, True], ids=["as_shipped", "result_push_on"])
+@pytest.mark.parametrize("first,other", _A_LONE_ZERO_BEFORE_ITS_ZEROS.values(),
+                         ids=_A_LONE_ZERO_BEFORE_ITS_ZEROS.keys())
+async def test_a_zero_fmp_sent_alone_before_its_row_of_zeros_is_never_told_at_a_wake(
+        monkeypatch, clean_sender, live, result_push, first, other):
+    """JOBY's release, an EPS of $0.44 and no revenue, is read at 20:03. At 20:05 FMP sends one
+    field as 0 with nothing beside it, which nothing yet says is unfilled, so the record takes it:
+    an EPS of 0 lands as a breakeven, which New York, awake, is told at once with the result push
+    on, the residual of a lone zero no row of zeros has come before. At 20:10 FMP's row of zeros
+    is refused beside the release, so the zero it sent alone is that unfilled field too, and goes,
+    and the other field's zero at 20:30 is refused as well. Berlin's row, held for its morning, is
+    never told a miss its record no longer holds, nobody is told one at 16:00 ET, and the sheet
+    shows the release's $0.44 with no revenue: no false -100% stays behind on either field."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _set_result_push(monkeypatch, result_push)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+
+    async def _fmp_answers(at, row):
+        live.observe_rows(TUESDAY, [row], at, fetched=True)
+        await sender.dispatch_landings(live.landed_snapshots(at), _clock_at(monkeypatch, at))
+
+    await _fmp_answers(TUE_1205, _joby_on_tuesday())
+    live.absorb_filing("JOBY", TUESDAY, FilingFigures(accession="a", accepted_at=None, url=None,
+                                                      eps_adjusted=0.44), TUE_2003)
+    await sender.dispatch_landings(live.landed_snapshots(TUE_2003),
+                                   _clock_at(monkeypatch, TUE_2003))
+    await _fmp_answers(TUE_2005, _joby_on_tuesday(**first))
+    await _fmp_answers(TUE_2005 + timedelta(minutes=5), _joby_on_tuesday(0.0, 0.0))
+    last = _joby_on_tuesday(**other)
+    await _fmp_answers(TUE_2030, last)
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY, rows=[last])
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    berlin = [row for row in ledger.rows if row["user_id"] == "berlin"]
+    held_at_the_landing = result_push and "eps" in first
+    assert len(berlin) == int(held_at_the_landing), "the row the 20:05 landing held for Berlin"
+    assert not [row for row in berlin if row["push_state"] == "sent" or "missed" in row["body"]], \
+        berlin
+    assert phones.of("berlin") == []
+    answer = await _tap(monkeypatch, {"ticker": "JOBY", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.eps.actual, answer.eps.surprise_pct, answer.eps.source) == (
+        0.44, 7.32, "filing")
+    assert (answer.revenue.actual, answer.revenue.surprise_pct) == (None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consensus", [16.6e9, None], ids=["material_consensus", "no_consensus"])
+@pytest.mark.parametrize("live_push", [False, True], ids=["result_push", "both_pushes"])
+async def test_a_zero_taken_off_with_no_release_is_never_buzzed_at_a_wake(
+        monkeypatch, clean_sender, live, consensus, live_push):
+    """The no-release twin of the test above. No 8-K is read. At 20:05 FMP sends JOBY's EPS as 0
+    with nothing beside it, which lands as a -100% miss: New York, awake, is told at once (the
+    residual of a lone zero no row of zeros has come before), and Berlin's row is held for its
+    morning. At 20:10 FMP's row of zeros shows the field unfilled, so the record takes the zero
+    off and holds no figure. At Berlin's wake the row is not buzzed in its landing's words, a miss
+    the sheet it opens no longer shows, and its inbox text states no figure either."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _set_result_push(monkeypatch, True)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", live_push)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+
+    async def _fmp_answers(at, row):
+        live.observe_rows(TUESDAY, [row], at, fetched=True)
+        await sender.dispatch_landings(live.landed_snapshots(at), _clock_at(monkeypatch, at))
+
+    await _fmp_answers(TUE_1205, _joby_on_tuesday(consensus=consensus))
+    await _fmp_answers(TUE_2005, _joby_on_tuesday(0.0, consensus=consensus))
+    await _fmp_answers(TUE_2005 + timedelta(minutes=5),
+                       _joby_on_tuesday(0.0, 0.0, consensus=consensus))
+    assert live.snapshot("JOBY", TUESDAY, TUE_2030).eps.actual is None, "the zero is taken off"
+    last = _joby_on_tuesday(None, 0.0, consensus=consensus)
+    await _fmp_answers(TUE_2030, last)
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY, rows=[last])
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    berlin = [row for row in ledger.rows if row["user_id"] == "berlin"]
+    assert len(berlin) == 1, "the row the 20:05 landing held for Berlin"
+    assert berlin[0]["push_state"] != "sent" and "missed" not in berlin[0]["body"], berlin
+    assert phones.of("berlin") == []
+    # It waited at every look, not just the first, and ended at the bound in words that state
+    # no figure.
+    assert (berlin[0]["push_state"], berlin[0]["attempts"], (berlin[0]["title"],
+            berlin[0]["body"]), berlin[0].get("last_error")) == (
+        "failed", pds.PushDispatchService.MAX_FLUSH_ATTEMPTS, _NO_FIGURE,
+        "suppressed on flush: a figure is still being confirmed")
+    answer = await _tap(monkeypatch, {"ticker": "JOBY", "report_date": TUESDAY.isoformat()},
+                        WED_1600)
+    assert (answer.eps.actual, answer.eps.surprise_pct) == (None, None)
+
+
+#: What a held JOBY row says once its record has taken off the zero it stated.
+_NO_FIGURE = ("JOBY results are out", "Revenue not out yet · EPS not out yet.")
+_JOBY_ROUTE = {"ticker": "JOBY", "report_date": TUESDAY.isoformat()}
+_MATERIAL = 16.6e9
+WED_0100 = datetime(2026, 11, 11, 1, 0, tzinfo=ET)
+
+
+def _joby_zero_taken_off(live) -> None:
+    """JOBY pending at noon, its EPS of 0 sent alone at 20:05 (it lands), and FMP's row of zeros
+    at 20:10, which shows that zero unfilled: the record takes it off and holds no figure."""
+    for at, row in ((TUE_1205, _joby_on_tuesday(consensus=_MATERIAL)),
+                    (TUE_2005, _joby_on_tuesday(0.0, consensus=_MATERIAL)),
+                    (TUE_2005 + timedelta(minutes=5),
+                     _joby_on_tuesday(0.0, 0.0, consensus=_MATERIAL))):
+        live.observe_rows(TUESDAY, [row], at, fetched=True)
+
+
+async def _joby_zero_taken_off_and_told(monkeypatch, live) -> None:
+    """`_joby_zero_taken_off`, each answer handed to the sender as the tick would."""
+    for at, row in ((TUE_1205, _joby_on_tuesday(consensus=_MATERIAL)),
+                    (TUE_2005, _joby_on_tuesday(0.0, consensus=_MATERIAL)),
+                    (TUE_2005 + timedelta(minutes=5),
+                     _joby_on_tuesday(0.0, 0.0, consensus=_MATERIAL))):
+        live.observe_rows(TUESDAY, [row], at, fetched=True)
+        await sender.dispatch_landings(live.landed_snapshots(at), _clock_at(monkeypatch, at))
+
+
+def _fmp_moves_joby_off_tuesday(live) -> None:
+    """Two own fetches of Tuesday, the end's hold apart, that list another company and leave JOBY
+    out (A REPORT FMP MOVES): with no figure left to keep it, JOBY's record ends."""
+    other = {**_joby_on_tuesday(), "symbol": "ACME", "companyName": "Acme"}
+    live._end_unlisted(TUESDAY, [other])
+    live._records[("JOBY", TUESDAY)].unlisted_since -= EARNINGS_LIVE_UNLISTED_END_SECONDS
+    live._end_unlisted(TUESDAY, [other])
+    assert ("JOBY", TUESDAY) not in live._records, "the record ends"
+
+
+def _berlin_held(monkeypatch, *, live_push: bool):
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=TO_BERLIN, users=tuple(TO_BERLIN))
+    _set_result_push(monkeypatch, True)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", live_push)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    return ledger, phones, svc
+
+
+async def _berlins_first_wake(monkeypatch, svc, ledger) -> datetime:
+    (berlin,) = ledger.of("berlin")
+    wake = _stamp(berlin["deliver_after"])
+    _clock_at(monkeypatch, wake)
+    await svc.flush_deferred()
+    return wake
+
+
+_KINDS = pytest.mark.parametrize("live_push", [False, True], ids=["result_row", "live_row"])
+
+
+@pytest.mark.parametrize("ended", [False, True], ids=["record_holds_nothing", "record_ended"])
+@pytest.mark.parametrize("kind", [KIND_EARNINGS_RESULT, KIND_EARNINGS_LIVE])
+def test_a_wake_on_a_figure_taken_off_asks_again_and_books_its_read(clean_sender, live, kind,
+                                                                     ended):
+    """The record took off the zero a held row states, and holds nothing, or an own fetch has
+    ended it since. Either way the wake keeps the row off the phone in words that state no
+    figure, asks again an hour on, and books the loop's read of the report just before that
+    look. A record that never held a figure says nothing against the row, as before."""
+    _joby_zero_taken_off(live)
+    if ended:
+        _fmp_moves_joby_off_tuesday(live)
+    assert live.ended_after_a_figure("JOBY", TUESDAY) is ended
+    wake = sender.copy_at_wake(kind, _JOBY_ROUTE, WED_0100)
+    assert wake == sender.WakeCopy(*_NO_FIGURE, send=False, ask_again_in=sender.WAKE_ASK_AGAIN)
+    assert live._looks == {("JOBY", TUESDAY): {WED_0100 + sender.WAKE_ASK_AGAIN}}
+
+    live.reset()
+    live.observe_rows(TUESDAY, [_joby_on_tuesday(consensus=_MATERIAL)], TUE_1205, fetched=True)
+    assert sender.copy_at_wake(kind, _JOBY_ROUTE, WED_0100) is None, "a record that held none"
+
+
+@pytest.mark.asyncio
+@_KINDS
+@pytest.mark.parametrize("moved", ["before_the_wake", "between_looks"])
+async def test_a_report_fmp_moves_after_its_zero_is_taken_off_is_never_buzzed(
+        monkeypatch, clean_sender, live, live_push, moved):
+    """The zero is taken off and FMP then moves JOBY off Tuesday, so own fetches end its record,
+    which holds no figure to keep it: before Berlin's wake, or between two of its looks. The
+    record is gone, but the service remembers it ended after a figure, so the zero is never
+    buzzed and the row ends at the bound in words that state none."""
+    ledger, phones, svc = _berlin_held(monkeypatch, live_push=live_push)
+    await _joby_zero_taken_off_and_told(monkeypatch, live)
+    if moved == "before_the_wake":
+        _fmp_moves_joby_off_tuesday(live)
+    else:
+        await _berlins_first_wake(monkeypatch, svc, ledger)
+        _fmp_moves_joby_off_tuesday(live)
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    assert phones.of("berlin") == []
+    (berlin,) = ledger.of("berlin")
+    assert (berlin["push_state"], (berlin["title"], berlin["body"])) == ("failed", _NO_FIGURE)
+
+
+@pytest.mark.asyncio
+@_KINDS
+@pytest.mark.parametrize("after", ["record_gone", "record_rebuilt"])
+async def test_a_row_held_for_a_figure_taken_off_waits_through_a_restart(
+        monkeypatch, clean_sender, live, live_push, after):
+    """Berlin's first look holds the row in words that state no figure. A restart then forgets
+    the record, or rebuilds it from FMP's next answer, which holds no figure either. The row the
+    wake held waits again at every later look (`_left_waiting`: an earnings_live row by its
+    figure-less words, an earnings_result row by its title), and is never buzzed."""
+    ledger, phones, svc = _berlin_held(monkeypatch, live_push=live_push)
+    await _joby_zero_taken_off_and_told(monkeypatch, live)
+    wake = await _berlins_first_wake(monkeypatch, svc, ledger)
+    (berlin,) = ledger.of("berlin")
+    assert (berlin["push_state"], (berlin["title"], berlin["body"])) == ("deferred", _NO_FIGURE)
+    live.reset()
+    sender.reset()
+    if after == "record_rebuilt":
+        live.observe_rows(TUESDAY, [_joby_on_tuesday(None, 0.0, consensus=_MATERIAL)],
+                          wake + timedelta(minutes=30), fetched=True)
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    assert phones.of("berlin") == []
+    (berlin,) = ledger.of("berlin")
+    assert berlin["push_state"] == "failed" and "missed" not in berlin["body"], berlin
+
+
+@pytest.mark.asyncio
+async def test_a_live_row_a_wake_held_in_doubt_waits_through_a_restart(monkeypatch, clean_sender,
+                                                                       live):
+    """A live row whose EPS FMP then puts in doubt (a dropped digit), revenue never in, is held
+    at its 07:00 wake as 'being confirmed'. A restart forgets the record: the row waits again,
+    never buzzed in that wake's words, which state no figure."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    await sender.dispatch_landings(_lands(live, THU_2210, revenue=None),
+                                   _clock_at(monkeypatch, THU_2210))
+    _fmp_says(live, THU_2340, eps=0.041, revenue=None)
+    _clock_at(monkeypatch, FRI_0700)
+    await svc.flush_deferred()
+    held = [row for row in ledger.rows if row["push_state"] == "deferred"]
+    assert held and all(sender._states_no_figure(row["body"]) for row in held), ledger.rows
+    live.reset()
+    sender.reset()
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    assert phones.buzzes == [], phones.buzzes
+    assert all(row["push_state"] == "failed" for row in ledger.rows), ledger.rows
+
+
+@pytest.mark.asyncio
+@_KINDS
+async def test_a_figure_back_after_its_zero_was_taken_off_is_told_at_the_next_look(
+        monkeypatch, clean_sender, live, live_push):
+    """FMP fills JOBY's real EPS, $0.45 against $0.41, after Berlin's first look held the row:
+    the next look tells it, once, in the words the sheet shows."""
+    ledger, phones, svc = _berlin_held(monkeypatch, live_push=live_push)
+    await _joby_zero_taken_off_and_told(monkeypatch, live)
+    wake = await _berlins_first_wake(monkeypatch, svc, ledger)
+    assert phones.of("berlin") == []
+    live.observe_rows(TUESDAY, [_joby_on_tuesday(0.45, consensus=_MATERIAL)],
+                      wake + timedelta(minutes=30), fetched=True)
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    (buzz,) = phones.of("berlin")
+    assert "EPS beat consensus by 10%" in buzz["body"], buzz
+    (berlin,) = ledger.of("berlin")
+    assert berlin["push_state"] == "sent"
+
+
+@pytest.mark.asyncio
+@_KINDS
+async def test_a_zero_a_new_process_first_sees_then_takes_off_is_never_buzzed(
+        monkeypatch, clean_sender, live, live_push):
+    """The zero lands and Berlin's row is held. A restart comes before FMP's row of zeros, and
+    the new process first sees the zero already reported (no landing of its own) before the
+    zeros take it off. It held that figure all the same, so the wake holds the row."""
+    ledger, phones, svc = _berlin_held(monkeypatch, live_push=live_push)
+    for at, row in ((TUE_1205, _joby_on_tuesday(consensus=_MATERIAL)),
+                    (TUE_2005, _joby_on_tuesday(0.0, consensus=_MATERIAL))):
+        live.observe_rows(TUESDAY, [row], at, fetched=True)
+        await sender.dispatch_landings(live.landed_snapshots(at), _clock_at(monkeypatch, at))
+    assert len(ledger.of("berlin")) == 1
+    live.reset()
+    sender.reset()
+    for minutes, row in ((10, _joby_on_tuesday(0.0, consensus=_MATERIAL)),
+                         (15, _joby_on_tuesday(0.0, 0.0, consensus=_MATERIAL))):
+        at = TUE_2005 + timedelta(minutes=minutes)
+        live.observe_rows(TUESDAY, [row], at, fetched=True)
+        await sender.dispatch_landings(live.landed_snapshots(at), _clock_at(monkeypatch, at))
+    assert live.snapshot("JOBY", TUESDAY, WED_0100).eps.actual is None
+    await _flush_every_wake(svc, ledger, monkeypatch)
+
+    assert phones.of("berlin") == []
+    (berlin,) = ledger.of("berlin")
+    assert (berlin["push_state"], (berlin["title"], berlin["body"])) == ("failed", _NO_FIGURE)
+
+
+@pytest.mark.parametrize("body,waits", [
+    ("Revenue not out yet · EPS not out yet.", True),
+    ("Revenue not out yet · EPS being confirmed.", True),
+    ("Revenue being confirmed · GAAP EPS not out yet.", True),
+    ("Revenue not out yet · EPS missed consensus by 100%.", False),
+    ("Revenue $18.5B (beat consensus by 2%) · EPS not out yet. From the company's release.", False),
+    ("Revenue being confirmed · EPS reported.", False),
+    ("Revenue not out yet · EPS in line with consensus.", False),
+], ids=["nothing", "eps_in_doubt", "revenue_in_doubt_gaap", "a_zero_stated", "a_release_figure",
+        "eps_reported", "in_line"])
+def test_only_a_live_row_whose_words_state_no_figure_reads_as_left_waiting(body, waits):
+    assert sender._left_waiting(KIND_EARNINGS_LIVE, "JOBY", ("JOBY results are out", body)) is waits
+    assert sender._left_waiting(KIND_EARNINGS_LIVE, "JOBY", None) is False
+
+
+@pytest.mark.asyncio
+async def test_a_report_listed_twice_is_told_from_its_row_when_its_record_will_not_fold(
+        monkeypatch, clean_sender, live):
+    """The record still holds Tuesday's single row, 0.60 against 0.41, which the pass could not
+    replace with what it read, though Wednesday's fold went through. A record older than the
+    pass is no record to follow: the pass tells from the row the record would have read, FMP's
+    newer consensus."""
+    ledger, phones = _Ledger(), _Phones()
+    _dispatcher_over(monkeypatch, ledger, phones)
+    _flags_as_shipped(monkeypatch)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    live.observe_rows(TUESDAY, [_fmp_row(TUESDAY)], TUE_2005 - timedelta(hours=8), fetched=True)
+    live.observe_rows(TUESDAY, [_beat_on(TUESDAY)], TUE_2005, fetched=True)
+    fold = live.observe_rows
+
+    def _tuesday_explodes(day, rows, *a, **k):
+        if day == TUESDAY:
+            raise RuntimeError("fold exploded")
+        return fold(day, rows, *a, **k)
+
+    monkeypatch.setattr(live, "observe_rows", _tuesday_explodes)
+    stats = await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
+                              rows=_twins((0.41, 0.60), (0.70, 0.60), newer_first=False))
+
+    assert stats["results"] == 1
+    assert [buzz["body"] for buzz in phones.buzzes] == [
+        "EPS missed consensus by 14%. Tap for the full picture."]
+
+
+@pytest.mark.asyncio
+async def test_a_live_record_that_cannot_be_read_leaves_a_report_listed_twice_its_row(
+        monkeypatch, clean_sender, live, caplog):
+    """A failed read of the record is logged with the report, and the pass tells from the row
+    the record would read: nobody is told less because of it."""
+    ledger, phones = _Ledger(), _Phones()
+    _dispatcher_over(monkeypatch, ledger, phones)
+    _flags_as_shipped(monkeypatch)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("snapshot exploded")
+
+    monkeypatch.setattr(live, "snapshot", _boom)
+    with caplog.at_level(logging.WARNING, logger=daily.__name__):
+        stats = await _daily_pass(monkeypatch, _clock_at(monkeypatch, WED_1600), day=TUESDAY,
+                                  rows=_twins((0.41, 0.60), (0.70, 0.60), newer_first=False))
+
+    assert stats["results"] == 1
+    assert [buzz["body"] for buzz in phones.buzzes] == [
+        "EPS missed consensus by 14%. Tap for the full picture."]
+    assert any("RuntimeError" in r.getMessage() and "INTC" in r.getMessage()
+               and TUESDAY.isoformat() in r.getMessage() for r in caplog.records)
+
+
 # ── a figure still being confirmed at the wake ───────────────────────────────
 #
 # "checking" is no answer: the guard holds a figure until FMP says what it is. So it cannot end
@@ -2824,6 +3763,337 @@ async def test_a_figure_never_confirmed_ends_the_row_without_a_buzz(
     assert row["last_error"] == "suppressed on flush: a figure is still being confirmed"
 
 
+FRI_2220 = datetime(2026, 11, 6, 22, 20, tzinfo=ET)
+FRI_2240 = datetime(2026, 11, 6, 22, 40, tzinfo=ET)
+SAT_0815 = datetime(2026, 11, 7, 8, 15, tzinfo=ET)
+#: After the loop's first read of Friday on Saturday: done with Friday at 22:00 ET, it reads
+#: the report again at the closed day's 2 h pace, at midnight.
+SAT_0030 = datetime(2026, 11, 7, 0, 30, tzinfo=ET)
+
+
+class _OvernightMarket:
+    """FMP over INTC's Friday report: its EPS filled at 22:20 with the revenue still to come, a
+    dropped digit from 00:30 on Saturday, its own figure again from `recovers`. The loop asks
+    nothing after 22:00, so it reads the fill at its first Saturday read, at midnight, and the
+    result lands in the night. The revenue FMP still owes keeps the loop asking at the closed
+    day's 2 h pace (a report FMP has confirmed whole is asked no more), so its 02:00, 04:00 and
+    06:00 reads find the dropped digit. Every day lists a pending row of another report, as a
+    real calendar does, so no first look comes back blank."""
+
+    def __init__(self, recovers: datetime):
+        self.recovers = recovers
+        self.at = FRI_2220
+        self.reads: List[tuple] = []        # (the walk's minute, the day asked)
+
+    def _intc(self) -> Dict[str, Any]:
+        eps = (None if self.at < FRI_2220 else 0.60 if self.at < SAT_0030
+               else 0.041 if self.at < self.recovers else 0.60)
+        return {**_fmp_row(FRIDAY, eps=eps, revenue=None),
+                "lastUpdated": FRIDAY.isoformat()}
+
+    async def get_earnings_calendar(self, from_date=None, to_date=None):
+        self.reads.append((self.at, date.fromisoformat(from_date)))
+        rows = [{**_fmp_row(date.fromisoformat(from_date)), "symbol": "ZZZZ"}]
+        return rows + [self._intc()] if from_date == FRIDAY.isoformat() else rows
+
+
+async def _walk_the_night(monkeypatch, svc, market: _OvernightMarket, start: datetime,
+                          end: datetime) -> List[datetime]:
+    """The real FMP tick and the real flush, minute by minute, as the loops run them, on a clock
+    the walk moves for the live records and the memo too. Returns the minutes a phone buzzed."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_FILINGS_ENABLED", False)
+    clock = SimpleNamespace(at=1_000_000.0)
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=lambda: clock.at))
+    monkeypatch.setattr(ts, "_time", SimpleNamespace(monotonic=lambda: clock.at))
+    phones = svc._push
+    buzzed: List[datetime] = []
+    at = start
+    while at < end:
+        clock.at += 60
+        market.at = at
+        monkeypatch.setattr(ts, "_et_today", lambda day=at.date(): day)
+        _clock_at(monkeypatch, at)
+        before = len(phones.buzzes)
+        await els.earnings_live_tick(at, fmp=market, watched=["INTC"])
+        await svc.flush_deferred()
+        buzzed += [at] * (len(phones.buzzes) - before)
+        at += timedelta(minutes=1)
+    return buzzed
+
+
+_SATURDAY_LOOKS = [datetime(2026, 11, 7, hour, 0, tzinfo=ET) for hour in (7, 8, 9)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovers,heard_by", [
+    (SAT_0815, _SATURDAY_LOOKS[2]),
+    (datetime(2026, 11, 7, 7, 30, tzinfo=ET), _SATURDAY_LOOKS[1]),
+    (datetime(2026, 11, 7, 6, 59, tzinfo=ET), _SATURDAY_LOOKS[1]),
+], ids=["between_the_second_and_last_look", "between_the_first_two_looks", "before_the_wake"])
+async def test_a_closed_day_hold_hears_fmps_recovery_before_its_next_look(
+        monkeypatch, clean_sender, live, recovers, heard_by):
+    """A closed day reads Friday's report only every 2 h, so the looks at 07:00, 08:00 and 09:00
+    all read one dropped-digit answer and the row ended unbuzzed with FMP back at 0.60 since
+    08:15. Each look that asks again now has the report read just before the next one, so a
+    recovery is heard by the first look whose read comes after it, at the latest."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    market = _OvernightMarket(recovers)
+
+    buzzed = await _walk_the_night(monkeypatch, svc, market, datetime(2026, 11, 6, 21, 30, tzinfo=ET),
+                                   datetime(2026, 11, 7, 10, 30, tzinfo=ET))
+
+    (row,) = ledger.rows
+    assert len(buzzed) == 1, (buzzed, row.get("last_error"))
+    assert buzzed[0] in _SATURDAY_LOOKS and buzzed[0] <= heard_by, buzzed
+    assert phones.buzzes[0]["body"] == "EPS beat consensus by 46%. Tap for the full picture."
+
+
+async def _walk_by_the_second(monkeypatch, svc, market: _OvernightMarket, start: datetime,
+                              end: datetime, *, interval: int, tick_at: int, flush_at: int,
+                              lag: int) -> List[datetime]:
+    """The real FMP tick every `interval` seconds from `tick_at` and the real flush every minute
+    from `flush_at`, each on its own clock as the two loops run, to the second. The flush reads
+    its clock as it starts and reaches the held row `lag` seconds later, as it does a row far into
+    a hand-out of many. Returns the instants a phone buzzed."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_FILINGS_ENABLED", False)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", interval)
+    base = 1_000_000.0
+    clock = SimpleNamespace(at=base)
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=lambda: clock.at))
+    monkeypatch.setattr(ts, "_time", SimpleNamespace(monotonic=lambda: clock.at))
+    phones = svc._push
+    buzzed: List[datetime] = []
+    total = int((end - start).total_seconds())
+    ticks, flushes = range(tick_at, total, interval), range(flush_at, total, 60)
+    for second in sorted(set(ticks) | set(flushes)):
+        at = start + timedelta(seconds=second)
+        _clock_at(monkeypatch, at)
+        if second in ticks:
+            clock.at = base + second
+            market.at = at
+            monkeypatch.setattr(ts, "_et_today", lambda day=at.date(): day)
+            await els.earnings_live_tick(at, fmp=market, watched=["INTC"])
+        if second in flushes:
+            clock.at = base + second + lag
+            before = len(phones.buzzes)
+            await svc.flush_deferred()
+            buzzed += [at] * (len(phones.buzzes) - before)
+    return buzzed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval,tick_at,flush_at,lag", [
+    (15, 2, 31, 20), (60, 10, 0, 115), (60, 59, 0, 150), (300, 7, 45, 90),
+], ids=["the_fastest_loop", "the_usual_loop", "the_usual_loop_a_tick_later",
+        "the_slowest_loop"])
+async def test_a_row_reached_late_in_its_hand_out_has_its_report_read_before_its_next_look(
+        monkeypatch, clean_sender, live, interval, tick_at, flush_at, lag):
+    """The flush holds a row to the clock it read as it started, plus an hour. A row reached
+    `lag` seconds into a long hand-out timed its read from that later moment instead, so the read
+    landed just after the look it was for, every hour, and the row ended unbuzzed although FMP was
+    back at 0.60 from 08:15. Timed from the hold itself, the 09:00 look reads the recovery."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    market = _OvernightMarket(SAT_0815)
+
+    buzzed = await _walk_by_the_second(
+        monkeypatch, svc, market, datetime(2026, 11, 6, 21, 30, tzinfo=ET),
+        datetime(2026, 11, 7, 10, 30, tzinfo=ET), interval=interval, tick_at=tick_at,
+        flush_at=flush_at, lag=lag)
+
+    (row,) = ledger.rows
+    assert len(buzzed) == 1, (buzzed, row.get("last_error"))
+    assert _SATURDAY_LOOKS[2] <= buzzed[0] < _SATURDAY_LOOKS[2] + timedelta(minutes=1), buzzed
+    assert phones.buzzes[0]["body"] == "EPS beat consensus by 46%. Tap for the full picture."
+
+
+SAT_0700_ET = datetime(2026, 11, 7, 7, 0, tzinfo=ET)
+#: The live days on Saturday: Friday, the previous trading day, and Saturday itself.
+_LIVE_DAYS_ON_SATURDAY = (FRIDAY, SATURDAY)
+
+
+async def _reads_after_a_look(monkeypatch, live, route_day: date, *,
+                              then=None, interval: int = 60) -> List[tuple]:
+    """A look at 07:00 on Saturday at a held result for INTC's report dated `route_day`, then the
+    loop's refresh every `interval` seconds to the next look, an hour on, on a clock the test
+    moves. `then` runs after the look. Returns (seconds after the look, day) for every day read."""
+    return await _reads_after_looks(monkeypatch, live, route_day, then=then, interval=interval)
+
+
+async def _reads_after_looks(monkeypatch, live, route_day: date, *,
+                             hand_outs=((SAT_0700_ET, 0.0),), then=None, interval: int = 60,
+                             symbols=("INTC",), start: float = 1_000_000.0,
+                             friday_read_at: Optional[float] = None) -> List[tuple]:
+    """Looks at held results for INTC's report dated `route_day`, one per hand-out: the flush's
+    own clock for it, and how many seconds after reading that clock the flush reaches the row, on
+    a monotonic clock at `start` at 07:00 on Saturday. Every day of the live days was read at
+    `start`, and Friday at `start + friday_read_at` when that is given. Then the loop's refresh
+    every `interval` seconds, from 07:00 to past the last look, an hour after its hand-out. `then`
+    runs after the looks. Returns (seconds after 07:00, day) for every day read."""
+    clock = SimpleNamespace(at=start)
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=lambda: clock.at))
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_INTERVAL_SECONDS", interval)
+    for day in _LIVE_DAYS_ON_SATURDAY:
+        live._fetched[day] = start
+    if friday_read_at is not None:
+        live._fetched[FRIDAY] = start + friday_read_at
+    route = {"ticker": "INTC", "report_date": route_day.isoformat()}
+    for handed_out, reached in hand_outs:
+        clock.at = start + (handed_out - SAT_0700_ET).total_seconds() + reached
+        wake = sender.copy_at_wake(KIND_EARNINGS_RESULT, route, handed_out)
+        assert wake is not None and wake.ask_again_in == sender.WAKE_ASK_AGAIN
+    if then is not None:
+        then()
+    reads: List[tuple] = []
+    elapsed = 0
+
+    async def _calendar(from_date=None, to_date=None):
+        reads.append((elapsed, date.fromisoformat(from_date)))
+        return [{**_fmp_row(date.fromisoformat(from_date)), "symbol": "ZZZZ"}]
+
+    last_look = 3600 + max((handed_out - SAT_0700_ET).total_seconds()
+                           for handed_out, _ in hand_outs)
+    for elapsed in range(0, int(last_look) + interval, interval):
+        clock.at = start + elapsed
+        await live.refresh(SAT_0700_ET + timedelta(seconds=elapsed),
+                           fmp=SimpleNamespace(get_earnings_calendar=_calendar),
+                           symbols=list(symbols))
+    return reads
+
+
+def _just_before_the_next_look(second: int, interval: int = 60) -> bool:
+    """Inside the two ticks and a fetch's deadline before the look an hour on, the slack every
+    cadence comes due early by included."""
+    return 3600 - (2 * interval + 20 + els._DUE_SLACK_SECONDS) <= second < 3600
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interval", [15, 60, 300],
+                         ids=["the_fastest_loop", "the_usual_loop", "the_slowest_loop"])
+async def test_a_look_that_asks_again_has_its_report_read_once_just_before_the_next(
+        monkeypatch, clean_sender, live, interval):
+    """Friday's report, its EPS a dropped digit at Saturday's 07:00 look, and the closed day's own
+    reads two hours apart: one read lands just before 08:00, and no other. A read is made only on
+    a tick, and `EARNINGS_LIVE_INTERVAL_SECONDS` may be 15 s to 300 s, so a fixed lead shorter
+    than a tick would leave no tick to make it."""
+    _lands(live, FRI_2220, day=FRIDAY)
+    _fmp_says(live, FRI_2240, eps=0.041, day=FRIDAY)
+    reads = await _reads_after_a_look(monkeypatch, live, FRIDAY, interval=interval)
+    (second,) = [second for second, day in reads if day == FRIDAY]
+    assert _just_before_the_next_look(second, interval), reads
+
+
+@pytest.mark.asyncio
+async def test_a_look_at_a_leftover_row_has_the_report_it_reads_as_read(
+        monkeypatch, clean_sender, live):
+    """A Saturday row with no figures of its own reads as Friday's report, so Friday's answer is
+    the one the next look reads."""
+    _lands(live, FRI_2220, day=FRIDAY)
+    _fmp_says(live, FRI_2240, eps=0.041, day=FRIDAY)
+    live.observe_rows(SATURDAY, [_fmp_row(SATURDAY)], SAT_0700_ET, fetched=True)
+    assert live.snapshot("INTC", SATURDAY, SAT_0700_ET).reads_as == FRIDAY
+    reads = await _reads_after_a_look(monkeypatch, live, SATURDAY)
+    (second,) = [second for second, day in reads if day == FRIDAY]
+    assert _just_before_the_next_look(second), reads
+
+
+@pytest.mark.asyncio
+async def test_a_look_whose_report_has_answered_by_then_costs_no_read(
+        monkeypatch, clean_sender, live):
+    """FMP's own figure came back in the hour, in another answer (the daily pass's): the next look
+    has its answer, so the read it asked for never goes out."""
+    _lands(live, FRI_2220, day=FRIDAY)
+    _fmp_says(live, FRI_2240, eps=0.041, day=FRIDAY)
+    reads = await _reads_after_a_look(
+        monkeypatch, live, FRIDAY,
+        then=lambda: _fmp_says(live, SAT_0700_ET + timedelta(minutes=10), day=FRIDAY))
+    assert [day for _, day in reads if day == FRIDAY] == [], reads
+
+
+@pytest.mark.asyncio
+async def test_a_look_whose_report_has_answered_costs_no_read_while_another_on_its_day_waits(
+        monkeypatch, clean_sender, live):
+    """AMD's Friday report still waits on FMP, which the day's own cadence asks about. INTC's
+    answered in the hour, so the read its look booked is nobody's: the look asks about its own
+    report, never about its day."""
+    _lands(live, FRI_2220, day=FRIDAY)
+    _fmp_says(live, FRI_2240, eps=0.041, day=FRIDAY)
+    live.observe_rows(FRIDAY, [{**_fmp_row(FRIDAY), "symbol": "AMD"}], FRI_2240, fetched=True)
+    reads = await _reads_after_looks(
+        monkeypatch, live, FRIDAY, symbols=("INTC", "AMD"),
+        then=lambda: _fmp_says(live, SAT_0700_ET + timedelta(minutes=10), day=FRIDAY))
+    assert [day for _, day in reads if day == FRIDAY] == [], reads
+
+
+@pytest.mark.asyncio
+async def test_the_rows_of_one_hand_out_share_one_look_and_one_read(
+        monkeypatch, clean_sender, live):
+    """The flush reads its clock once per hand-out and holds every row of it to that clock plus
+    an hour. Two rows of one report reached 0.2 s apart, either side of half a minute, used to
+    look at two different minutes and cost two reads of the day."""
+    _lands(live, FRI_2220, day=FRIDAY)
+    _fmp_says(live, FRI_2240, eps=0.041, day=FRIDAY)
+    reads = await _reads_after_looks(monkeypatch, live, FRIDAY, start=60.0 * 20000 + 29.9,
+                                     hand_outs=((SAT_0700_ET, 0.0), (SAT_0700_ET, 0.2)))
+    (second,) = [second for second, day in reads if day == FRIDAY]
+    assert _just_before_the_next_look(second), reads
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("apart", [1, 40, 59], ids=lambda s: f"{s}s_apart")
+async def test_looks_less_than_a_tick_apart_share_one_read(monkeypatch, clean_sender, live,
+                                                           apart):
+    """Two hand-outs `apart` seconds apart hold their rows to two instants under a tick apart:
+    the read the first one's look gets lands before the second's too, so it is the second's."""
+    _lands(live, FRI_2220, day=FRIDAY)
+    _fmp_says(live, FRI_2240, eps=0.041, day=FRIDAY)
+    reads = await _reads_after_looks(
+        monkeypatch, live, FRIDAY, start=60.0 * 20000 + 25,
+        hand_outs=((SAT_0700_ET, 0.0), (SAT_0700_ET + timedelta(seconds=apart), 0.0)))
+    (second,) = [second for second, day in reads if day == FRIDAY]
+    assert _just_before_the_next_look(second), reads
+
+
+@pytest.mark.asyncio
+async def test_a_look_and_its_days_own_cadence_due_on_one_tick_read_the_day_once(
+        monkeypatch, clean_sender, live):
+    """Friday's 2 h cadence on a closed day comes due on the tick that opens the look's window:
+    one call for the day, never one for each reason to read it."""
+    _lands(live, FRI_2220, day=FRIDAY)
+    _fmp_says(live, FRI_2240, eps=0.041, day=FRIDAY)
+    first_in_the_window = 3480
+    cold = els.EARNINGS_LIVE_CLOSED_DAY_TTL_SECONDS - els._DUE_SLACK_SECONDS
+    assert _just_before_the_next_look(first_in_the_window)
+    assert not _just_before_the_next_look(first_in_the_window - 60)
+    reads = await _reads_after_looks(monkeypatch, live, FRIDAY,
+                                     friday_read_at=first_in_the_window - cold)
+    assert [read for read in reads if read[1] == FRIDAY] == [(first_in_the_window, FRIDAY)], reads
+
+
+@pytest.mark.parametrize("kind,eps,revenue,asks_again", [
+    (KIND_EARNINGS_RESULT, 0.60, 17.1e9, False),
+    (KIND_EARNINGS_RESULT, 0.42, 17.1e9, False),
+    (KIND_EARNINGS_RESULT, 0.041, 17.1e9, True),
+    (KIND_EARNINGS_LIVE, 0.60, 17.1e9, False),
+    (KIND_EARNINGS_LIVE, 0.041, 17.1e9, False),
+    (KIND_EARNINGS_LIVE, 0.041, None, True),
+], ids=["result_sends", "result_ends_under_the_bar", "result_asks_again", "live_sends",
+        "live_sends_a_revenue_beside_an_eps_in_doubt", "live_asks_again"])
+def test_only_a_wake_that_asks_again_books_a_read_before_its_next_look(
+        clean_sender, live, kind, eps, revenue, asks_again):
+    """A row its wake sends or ends has no next look, so a read an hour on would serve nobody. A
+    row that asks again books one, for its own report, at the instant its row is held to."""
+    _lands(live, FRI_2220, eps=eps, revenue=revenue, day=FRIDAY)
+    route = {"ticker": "INTC", "report_date": FRIDAY.isoformat()}
+    wake = sender.copy_at_wake(kind, route, SAT_0700_ET)
+    assert wake is not None and (wake.ask_again_in is not None) is asks_again, wake
+    booked = {("INTC", FRIDAY): {SAT_0700_ET + sender.WAKE_ASK_AGAIN}} if asks_again else {}
+    assert live._looks == booked
+
+
 @pytest.mark.asyncio
 async def test_a_row_that_spent_a_hand_out_on_the_clock_still_gets_its_look(
         monkeypatch, clean_sender, live):
@@ -2849,6 +4119,247 @@ async def test_a_row_that_spent_a_hand_out_on_the_clock_still_gets_its_look(
     _clock_at(monkeypatch, _stamp(row["deliver_after"]))
     assert (await svc.flush_deferred())["sent"] == 1
     assert phones.buzzes[0]["body"].startswith("EPS beat consensus by 46%")
+
+
+THU_2130 = datetime(2026, 10, 29, 21, 30, tzinfo=ET)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefs,morning", [
+    (IN_NEW_YORK, FRI_0700),
+    ({**IN_NEW_YORK, qh.PREF_QUIET_ENABLED: True, qh.PREF_QUIET_START: "22:15",
+      qh.PREF_QUIET_END: "06:30"}, FRI_0700 - timedelta(minutes=30)),
+], ids=["default_night", "own_window"])
+async def test_a_second_look_never_lands_in_the_users_night(
+        monkeypatch, clean_sender, live, prefs, morning):
+    """Parked on a failed read at 21:30, the row's first hand-out is a minute on, on a good read:
+    New York's evening, so it is not held. Its figure is being confirmed, so it asks again in an
+    hour, and 22:31 is the user's night, where nothing would hold it: only a first hand-out, or one
+    after a hand-out that judged nothing, is held again. So the next look waits for the night's
+    end, and the one buzz is the morning's."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    _read_fails_once(svc, prefs)
+    await sender.dispatch_landings(_lands(live, THU_2130), _clock_at(monkeypatch, THU_2130))
+    (row,) = ledger.rows
+    assert _stamp(row["deliver_after"]) == THU_2130
+    _fmp_says(live, THU_2130 + timedelta(seconds=30), eps=0.041)
+
+    _clock_at(monkeypatch, THU_2130 + timedelta(minutes=1))
+    stats = await svc.flush_deferred()
+
+    assert (stats["sent"], stats["requeued"]) == (0, 1) and phones.buzzes == []
+    assert _stamp(row["deliver_after"]) == morning
+    _fmp_says(live, THU_2340, eps=0.60)
+    _clock_at(monkeypatch, morning)
+    assert (await svc.flush_deferred())["sent"] == 1
+    assert phones.buzzes[0]["body"].startswith("EPS beat consensus by 46%")
+
+
+@pytest.mark.asyncio
+async def test_a_second_look_that_misses_the_night_keeps_its_hour(monkeypatch, clean_sender, live):
+    """A look an hour on at 20:31 is still the evening: it is not moved."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    _read_fails_once(svc, IN_NEW_YORK)
+    landing = THU_2130 - timedelta(hours=1)
+    await sender.dispatch_landings(_lands(live, landing), _clock_at(monkeypatch, landing))
+    _fmp_says(live, landing + timedelta(seconds=30), eps=0.041)
+
+    _clock_at(monkeypatch, landing + timedelta(minutes=1))
+    assert (await svc.flush_deferred())["requeued"] == 1
+    assert _stamp(ledger.rows[0]["deliver_after"]) == landing + timedelta(minutes=1, hours=1)
+
+
+@pytest.mark.asyncio
+async def test_a_second_look_after_a_failed_read_keeps_its_hour(monkeypatch, clean_sender, live):
+    """With no blob, nothing says where the user is, so ET's night would be a guess: the flush
+    holds nothing on one, and moves no look on one either."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    svc._preferences_bulk = lambda ids: {u: None for u in ids}
+    await sender.dispatch_landings(_lands(live, THU_2130), _clock_at(monkeypatch, THU_2130))
+    _fmp_says(live, THU_2130 + timedelta(seconds=30), eps=0.041)
+
+    _clock_at(monkeypatch, THU_2130 + timedelta(minutes=1))
+    assert (await svc.flush_deferred())["requeued"] == 1
+    assert _stamp(ledger.rows[0]["deliver_after"]) == THU_2130 + timedelta(minutes=1, hours=1)
+
+
+@pytest.mark.asyncio
+async def test_a_look_asked_for_on_an_unread_clock_is_held_for_the_night_it_lands_in(
+        monkeypatch, clean_sender, live):
+    """Parked on a failed read at 21:30, its first hand-out at 21:31 reads nothing either, so its
+    look an hour on could not be checked against the user's clock: 22:31 is New York's night. That
+    hand-out judged nothing, so it spends no night hold: the look's good read holds the row for
+    the morning, where it used to buzz at 22:31 as a second hand-out."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    answers = iter([{"u1": None}, {"u1": None}])     # the landing's read and the first flush's
+    svc._preferences_bulk = lambda ids: next(answers, {"u1": IN_NEW_YORK})
+    await sender.dispatch_landings(_lands(live, THU_2130), _clock_at(monkeypatch, THU_2130))
+    (row,) = ledger.rows
+    _fmp_says(live, THU_2130 + timedelta(seconds=30), eps=0.041)
+
+    _clock_at(monkeypatch, THU_2130 + timedelta(minutes=1))
+    assert (await svc.flush_deferred())["requeued"] == 1
+    look = _stamp(row["deliver_after"])
+    assert look == THU_2130 + timedelta(minutes=1, hours=1), "nothing said where the user is"
+    assert row["last_error"] == pds.UNREAD_CLOCK_ASK, "the row says its look judged nothing"
+
+    _fmp_says(live, look - timedelta(minutes=10), eps=0.60)
+    _clock_at(monkeypatch, look)
+    stats = await svc.flush_deferred()
+    assert (stats["sent"], stats["requeued"]) == (0, 1) and phones.buzzes == []
+    assert _stamp(row["deliver_after"]) == FRI_0700
+
+    _clock_at(monkeypatch, FRI_0700)
+    assert (await svc.flush_deferred())["sent"] == 1
+    assert phones.buzzes[0]["body"].startswith("EPS beat consensus by 46%")
+
+
+@pytest.mark.asyncio
+async def test_a_look_asked_for_on_a_good_read_spends_the_night_hold(monkeypatch, clean_sender,
+                                                                     live):
+    """The bound stays: a look judged on the user's own clock never lands in their night, so a
+    later hand-out found there anyway, a clock the user changed since, is not held again."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    _read_fails_once(svc, IN_NEW_YORK)
+    landing = THU_2130 - timedelta(hours=1)
+    await sender.dispatch_landings(_lands(live, landing), _clock_at(monkeypatch, landing))
+    (row,) = ledger.rows
+    _fmp_says(live, landing + timedelta(seconds=30), eps=0.041)
+    _clock_at(monkeypatch, landing + timedelta(minutes=1))
+    assert (await svc.flush_deferred())["requeued"] == 1
+    assert row.get("last_error") is None, "a look judged on a good read carries no note"
+
+    svc._preferences_bulk = lambda ids: {"u1": {qh.PREF_TIMEZONE: "Europe/Berlin"}}
+    _fmp_says(live, landing + timedelta(minutes=30), eps=0.60)
+    _clock_at(monkeypatch, _stamp(row["deliver_after"]))
+    assert (await svc.flush_deferred())["sent"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_hand_out_a_redeploy_cut_off_spends_neither_an_attempt_nor_the_night_hold(
+        monkeypatch, clean_sender):
+    """A Berlin row parked by a failed read at 17:05 ET is handed out at 17:06, and a redeploy cuts
+    that flush off before it judged anything. Back to `deferred` with the claim's attempt given
+    back, as `_return_to_deferred` promises, so the new process's good read at 22:07 in Berlin
+    holds it for Berlin's morning instead of buzzing it there."""
+    ledger, phones = _Ledger(), _Phones()
+    berlin = {qh.PREF_TIMEZONE: "Europe/Berlin"}
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs={"u1": berlin})
+    _read_fails_once(svc, berlin)
+    landing = datetime(2026, 10, 29, 17, 5, tzinfo=ET)
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, landing))
+    (row,) = ledger.rows
+    assert (row["push_state"], row["attempts"]) == ("deferred", 0)
+
+    _clock_at(monkeypatch, landing + timedelta(minutes=1))
+    claimed = svc._claim_due(100)
+    assert row["attempts"] == 1
+    svc._return_to_deferred(claimed, reason=pds.FLUSH_CANCELLED_MID_BATCH)
+    assert (row["push_state"], row["attempts"]) == ("deferred", 0)
+
+    wake = _clock_at(monkeypatch, landing + timedelta(minutes=2))
+    stats = await svc.flush_deferred()
+    assert (stats["sent"], stats["requeued"]) == (0, 1) and phones.buzzes == []
+    held = _stamp(row["deliver_after"]).astimezone(ZoneInfo("Europe/Berlin"))
+    assert (held.hour, held.date()) == (7, (wake + timedelta(days=1)).date())
+
+
+@pytest.mark.asyncio
+async def test_a_hand_out_cut_off_after_a_look_on_an_unread_clock_still_spends_no_night_hold(
+        monkeypatch, clean_sender, live):
+    """The cut-off flush's note replaces the look's on the row, and says the same: nothing judged
+    the user's clock, so the next good read in their night still holds the row."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    answers = iter([{"u1": None}, {"u1": None}])
+    svc._preferences_bulk = lambda ids: next(answers, {"u1": IN_NEW_YORK})
+    await sender.dispatch_landings(_lands(live, THU_2130), _clock_at(monkeypatch, THU_2130))
+    (row,) = ledger.rows
+    _fmp_says(live, THU_2130 + timedelta(seconds=30), eps=0.041)
+    _clock_at(monkeypatch, THU_2130 + timedelta(minutes=1))
+    assert (await svc.flush_deferred())["requeued"] == 1
+
+    look = _clock_at(monkeypatch, _stamp(row["deliver_after"]))
+    svc._return_to_deferred(svc._claim_due(100), reason=pds.FLUSH_CANCELLED_MID_BATCH)
+    _fmp_says(live, look, eps=0.60)
+    _clock_at(monkeypatch, look + timedelta(minutes=1))
+    stats = await svc.flush_deferred()
+    assert (stats["sent"], stats["requeued"]) == (0, 1) and phones.buzzes == []
+    assert _stamp(row["deliver_after"]) == FRI_0700
+
+
+async def _held_on_its_third_hand_out(monkeypatch, live):
+    """Parked on a failed read at 20:30, with the figure in doubt and the settings read failing
+    at the 20:31 and 21:31 flushes too: two looks asked for an hour on, each on a clock nobody
+    read. FMP answers before the third, at 22:31, whose good read finds New York's night."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _result_kind_alone(monkeypatch)
+    answers = iter([{"u1": None}, {"u1": None}, {"u1": None}])
+    svc._preferences_bulk = lambda ids: next(answers, {"u1": IN_NEW_YORK})
+    landing = THU_2130 - timedelta(hours=1)
+    await sender.dispatch_landings(_lands(live, landing), _clock_at(monkeypatch, landing))
+    (row,) = ledger.rows
+    _fmp_says(live, landing + timedelta(seconds=30), eps=0.041)
+    for hand_out in (1, 2):
+        _clock_at(monkeypatch, landing + timedelta(minutes=1, hours=hand_out - 1))
+        assert (await svc.flush_deferred())["requeued"] == 1
+        assert (row["attempts"], row["last_error"]) == (hand_out, pds.UNREAD_CLOCK_ASK)
+    look = _stamp(row["deliver_after"])
+    assert look == landing + timedelta(minutes=1, hours=2), "22:31: New York's night"
+    _fmp_says(live, look - timedelta(minutes=10), eps=0.60)
+
+    _clock_at(monkeypatch, look)
+    stats = await svc.flush_deferred()
+    return svc, ledger, phones, row, stats
+
+
+@pytest.mark.asyncio
+async def test_two_looks_on_an_unread_clock_leave_the_row_its_night_hold(
+        monkeypatch, clean_sender, live):
+    """Two hand-outs that judged nothing spend no hold, even when the second is the last one the
+    attempts ceiling counts: the third, the first on a clock it read, holds the row for the
+    morning. It used to buzz at 22:31, in New York's night as in ET's."""
+    svc, ledger, phones, row, stats = await _held_on_its_third_hand_out(monkeypatch, live)
+    assert (stats["sent"], stats["requeued"]) == (0, 1) and phones.buzzes == []
+    assert (row["attempts"], _stamp(row["deliver_after"])) == (
+        pds.PushDispatchService.MAX_FLUSH_ATTEMPTS, FRI_0700)
+
+    _clock_at(monkeypatch, FRI_0700)
+    assert (await svc.flush_deferred())["sent"] == 1
+    assert phones.buzzes[0]["body"].startswith("EPS beat consensus by 46%")
+    assert (row["push_state"], row["attempts"]) == (
+        "sent", pds.PushDispatchService.MAX_FLUSH_ATTEMPTS + 1)
+
+
+@pytest.mark.asyncio
+async def test_a_row_held_on_its_last_counted_hand_out_comes_back_once_and_is_held_no_more(
+        monkeypatch, clean_sender, live):
+    """What ends the holds: the attempts ceiling. The row held at 22:31 comes back at 07:00 for one
+    hand-out past it and goes out whatever the clock says then, here a user who has flown to
+    Auckland, where it is midnight. Its note still reads as a hand-out that judged nothing, so
+    without the ceiling it would be held again, and again for every clock that moves."""
+    svc, ledger, phones, row, stats = await _held_on_its_third_hand_out(monkeypatch, live)
+    assert stats["requeued"] == 1 and row["last_error"] == pds.UNREAD_CLOCK_ASK
+    svc._preferences_bulk = lambda ids: {"u1": {qh.PREF_TIMEZONE: "Pacific/Auckland"}}
+
+    wake = _clock_at(monkeypatch, FRI_0700)
+    assert wake.astimezone(ZoneInfo("Pacific/Auckland")).hour == 0
+    stats = await svc.flush_deferred()
+    assert (stats["sent"], stats["requeued"]) == (1, 0)
+    assert (row["push_state"], row["attempts"]) == (
+        "sent", pds.PushDispatchService.MAX_FLUSH_ATTEMPTS + 1)
 
 
 @pytest.mark.asyncio
@@ -2951,22 +4462,57 @@ async def test_a_hold_for_a_figure_that_cannot_be_written_ends_the_row_instead_o
 
 
 @pytest.mark.asyncio
-async def test_a_restart_inside_the_hold_never_buzzes_the_doubted_number(
-        monkeypatch, clean_sender, live):
-    """The record is gone, so the row's own text goes out. It no longer holds the 46%."""
+@pytest.mark.parametrize("kept,meanwhile", [
+    (False, "Revenue beat consensus by 3% · EPS being confirmed."),
+    (True, "Revenue $17.1B · EPS $0.44. From the company's release."),
+], ids=["the_record_gone", "the_filing_given_back_alone"])
+@pytest.mark.parametrize("fmp_then,buzzed", [
+    (0.60, ["EPS beat consensus by 46%. Tap for the full picture."]),
+    (0.041, []),
+], ids=["fmp_confirms_the_beat", "fmp_still_in_doubt"])
+async def test_a_restart_inside_the_hold_never_buzzes_what_the_wake_wrote_while_waiting(
+        monkeypatch, clean_sender, live, kept, meanwhile, fmp_then, buzzed):
+    """The 46% is parked, then FMP puts a dropped digit on the EPS: the 07:00 wake holds the row
+    for FMP's answer and leaves on it what is known meanwhile, which this kind never sends. A
+    deploy at 07:30 forgets the record, or the table gives back the filing alone, and neither is
+    that answer: the 08:00 wake asks again, as the old process would have, and the row goes out
+    only on what FMP says next. The doubted number is never buzzed."""
+    from _filing_cache_fake import FilingCache
+
+    table, watcher = FilingCache(), efs.EarningsFilingWatcher()
+    monkeypatch.setattr("app.database.get_supabase", lambda: table)
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
     ledger, phones = _Ledger(), _Phones()
     svc = _dispatcher_over(monkeypatch, ledger, phones)
     _result_kind_alone(monkeypatch)
     await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
+    if kept:
+        live.absorb_filing("INTC", REPORT, FilingFigures(
+            accession="0000050863-26-000123", accepted_at=THU_2210, url="https://www.sec.gov/x",
+            revenue=17.1e9, eps_adjusted=0.44), THU_2210)
+        await live.keep_filing("INTC", REPORT, THU_2210)
     _fmp_says(live, THU_2340, eps=0.041)
+
     _clock_at(monkeypatch, FRI_0700)
-    await svc.flush_deferred()
+    assert (await svc.flush_deferred())["requeued"] == 1
+    (row,) = ledger.rows
+    assert row["title"] == "INTC results are out" and phones.buzzes == []
+    assert ("$0.44" in row["body"]) is kept, "the release's EPS is on the row, never on a phone"
 
     live.reset()
-    _clock_at(monkeypatch, FRI_0700 + timedelta(hours=1))
-    assert (await svc.flush_deferred())["sent"] == 1
+    await live.restore_filings(FRI_0700 + timedelta(minutes=30))
+    second = _clock_at(monkeypatch, FRI_0700 + timedelta(hours=1))
+    stats = await svc.flush_deferred()
+    assert (stats["sent"], stats["requeued"]) == (0, 1) and phones.buzzes == []
+    assert (row["push_state"], row["title"], row["body"]) == ("deferred", "INTC results are out",
+                                                              meanwhile)
 
-    assert phones.buzzes[0]["body"] == "Revenue beat consensus by 3% · EPS being confirmed."
+    _fmp_says(live, second + timedelta(minutes=5), eps=fmp_then)
+    _clock_at(monkeypatch, second + timedelta(hours=1))
+    await svc.flush_deferred()
+    assert [b["body"] for b in phones.buzzes] == buzzed
+    assert row["push_state"] == ("sent" if buzzed else "failed")
+    assert row["attempts"] == pds.PushDispatchService.MAX_FLUSH_ATTEMPTS
 
 
 @pytest.mark.parametrize("settled", [
@@ -3050,6 +4596,395 @@ async def test_a_failed_read_east_of_et_is_late_and_never_held_twice(monkeypatch
     await sender.dispatch_landings([_big()], _clock_at(monkeypatch, FRI_0230))
     _clock_at(monkeypatch, FRI_0700)
     assert (await svc.flush_deferred())["sent"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zone,wake", [
+    ("America/New_York", None),
+    ("Europe/Berlin", WED_0700_BERLIN),
+    ("Asia/Tokyo", datetime(2026, 11, 11, 7, 0, tzinfo=ZoneInfo("Asia/Tokyo"))),
+], ids=["new_york", "berlin", "tokyo"])
+async def test_a_failed_read_at_the_16_00_pass_is_judged_on_the_users_own_clock(
+        monkeypatch, clean_sender, zone, wake):
+    """New York's afternoon is the night from Berlin to Tokyo, and a failed read says nothing of
+    which this user is in. So the row waits for the next flush, a minute on, which reads the
+    settings again: New York's goes out then, the others at 07:00 on their own clocks. Never a
+    buzz at 22:05 in Berlin."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _flags_as_shipped(monkeypatch)
+    _read_fails_once(svc, {qh.PREF_TIMEZONE: zone})
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, TUE_1605), day=TUESDAY)
+    (row,) = ledger.rows
+    assert phones.buzzes == [] and row["push_state"] == "deferred"
+    assert _stamp(row["deliver_after"]) == TUE_1605
+
+    _clock_at(monkeypatch, TUE_1605 + timedelta(minutes=1))
+    stats = await svc.flush_deferred()
+    if wake is not None:
+        assert (stats["sent"], stats["requeued"]) == (0, 1) and phones.buzzes == []
+        assert _stamp(row["deliver_after"]) == wake
+        _clock_at(monkeypatch, wake)
+        await svc.flush_deferred()
+    assert len(phones.buzzes) == 1 and row["push_state"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_fails_again_at_the_flush_goes_out_then_and_once(monkeypatch, clean_sender):
+    """Nothing better can be known, so ET's word stands: a minute late, and never held twice."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=IN_BERLIN)
+    _flags_as_shipped(monkeypatch)
+    svc._preferences_bulk = lambda ids: {u: None for u in ids}
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, TUE_1605), day=TUESDAY)
+    assert phones.buzzes == [] and ledger.rows[0]["push_state"] == "deferred"
+    _clock_at(monkeypatch, TUE_1605 + timedelta(minutes=1))
+    assert (await svc.flush_deferred())["sent"] == 1
+    _clock_at(monkeypatch, TUE_1605 + timedelta(minutes=2))
+    assert (await svc.flush_deferred())["claimed"] == 0
+    assert len(phones.buzzes) == 1 and len(ledger.rows) == 1
+
+
+RESULTS_ONLY = {**IN_NEW_YORK, "notify_earnings_live": False, "notify_earnings_surprises": True}
+FRI_0630 = datetime(2026, 10, 30, 6, 30, tzinfo=ET)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result_push", [True, False], ids=["result_push_on", "result_push_off"])
+@pytest.mark.parametrize("landing", [FRI_NOON, FRI_0630], ids=["et_day", "et_night"])
+async def test_a_live_row_parked_on_a_failed_read_gives_its_key_back_to_a_results_only_user(
+        monkeypatch, clean_sender, result_push, landing):
+    """The read failed, so Live Results was parked for a user who has it off and Results &
+    Surprises on, under the one key both kinds and the daily pass share; the result kind behind it
+    found that key taken. Ended at the flush, the row kept it, and the surprise this user did ask
+    for was told by nobody. It gives the key back instead, so the 16:00 pass tells them. Here the
+    record holds nothing at the wake (the report reached the sender straight, as after a restart),
+    so the row has no result to go out as; with one, it does (the section below)."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", result_push)
+    _read_fails_once(svc, RESULTS_ONLY)
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, landing))
+    (row,) = ledger.rows
+    assert (row["kind"], row["push_state"]) == (KIND_EARNINGS_LIVE, "deferred")
+
+    _clock_at(monkeypatch, max(landing + timedelta(minutes=1), _stamp(row["deliver_after"])))
+    stats = await svc.flush_deferred()
+    assert (stats["claimed"], stats["sent"]) == (1, 0) and phones.buzzes == []
+    assert ledger.rows == []
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, FRI_1600))
+    (told,) = phones.buzzes
+    assert told["data"]["kind"] == KIND_EARNINGS_RESULT
+    assert told["body"].startswith("EPS beat consensus by 46%")
+    assert [r["kind"] for r in ledger.rows] == [KIND_EARNINGS_RESULT]
+
+
+@pytest.mark.asyncio
+async def test_a_released_key_tells_a_user_who_wants_neither_kind_nothing(
+        monkeypatch, clean_sender):
+    """Given back, the key only lets the daily pass ask this user's settings itself: both kinds
+    off, it claims nothing and buzzes nobody."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _read_fails_once(svc, {**RESULTS_ONLY, "notify_earnings_surprises": False})
+
+    await sender.dispatch_landings([_big()], _clock_at(monkeypatch, FRI_NOON))
+    _clock_at(monkeypatch, FRI_NOON + timedelta(minutes=1))
+    await svc.flush_deferred()
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, FRI_1600))
+
+    assert phones.buzzes == [] and ledger.rows == []
+
+
+# ── a live row turned off at its wake, with the result push on ───────────────
+#
+# The result kind behind a parked live row found the key taken and is done with the report in this
+# process, and the daily pass keeps to its own window: a Thursday report landing on Friday after
+# 16:00 ET is in no later pass. So with the result push on, a live row the user's settings turn off
+# goes on as the result they do take, from the record as it stands, as a landing that had read
+# those settings would have sent it. Whatever would start no result push now (no clear surprise,
+# FMP's EPS not in yet, the user's toggles, the cap, the switch off) deletes the row as before, so
+# the key is free for the round or the pass that can still tell it.
+
+FRI_1605 = datetime(2026, 10, 30, 16, 5, tzinfo=ET)
+FRI_2145 = datetime(2026, 10, 30, 21, 45, tzinfo=ET)
+SAT_1600 = datetime(2026, 10, 31, 16, 0, tzinfo=ET)
+REPORTED_FRIDAY = date(2026, 10, 30)
+BEAT_46 = ("INTC earnings are out", "EPS beat consensus by 46%. Tap for the full picture.")
+
+
+async def _parked_then_woken(monkeypatch, svc, ledger, live, landing, blob, **figures):
+    """A landing whose settings read fails, which parks the live row on a guess; then the flush
+    at that row's wake, which reads `blob`. Returns the flush's stats."""
+    _read_fails_once(svc, blob)
+    await sender.dispatch_landings(_lands(live, landing, **figures),
+                                   _clock_at(monkeypatch, landing))
+    (row,) = [r for r in ledger.rows if r["kind"] == KIND_EARNINGS_LIVE]
+    assert row["push_state"] == "deferred"
+    _clock_at(monkeypatch, max(landing + timedelta(minutes=1), _stamp(row["deliver_after"])))
+    return await svc.flush_deferred()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landing,wake", [
+    (FRI_NOON, FRI_NOON + timedelta(minutes=1)),
+    (FRI_1605, FRI_1605 + timedelta(minutes=1)),
+    (FRI_2145, FRI_2145 + timedelta(minutes=1)),
+    (FRI_0630, FRI_0700),
+    (FRI_2330, SAT_0700),
+], ids=["before_the_pass", "after_the_pass", "late_evening", "et_night", "out_of_the_window"])
+async def test_a_live_row_turned_off_at_its_wake_goes_out_as_the_result_the_user_takes(
+        monkeypatch, clean_sender, live, landing, wake):
+    """Thursday's 46% beat lands on Friday, and a Results-only user's settings read fails. A good
+    read would have sent them the result at once (or at 07:00 in ET's night); it now does, at the
+    flush that reads them, and once: neither a later round nor a pass tells it again. Saturday 07:00
+    is past the window, but the row was claimed inside it, as a held result row is."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    stats = await _parked_then_woken(monkeypatch, svc, ledger, live, landing, RESULTS_ONLY)
+
+    assert (stats["sent"], stats["released"]) == (1, 0)
+    (buzz,) = phones.buzzes
+    assert (buzz["title"], buzz["body"]) == BEAT_46
+    assert buzz["data"]["kind"] == KIND_EARNINGS_RESULT
+    assert buzz["data"]["dedup_key"] == "earnings_result:INTC:2026-10-29"
+    assert (buzz["data"]["ticker"], buzz["data"]["report_date"]) == ("INTC", "2026-10-29")
+    (row,) = ledger.rows
+    assert (row["kind"], row["category"], row["push_state"]) == (
+        KIND_EARNINGS_RESULT, "earnings", "sent")
+    assert (row["title"], row["body"]) == BEAT_46, "the inbox says what the phone said"
+    assert row["route"]["kind"] == KIND_EARNINGS_RESULT and row["sent_at"]
+
+    await sender.dispatch_landings(live.landed_snapshots(wake), wake)
+    next_pass = FRI_1600 if wake < FRI_1600 else FRI_1600 + timedelta(days=1)
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, next_pass))
+    assert len(phones.buzzes) == 1 and len(ledger.rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_live_row_turned_off_in_the_users_night_waits_for_their_morning_as_the_result(
+        monkeypatch, clean_sender, live):
+    """16:05 ET is 22:05 in Berlin, on a day that holds four alerts by the flush a minute later.
+    The result it goes on as is held for Berlin's 07:00, which spends Wednesday's budget, and
+    buzzes once then."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _read_fails_once(svc, {**RESULTS_ONLY, qh.PREF_TIMEZONE: "Europe/Berlin"})
+
+    await sender.dispatch_landings(_lands(live, TUE_1605, day=TUESDAY),
+                                   _clock_at(monkeypatch, TUE_1605))
+    assert [r["kind"] for r in ledger.rows] == [KIND_EARNINGS_LIVE]
+    _spent_today(ledger, TUE_1605 + timedelta(minutes=1))
+    _clock_at(monkeypatch, TUE_1605 + timedelta(minutes=1))
+    stats = await svc.flush_deferred()
+
+    assert (stats["sent"], stats["requeued"]) == (0, 1) and phones.buzzes == []
+    (row,) = [r for r in ledger.rows if r["dedup_key"] == "earnings_result:INTC:2026-11-10"]
+    assert (row["kind"], row["push_state"]) == (KIND_EARNINGS_RESULT, "deferred")
+    assert _stamp(row["deliver_after"]) == WED_0700_BERLIN
+
+    _clock_at(monkeypatch, WED_0700_BERLIN)
+    assert (await svc.flush_deferred())["sent"] == 1
+    (buzz,) = phones.buzzes
+    assert buzz["data"]["kind"] == KIND_EARNINGS_RESULT
+    assert buzz["body"] == BEAT_46[1] and row["push_state"] == "sent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eps,body", [
+    (0.60, BEAT_46[1]),
+    (0.30, "EPS missed consensus by 27%. Tap for the full picture."),
+], ids=["as_landed", "corrected_overnight"])
+async def test_live_results_turned_off_in_the_night_still_tells_the_result_at_7(
+        monkeypatch, clean_sender, live, eps, body):
+    """A good read at 22:10 held Live Results for 07:00, and the result kind found its key taken.
+    The user turns Live Results off before 07:00 and keeps Results & Surprises: at 07:00 they are
+    told the result, as the record has it then."""
+    ledger, phones = _Ledger(), _Phones()
+    prefs = {"u1": dict(IN_NEW_YORK)}
+    svc = _dispatcher_over(monkeypatch, ledger, phones, prefs=prefs)
+
+    await sender.dispatch_landings(_lands(live, THU_2210), _clock_at(monkeypatch, THU_2210))
+    (row,) = ledger.rows
+    assert (row["kind"], _stamp(row["deliver_after"])) == (KIND_EARNINGS_LIVE, FRI_0700)
+
+    _fmp_says(live, THU_2340, eps=eps)
+    prefs["u1"] = dict(RESULTS_ONLY)
+    _clock_at(monkeypatch, FRI_0700)
+    assert (await svc.flush_deferred())["sent"] == 1
+
+    (buzz,) = phones.buzzes
+    assert (buzz["data"]["kind"], buzz["body"]) == (KIND_EARNINGS_RESULT, body)
+    assert (row["kind"], row["body"]) == (KIND_EARNINGS_RESULT, body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eps", [None, 0.041], ids=["not_out_yet", "being_confirmed"])
+async def test_a_live_row_turned_off_before_fmps_eps_is_in_leaves_the_key_to_the_result_round(
+        monkeypatch, clean_sender, live, eps):
+    """Revenue landed with no EPS that stands (none yet, or a dropped digit held as checking), so
+    the result kind has not decided yet: it decides once FMP's EPS stands. The row is deleted, and
+    that round tells the user. A result row holding the key would have asked again twice and then
+    ended, with nobody left to tell a later EPS."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    stats = await _parked_then_woken(monkeypatch, svc, ledger, live, FRI_NOON, RESULTS_ONLY,
+                                     eps=eps)
+    assert (stats["released"], stats["sent"]) == (1, 0)
+    assert ledger.rows == [] and phones.buzzes == []
+
+    filled = FRI_NOON + timedelta(minutes=40)
+    await sender.dispatch_landings(_fmp_says(live, filled, eps=0.60),
+                                   _clock_at(monkeypatch, filled))
+    (buzz,) = phones.buzzes
+    assert (buzz["data"]["kind"], buzz["body"]) == (KIND_EARNINGS_RESULT, BEAT_46[1])
+    assert [r["kind"] for r in ledger.rows] == [KIND_EARNINGS_RESULT]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eps", [0.42, 0.40], ids=["small_beat", "small_miss"])
+async def test_a_live_row_turned_off_with_no_surprise_to_tell_is_deleted(
+        monkeypatch, clean_sender, live, eps):
+    """A 2% surprise starts no result push, at the landing or at 16:00 ET: nobody is told."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    stats = await _parked_then_woken(monkeypatch, svc, ledger, live, FRI_NOON, RESULTS_ONLY,
+                                     eps=eps)
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, FRI_1600),
+                      row=_fmp_row(eps=eps, revenue=17.1e9))
+
+    assert stats["released"] == 1
+    assert phones.buzzes == [] and ledger.rows == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("off", [
+    {"notify_earnings_surprises": False}, {"notify_earnings_alerts": False},
+], ids=["results_off", "earnings_master_off"])
+async def test_a_live_row_turned_off_for_a_user_who_takes_no_result_either_is_deleted(
+        monkeypatch, clean_sender, live, off):
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    stats = await _parked_then_woken(monkeypatch, svc, ledger, live, FRI_NOON,
+                                     {**RESULTS_ONLY, **off})
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, FRI_1600))
+
+    assert stats["released"] == 1
+    assert phones.buzzes == [] and ledger.rows == []
+
+
+@pytest.mark.asyncio
+async def test_a_live_row_turned_off_behind_a_full_day_is_deleted_as_a_capped_landing_would_be(
+        monkeypatch, clean_sender, live):
+    """The day fills between the landing and the flush. A capped alert takes no row, so it costs
+    no later pass its key: Saturday's pass reads Friday's report as yesterday's, with a new day's
+    budget."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    _read_fails_once(svc, RESULTS_ONLY)
+    await sender.dispatch_landings(_lands(live, FRI_NOON, day=REPORTED_FRIDAY),
+                                   _clock_at(monkeypatch, FRI_NOON))
+    _spent_today(ledger, FRI_NOON + timedelta(minutes=1))
+
+    _clock_at(monkeypatch, FRI_NOON + timedelta(minutes=1))
+    stats = await svc.flush_deferred()
+    assert (stats["released"], stats["sent"]) == (1, 0) and phones.buzzes == []
+    assert [r for r in ledger.rows if r["dedup_key"].startswith("earnings_result:")] == []
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, SAT_1600), day=REPORTED_FRIDAY)
+    (buzz,) = phones.buzzes
+    assert (buzz["data"]["kind"], buzz["body"]) == (KIND_EARNINGS_RESULT, BEAT_46[1])
+
+
+@pytest.mark.asyncio
+async def test_with_the_result_push_off_a_live_row_turned_off_is_deleted_whatever_the_record_says(
+        monkeypatch, clean_sender, live):
+    """The owner's switch: off, no result goes out live, so a good read at the landing would have
+    left this user to the 16:00 ET pass, and so does the delete."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_RESULT_PUSH_ENABLED", False)
+
+    stats = await _parked_then_woken(monkeypatch, svc, ledger, live, FRI_NOON, RESULTS_ONLY)
+    assert (stats["released"], stats["sent"]) == (1, 0)
+    assert ledger.rows == [] and phones.buzzes == []
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, FRI_1600))
+    (buzz,) = phones.buzzes
+    assert (buzz["data"]["kind"], buzz["body"]) == (KIND_EARNINGS_RESULT, BEAT_46[1])
+
+
+@pytest.mark.asyncio
+async def test_a_result_that_cannot_be_written_onto_the_row_leaves_it_deleted_as_before(
+        monkeypatch, clean_sender, live, caplog):
+    """The row goes on as a result only once the ledger says so, or the inbox and a later wake
+    would read a live row the phone was told as a result. A failed write deletes it as before,
+    which frees the key for the 16:00 ET pass, and the log names the row."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+    real_update = ledger.update
+
+    def _refuses_a_new_kind(patch):
+        if "kind" in patch:
+            raise RuntimeError("write refused")
+        return real_update(patch)
+
+    monkeypatch.setattr(ledger, "update", _refuses_a_new_kind)
+    with caplog.at_level(logging.WARNING):
+        stats = await _parked_then_woken(monkeypatch, svc, ledger, live, FRI_NOON, RESULTS_ONLY)
+
+    assert (stats["released"], stats["sent"]) == (1, 0)
+    assert ledger.rows == [] and phones.buzzes == []
+    (line,) = [r.getMessage() for r in caplog.records if "write refused" in r.getMessage()]
+    assert "user=u1" in line and "earnings_result:INTC:2026-10-29" in line
+
+    await _daily_pass(monkeypatch, _clock_at(monkeypatch, FRI_1600))
+    assert [buzz["body"] for buzz in phones.buzzes] == [BEAT_46[1]]
+
+
+@pytest.mark.asyncio
+async def test_a_broken_answer_to_what_a_row_goes_out_as_deletes_it_and_keeps_the_stack(
+        monkeypatch, clean_sender, live, caplog):
+    """Only a bug reaches that except, and its line is the one trace: a WARNING with the stack,
+    and the row deleted as with nothing to go out as."""
+    ledger, phones = _Ledger(), _Phones()
+    svc = _dispatcher_over(monkeypatch, ledger, phones)
+
+    def _boom(*a, **k):
+        raise RuntimeError("record exploded")
+
+    monkeypatch.setattr(sender, "instead_at_wake", _boom)
+    with caplog.at_level(logging.WARNING):
+        stats = await _parked_then_woken(monkeypatch, svc, ledger, live, FRI_NOON, RESULTS_ONLY)
+
+    assert (stats["released"], stats["sent"]) == (1, 0)
+    assert ledger.rows == [] and phones.buzzes == []
+    (record,) = [r for r in caplog.records if "goes out as instead" in r.getMessage()]
+    assert "RuntimeError" in record.getMessage() and "INTC" in record.getMessage()
+    assert record.levelno == logging.WARNING
+    assert record.exc_info is not None and record.exc_info[0] is RuntimeError
+
+
+@pytest.mark.parametrize("state", ["sent", "deferred", "failed"])
+def test_a_new_kind_is_only_ever_written_onto_a_row_still_claimed(state):
+    """A row some other path has finished, or put back, keeps its kind and its text."""
+    ledger = _Ledger()
+    svc = object.__new__(pds.PushDispatchService)
+    svc.supabase = ledger
+    ledger.rows.append({"user_id": "u1", "dedup_key": "k", "push_state": state,
+                        "kind": KIND_EARNINGS_LIVE, "title": "t", "body": "b", "route": {}})
+    result = NOTIFICATION_KINDS[KIND_EARNINGS_RESULT]
+
+    assert svc._rekind("u1", "k", result, *BEAT_46, {"kind": KIND_EARNINGS_RESULT}) is False
+    assert (ledger.rows[0]["kind"], ledger.rows[0]["body"]) == (KIND_EARNINGS_LIVE, "b")
 
 
 @pytest.mark.asyncio
@@ -3187,6 +5122,30 @@ def test_a_filing_figure_keeps_its_print_beside_a_verdict_that_rounds_to_zero():
     assert body.startswith("Revenue $17.1B (beat consensus) ·"), body
 
 
+@pytest.mark.parametrize("eps,revenue,body", [
+    (2.01, 10.05e9, "Revenue beat consensus · EPS beat consensus."),
+    (1.99, 9.95e9, "Revenue missed consensus · EPS missed consensus."),
+    (2.03, 10.15e9, "Revenue beat consensus by 2% · EPS beat consensus by 2%."),
+], ids=["half_a_percent_beat", "half_a_percent_miss", "one_and_a_half_percent"])
+def test_a_percentage_that_would_print_as_zero_is_left_out(eps, revenue, body):
+    """A 0.50% surprise prints "0%" (Python rounds half to even), and "beat consensus by 0%" on
+    a lock screen contradicts the "Beat +0.5%" of the sheet it opens. The percentage goes
+    whenever it would print as 0; the daily pass rounds the same way above its 5% floor."""
+    snap = _snap(eps=eps, eps_est=2.00, eps_pct=els.eps_surprise_pct(eps, 2.00),
+                 rev=revenue, rev_est=10.0e9, rev_pct=els.revenue_surprise_pct(revenue, 10.0e9))
+    assert sender.live_copy(snap)[1] == body
+
+
+@pytest.mark.parametrize("pct,phrase", [
+    (0.49, "beat consensus"), (0.5, "beat consensus"), (0.51, "beat consensus by 1%"),
+    (-0.5, "missed consensus"), (-0.51, "missed consensus by 1%"),
+    (999.4, "beat consensus by 999%"), (1000.0, "beat consensus"),
+])
+def test_the_percentage_is_named_only_between_its_two_bounds(pct, phrase):
+    m = LiveMetric(2.0, 2.0 * (1 + pct / 100), pct, SOURCE_FMP)
+    assert sender._vs_consensus(m) == phrase
+
+
 def test_the_copy_is_informational_never_directive():
     for snap in (_snap(eps=0.44, eps_pct=7.3, rev=17.1e9, rev_pct=3.0),
                  _snap(eps=0.30, eps_pct=-26.8, rev=15.0e9, rev_pct=-9.6)):
@@ -3229,12 +5188,13 @@ def _calendar_row(day: date, *, eps=None, revenue=None) -> Dict[str, Any]:
 
 
 def _results_8k(*, filed: date, accepted: str) -> Dict[str, Any]:
+    """`accepted` as SEC stamps it, in UTC: these dates are EDT, so 16:02 ET is 20:02Z."""
     return {"accessionNumber": _INTEL_ACC, "filingDate": filed.isoformat(), "form": "8-K",
             "items": "2.02,9.01", "primaryDocument": "intc.htm", "acceptanceDateTime": accepted}
 
 
-_EVENING_8K = _results_8k(filed=OCT_29, accepted="2026-10-28T18:05:00.000Z")
-_MORNING_8K = _results_8k(filed=OCT_29, accepted="2026-10-29T08:00:00.000Z")
+_EVENING_8K = _results_8k(filed=OCT_29, accepted="2026-10-28T22:05:00.000Z")   # 18:05 ET
+_MORNING_8K = _results_8k(filed=OCT_29, accepted="2026-10-29T12:00:00.000Z")   # 08:00 ET
 
 
 class _Market:
@@ -3315,6 +5275,8 @@ class _EventLedger:
 
     def __init__(self, users=("u1",)):
         self.users, self.rows, self.failing_reads, self.reads = users, [], 0, []
+        # What a failing read raises: by default an error no retry takes for a blip.
+        self.read_error = lambda: RuntimeError("520 from the edge")
 
     def table(self, name):
         return _LedgerQuery(self, name)
@@ -3331,7 +5293,7 @@ class _EventLedger:
         self.reads.append(dict(query.wanted))
         if self.failing_reads:
             self.failing_reads -= 1
-            raise RuntimeError("520 from the edge")
+            raise self.read_error()
         return SimpleNamespace(data=[
             {"user_id": row["user_id"]} for row in self.rows
             if all(row.get(column) in values for column, values in query.wanted.items())
@@ -3375,9 +5337,15 @@ def ledger(monkeypatch):
 def live_loop(ledger, monkeypatch):
     """Run minutes of the real FMP tick, filing tick and `dispatch_landings` over a `_Market`,
     with the real dispatcher over a `_EventLedger`. Each minute starts the Tracking memo afresh unless
-    it keeps it, as a minute of the 30 it lives for does."""
+    it keeps it, as a minute of the 30 it lives for does.
+
+    Both ticks keep and restore filings through `earnings_filing_cache`, here ONE in-memory table
+    for the whole test (`table`): it outlives `restart()`, as the real one outlives a deploy, and it
+    keeps the loop off the network. A test of the table down sets its errors (`_table_down`)."""
     service = EarningsLiveService()
     watcher = efs.EarningsFilingWatcher()
+    table = FilingCache()
+    monkeypatch.setattr("app.database.get_supabase", lambda: table)
     monkeypatch.setattr(els, "get_earnings_live_service", lambda: service)
     monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
     monkeypatch.setattr(efs, "_CALL_SPACING_SECONDS", 0)
@@ -3403,6 +5371,8 @@ def live_loop(ledger, monkeypatch):
         await els.earnings_live_tick(at, fmp=market, watched=["INTC"])
 
     def _restart() -> None:
+        # The process goes, with its records, its watch and its memory of who was sent what. The
+        # table stays.
         service.reset()
         watcher.reset()
         sender.reset()
@@ -3419,8 +5389,15 @@ def live_loop(ledger, monkeypatch):
 
     ts.reset_earnings_calendar_cache()
     yield SimpleNamespace(minute=_minute, restart=_restart, daily_pass=_daily_pass,
-                          service=service, watcher=watcher)
+                          service=service, watcher=watcher, table=table)
     ts.reset_earnings_calendar_cache()
+
+
+def _table_down(loop) -> None:
+    """`earnings_filing_cache` not there yet, as before the owner applies migration 209: every
+    read and write fails, so a restart is what it was before the table."""
+    loop.table.read_error = RuntimeError("PGRST205: could not find the table")
+    loop.table.write_error = RuntimeError("PGRST205: could not find the table")
 
 
 def _keys(ledger: _EventLedger) -> set:
@@ -3552,12 +5529,16 @@ _ONE_REPORT = {
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("table", ["kept", "down"])
 @pytest.mark.parametrize("leg", _ONE_REPORT.values(), ids=_ONE_REPORT.keys())
 async def test_one_report_on_two_dated_rows_is_told_once_under_its_first_date(
-        live_loop, ledger, leg):
+        live_loop, ledger, leg, table):
     """FMP's reschedule leftover puts a second, later row beside a report, and the dedup key
     carries the row's date. The key is what must be asserted, never a count of one: a first
-    date that never landed would leave one push, keyed on the wrong report."""
+    date that never landed would leave one push, keyed on the wrong report. Whether a restart
+    gets the filing back from the table or not."""
+    if table == "down":
+        _table_down(live_loop)
     await leg(live_loop, _Market())
     assert _keys(ledger) == _FIRST_PUSH
 
@@ -3670,7 +5651,7 @@ async def test_a_report_nobody_heard_about_holds_nothing_back(live_loop, ledger,
     monkeypatch.setattr(settings, "EARNINGS_LIVE_PUSH_ENABLED", False)
     market = _Market()
     await live_loop.minute(market, _et_time(OCT_28, 16))
-    market.filings.append(_results_8k(filed=OCT_28, accepted="2026-10-28T16:02:00.000Z"))
+    market.filings.append(_results_8k(filed=OCT_28, accepted="2026-10-28T20:02:00.000Z"))
     await live_loop.minute(market, _et_time(OCT_28, 16, 3))
     await live_loop.minute(market, _et_time(OCT_29, 8))
     assert ledger.rows == []
@@ -3750,14 +5731,82 @@ async def test_a_report_nobody_heard_about_goes_out_after_a_failed_read(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_the_daily_pass_tells_nobody_on_a_failed_read_of_who_was_told(monkeypatch, caplog):
+async def test_the_daily_pass_tells_nobody_on_a_failed_read_of_who_was_told(monkeypatch):
+    """The read told nobody and claimed nothing, and it says so to the pass, which can try again:
+    a 0 would read as a ticker nobody watches."""
     svc = _ledger_dispatcher(monkeypatch)
     svc.supabase.failing_reads = 1
-    with caplog.at_level(logging.WARNING, logger=pds.logger.name):
-        sent = await daily._dispatch(kind=KIND_EARNINGS_RESULT, symbol="INTC", when="2026-10-29",
-                                     title="t", body="b")
-    assert sent == 0 and svc.supabase.rows == []
-    assert any("INTC" in line and "520 from the edge" in line for line in _warnings(caplog))
+    with pytest.raises(pds.WatcherLookupFailed, match="520 from the edge"):
+        await daily._dispatch(kind=KIND_EARNINGS_RESULT, symbol="INTC", when="2026-10-29",
+                              title="t", body="b")
+    assert svc.supabase.rows == []
+
+
+class _FailingWatcherRead(_Dispatch):
+    """A dispatcher whose read of who to tell fails for `failing` tickers, `times` times each, as
+    the real one says it when asked (`strict`)."""
+
+    def __init__(self, failing, times=1):
+        super().__init__()
+        self.left = {symbol: times for symbol in failing}
+
+    async def notify_watchers(self, **kw):
+        if self.left.get(kw["ticker"]):
+            assert kw.get("strict") is True, "only a strict send hears about a failed read"
+            self.left[kw["ticker"]] -= 1
+            raise pds.WatcherLookupFailed(f"{kw['ticker']}: RuntimeError: 520 from the edge")
+        return await super().notify_watchers(**kw)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", [{"INTC"}, {"NVDA"}, {"MSFT", "INTC"}],
+                         ids=["a_result", "a_reports_tomorrow", "two_results"])
+async def test_a_failed_read_of_who_to_tell_leaves_the_day_open_for_the_next_wake(
+        monkeypatch, clean_sender, live, caplog, failing):
+    """One failed read used to cost that ticker's push for everyone watching it: the pass sent
+    nothing for it, stamped the day done, and Thursday's after-close report was out of the window
+    by Saturday. The other tickers are still told, the pass raises so the day stays open, and the
+    next hourly wake tells the rest."""
+    rec = _FailingWatcherRead(failing)
+    monkeypatch.setattr(daily, "get_push_dispatch_service", lambda: rec)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    with caplog.at_level(logging.WARNING, logger=daily.__name__):
+        with pytest.raises(pds.WatcherLookupFailed) as raised:
+            await _pass_over_the_calendar(monkeypatch)
+    told = {send["ticker"] for send in rec.sent}
+    assert told == {"NVDA", "MSFT", "INTC"} - failing, "the other tickers are still told"
+    for symbol in failing:
+        assert symbol in str(raised.value)
+        assert any(symbol in line and "520 from the edge" in line for line in _warnings(caplog))
+
+    stats, run = await _pass_over_the_calendar(monkeypatch)
+    assert [send["ticker"] for send in rec.sent].count("MSFT") == 1 + ("MSFT" not in failing)
+    assert {send["ticker"] for send in rec.sent} == {"NVDA", "MSFT", "INTC"}
+    assert (run.success, stats["symbols"]) == (True, 3)
+
+
+@pytest.mark.asyncio
+async def test_the_next_wake_tells_each_watcher_of_the_failed_ticker_once(
+        monkeypatch, clean_sender, live):
+    """The real dispatcher over the ledger: the wake after the failed read tells INTC's watchers,
+    and the ledger keeps everyone the first wake told from hearing twice."""
+    svc = _ledger_dispatcher(monkeypatch, users=("u1", "u2"))
+    _clock_at(monkeypatch, FRI_1600)
+    _flags_as_shipped(monkeypatch)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_ENABLED", True)
+    svc.supabase.failing_reads = 1      # MSFT's read of who holds a neighbouring key: it goes first
+    with pytest.raises(pds.WatcherLookupFailed, match="MSFT"):
+        await _pass_over_the_calendar(monkeypatch)
+    assert {key for _, key in svc.supabase.told} == {
+        "earnings_upcoming:NVDA:2026-10-31", "earnings_result:INTC:2026-10-29"}
+
+    stats, run = await _pass_over_the_calendar(monkeypatch)
+    assert run.success is True
+    assert sorted(svc.supabase.told) == sorted(
+        (user, key) for user in ("u1", "u2") for key in (
+            "earnings_upcoming:NVDA:2026-10-31", "earnings_result:MSFT:2026-10-30",
+            "earnings_result:INTC:2026-10-29"))
+    assert len(svc.supabase.rows) == 6, "nobody the first wake told is told again"
 
 
 @pytest.mark.asyncio
@@ -3891,25 +5940,77 @@ def test_the_read_of_who_was_told_is_batched_and_names_both_columns(monkeypatch)
     assert all(read["dedup_key"] == {"k1", "k2"} for read in svc.supabase.reads)
 
 
+class _EdgeBlip(Exception):
+    """What postgrest raises when Cloudflare answers for the origin: an int status for a code."""
+
+    code = 520
+
+
+def test_an_edge_blip_on_the_read_of_who_was_told_is_read_again_in_place(monkeypatch, caplog):
+    """One of ceil(N/200) reads hitting a 520 used to cost every watcher of the ticker: the live
+    sender's round, or the whole 16:00 ET pass, waits for the next try. It is a read, so it is
+    read again where it failed, and only that batch."""
+    import app.utils.supabase_errors as supabase_errors
+
+    monkeypatch.setattr(supabase_errors.time, "sleep", lambda _seconds: None)
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.rows.append({"user_id": "u450", "dedup_key": "k1"})
+    svc.supabase.read_error = lambda: _EdgeBlip("JSON could not be generated")
+    svc.supabase.failing_reads = 1
+    users = [f"u{i}" for i in range(451)]
+    with caplog.at_level(logging.WARNING):
+        assert svc._holders_of(users, ["k1", "k2"]) == {"u450"}
+    assert [len(read["user_id"]) for read in svc.supabase.reads] == [200, 200, 200, 51]
+    assert any("retrying" in line for line in _warnings(caplog))
+
+
+@pytest.mark.asyncio
+async def test_a_send_goes_out_through_one_edge_blip_and_stops_on_a_failure_that_stays(
+        monkeypatch):
+    import app.utils.supabase_errors as supabase_errors
+
+    monkeypatch.setattr(supabase_errors.time, "sleep", lambda _seconds: None)
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.read_error = lambda: _EdgeBlip("JSON could not be generated")
+    svc.supabase.failing_reads = 1
+    assert await _send_unless_told(svc, strict=True) == 1
+
+    svc = _ledger_dispatcher(monkeypatch)
+    svc.supabase.read_error = lambda: _EdgeBlip("JSON could not be generated")
+    svc.supabase.failing_reads = 3
+    with pytest.raises(pds.WatcherLookupFailed, match="who holds"):
+        await _send_unless_told(svc, strict=True)
+    assert svc.supabase.rows == [] and len(svc.supabase.reads) == 3
+
+
+async def _send_unless_told(svc: pds.PushDispatchService, **kw) -> int:
+    """One `earnings_result` send of key "k" unless "k0" is held, at the file's NOW (16:05 ET).
+    Handed no `now`, the dispatcher reads the wall clock, and from 22:00 to 07:00 ET (the night
+    of a user who never set quiet hours) it holds every send for the morning: a count would pass
+    or fail by the hour the file ran."""
+    return await svc.notify_watchers(
+        ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_RESULT,
+        data={"ticker": "INTC"}, unless_claimed=["k0"], now=NOW, **kw)
+
+
 @pytest.mark.asyncio
 async def test_with_nothing_held_a_send_reaches_everyone_it_would_have(monkeypatch):
+    """At the file's NOW (16:05 ET): these users never set Quiet Hours, so from 22:00 to 07:00 ET
+    the night hold would park both rows and the count would read 0 whatever `unless_claimed` did."""
     svc = _ledger_dispatcher(monkeypatch, users=("u1", "u2"))
-    sent = await svc.notify_watchers(
-        ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_RESULT,
-        data={"ticker": "INTC"}, unless_claimed=["k0"])
-    assert sent == 2
+    assert await _send_unless_told(svc) == 2
+    assert svc.supabase.told == {("u1", "k"), ("u2", "k")}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", ["deferred", "pending", "sent", "no_device", "failed"])
 async def test_a_row_in_any_state_is_a_user_told(monkeypatch, state):
-    """A push waiting out quiet hours still goes out, and a row is what the inbox shows."""
+    """A push waiting out quiet hours still goes out, and a row is what the inbox shows. Told
+    means no row of their own either: a send held for the night still claims one."""
     svc = _ledger_dispatcher(monkeypatch)
     svc.supabase.rows.append({"user_id": "u1", "dedup_key": "k0", "push_state": state})
-    sent = await svc.notify_watchers(
-        ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_RESULT,
-        data={"ticker": "INTC"}, unless_claimed=["k0"])
-    assert sent == 0
+    assert await _send_unless_told(svc) == 0
+    assert svc.supabase.told == {("u1", "k0")}
 
 
 @pytest.mark.asyncio
@@ -3917,9 +6018,7 @@ async def test_a_send_with_everyone_told_says_so_and_ends(monkeypatch, caplog):
     svc = _ledger_dispatcher(monkeypatch)
     svc.supabase.rows.append({"user_id": "u1", "dedup_key": "k0"})
     with caplog.at_level(logging.INFO, logger=pds.logger.name):
-        sent = await svc.notify_watchers(
-            ticker="INTC", title="t", body="b", dedup_key="k", kind=KIND_EARNINGS_RESULT,
-            data={"ticker": "INTC"}, unless_claimed=["k0"])
+        sent = await _send_unless_told(svc)
     assert sent == 0 and svc.supabase.told == {("u1", "k0")}
     (line,) = [r.getMessage() for r in caplog.records if "already told" in r.getMessage()]
     assert "INTC" in line and "k0" in line
@@ -3930,8 +6029,7 @@ async def test_a_strict_send_raises_on_a_failed_read_of_who_was_told(monkeypatch
     svc = _ledger_dispatcher(monkeypatch)
     svc.supabase.failing_reads = 1
     with pytest.raises(pds.WatcherLookupFailed, match="520 from the edge"):
-        await svc.notify_watchers(ticker="INTC", title="t", body="b", dedup_key="k",
-                                  kind=KIND_EARNINGS_RESULT, unless_claimed=["k0"], strict=True)
+        await _send_unless_told(svc, strict=True)
     assert svc.supabase.rows == []
 
 
@@ -3959,12 +6057,75 @@ async def test_the_leftover_row_beside_an_evening_8k_reads_as_that_report(live_l
 
 
 @pytest.mark.asyncio
-async def test_after_a_restart_the_leftover_row_has_no_report_to_read_as(live_loop, ledger):
-    """A filing's figures live in this process, so a restart loses them until FMP fills, and the
-    row says what it knows: nothing yet, never a figure it no longer holds."""
-    await _restart_overnight(live_loop, _Market())
+async def test_after_a_restart_the_leftover_row_reads_as_the_report_the_table_kept(live_loop,
+                                                                                   ledger):
+    """The filing outlives the process in `earnings_filing_cache`, kept under the day it was
+    accepted, so after a restart the leftover row reads as that report just as its same-process
+    twin above does, from the company's own figures, and the release is not read again."""
+    market = _Market()
+    await _restart_overnight(live_loop, market)
+    assert set(live_loop.table.rows) == {("INTC", OCT_28.isoformat())}
+    assert OCT_28.isoformat() in live_loop.table.reads[-1], "the new process asked for its day"
     card = live_loop.service.snapshot("INTC", OCT_29, _et_time(OCT_29, 8, 5))
-    assert card.status == els.STATUS_LIVE and card.eps.actual is None
+    assert card.status == els.STATUS_REPORTED and card.preliminary is True
+    assert card.reads_as == OCT_28
+    assert (card.eps.actual, card.revenue.actual) == (0.44, 17.1e9)
+    assert (card.eps.surprise_pct, card.revenue.surprise_pct) == (7.32, 3.01)
+    assert (card.eps.source, card.revenue.source) == (SOURCE_FILING, SOURCE_FILING)
+    assert card.filing is not None and card.filing.accession == _INTEL_ACC
+    assert market.model_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_with_no_table_the_leftover_row_has_no_report_to_read_as(
+        live_loop, ledger):
+    """Until the table answers (not applied yet, or a failed read), a restart is what it was
+    before the table: the filing went with the process, and the row says what it knows, nothing
+    yet, never a figure it no longer holds."""
+    _table_down(live_loop)
+    market = _Market()
+    await _restart_overnight(live_loop, market)
+    assert live_loop.table.rows == {}
+    assert len(live_loop.table.reads) == 2, "each process tried the table once"
+    card = live_loop.service.snapshot("INTC", OCT_29, _et_time(OCT_29, 8, 5))
+    assert card.status == els.STATUS_LIVE and card.reads_as is None
+    assert (card.eps.actual, card.revenue.actual) == (None, None)
+    assert market.model_calls == 1, "the previous day's filing is not read again"
+
+
+_RESTARTS_AFTER_A_FILING = ("restart_overnight", "restart_then_fmp_fills_the_leftover_row",
+                            "restart_then_fmp_fills_both_rows_the_later_first",
+                            "restart_at_nine_then_fmp_fills_the_leftover_row")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("leg", [_ONE_REPORT[name] for name in _RESTARTS_AFTER_A_FILING],
+                         ids=_RESTARTS_AFTER_A_FILING)
+async def test_with_no_table_a_restart_still_tells_the_report_once_under_its_first_date(
+        live_loop, ledger, leg):
+    """The legs of `test_one_report_on_two_dated_rows_is_told_once_under_its_first_date` that
+    restart after a filing was read, with nothing kept and nothing restored: a failed table never
+    stops a tick, and the ledger, not the table, keeps the report to one push."""
+    _table_down(live_loop)
+    await leg(live_loop, _Market())
+    assert live_loop.table.rows == {}
+    assert len(live_loop.table.reads) == 2, "each process tried the table once"
+    assert _keys(ledger) == _FIRST_PUSH
+
+
+@pytest.mark.asyncio
+async def test_after_a_restart_the_leftover_row_reads_as_the_report_the_table_gives_back(
+        live_loop, ledger):
+    """The table outlives the deploy, so the evening's filing comes back to its record, and the
+    leftover row reads as that report the next morning, with no second read of the release."""
+    market = _Market()
+    await _restart_overnight(live_loop, market)
+    card = live_loop.service.snapshot("INTC", OCT_29, _et_time(OCT_29, 8, 5))
+    assert (card.status, card.reads_as, card.preliminary) == (els.STATUS_REPORTED, OCT_28, True)
+    assert (card.eps.actual, card.revenue.actual) == (0.44, 17.1e9)
+    assert market.model_calls == 1
+    assert [(symbol, day) for symbol, day in live_loop.table.rows] == [
+        ("INTC", OCT_28.isoformat())]
 
 
 @pytest.mark.asyncio
@@ -3979,7 +6140,7 @@ async def test_a_lone_row_with_an_evening_8k_is_told_on_its_own_date(live_loop, 
 async def test_a_pair_with_an_8k_during_the_day_is_told_on_its_first_date(live_loop, ledger):
     market = _Market()
     await live_loop.minute(market, _et_time(OCT_28, 16))
-    market.filings.append(_results_8k(filed=OCT_28, accepted="2026-10-28T16:02:00.000Z"))
+    market.filings.append(_results_8k(filed=OCT_28, accepted="2026-10-28T20:02:00.000Z"))
     await live_loop.minute(market, _et_time(OCT_28, 16, 3))
     await live_loop.minute(market, _et_time(OCT_29, 8))
     assert _keys(ledger) == _FIRST_PUSH
@@ -3990,7 +6151,7 @@ async def test_a_stale_earlier_row_never_stops_the_true_report_the_next_day(live
     market = _Market()
     await live_loop.minute(market, _et_time(OCT_28, 16))
     await live_loop.minute(market, _et_time(OCT_29, 15))
-    market.filings.append(_results_8k(filed=OCT_29, accepted="2026-10-29T16:02:00.000Z"))
+    market.filings.append(_results_8k(filed=OCT_29, accepted="2026-10-29T20:02:00.000Z"))
     await live_loop.minute(market, _et_time(OCT_29, 16, 3))
     assert _keys(ledger) == {"earnings_result:INTC:2026-10-29"}
 
@@ -4013,7 +6174,7 @@ async def test_a_friday_evening_8k_is_told_on_friday_and_never_again_on_monday(l
     friday, monday = date(2026, 10, 30), date(2026, 11, 2)
     market = _Market(days=(friday, monday))
     await live_loop.minute(market, _et_time(friday, 16))
-    market.filings.append(_results_8k(filed=monday, accepted="2026-10-30T18:05:00.000Z"))
+    market.filings.append(_results_8k(filed=monday, accepted="2026-10-30T22:05:00.000Z"))
     await live_loop.minute(market, _et_time(friday, 18, 6))
     assert _keys(ledger) == {"earnings_result:INTC:2026-10-30"}
     await live_loop.minute(market, _et_time(monday, 8))
@@ -4021,3 +6182,17 @@ async def test_a_friday_evening_8k_is_told_on_friday_and_never_again_on_monday(l
     await live_loop.minute(market, _et_time(monday, 8, 10))
     assert _keys(ledger) == {"earnings_result:INTC:2026-10-30"}
     assert market.model_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_release_already_out_when_the_process_starts_is_not_pushed(live_loop, ledger):
+    """SEC stamps the 8-K in UTC: 20:02Z is 16:02 ET. A process that first sees the report at
+    19:00 ET finds a release three hours old, which is no landing. Read as 20:02 ET, it would
+    look newer than the process and go out at 19:00 as news, three hours late."""
+    market = _Market(days=(OCT_28,))
+    market.filings.append(_results_8k(filed=OCT_28, accepted="2026-10-28T20:02:00.000Z"))
+    at = _et_time(OCT_28, 19)
+    await live_loop.minute(market, at)
+    assert market.model_calls == 1
+    assert live_loop.service.snapshot("INTC", OCT_28, at).eps.actual == 0.44, "on the card"
+    assert ledger.rows == []

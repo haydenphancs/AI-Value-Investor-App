@@ -13,6 +13,7 @@ once a second kind existed:
 No Supabase, no APNs.
 """
 
+import logging
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -32,6 +33,7 @@ from app.services.notification_kinds import (
     KIND_RESEARCH_COMPLETE,
     KIND_TICKER_MOVE,
     NOTIFICATION_KINDS,
+    category_cap,
     get_kind,
 )
 from app.services.push_dispatch_service import (
@@ -39,6 +41,7 @@ from app.services.push_dispatch_service import (
     STATE_DRY_RUN,
     STATE_FAILED,
     STATE_NO_DEVICE,
+    STATE_PENDING,
     STATE_SENT,
     PushDispatchService,
     _Recipient,
@@ -336,6 +339,36 @@ def test_a_failed_preference_read_errs_toward_a_late_buzz():
 
 
 @pytest.mark.parametrize("key", NIGHT_KINDS)
+@pytest.mark.parametrize("hour,minute", [(7, 0), (12, 0), (16, 5), (21, 59)])
+def test_a_failed_read_in_ets_daytime_waits_for_the_flush_instead_of_buzzing(key, hour, minute):
+    """ET's day is someone's night: 16:05 ET is 22:05 in Berlin and 06:05 in Tokyo. With no blob
+    nothing says which clock this user is on, so the row is parked for the next flush, which reads
+    the settings again and judges it on the user's own clock: a minute late at worst, never a buzz
+    at 22:05 in Berlin."""
+    now = _et(hour, minute)
+    d = _svc().decide(_recipient(preferences={}, preferences_known=False), get_kind(key), now)
+    assert (d.send, d.reason, d.deliver_after) == (False, "preferences_unread", now)
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+def test_a_failed_read_in_ets_own_night_still_waits_for_ets_morning(key):
+    """Parked for the flush instead, a row would go out at 23:31 in New York the moment a second
+    read failed too. So ET's night still parks it to ET's 07:00, where a good read holds it again
+    for anyone further west."""
+    d = _svc().decide(_recipient(preferences={}, preferences_known=False), get_kind(key), _et(23, 30))
+    assert (d.reason, d.deliver_after) == (
+        "quiet_hours", datetime(2026, 10, 31, 11, 0, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize("key", sorted(set(NOTIFICATION_KINDS) - set(NIGHT_KINDS)))
+def test_a_failed_read_changes_nothing_for_any_other_kind(key):
+    svc, kind = _svc(), get_kind(key)
+    for now in (SMALL_HOURS_ET, NOON_ET, _et(23, 30)):
+        unread = svc.decide(_recipient(preferences={}, preferences_known=False), kind, now)
+        assert unread == svc.decide(_recipient(preferences={}), kind, now)
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
 @pytest.mark.parametrize("stored", [False, "false", "off", "0", 0])
 def test_an_explicit_quiet_hours_off_is_honoured_however_it_is_stored(key, stored):
     prefs = {**NY_ONLY, qh.PREF_QUIET_ENABLED: stored}
@@ -385,13 +418,106 @@ def test_hours_stored_without_the_toggle_do_not_move_the_hold():
 
 @pytest.mark.parametrize("key", NIGHT_KINDS)
 def test_a_toggle_or_the_cap_still_decides_first_and_parks_nothing(key):
-    """A held row would use the user's dedup slot for something they will never be told."""
+    """A held row would use the user's dedup slot for something they will never be told: at 02:30
+    the wake is 07:00 the same day, whose budget is already spent. A failed read is parked only
+    once the cap has passed it, for the same reason."""
     svc, kind = _svc(), get_kind(key)
     for preference in (kind.preference_key, kind.master_preference_key):
         d = svc.decide(_recipient(preferences={preference: False}), kind, SMALL_HOURS_ET)
         assert (d.reason, d.deliver_after) == (f"preference_off:{preference}", None)
     d = svc.decide(_recipient(category_sent_today=4), kind, SMALL_HOURS_ET)
     assert (d.reason, d.deliver_after) == ("cap_reached:earnings:4", None)
+    unread = _recipient(preferences={}, preferences_known=False, category_sent_today=4)
+    d = svc.decide(unread, kind, NOON_ET)
+    assert (d.reason, d.deliver_after) == ("cap_reached:earnings:4", None)
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+@pytest.mark.parametrize("hour,minute", [(22, 0), (23, 30), (23, 59)])
+def test_a_hold_past_midnight_leaves_the_cap_to_the_day_it_wakes_on(key, hour, minute):
+    """Today's four are spent, but this row buzzes at 07:00 tomorrow, against tomorrow's budget,
+    and the flush applies that one. Judged on today's, a result landing at 23:30 was dropped with
+    no inbox row while the same result at 00:30 went out at 07:00."""
+    d = _svc().decide(
+        _recipient(preferences=NY_ONLY, category_sent_today=4), get_kind(key), _et(hour, minute))
+    assert (d.send, d.reason) == (False, "quiet_hours")
+    assert d.deliver_after == datetime(2026, 10, 31, 11, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+def test_a_users_own_window_past_midnight_leaves_the_cap_to_its_wake_too(key):
+    prefs = {**NY_ONLY, qh.PREF_QUIET_ENABLED: True,
+             qh.PREF_QUIET_START: "21:00", qh.PREF_QUIET_END: "06:00"}
+    d = _svc().decide(_recipient(preferences=prefs, category_sent_today=9), get_kind(key), _et(21, 30))
+    assert (d.reason, d.deliver_after) == (
+        "quiet_hours", datetime(2026, 10, 31, 10, 0, tzinfo=timezone.utc))
+
+
+# Which day a hold wakes on is read off the user's own calendar, the day their cap counts. These
+# are the cases where ET's calendar, or a hold's length, would give another answer.
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+@pytest.mark.parametrize("zone", ["Asia/Tokyo", "Asia/Kolkata"])
+def test_a_hold_past_the_users_midnight_is_tomorrows_even_on_the_same_et_date(key, zone):
+    """22:30 in Tokyo is 09:30 in New York, and the 07:00 wake is still that ET date. On ET's
+    calendar it would meet today's spent four and get no row; it buzzes tomorrow on theirs."""
+    tz = ZoneInfo(zone)
+    late = datetime(2026, 10, 29, 22, 30, tzinfo=tz).astimezone(timezone.utc)
+    d = _svc().decide(_recipient(preferences={qh.PREF_TIMEZONE: zone}, category_sent_today=4),
+                      get_kind(key), late)
+    wake = d.deliver_after.astimezone(tz)
+    assert d.reason == "quiet_hours"
+    assert (wake.date(), wake.hour, wake.minute) == (date(2026, 10, 30), 7, 0)
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+def test_a_hold_that_wakes_on_the_users_same_day_meets_that_days_cap(key):
+    """00:30 in Berlin is 19:30 in New York, and the 07:00 wake falls on the next ET date. It is
+    the same Berlin day, whose four are spent, so it gets no row, as at 02:30 in New York."""
+    berlin = ZoneInfo("Europe/Berlin")
+    late = datetime(2026, 10, 30, 0, 30, tzinfo=berlin).astimezone(timezone.utc)
+    d = _svc().decide(
+        _recipient(preferences={qh.PREF_TIMEZONE: "Europe/Berlin"}, category_sent_today=4),
+        get_kind(key), late)
+    assert (d.reason, d.deliver_after) == ("cap_reached:earnings:4", None)
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+def test_a_short_window_across_midnight_still_wakes_on_the_next_day(key):
+    """23:30 to 03:00 is a hold of three and a half hours, and it ends tomorrow all the same."""
+    prefs = {**NY_ONLY, qh.PREF_QUIET_ENABLED: True,
+             qh.PREF_QUIET_START: "23:00", qh.PREF_QUIET_END: "03:00"}
+    d = _svc().decide(_recipient(preferences=prefs, category_sent_today=4), get_kind(key), _et(23, 30))
+    assert (d.reason, d.deliver_after) == (
+        "quiet_hours", datetime(2026, 10, 31, 7, 0, tzinfo=timezone.utc))
+
+
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+def test_a_long_hold_inside_one_day_meets_that_days_cap(key):
+    """00:45 to 09:00 is eight hours and a quarter, all of it on one New York day."""
+    prefs = {**NY_ONLY, qh.PREF_QUIET_ENABLED: True,
+             qh.PREF_QUIET_START: "00:30", qh.PREF_QUIET_END: "09:00"}
+    d = _svc().decide(_recipient(preferences=prefs, category_sent_today=4), get_kind(key), _et(0, 45))
+    assert (d.reason, d.deliver_after) == ("cap_reached:earnings:4", None)
+
+
+_CAPPED_QUIET_KINDS = sorted(
+    k for k, kind in NOTIFICATION_KINDS.items()
+    if k not in NIGHT_KINDS and kind.respects_quiet_hours
+    and category_cap(kind.category, settings.PUSH_MAX_ALERTS_PER_USER_PER_DAY) is not None
+)
+
+
+@pytest.mark.parametrize("key", _CAPPED_QUIET_KINDS)
+def test_any_other_kind_held_past_midnight_still_meets_the_landing_days_cap(key):
+    """The wake's cap belongs to the night-hold kinds. Every other kind keeps the order it shipped
+    with: a user at the cap gets no row, whatever their own quiet hours say."""
+    kind = get_kind(key)
+    cap = category_cap(kind.category, settings.PUSH_MAX_ALERTS_PER_USER_PER_DAY)
+    prefs = {**_QUIET, kind.preference_key: True}
+    d = _svc().decide(_recipient(preferences=prefs, category_sent_today=cap), kind, _et(23, 30))
+    assert (d.reason, d.deliver_after) == (f"cap_reached:{kind.category}:{cap}", None)
 
 
 def test_broken_hold_math_fails_to_NOT_QUIET(monkeypatch):
@@ -992,6 +1118,210 @@ async def test_every_other_kind_is_flushed_word_for_word_with_no_second_hold(key
     assert (push.calls[0]["title"], push.calls[0]["body"]) == ("T", "B")
 
 
+def _flush_clock(monkeypatch, instant: datetime) -> datetime:
+    """The flush reads its own clock, so a test of who is in their night pins it."""
+    import app.services.push_dispatch_service as pds
+
+    class _Moved(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return instant.astimezone(tz or timezone.utc)
+
+    monkeypatch.setattr(pds, "datetime", _Moved)
+    return instant
+
+
+def _never(*args, **kwargs):
+    raise AssertionError("this row must not reach that step")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempts,hold_written,read_ok,held", [
+    (1, True, True, True),
+    (2, True, True, False),
+    (1, False, True, False),
+    (1, True, False, False),
+], ids=["first_wake", "spent", "hold_not_written", "read_failed"])
+async def test_a_night_row_judged_at_the_flush_meets_the_cap_of_the_day_it_goes_out_on(
+        monkeypatch, attempts, hold_written, read_ok, held):
+    """23:30 in New York is the user's night, with the wake tomorrow, so `decide` leaves the cap to
+    that wake: a row on its first hand-out is held for it, today's four spent or not. A row the
+    flush does not hold again goes out now instead, so today's budget is the one it would spend:
+    one that has had its second hold, one whose hold could not be written, and one whose read
+    failed (an empty blob reads as ET's night, which is no reason to hold it)."""
+    now = _flush_clock(monkeypatch, _et(23, 30))
+    push = _FakePush()
+    svc = _svc(push)
+    svc._claim_due = lambda limit: [{
+        "user_id": "u1", "dedup_key": "k", "kind": KIND_EARNINGS_RESULT, "title": "T", "body": "B",
+        "route": {}, "attempts": attempts, "deliver_after": (now - timedelta(minutes=1)).isoformat(),
+    }]
+    svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
+    svc.unread_counts_bulk = lambda ids: {"u1": 0}
+    svc._preferences_bulk = lambda ids: {"u1": dict(NY_ONLY) if read_ok else None}
+    svc._category_counts_bulk = lambda ids, category, cutoffs: {uid: 4 for uid in ids}
+    holds, states = [], []
+    svc._hold_again = lambda uid, key, at: holds.append(at) or hold_written
+    svc.mark_state = lambda uid, key, state, **kw: states.append((state, kw.get("error")))
+
+    stats = await svc.flush_deferred()
+
+    wake = datetime(2026, 10, 31, 11, 0, tzinfo=timezone.utc)
+    assert push.calls == []
+    if held:
+        assert (stats["requeued"], stats["suppressed"]) == (1, 0)
+        assert holds == [wake] and states == []
+    else:
+        assert (stats["requeued"], stats["suppressed"]) == (0, 1)
+        assert holds == ([] if hold_written else [wake])
+        assert states == [(STATE_FAILED, "suppressed on flush: cap_reached:earnings:4")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempts", [1, 2, 3], ids=["first_wake", "second", "last"])
+@pytest.mark.parametrize("key", [KIND_TICKER_MOVE, KIND_EARNINGS_RESULT, KIND_EARNINGS_LIVE])
+async def test_a_held_row_read_in_the_inbox_is_ended_unbuzzed_at_its_wake(monkeypatch, key, attempts):
+    """The inbox marks a held row read when the user opens it. At its wake they have what the buzz
+    would tell them: no buzz, no second hold, no new text, no count read, and nothing charged to the
+    day's cap. On any hand-out: a failed read at the landing or a figure being confirmed gives a
+    night-hold row later ones. 02:30 is still the night, so a first one would be held once more."""
+    now = _flush_clock(monkeypatch, SMALL_HOURS_ET)
+    push = _FakePush()
+    svc = _svc(push)
+    svc._claim_due = lambda limit: [{
+        "user_id": "u1", "dedup_key": "k", "kind": key, "title": "T", "body": "B",
+        "route": {"ticker": "INTC", "report_date": "2026-10-29"}, "attempts": attempts,
+        "deliver_after": (now - timedelta(minutes=1)).isoformat(),
+        "read_at": (now - timedelta(hours=3)).isoformat(),
+    }]
+    svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
+    svc.unread_counts_bulk = lambda ids: {"u1": 0}
+    svc._preferences_bulk = lambda ids: {"u1": dict(NY_ONLY)}
+    svc._category_counts_bulk = _never
+    svc._hold_again = _never
+    svc._rewrite_text = _never
+    monkeypatch.setattr(earnings_live_sender, "copy_at_wake", _never)
+    states = []
+    svc.mark_state = lambda uid, k, state, **kw: states.append((state, kw.get("error"), kw.get("sent")))
+
+    stats = await svc.flush_deferred()
+
+    assert push.calls == []
+    assert (stats["suppressed"], stats["sent"], stats["requeued"], stats["failed"]) == (1, 0, 0, 0)
+    assert states == [(STATE_FAILED, "suppressed on flush: read in the app before its wake", False)]
+
+
+def _turned_off_at_the_wake(monkeypatch, key, *, off):
+    """One held row of `key` on its first hand-out at noon, its user's `off` toggle now False."""
+    now = _flush_clock(monkeypatch, _et(12, 0))
+    push = _FakePush()
+    svc = _svc(push)
+    svc._claim_due = lambda limit: [{
+        "user_id": "u1", "dedup_key": "k", "kind": key, "title": "T", "body": "B",
+        "route": {"ticker": "INTC", "report_date": "2026-10-29"}, "attempts": 1,
+        "deliver_after": (now - timedelta(minutes=1)).isoformat(),
+    }]
+    svc._devices_bulk = lambda ids: {"u1": [{"token": "t", "environment": "sandbox"}]}
+    svc.unread_counts_bulk = lambda ids: {"u1": 0}
+    svc._preferences_bulk = lambda ids: {"u1": {**NY_ONLY, off: False}}
+    svc._category_counts_bulk = lambda ids, category, cutoffs: {uid: 0 for uid in ids}
+    states = []
+    svc.mark_state = lambda uid, k, state, **kw: states.append((state, kw.get("error")))
+    return svc, push, states
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+@pytest.mark.parametrize("which", ["own", "master"])
+async def test_a_night_row_its_user_turned_off_gives_its_key_back(monkeypatch, key, which):
+    """The two night-hold kinds and the daily pass share one key per report. A row the user's
+    settings turn off at its wake was claimed on a guess (a failed read at the landing) or before
+    they changed them, and ended there it kept that key from the kind or the pass they do want. It
+    is deleted instead: nothing was buzzed, so nothing can be buzzed twice."""
+    kind = get_kind(key)
+    off = kind.preference_key if which == "own" else kind.master_preference_key
+    svc, push, states = _turned_off_at_the_wake(monkeypatch, key, off=off)
+    released = []
+    svc._release = lambda uid, k: released.append((uid, k)) or True
+    monkeypatch.setattr(earnings_live_sender, "copy_at_wake", _never)
+
+    stats = await svc.flush_deferred()
+
+    assert push.calls == [] and states == [] and released == [("u1", "k")]
+    assert (stats["released"], stats["suppressed"], stats["sent"]) == (1, 0, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", NIGHT_KINDS)
+async def test_a_row_that_cannot_be_given_back_is_ended_as_before(monkeypatch, key):
+    svc, push, states = _turned_off_at_the_wake(monkeypatch, key, off=get_kind(key).preference_key)
+    svc._release = lambda uid, k: False
+    monkeypatch.setattr(earnings_live_sender, "copy_at_wake", lambda *args: None)
+
+    stats = await svc.flush_deferred()
+
+    assert push.calls == [] and (stats["released"], stats["suppressed"]) == (0, 1)
+    assert states == [(STATE_FAILED, f"suppressed on flush: preference_off:{get_kind(key).preference_key}")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", sorted(k for k, kind in NOTIFICATION_KINDS.items()
+                                       if k not in NIGHT_KINDS and kind.respects_quiet_hours))
+async def test_any_other_kind_turned_off_at_its_wake_keeps_its_row(monkeypatch, key):
+    """No other kind shares its key, so its row stays as the record of what was decided."""
+    svc, push, states = _turned_off_at_the_wake(monkeypatch, key, off=get_kind(key).preference_key)
+    svc._release = _never
+
+    stats = await svc.flush_deferred()
+
+    assert push.calls == [] and (stats["released"], stats["suppressed"]) == (0, 1)
+    assert states == [(STATE_FAILED, f"suppressed on flush: preference_off:{get_kind(key).preference_key}")]
+
+
+class _DeleteRecorder:
+    """`notification_events` for `_release`: the filters a DELETE carries, and what it answers."""
+
+    def __init__(self, answer=None, error=None):
+        self.filters, self.answer, self.error = [], answer, error
+
+    def table(self, name):
+        assert name == "notification_events"
+        return self
+
+    def delete(self):
+        return self
+
+    def eq(self, column, value):
+        self.filters.append((column, value))
+        return self
+
+    def execute(self):
+        if self.error is not None:
+            raise self.error
+        return type("_R", (), {"data": self.answer})()
+
+
+def test_a_release_deletes_only_the_row_this_flush_holds():
+    """Scoped to the user and the key, and to `pending`: the state the claim RPC gave the row this
+    flush is handling, so the delete can never remove a row that has gone out."""
+    svc = _svc()
+    svc.supabase = _DeleteRecorder(answer=[{"user_id": "u1", "dedup_key": "k"}])
+    assert svc._release("u1", "k") is True
+    assert sorted(svc.supabase.filters) == [
+        ("dedup_key", "k"), ("push_state", STATE_PENDING), ("user_id", "u1")]
+
+
+@pytest.mark.parametrize("answer,error", [([], None), (None, RuntimeError("520 from the edge"))],
+                         ids=["nothing_deleted", "delete_failed"])
+def test_a_release_that_removed_nothing_says_so_and_answers_false(caplog, answer, error):
+    svc = _svc()
+    svc.supabase = _DeleteRecorder(answer=answer, error=error)
+    with caplog.at_level(logging.WARNING):
+        assert svc._release("u1", "k") is False
+    (record,) = [r for r in caplog.records if "user=u1" in r.getMessage()]
+    assert "key=k" in record.getMessage() and record.levelno == logging.WARNING
+
+
 # ── the flush charges the cap against the RIGHT clock ────────────────────────
 #
 # §11.3 names three clocks that must never be interchanged. The per-category daily cap rolls
@@ -1103,3 +1433,99 @@ async def test_the_flush_asks_once_per_user_and_category_not_once_per_row():
     await svc.flush_deferred()
 
     assert asked == ["watchlist"], f"one read per (user, category) expected; got {asked}"
+
+
+# ── the dispatch loop's pace ─────────────────────────────────────────────────
+
+
+class _LoopStopped(BaseException):
+    """Ends the 24/7 dispatch loop, which outlives every `Exception`."""
+
+
+async def _dispatch_loop_sleeps(monkeypatch, passes):
+    """Run the real `_run_notification_dispatch_loop` over `passes`, each one flush's stats or the
+    error it raises, and return every pause it took, the start-up stagger first."""
+    import asyncio
+    from types import SimpleNamespace
+
+    import app.main as main_mod
+    import app.services.push_dispatch_service as pds
+
+    left = iter(passes)
+
+    class _Flush:
+        async def flush_deferred(self):
+            stats = next(left, None)
+            if stats is None:
+                raise _LoopStopped
+            if isinstance(stats, Exception):
+                raise stats
+            return stats
+
+    slept = []
+
+    async def _sleep(seconds):
+        slept.append(seconds)
+
+    monkeypatch.setattr(pds, "get_push_dispatch_service", lambda: _Flush())
+    monkeypatch.setattr(main_mod, "asyncio",
+                        SimpleNamespace(sleep=_sleep, CancelledError=asyncio.CancelledError))
+    with pytest.raises(_LoopStopped):
+        await main_mod._run_notification_dispatch_loop()
+    return slept
+
+
+@pytest.mark.asyncio
+async def test_a_full_batch_that_settled_rows_is_followed_at_once_not_a_minute_later(monkeypatch):
+    """A 07:00 wake after an earnings night holds every default user's results in that time zone,
+    all due at once. One batch, then a minute's wait: about 75 rows a minute, so a few thousand
+    rows made 07:00 into 08:00 for the last of them. A batch that came back full and settled rows
+    says more are due now, so the next one starts at once."""
+    import app.main as main_mod
+
+    batch = settings.NOTIFICATION_DISPATCH_BATCH
+    interval = max(settings.NOTIFICATION_DISPATCH_INTERVAL_SECONDS, 10)
+    slept = await _dispatch_loop_sleeps(monkeypatch, [
+        {"claimed": batch, "sent": batch - 3, "requeued": 3},
+        {"claimed": batch, "sent": batch, "requeued": 0},
+        {"claimed": batch - 1, "sent": batch - 1, "requeued": 0},
+    ])
+    pause = main_mod._FLUSH_DRAIN_PAUSE_SECONDS
+    assert slept == [45, pause, pause, interval]
+    assert 0 < pause < interval
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stats", [
+    {"claimed": 100, "requeued": 100},
+    {"claimed": 0, "requeued": 0},
+    {"claimed": 99, "sent": 99, "requeued": 0},
+    {},
+], ids=["a_full_batch_all_put_back", "nothing_due", "the_last_of_the_queue", "no_counts"])
+async def test_a_batch_that_settled_nothing_or_emptied_the_queue_waits_the_interval(
+        monkeypatch, stats):
+    """A full batch put back whole, every row held again or retried after an error, settled
+    nothing: taken again at once, an error that keeps failing would spend a row's tries in
+    seconds. A short batch emptied the queue."""
+    monkeypatch.setattr(settings, "NOTIFICATION_DISPATCH_BATCH", 100)
+    interval = max(settings.NOTIFICATION_DISPATCH_INTERVAL_SECONDS, 10)
+    assert await _dispatch_loop_sleeps(monkeypatch, [stats]) == [45, interval]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_flush_waits_the_interval_and_says_so(monkeypatch, caplog):
+    """Even right after a pass that drained a full batch: a failure says nothing about what is
+    due, and taken again at once it would fail, with an ERROR and its stack, every second."""
+    import app.main as main_mod
+
+    batch = settings.NOTIFICATION_DISPATCH_BATCH
+    interval = max(settings.NOTIFICATION_DISPATCH_INTERVAL_SECONDS, 10)
+    with caplog.at_level(logging.ERROR, logger=main_mod.__name__):
+        slept = await _dispatch_loop_sleeps(monkeypatch, [
+            {"claimed": batch, "sent": batch, "requeued": 0},
+            RuntimeError("claim RPC exploded"),
+            RuntimeError("claim RPC exploded"),
+        ])
+    assert slept == [45, main_mod._FLUSH_DRAIN_PAUSE_SECONDS, interval, interval]
+    failures = [r for r in caplog.records if "claim RPC exploded" in r.getMessage()]
+    assert len(failures) == 2 and all(r.exc_info for r in failures)

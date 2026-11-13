@@ -20,6 +20,7 @@ import app.services.earnings_live_service as els
 import app.services.tracking_service as ts
 from app.api.v1.endpoints import tracking as endpoint
 from app.config import settings
+from app.integrations.fmp import EmptyAfterFailure
 from app.services.earnings_filing_service import FilingFigures
 from app.utils.market_hours import ET
 
@@ -756,6 +757,58 @@ def test_a_cold_calendar_failure_is_unknown_not_none(client, monkeypatch, extras
     assert body["eps"] == _estimate_only(None) and body["revenue"] == _estimate_only(None)
     assert body["year_ago"] is None and body["last_quarters"] == []
     assert extras_calls == [], "no history fan-out during an outage"
+
+
+def _down_by_an_empty_answer(monkeypatch) -> None:
+    async def _empty(from_date=None, to_date=None):
+        return EmptyAfterFailure("HTTP 503 from the calendar")
+
+    monkeypatch.setattr(ts.get_fmp_client(), "get_earnings_calendar", _empty)
+
+
+def _down_by_a_stall(monkeypatch) -> None:
+    async def _stalls(from_date=None, to_date=None):
+        await asyncio.sleep(1.0)
+        return []
+
+    monkeypatch.setattr(ts, "_EARNINGS_CALENDAR_DEADLINE_SECONDS", 0.05)
+    monkeypatch.setattr(ts.get_fmp_client(), "get_earnings_calendar", _stalls)
+
+
+#: Each outage, with the words its first failed round leaves in the warning.
+_CALENDAR_OUTAGES = {
+    "fmp_raises": (_fmp_is_down, "cold and failing"),
+    "an_empty_answer_after_a_failure": (_down_by_an_empty_answer, "empty after a failed fetch"),
+    "a_round_past_its_deadline": (_down_by_a_stall, "not done within"),
+}
+
+
+@pytest.mark.parametrize("query,day", [("", "2026-10-29"), ("?report_date=2026-11-02", "2026-11-02")],
+                         ids=["no_date", "by_date"])
+@pytest.mark.parametrize("outage", _CALENDAR_OUTAGES.values(), ids=_CALENDAR_OUTAGES)
+def test_the_route_answers_every_calendar_outage_as_a_report_not_in_yet(
+        client, monkeypatch, caplog, outage, query, day):
+    """Each way the memo's read fails ends in `FMPUnavailableException`, the first read and the
+    one inside the wait after it alike, and the service answers it: a 200 the sheet asks again
+    on, never an error, never a Sentry issue per poll. The route has no branch of its own for
+    it, so this is the only answer there is."""
+    down, first_words = outage
+    down(monkeypatch)
+    for read, words in (("the_failed_round", first_words),
+                        ("inside_the_wait_after_it", "the last round failed")):
+        with caplog.at_level(logging.WARNING):
+            resp = client.get(f"/api/v1/tracking/earnings/INTC/live{query}")
+        assert resp.status_code == 200, (read, resp.text)
+        body = resp.json()
+        assert (body["status"], body["report_date"], body["poll_seconds"]) == (
+            "upcoming", day, 30), read
+        app_records = [r for r in caplog.records if r.name.startswith("app.")]
+        assert [r for r in app_records if r.levelno >= logging.ERROR] == [], read
+        assert not [r for r in app_records if r.name == endpoint.logger.name], read
+        warned = [r.getMessage() for r in app_records if "calendar unavailable" in r.getMessage()]
+        assert warned and all("INTC" in line and "FMPUnavailableException" in line
+                              and words in line for line in warned), (read, warned)
+        caplog.clear()
 
 
 def test_one_failed_day_of_a_cold_round_is_unknown_for_a_day_that_did_answer(client, monkeypatch):

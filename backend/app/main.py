@@ -1018,6 +1018,24 @@ async def _run_close_snapshot_loop():
         await asyncio.sleep(3600)
 
 
+#: The pause before the next flush when the last one claimed a full batch and settled rows:
+#: more are due now, so it is a yield, not the interval (`_run_notification_dispatch_loop`).
+_FLUSH_DRAIN_PAUSE_SECONDS = 1.0
+
+
+def _flush_left_rows_due(stats: Any) -> bool:
+    """Did a flush claim a full batch and settle at least one row of it? Then more rows are due
+    now. A batch put back whole (every row held again, or retried after an error) settled
+    nothing: taken again at once, an error that keeps failing would spend its tries in
+    seconds, so it waits the interval as before."""
+    if not isinstance(stats, Mapping):
+        return False
+    claimed, requeued = stats.get("claimed"), stats.get("requeued") or 0
+    if not isinstance(claimed, int) or not isinstance(requeued, int):
+        return False
+    return claimed >= settings.NOTIFICATION_DISPATCH_BATCH and claimed > requeued
+
+
 async def _run_notification_dispatch_loop():
     """Background task: deliver notifications parked by quiet hours.
 
@@ -1031,6 +1049,12 @@ async def _run_notification_dispatch_loop():
     Cheap when idle: one RPC per cycle that returns zero rows on the overwhelming
     majority of ticks. Cross-instance safe — `claim_due_notifications` (migration 119)
     uses FOR UPDATE SKIP LOCKED, so two instances never hand out the same row.
+
+    A flush that claimed a full batch and settled rows is followed at once
+    (`_flush_left_rows_due`). The night hold of `earnings_result` / `earnings_live` wakes
+    every default-settings user of a time zone at its 07:00, all due at once, and one
+    batch of `NOTIFICATION_DISPATCH_BATCH` a minute (about 75 rows a minute with the work
+    each takes) turned 07:00 into 08:00 for the last of a few thousand rows.
     """
     from app.services.push_dispatch_service import get_push_dispatch_service
 
@@ -1040,8 +1064,9 @@ async def _run_notification_dispatch_loop():
 
     interval = max(settings.NOTIFICATION_DISPATCH_INTERVAL_SECONDS, 10)
     while True:
+        stats: Any = None
         try:
-            await get_push_dispatch_service().flush_deferred()
+            stats = await get_push_dispatch_service().flush_deferred()
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -1052,6 +1077,9 @@ async def _run_notification_dispatch_loop():
                 "Notification dispatch cycle failed (%s: %s)",
                 type(e).__name__, e, exc_info=True,
             )
+        if _flush_left_rows_due(stats):
+            await asyncio.sleep(_FLUSH_DRAIN_PAUSE_SECONDS)
+            continue
         await asyncio.sleep(interval)
 
 

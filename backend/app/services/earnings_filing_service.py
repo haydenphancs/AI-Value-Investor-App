@@ -1,8 +1,9 @@
 """The company's own earnings release, read from SEC EDGAR — the live-earnings fast path.
 
 WHY THIS EXISTS (owner request 2026-10-29, INTC's report day). FMP's earnings calendar does
-carry the actual EPS and revenue, but it fills them ~1–3 h after the release, and an
-after-close report can wait until the next morning (`earnings_window_service._HOT_REFRESH_
+carry the actual EPS and revenue, but it fills them some time after the release, from minutes
+to hours (a dry run on 2026-11-12: three releases 1-18 min after their 8-K was read, one not
+within 2 h 20 min), and an after-close report can wait until the next morning (`earnings_window_service._HOT_REFRESH_
 SECONDS`). The release itself is public within minutes: a US issuer furnishes it to the SEC
 as an 8-K under Item 2.02 ("Results of Operations and Financial Condition") with the press
 release as Exhibit 99.1, normally in the same minute it goes out on the wire.
@@ -19,14 +20,17 @@ WHAT IT DOES, for one watched ticker on its report day:
      (`_release_view`);
   4. keeps a figure only when its quote is a verbatim span of the release
      (`filing_text.verify_peg_span`, the Learn engine's checker), it is in dollars, Gemini's value
-     rounds to the number printed in that quote, read with its own sign, scale and basis, AND the
-     quote names the metric at that number (`_metric_at`, `_adjusted_at`), as a level of the
+     rounds to the number printed in that quote, read with its own sign (never one its label's
+     words leave open, `_words_point_both_ways`), scale and basis, AND the quote names the metric
+     at that number (`_metric_at`, `_adjusted_at`; never an excluded item's own figure,
+     `_tied_to_an_excluded_item`), as a level of the
      quarter, and the release around the quote does not say otherwise (`_seats_of`). What is stored
      is the printed number, never Gemini's. Anything else is dropped and logged with its reason. A
      figure the release does not state cannot reach a user.
   5. keeps the outlook only as that verified quote: the company's own sentences, never a word
-     of Gemini's, and never a piece of a sentence, the rows of a table, a sentence that only
-     points at figures, or one that does not look ahead with a figure (`_outlook_problem`).
+     of Gemini's, and never a piece of a sentence, the rows or headings of a table, a sentence
+     that only points at figures, or one that does not look ahead with a figure
+     (`_outlook_problem`).
 
 The result is PRELIMINARY by construction: `earnings_live_service` shows it as "from the
 company's release" until FMP's own figure replaces it, and the existing `earnings_result`
@@ -35,23 +39,70 @@ push never uses it (that kind reaches 1.02 users on FMP numbers only).
 SEC LOAD. The limiter (`SEC_EDGAR_MAX_RPS`) and the 600 s throttle circuit are SHARED with
 the Learn pipeline, the buyback check and the Trillion stake finder, so a throttle caused
 here would stop all of them. The watcher therefore:
-  * reads at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` tickers at a time, most-watched first; the
-    next ticker takes a freed slot, and a ticker still waiting on its release keeps its own,
-    unless its record shows foreign forms alone (below);
-  * polls each one every minute only inside the two release windows (06:00–09:35 and
-    15:55–18:30 ET), every 5 min otherwise, never outside 06:00–22:00 ET and never on a weekend,
-    when EDGAR accepts nothing, so a report FMP dates on one is FMP's alone;
+  * reads at most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` tickers at a time, most-watched first, each
+    keeping for the day the place it was given, wherever a later list puts it (tickers watched
+    as often trade places in it, and a company can gain watchers on its report day), and a
+    ticker that joins the day's list later going ahead of every ticker placed that the list
+    ranks below it (`_placed`); the next ticker takes a freed slot, and a ticker still waiting
+    on its release keeps its own, unless its record shows foreign forms alone (below), or it
+    waits out its 15 min inside a release window its own company does not use: there it holds a
+    slot only in the round its read is due (`_holds_a_slot`), so the slot serves the window's
+    own companies meanwhile, but in the rounds the reads of tickers placed above them come due
+    in;
+  * lets the rounds that start in any one minute read no more submissions between them than
+    that cap, however often the loop runs: the reads of the rounds that started in the minute
+    before come off a round's slots, a minute on the loop's own clock as well as the monotonic
+    one (`_forget_reads_a_minute_back`). Each read counts at its round's start, so a round a slow
+    model call stretches can make some of its reads in the next minute of the wall clock;
+  * reads a round's tickers in their places and, after a model call, gives way to a ticker it
+    read before that the next round would read again: the round stops, and the next one starts
+    at the top, so a release the most-watched company files just after its read waits for one
+    model call, not for every release placed below it, and those wait instead. It gives way only
+    once it has run into the loop's next tick, which the next round never starts before, and
+    never when a ticker it would leave is not due in the next round, a release window or EDGAR's
+    day having closed by then (`_gives_way_for`). A filing it leaves waiting on its retry holds
+    for the minute after a round that spent an attempt like any other retry, unless that hold
+    would let it in only after its window or EDGAR's day has closed: then it keeps its own stamp,
+    and the next round reads it in its place (`_run_round`). A round of reads alone always runs
+    to its end: reads can fill a minute, and a round cut there would stop at the same ticker
+    every time;
+  * polls each one every minute only inside its own company's release windows (and in EDGAR's
+    last minute, below), every 15 min otherwise, never outside 06:00–22:00 ET and never on a
+    weekend, when EDGAR accepts nothing, so a report FMP dates on one is FMP's alone. The
+    windows are 06:00–09:35 ET, before the open, and 15:55–18:30 ET, after the close. Which a
+    company uses is read from the record the watch fetches anyway, at no extra call
+    (`release_windows`): the ET acceptance times of its last six results releases in two
+    years, every one before 09:30 ET the morning, every one after 15:30 ET the close, anything
+    else both. It is learned on the ticker's first read of the day, so until then it is both,
+    and so it stays for a ticker with no CIK, a foreign filer or a record that does not say. A
+    release out of its company's habit is still read, within the 15 min, up to the last read
+    before EDGAR closes: in its last minute (21:59 ET) every ticker is read at the minute
+    whatever its windows, unless it rests or is parked (below), because its next 15 min read
+    could fall after 22:00, and after that only FMP brings the figures;
   * spaces its calls (`_CALL_SPACING_SECONDS`) instead of bursting;
-  * stops for a symbol once its release is read;
-  * rests a filing whose read failed on a widening ladder (`_EXTRACT_RETRY_GAPS`), with no SEC
-    call for that symbol while it rests;
+  * stops for a symbol once its release is read, and at once for a ticker SEC's map lists no
+    company under, which waits for FMP: said once a day, at WARNING for a ticker written as a US
+    listing is, which has lost the fast path;
+  * rests a filing whose read failed on a widening ladder (`_EXTRACT_RETRY_GAPS`), never shorter
+    than the symbol's own cadence, with no SEC call for that symbol while it rests;
   * on any throttle, parks EVERY symbol for SEC's Retry-After (or the circuit) and never
     retries sooner.
 That cap is a limit on the rate, which is what SEC limits, and not on the day: every watched
 ticker reporting today can be read (at most 1,000, `earnings_sender._WATCHED_LOOKUP_LIMIT`), 25 at
-a time. A day's ceiling is 25 x 488 rounds = 12,200 submissions reads (370 rounds in the release
-windows, 118 outside them). On top of that, each read of a filing takes two document reads and
-one Gemini call, and a filing gets at most six reads.
+a time. A company whose release goes out after the close, at 16:05 ET, costs 51 submissions reads
+on its report day: every 15 min from 06:00, then every minute from 15:55 until the release is
+read. Read every minute in both windows and every 5 min between them, as every company was before
+each had windows of its own, it cost 302. A day's ceiling is 25 x 409 rounds = 10,225 submissions
+reads (370 rounds in the release windows, 39 outside them, and the rounds starting in a minute
+reading no more than one round's 25) for tickers whose records do not say; a ticker of one window is read at most 209
+times a day (after the close) or 265 (before the open, with the read in EDGAR's last minute),
+where every one could be read 488 times before. Those figures are the loop's 60 s. A loop set
+under a minute reads no minute past the cap either. With a multiple in 55-59 s (19, 28, 29 or
+55-59 s) and more than half the cap's tickers in their windows, the reads of the rounds before
+still fill the minute's count at the next one, so rounds go by that read nothing: those tickers
+are read about every 110-118 s at 55-59 s, and every 76-87 s at 19, 28 or 29 s, slower than at
+the loop's 60 s. On top of that, each read of a filing takes two document reads and one Gemini
+call, and a filing gets at most six reads.
 Foreign private issuers furnish results on 6-K, not 8-K, and they stay FMP-only. SEC lists most
 of them under a CIK, so a read of their record shows it (`furnishes_on_6k`), and the ticker then
 rests `_FOREIGN_FILER_REST_SECONDS` between reads with no slot. The watch never ends on that: a
@@ -61,8 +112,11 @@ the very release being watched for.
 WHAT A READ SETTLES (`_Read`). A filing is read until one of three things is known, and only the
 last of them ends the watch for the report:
   * RETRY: the read failed, which says nothing about the filing. The index or the exhibit could
-    not be read, or the model failed, was cut off or answered off schema. The same accession goes
-    again, up to six reads over about 33 minutes.
+    not be read, or the model failed, ran past the read's deadline (its own timeout and 15 s,
+    `_model_deadline_seconds`: a round is serial, and every company behind the read waits on
+    it), was cut off or answered off schema. The same accession goes again, up to six reads:
+    over about 33 minutes inside the company's windows, and about 75 outside them, where no rest
+    is shorter than the 15 min cadence.
   * NOT_RELEASE: it was read and is not the results release: no EX-99, an exhibit with no text,
     or the model says so. A morning Item 2.02 can be just that, so the accession is never read
     again and the watch goes on for the release still to come.
@@ -93,12 +147,29 @@ import logging
 import re
 import time
 import unicodedata
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
-from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from types import MappingProxyType
+from typing import (
+    Any,
+    Awaitable,
+    Callable,
+    Collection,
+    Deque,
+    Dict,
+    FrozenSet,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from app.config import settings
 from app.integrations.gemini import _is_clean_finish
@@ -126,24 +197,52 @@ logger = logging.getLogger(__name__)
 
 # ── Cadence and budget ──────────────────────────────────────────────
 
-#: The two windows nearly every US report lands in, as ET (hour, minute) bounds. Inside them a
-#: symbol is checked every `_FAST_POLL_SECONDS`; outside them every `_SLOW_POLL_SECONDS`.
+#: The two windows nearly every US report lands in, as ET (hour, minute) bounds. A symbol is
+#: checked every `_FAST_POLL_SECONDS` inside the ones its own company uses
+#: (`EarningsFilingWatcher.release_windows`), and every `_SLOW_POLL_SECONDS` outside them, but for
+#: EDGAR's last minute (`_EDGAR_LAST_MINUTE`).
 _RELEASE_WINDOWS: Tuple[Tuple[Tuple[int, int], Tuple[int, int]], ...] = (
     ((6, 0), (9, 35)),      # before the open (most BMO releases go out 06:00–08:00)
     ((15, 55), (18, 30)),   # after the close (most AMC releases go out 16:00–16:30)
 )
+#: The names `EarningsFilingWatcher.release_windows` answers with, and each one's hours: the same
+#: two windows, in that order. Read-only, because the FMP cadence reads them too.
+RELEASE_WINDOW_MORNING = "morning"
+RELEASE_WINDOW_CLOSE = "close"
+RELEASE_WINDOW_HOURS: Mapping[str, Tuple[Tuple[int, int], Tuple[int, int]]] = MappingProxyType(
+    dict(zip((RELEASE_WINDOW_MORNING, RELEASE_WINDOW_CLOSE), _RELEASE_WINDOWS)))
+#: Both windows: the answer for a company whose own record does not say which one it uses, and
+#: for any company before its first read of the day.
+BOTH_RELEASE_WINDOWS: FrozenSet[str] = frozenset(RELEASE_WINDOW_HOURS)
+#: Which window a company uses, from the ET acceptance times of its own past releases
+#: (`_release_habit`): every one before 09:30 ET is the morning, every one after 15:30 ET the
+#: close, and anything else is both. As ET (hour, minute, second).
+_MORNING_RELEASES_BEFORE = (9, 30, 0)
+_CLOSE_RELEASES_AFTER = (15, 30, 0)
+#: How many past releases decide, newest first, and how far back one may be.
+_HABIT_RELEASES = 6
+_HABIT_DAYS = 730
 #: EDGAR accepts filings 06:00–22:00 ET on business days; outside that there is nothing new to
 #: find (`poll_interval_seconds`).
 _EDGAR_OPEN = (6, 0)
 _EDGAR_CLOSE = (22, 0)
+#: The last minute EDGAR accepts filings in, 21:59 ET. Every company still waiting is read at the
+#: minute in it, whatever its windows: its slow cadence's next read can fall past 22:00, when the
+#: watch reads nothing, and a release accepted in the quarter hour before would wait for FMP,
+#: which can take until the next morning. It costs a company at most one read a day more.
+_EDGAR_LAST_MINUTE: Tuple[int, int] = divmod(_EDGAR_CLOSE[0] * 60 + _EDGAR_CLOSE[1] - 1, 60)
 _FAST_POLL_SECONDS = 60
-_SLOW_POLL_SECONDS = 300
+_SLOW_POLL_SECONDS = 900
 #: What a loop reads on its minute comes due this much early, here and in the FMP cadences
 #: (`earnings_live_service.due_days`, `tracking_service._earnings_days_due`). Ticks start a minute
 #: apart give or take scheduling, and a stamp taken when a read returned sits past its tick's
 #: start, so an exact compare falls a moment short on the tick it was meant for and loses a whole
 #: minute. Never a throttle's park: that one is SEC's, and is never cut short.
 _DUE_SLACK_SECONDS = 5
+#: The least the loop rests after a tick, however long it ran (`earnings_live_service.
+#: _MIN_TICK_GAP_SECONDS`, pinned equal): with the loop's interval, how soon after a round the
+#: next one can start (`EarningsFilingWatcher._start_round`, `_gives_way_for`).
+_LOOP_REST_SECONDS = 1.0
 #: Gap between two of OUR SEC calls, so a round of 25 symbols never holds the shared
 #: limiter for long and never bursts against SEC's per-second cap.
 _CALL_SPACING_SECONDS = 1.0
@@ -151,9 +250,11 @@ _CALL_SPACING_SECONDS = 1.0
 _THROTTLE_PARK_SECONDS = 600.0
 #: How long a filing rests after each failed read, in seconds: six reads over about 33 minutes, so
 #: half an hour of outage loses no filing, however many others fail in it. Counted from the end of
-#: the failed read, and never shorter than the symbol's own cadence. The wider gaps are what keep a
-#: long outage cheap on the limiter shared with Learn and the stake finder, and each one outlasts
-#: the quota breaker's 30 s cooldown, so a fail-fast from it rests on this same ladder.
+#: the failed read, and never shorter than the symbol's own cadence, so outside its company's
+#: windows, but for EDGAR's last minute, every rest is 15 min and the six reads take 75. The wider
+#: gaps are what keep a long outage cheap on the limiter shared with Learn and the stake finder, and
+#: each one outlasts the quota breaker's 30 s cooldown, so a fail-fast from it rests on this same
+#: ladder.
 _EXTRACT_RETRY_GAPS: Tuple[int, ...] = (60, 120, 300, 600, 900)
 #: The form families that tell a foreign private issuer from a domestic filer (`furnishes_on_6k`).
 #: Prefixes, so an amendment ("6-K/A", "10-K/A") or a transition report ("10-KT") reads as its
@@ -161,9 +262,12 @@ _EXTRACT_RETRY_GAPS: Tuple[int, ...] = (60, 120, 300, 600, 900)
 _FOREIGN_FORMS: Tuple[str, ...] = ("20-F", "40-F", "6-K")
 _DOMESTIC_FORMS: Tuple[str, ...] = ("10-K", "10-Q", "8-K")
 #: How long a ticker whose record shows foreign forms alone rests between reads, with no slot under
-#: the cap. Short enough that a first 8-K still beats FMP, which takes 1–3 h, and at most 33 reads
-#: a day for a ticker that will almost always stay on 6-K.
+#: the cap. Short enough that a first 8-K still beats FMP, which can take hours to fill a report,
+#: and at most 33 reads a day for a ticker that will almost always stay on 6-K.
 _FOREIGN_FILER_REST_SECONDS = 1800
+#: A ticker written as a US listing is: letters alone. One SEC's map lacks has lost the fast path
+#: (WARNING); a listing abroad ("SHOP.TO", "7203.T") never had it (INFO).
+_US_TICKER_RE = re.compile(r"[A-Z]{1,5}")
 
 # ── Extraction ──────────────────────────────────────────────────────
 
@@ -171,6 +275,13 @@ _FOREIGN_FILER_REST_SECONDS = 1800
 #: and the outlook sit at the top of every release; the GAAP-to-non-GAAP reconciliation
 #: tables that follow are not needed to read them.
 _EXTRACT_TEXT_CHARS = 40_000
+#: Past a model call's own timeout (`GEMINI_REQUEST_TIMEOUT_SECONDS`), how long one read's model
+#: step may still run: room for a call that failed at once and the backoff before its retry, so
+#: that retry still has its whole timeout. A round is serial, and the client's retries can
+#: stretch one read for minutes (two 5xx answers that each take a minute, the backoffs between
+#: them), every company behind it waiting. Past the deadline the read is a failed read, rested on
+#: the ladder like any other (`_Read.RETRY`, `_model_deadline_seconds`).
+_MODEL_DEADLINE_MARGIN_SECONDS = 15.0
 #: The shortest quote that proves a figure. "EPS of $0.91" is a whole proof, because the printed
 #: number and the label at it carry what the longer floor of the outlook has to.
 _FIGURE_QUOTE_MIN_CHARS = 12
@@ -366,27 +477,44 @@ class ResultsFiling:
 
 
 def _parse_accepted(value: Any) -> Optional[datetime]:
-    """SEC's `acceptanceDateTime` ("2026-10-29T16:02:11.000Z") as an aware UTC datetime.
+    """SEC's `acceptanceDateTime` ("2026-10-29T20:08:53.000Z") as an aware UTC datetime, or None
+    when it is not such a stamp.
 
-    EDGAR writes a "Z" on this field, but its digits are the acceptance clock the filing's
-    own index page prints ("Accepted: 2026-10-29 16:02:11"), which is Eastern time — EDGAR
-    runs on ET, and reading the digits as UTC would put an after-close release four hours
-    BEFORE the close. So the digits are read as ET wall-clock and converted to UTC for the
-    wire. ⚠️ Not yet compared against a live filing from this code path: the first report
-    day's `EARNINGS_LIVE_FILING ... accepted=HH:MM ET` line is the check (OWNER_TASKS).
+    The stamp is UTC, as its "Z" says. Thirty real Item 2.02 filings of 2026-10 and 2026-11 show
+    it: read as UTC, each falls where results come out, 06:14 to 09:18 ET or 16:00 to 16:41 ET.
+    Intel's after-close 8-K is stamped 20:08:53Z, 16:08 EDT; Apple's on 2026-11-02, after the
+    clocks went back, 21:30:23Z, 16:30 EST; UnitedHealth's morning one 10:14:45Z, 06:14 EDT.
+    EDGAR's own filing dates agree: read as ET, every after-close stamp would fall after 17:30
+    and carry the next business day's date, and none does. So an evening 8-K stamped after
+    midnight UTC was accepted the evening before on the ET calendar (`find_results_filings`).
+
+    A stamp is read on the clock it names. One that names none is not SEC's, and its clock is
+    unknown, so it reads as no time, like any other that cannot be read: no time is better than
+    one four or five hours off, on the sheet and against first sight
+    (`earnings_live_service._FILING_LANDING_GRACE`). So does one too near the ends of the
+    calendar to take to ET, which every reader of it does: it would raise there instead.
     """
-    if not isinstance(value, str) or len(value) < 19:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if len(value) < 19 or value[10:11] != "T":
         return None
     try:
-        wall = datetime.strptime(value[:19], "%Y-%m-%dT%H:%M:%S")
-    except ValueError:
+        when = datetime.fromisoformat(value)
+        if when.tzinfo is None:
+            return None
+        accepted = when.astimezone(timezone.utc)
+        accepted.astimezone(ET)     # what every reader does: one that cannot, fails here
+    except (ValueError, OverflowError):
         return None
-    return wall.replace(tzinfo=ET).astimezone(timezone.utc)
+    return accepted
 
 
-def find_results_filings(data: Any, report_date: date) -> List[ResultsFiling]:
+def find_results_filings(data: Any, report_date: date, *,
+                         symbol: str = "?") -> List[ResultsFiling]:
     """PURE. The 8-K filings carrying item 2.02 that belong to the report dated `report_date`,
-    newest first, from one submissions record (`filings.recent`, parallel arrays).
+    newest first, from one submissions record (`filings.recent`, parallel arrays). `symbol`
+    only names the ticker in a log line.
 
     Its filing date runs from `report_date` through the second trading day after it. A filing
     accepted after 17:30 ET is dated EDGAR's next business day, and EDGAR keeps the federal
@@ -398,28 +526,61 @@ def find_results_filings(data: Any, report_date: date) -> List[ResultsFiling]:
 
     It must also have been accepted on `report_date` or later, on the ET calendar. A filing's
     date can be the morning after the evening it was accepted, so that morning's row, a
-    reschedule leftover, would otherwise read the report as its own. One with no readable
-    acceptance time is judged on its date alone.
+    reschedule leftover, would otherwise read the report as its own. SEC stamps that time in
+    UTC (`_parse_accepted`), so an evening filing stamped after midnight UTC belongs to the day
+    before. One with no readable acceptance time is judged on its date alone, and a stamp that
+    is there but cannot be read is logged, as is a time column that cannot be paired with the
+    filings (missing, not a list, or of another length), which leaves every filing without its
+    time: a change in SEC's format would otherwise take every filing's time away without a word.
+    A filing date that cannot be read is replaced by the ET day of the acceptance time, which is
+    never later than it, and logged when that makes it one of the report's; with no readable time
+    either, the filing is not read, and that is logged too, as is one of the report's that names
+    no accession or document to fetch it by.
 
     The arrays must be the same length; a record whose columns disagree is read as having
-    no such filing rather than mis-pairing an accession with another filing's items.
+    no such filing rather than mis-pairing an accession with another filing's items. That, and a
+    record with no `filings.recent` object or a column of it that is not a list, is logged with
+    the ticker and the day: it repeats on every read of the company. None (SEC has no such
+    record) is quiet here.
     """
-    if not isinstance(data, Mapping):
+    if data is None:
         return []
-    recent = (data.get("filings") or {}).get("recent") if isinstance(data.get("filings"), Mapping) else None
+    day = report_date.isoformat()
+    filings = data.get("filings") if isinstance(data, Mapping) else None
+    recent = filings.get("recent") if isinstance(filings, Mapping) else None
     if not isinstance(recent, Mapping):
+        logger.warning(
+            "[earnings-live-filing] sym=%s day=%s submissions record holds no filings.recent "
+            "object (record: %s, filings: %s) — no filing read",
+            symbol, day, type(data).__name__, type(filings).__name__,
+        )
         return []
     keys = ("accessionNumber", "filingDate", "form", "items", "primaryDocument")
     cols = {k: recent.get(k) for k in keys}
-    if not all(isinstance(v, list) for v in cols.values()):
+    not_lists = [k for k, v in cols.items() if not isinstance(v, list)]
+    if not_lists:
+        logger.warning(
+            "[earnings-live-filing] sym=%s day=%s submissions columns not lists (%s) — no filing "
+            "read", symbol, day,
+            " ".join(f"{k}={type(cols[k]).__name__}" for k in not_lists),
+        )
         return []
     n = len(cols["accessionNumber"])
     if any(len(v) != n for v in cols.values()):
         logger.warning(
-            "[earnings-live-filing] submissions arrays disagree in length — no filing read"
+            "[earnings-live-filing] sym=%s day=%s submissions arrays disagree in length (%s) — "
+            "no filing read", symbol, day, " ".join(f"{k}={len(v)}" for k, v in cols.items()),
         )
         return []
     accepted = recent.get("acceptanceDateTime")
+    if n and not (isinstance(accepted, list) and len(accepted) == n):
+        logger.warning(
+            "[earnings-live-filing] sym=%s day=%s acceptanceDateTime column %s: every filing "
+            "judged on its filing date alone, with no time shown", symbol, day,
+            "missing" if accepted is None
+            else (f"holds {len(accepted)} for {n} filings" if isinstance(accepted, list)
+                  else f"is a {type(accepted).__name__}, not a list"),
+        )
     accepted = accepted if isinstance(accepted, list) and len(accepted) == n else [None] * n
     last_day = next_trading_day(next_trading_day(report_date))
     out: List[ResultsFiling] = []
@@ -429,18 +590,47 @@ def find_results_filings(data: Any, report_date: date) -> List[ResultsFiling]:
         items = {p.strip() for p in str(cols["items"][i] or "").split(",")}
         if "2.02" not in items:
             continue
+        stamp = accepted[i]
         try:
             filed = date.fromisoformat(str(cols["filingDate"][i] or "")[:10])
         except ValueError:
-            continue
+            stamped = _parse_accepted(stamp)
+            if stamped is None:
+                logger.warning(
+                    "[earnings-live-filing] sym=%s day=%s acc=%s filingDate=%s unreadable, and no "
+                    "acceptance time to date it by: not read",
+                    symbol, day, cols["accessionNumber"][i], repr(cols["filingDate"][i])[:60],
+                )
+                continue
+            filed = stamped.astimezone(ET).date()
+            if report_date <= filed <= last_day:
+                logger.warning(
+                    "[earnings-live-filing] sym=%s day=%s acc=%s filingDate=%s unreadable: dated "
+                    "%s, the ET day of its acceptance time",
+                    symbol, day, cols["accessionNumber"][i], repr(cols["filingDate"][i])[:60],
+                    filed.isoformat(),
+                )
         if not report_date <= filed <= last_day:
             continue
-        accepted_at = _parse_accepted(accepted[i])
+        accepted_at = _parse_accepted(stamp)
+        absent = stamp is None or (isinstance(stamp, str) and not stamp.strip())
+        if accepted_at is None and not absent:
+            logger.warning(
+                "[earnings-live-filing] sym=%s day=%s acc=%s acceptanceDateTime=%s unreadable: "
+                "judged on its filing date alone, with no time shown",
+                symbol, day, cols["accessionNumber"][i], repr(stamp)[:60],
+            )
         if accepted_at is not None and accepted_at.astimezone(ET).date() < report_date:
             continue
         acc = normalize_accession(cols["accessionNumber"][i])
         doc = cols["primaryDocument"][i]
         if acc is None or not isinstance(doc, str) or not doc:
+            # The report's own filing, maybe, and nothing to fetch it by.
+            logger.warning(
+                "[earnings-live-filing] sym=%s day=%s accessionNumber=%s primaryDocument=%s: an "
+                "Item 2.02 8-K of the report's dates that cannot be fetched, not read",
+                symbol, day, repr(cols["accessionNumber"][i])[:60], repr(doc)[:60],
+            )
             continue
         out.append(ResultsFiling(acc, filed, accepted_at, doc))
     out.sort(key=lambda f: (f.filing_date, f.accepted_at or datetime.min.replace(tzinfo=timezone.utc)),
@@ -467,6 +657,85 @@ def furnishes_on_6k(data: Any) -> bool:
     names = [f.strip().upper() for f in forms if isinstance(f, str)]
     return (any(name.startswith(_FOREIGN_FORMS) for name in names)
             and not any(name.startswith(_DOMESTIC_FORMS) for name in names))
+
+
+class _Habit(NamedTuple):
+    """When one company puts its results out, as its own record shows it (`_release_habit`)."""
+
+    windows: FrozenSet[str]
+    releases: int   # how many past releases decided it
+    why: str        # for the log line
+
+
+#: What `_release_habit` says of a record it cannot read. Nothing is learned from it, so the next
+#: read of the day tries again.
+_UNREADABLE_HABIT = _Habit(BOTH_RELEASE_WINDOWS, 0, "unreadable")
+
+
+def _release_habit(data: Any, report_date: date) -> _Habit:
+    """PURE. The release windows one company's results come out in, from its submissions record
+    (`filings.recent`, parallel arrays): its newest `_HABIT_RELEASES` 8-K filings carrying item
+    2.02 accepted in the `_HABIT_DAYS` before `report_date`, each read on the ET clock of its own
+    date (SEC stamps UTC, `_parse_accepted`). Every one before 09:30 ET is the morning window,
+    every one after 15:30 ET the close window. Anything else is both: releases in both windows or
+    between them, none at all (a foreign filer furnishes its results on 6-K, so it has none), or a
+    release whose time cannot be read, which cannot be shown to be in either. A record that cannot
+    be read is `_UNREADABLE_HABIT`.
+
+    Only releases accepted before the report day count, on the ET calendar: that day's own filing
+    is what the watch looks for, an Item 2.02 that morning can be a pre-announcement, and an
+    evening release stamped after midnight UTC is the evening before's. An amendment or another
+    item is no release: either can be filed at any hour.
+    """
+    filings = data.get("filings") if isinstance(data, Mapping) else None
+    recent = filings.get("recent") if isinstance(filings, Mapping) else None
+    if not isinstance(recent, Mapping):
+        return _UNREADABLE_HABIT
+    forms, items, filed = (recent.get(key) for key in ("form", "items", "filingDate"))
+    if not (isinstance(forms, list) and isinstance(items, list) and isinstance(filed, list)
+            and len(forms) == len(items) == len(filed)):
+        return _UNREADABLE_HABIT
+    stamps = recent.get("acceptanceDateTime")
+    if not isinstance(stamps, list) or len(stamps) != len(forms):
+        stamps = [None] * len(forms)
+    earliest = report_date - timedelta(days=_HABIT_DAYS)
+    past: List[Tuple[date, float, Optional[datetime]]] = []
+    for form, item_list, filing_date, stamp in zip(forms, items, filed, stamps):
+        if str(form or "").strip().upper() != "8-K":
+            continue
+        if "2.02" not in {part.strip() for part in str(item_list or "").split(",")}:
+            continue
+        accepted = _parse_accepted(stamp)
+        if accepted is not None:
+            on = accepted.astimezone(ET).date()
+        else:
+            try:
+                on = date.fromisoformat(str(filing_date or "")[:10])
+            except ValueError:
+                # No time and no date: it may be the newest release, at an hour nobody knows.
+                return _Habit(BOTH_RELEASE_WINDOWS, 0, "a past release with no time")
+        if earliest <= on < report_date:
+            past.append((on, accepted.timestamp() if accepted is not None else 0.0, accepted))
+    if not past:
+        return _Habit(BOTH_RELEASE_WINDOWS, 0, "no past release")
+    newest = sorted(past, key=lambda release: release[:2], reverse=True)[:_HABIT_RELEASES]
+    if any(accepted is None for _, _, accepted in newest):
+        return _Habit(BOTH_RELEASE_WINDOWS, len(newest), "a past release with no time")
+    clocks = [(local.hour, local.minute, local.second)
+              for local in (accepted.astimezone(ET) for _, _, accepted in newest)]
+    if all(clock < _MORNING_RELEASES_BEFORE for clock in clocks):
+        return _Habit(frozenset({RELEASE_WINDOW_MORNING}), len(clocks), "before the open")
+    if all(clock > _CLOSE_RELEASES_AFTER for clock in clocks):
+        return _Habit(frozenset({RELEASE_WINDOW_CLOSE}), len(clocks), "after the close")
+    return _Habit(BOTH_RELEASE_WINDOWS, len(clocks), "not always in one window")
+
+
+def _seconds_left_in_et_day(now: datetime) -> float:
+    """Real seconds from `now` to the next midnight ET: 25 hours from the midnight the clocks go
+    back after, 23 from the one they go forward after."""
+    local = now.astimezone(ET)
+    midnight = datetime(local.year, local.month, local.day, tzinfo=ET) + timedelta(days=1)
+    return (midnight.astimezone(timezone.utc) - local.astimezone(timezone.utc)).total_seconds()
 
 
 class _IndexTableParser(HTMLParser):
@@ -566,23 +835,31 @@ _SMALLER_FONT = (
     r"font-size\s*:\s*(?:\d{1,2}(?:\.\d+)?\s*%|[1-7](?:\.\d+)?\s*pt|0?\.\d+\s*r?em"
     r"|smaller|x{1,2}-small)"
 )
+#: How many tags a superscript run may hold inside it: enough for a mark eight tags deep, or one
+#: behind eight empty anchors. It bounds what a stray opening tag costs to read past.
+_SUPERSCRIPT_RUN_TAGS = 16
+#: The inline tags a style can raise into a superscript.
+_INLINE_TAGS = r"(?:span|font|a|b|i|em|strong|small|u)"
 #: A run set as a superscript, in the spellings filers use: `<sup>`, or an inline tag carrying a
 #: `vertical-align:super` style or the relative shift of Workiva's exports ("position:relative;
 #: top:-3.5pt"). `vertical-align:top` counts only with a smaller font: on its own it is how a table
 #: cell's content sits. A block tag is never a run. What a run holds is short text and the tags
-#: around it, and a tag's length is no part of the text's bound, so a long style inside a run
-#: leaves its mark in reach. Every part is bounded, so a stray "<sup" costs a short read past it,
-#: never a scan of the file.
+#: around it, at most `_SUPERSCRIPT_RUN_TAGS` of them, and a tag's length is no part of the text's
+#: bound, so a long style inside a run leaves its mark in reach. Every part is bounded, so a stray
+#: "<sup" costs a short read past it, never a scan of the file.
 _SUPERSCRIPT_RUN_RE = re.compile(
-    r"<(?P<tag>sup\b|(?:span|font|a|b|i|em|strong|small|u)\b(?:"
+    rf"<(?P<tag>sup\b|{_INLINE_TAGS}\b(?:"
     r"(?=[^<>]{0,2000}?(?:vertical-align\s*:\s*super|(?<![\w-])top\s*:\s*-))"
     r"|(?=[^<>]{0,2000}?vertical-align\s*:\s*(?:text-)?top\b)"
     rf"(?=[^<>]{{0,2000}}?{_SMALLER_FONT})"
     r"))"
-    r"[^<>]{0,2000}>(?P<body>[^<>]{0,200}(?:<[^<>]{0,2000}>[^<>]{0,200}){0,8}?)"
+    r"[^<>]{0,2000}>(?P<body>[^<>]{0,200}"
+    rf"(?:<[^<>]{{0,2000}}>[^<>]{{0,200}}){{0,{_SUPERSCRIPT_RUN_TAGS}}}?)"
     r"</(?P=tag)\s*>",
     re.IGNORECASE,
 )
+#: Where a run may open: each tag `_SUPERSCRIPT_RUN_RE` reads, whatever its style says.
+_A_RUNS_OPENING_RE = re.compile(rf"<(?:sup|{_INLINE_TAGS})\b", re.IGNORECASE)
 _ANY_TAG_RE = re.compile(r"<[^<>]{0,2000}>")
 #: The printer's marks: asterisk, dagger, double dagger, section sign, pilcrow.
 _FOOTNOTE_SYMBOLS = "*\u2020\u2021\u00a7\u00b6"
@@ -608,15 +885,36 @@ def _drop_footnote_marks(raw: str) -> str:
     It works on the markup because only the markup can tell a note from a digit, and it lives here
     because the Learn engine and the stake finder are pinned to `html_to_text`'s answers. Residual:
     a mark told apart by nothing but a smaller font, or by `vertical-align:top` at a size
-    `_SMALLER_FONT` does not read, or raised in a spelling `_SUPERSCRIPT_RUN_RE` does not read,
-    still flattens. An EPS is then refused (`_eps_prints`); a revenue or an outlook cannot be told
-    from a figure printed that way.
-    """
-    def _unless_a_mark(run: "re.Match[str]") -> str:
-        mark = unescape(_ANY_TAG_RE.sub("", run.group("body"))).strip()
-        return "" if mark and _FOOTNOTE_MARKS_RE.fullmatch(mark) else run.group(0)
+    `_SMALLER_FONT` does not read, or raised in a spelling `_SUPERSCRIPT_RUN_RE` does not read, or
+    with more than `_SUPERSCRIPT_RUN_TAGS` tags inside its run, still flattens. An EPS is then
+    refused (`_eps_prints`); a revenue or an outlook cannot be told from a figure printed that way.
 
-    return _SUPERSCRIPT_RUN_RE.sub(_unless_a_mark, raw)
+    It reads one run at a time, from each tag a run may open on, and goes on past every run it
+    read, a mark or not, as one scan of the whole exhibit would. A regex holds the interpreter for
+    all of one call, so a single call over an exhibit of runs that never close would stand the
+    event loop still for as long as it reads; one call per run lets it in between.
+    """
+    kept: List[str] = []
+    at = 0        # what is copied up to
+    past = 0      # where the next run may open
+    for opening in _A_RUNS_OPENING_RE.finditer(raw):
+        if opening.start() < past:
+            continue
+        run = _SUPERSCRIPT_RUN_RE.match(raw, opening.start())
+        if run is None:
+            continue
+        past = run.end()
+        if _is_a_mark(run):
+            kept.append(raw[at:run.start()])
+            at = run.end()
+    kept.append(raw[at:])
+    return "".join(kept)
+
+
+def _is_a_mark(run: "re.Match[str]") -> bool:
+    """Does a run of `_SUPERSCRIPT_RUN_RE` hold only a footnote mark?"""
+    mark = unescape(_ANY_TAG_RE.sub("", run.group("body"))).strip()
+    return bool(mark) and _FOOTNOTE_MARKS_RE.fullmatch(mark) is not None
 
 
 def _release_text(raw: Any, document: str) -> str:
@@ -792,8 +1090,10 @@ _RELEASE_SCALE_RE = re.compile(
     re.IGNORECASE,
 )
 #: After a figure, what says a sentence goes on: punctuation, a word in lower case, the end of the
-#: quote. Case matters: a capital is the next row's label.
-_SENTENCE_GOES_ON_RE = re.compile(r"\s*(?:[,.;:)]|\(?\s*[a-z]|\Z)")
+#: quote. Case matters: a capital is the next row's label. In parentheses it is a word, "(up 12%)",
+#: "(a 3% increase)" or "(i.e., about $48.3 million)", never one letter its ")" closes: "(a)" is a
+#: table's note, and the next cell may stand right behind it.
+_SENTENCE_GOES_ON_RE = re.compile(r"\s*(?:[,.;:)]|\(\s*[a-z](?!\s*\))|[a-z]|\Z)")
 
 
 def _one_scale(headers: "re.Pattern[str]", text: str) -> Optional[float]:
@@ -999,27 +1299,93 @@ _LOSS_AFTER_RE = re.compile(
     r"loss(?:es)?\b"
     r")"
 )
+#: The words of a per-share label that hold a joining word or a mark, read as one: "basic and
+#: diluted", ", basic and diluted", "(basic & diluted)", "on a diluted basis".
+_A_LABELS_JOINED_WORDS = (
+    r"(?:[,(]\s*)?\b(?:basic|diluted)(?:\s*(?:and|&|or|/)\s*(?:basic|diluted))?\b\)?"
+    r"|\bon\s+an?\s+(?:fully\s+)?(?:(?:basic|diluted)\s+(?:(?:and|&|or)\s+(?:basic|diluted)\s+)?"
+    r"|per[\s\-]+share\s+)basis\b"
+)
+#: Behind a loss label right after a figure, the amount that makes it the next row's label:
+#: "Non-GAAP EPS $0.46 GAAP loss per share $(0.12)", "$0.46 Net loss per share - basic and diluted
+#: $(0.12)", "$0.46 GAAP Net Loss per Share on a Diluted Basis $(0.12)". A word that joins,
+#: compares or goes on to the next clause ends the label before any amount, unless it is one of
+#: the label's own (`_A_LABELS_JOINED_WORDS`): "$0.46 Net Loss per Share versus $0.12 a year ago",
+#: "versus a loss of $0.12", "on $1.2 Billion in Revenue", "and Revenue of $1.2 Billion".
+_A_LABEL_WITH_ITS_OWN_AMOUNT_RE = re.compile(
+    rf"(?:{_A_LABELS_JOINED_WORDS}"
+    r"|(?!\b(?:and|or|versus|vs|compared|against|on|over|than|up|down|while|with)\b)"
+    r"[^\d$(),;.:]){0,40}?[$(]+\s*\.?\d",
+    re.IGNORECASE,
+)
 _CLOSED_PARENS_RE = re.compile(r"\([^()]*\)")
+#: In front of a number, the words that only say how exact it is.
+_HEDGE = r"(?:approximately|about|nearly|roughly|around|almost)"
+_ABOUT = rf"(?:(?:a|an|the|some|{_HEDGE})\s+)?"
+_HEDGED = rf"(?:\s+{_HEDGE})?"
+#: Beside "or", the words that tie a total to its per-share figure right behind it: "$120 million,
+#: representing $0.46", "equal to", "which equates to", "which was". Never "of" or "at": in "a net
+#: loss of $120 million, compared with net income of $0.46" the number is another figure's.
+_SHARE_OF_A_TOTAL_WORDS = (
+    r"(?:representing|equal(?:l?ing)?\s+to|equivalent\s+to|equating\s+to|amounting\s+to"
+    r"|(?:which|that)\s+(?:was|is|equat(?:es|ed)\s+to|equall?ed|amounted\s+to|came\s+to))"
+)
+#: Behind a total, what makes the number right after it that total's per-share figure, with a word
+#: that only says how exact it is or none: ", or $", " ($", ", or approximately $", ", representing
+#: $", ", which equates to $".
+_THE_SHARE_OF_A_TOTAL = (
+    rf"(?:\s*,\s*(?:(?:or|and)\s++{_ABOUT}|{_SHARE_OF_A_TOTAL_WORDS}{_HEDGED}\s++)"
+    rf"|\s*(?:or|and)\s++{_ABOUT}|\s*\(\s*{_ABOUT})[$(\s]*+\Z"
+)
 #: What opens an aside about another figure. "excl." ends on its dot, so it takes no `\b`.
 _ASIDE_OPENS = (
     r"(?:(?:excluding|excludes?|excluded|including|includes?|included|before|after|net\s+of"
     r"|exclusive\s+of|inclusive\s+of)\b|excl\.)"
 )
 #: ", excluding special items," or ", which reflected a charge," inside a label. A "," inside a
-#: number neither runs through one nor closes it, and neither does one that ties the number to the
-#: aside: ", including a net loss of $120 million, or $0.46 per share".
+#: number neither runs through one nor closes it. Whether one that ties the number to the aside
+#: (", including a net loss of $120 million, or $0.46 per share") leaves the aside the figure's is
+#: `_holds_its_total`'s to say.
 _ASIDE_RE = re.compile(
-    rf",\s*(?:(?:which|that)\b|{_ASIDE_OPENS})(?:[^,;]|,(?=\d))*,(?!\d)"
-    r"(?!\s*(?:or|and)\s+[$(\s]*\Z)",
+    rf",\s*(?:(?:which|that)\b|{_ASIDE_OPENS})(?:[^,;]|,(?=\d))*,(?!\d)",
     re.IGNORECASE,
 )
-#: A comma never splits a subject from its verb, so one right before "was $0.46" closes an aside,
-#: whatever opened it: "Adjusted EPS, compared with a loss of $0.12 a year ago, was $0.46". With no
-#: verb it may be a list: "Revenue, $1.2 billion, net loss per share, $0.46".
-_LAST_ASIDE_RE = re.compile(
-    r",(?:[^,;]|,(?=\d))*,"
+#: Right behind an aside, the words that tie the number to a total the aside holds: "or", "or
+#: approximately", "representing" (`_SHARE_OF_A_TOTAL_WORDS`).
+_TIES_THE_NUMBER_RE = re.compile(
+    rf"\s*(?:(?:or|and)\s++{_ABOUT}|{_SHARE_OF_A_TOTAL_WORDS}{_HEDGED}\s++)[$(\s]*+\Z",
+    re.IGNORECASE,
+)
+#: The same words, or "totaling" with no comma, which makes the number the per-share figure of a
+#: total or of an item, never of a measure in front of the item: "GAAP EPS included restructuring
+#: and other charges totaling $0.12 per share", "Adjusted EPS excludes special items totaling $0.12
+#: per share" (`_tied_to_an_excluded_item`). `_holds_its_total` reads only `_TIES_THE_NUMBER_RE`.
+_TIES_A_SHARE_RE = re.compile(
+    rf"\s*(?:(?:or|and)\s++{_ABOUT}|(?:{_SHARE_OF_A_TOTAL_WORDS}|totall?ing){_HEDGED}\s++)"
+    r"[$(\s]*+\Z",
+    re.IGNORECASE,
+)
+#: Right behind a comma, the verb that takes a subject to its figure: "was $0.46", "rose to $0.46",
+#: "was approximately $0.46". A comma never splits a subject from its verb.
+_AT_ITS_VERB = (
     r"(?=\s*(?:was|were|is|are|of|came\s+(?:in\s+)?(?:at|to)|totall?ed|amounted\s+to|reached"
-    r"|stood\s+at)\s+[$(\s]*\Z)",
+    r"|stood\s+at|(?:rose|increased|improved|grew|climbed|jumped|fell|declined|decreased|dropped)"
+    rf"\s+to){_HEDGED}\s+[$(\s]*\Z)"
+)
+#: So a comma right before such a verb closes an aside, whatever opened it: "Adjusted EPS, compared
+#: with a loss of $0.12 a year ago, rose to $0.46". With no verb it may be a list: "Revenue, $1.2
+#: billion, net loss per share, $0.46".
+_LAST_ASIDE_RE = re.compile(rf",(?:[^,;]|,(?=\d))*,{_AT_ITS_VERB}", re.IGNORECASE)
+#: One item of such a list: no comma, figure or digit, and it opens on no space, so a run of spaces
+#: has one way to split and a list that never closes fails in a time linear in its items.
+_LISTED_ITEM = r"[^,;$\d\s][^,;$\d]*"
+#: What a figure leaves out or takes in, listed with commas up to that verb: ", excluding
+#: restructuring charges, acquisition costs and the loss on sale, was $0.46". Its last item is
+#: joined by "and" or "or", so a clause with a verb and a figure of its own between the commas
+#: ("including services, grew 5%, and EPS") is none.
+_LISTED_ASIDE_RE = re.compile(
+    rf",\s*{_ASIDE_OPENS}\s*{_LISTED_ITEM}(?:,\s*{_LISTED_ITEM})*?,?\s+(?:and|or)\s+{_LISTED_ITEM},"
+    rf"{_AT_ITS_VERB}",
     re.IGNORECASE,
 )
 #: "Gains and losses" points neither way.
@@ -1027,70 +1393,607 @@ _GAINS_AND_LOSSES_RE = re.compile(
     r"\bgains?\s*(?:and|or|/)\s*loss(?:es)?\b|\bloss(?:es)?\s*(?:and|or|/)\s*gains?\b",
     re.IGNORECASE,
 )
+#: The company's common holders: "stockholders", "common shareholders", "ordinary shareholders",
+#: "unitholders".
+_COMMON_HOLDERS = r"(?:(?:common|ordinary)\s+)?(?:share|stock|unit)holders"
+#: A word that names a class or a series of stock, units, a partner, or a holder that is not the
+#: company's common one, however it is capitalized, and a single letter standing alone: "Class B",
+#: "Series A", "Preferred", "Units", "Partners", "Noncontrolling Interests", "NCI", "Minority
+#: Holders", "Unvested Shareholders", the "B" of "B common stockholders" (never the "P" of "P&G").
+_A_CLASS_OR_SERIES_WORD = (
+    r"(?:(?:class(?:es)?|series|preferred|redeemable|participating|units?|partners?|unvested"
+    r"|restricted|non[\s\-\u2010-\u2015]*controlling|ncis?|minority)\b|[a-z](?![\w&'\u2019.\-]))"
+)
+#: The word of a company's legal form: "Inc.", "Corp.", "plc", "N.V.", "Holdings", "Group".
+_A_LEGAL_FORM = (
+    r"(?:inc\.?|corp\.?|corporation|company|co\.|plc|ltd\.?|limited|n\.v\.|s\.a\.|ag|se|llc|l\.p\."
+    r"|holdings|group)"
+)
+#: A company's name: one capitalized word, never a class's, a series' or another holder's
+#: (`_A_CLASS_OR_SERIES_WORD`), and the word of its legal form, capitalized, or none: "Acme",
+#: "Pfizer Inc.", "UnitedHealth Group" (as `_ONE_NAME_AS_THE_COMPANY` reads a company that
+#: reports). A name of more words may be a unit's or a share class's: "Georgia Power", "Acme
+#: Europe", "Class B".
+_A_COMPANYS_NAME = (
+    rf"(?!{_A_CLASS_OR_SERIES_WORD})(?-i:[A-Z])[\w&'\u2019.\-]*"
+    rf"(?:\s+(?=(?-i:[A-Z])){_A_LEGAL_FORM})?"
+)
+#: Behind a measure's direction word, the words that are the measure's own and no item's: whose it
+#: is, the company's or its common holders' ("attributable to common stockholders", "attributable
+#: to Acme Corp.", "attributable to the Company", "attributable to Pfizer Inc. common
+#: shareholders", "attributable to common shareholders of Acme", "attributable to the Company's
+#: common stockholders"), the continuing operations it comes from, and the period it is for, named
+#: with no year or date ("for the quarter", "in the quarter"): a year or a date behind it is no
+#: word of these. Never "from discontinued operations", "on the sale" or any other item's words,
+#: never a holder that is not the company's common one, however it is capitalized ("attributable
+#: to Noncontrolling Interests", "to Preferred Stockholders", "to Acme preferred stockholders"),
+#: and never a name of more words or a share class's ("to Class B common stockholders", "to
+#: Georgia Power", "to common shareholders of Acme Europe"), which may be a class's or a unit's.
+_THE_MEASURES_OWN_HOLDERS = (
+    r"\s+(?:attributable|available|applicable)\s+to\s+(?:"
+    rf"(?:the\s+company['\u2019]s\s+)?{_COMMON_HOLDERS}"
+    rf"(?:\s+of\s+(?:the\s+company|{_A_COMPANYS_NAME}))?"
+    rf"|the\s+company|{_A_COMPANYS_NAME}(?:\s+{_COMMON_HOLDERS})?)"
+)
+#: The period is "for the quarter", "for the period" or "for the third quarter", and "in" or
+#: "during" the quarter with no ordinal only: "net income in the second quarter was" may be another
+#: quarter's, which these words cannot tell from this one's.
+_THE_MEASURES_OWN_TAIL = (
+    rf"(?:{_THE_MEASURES_OWN_HOLDERS}"
+    r"|\s+from\s+continuing\s+operations"
+    r"|\s+for\s+the\s+(?:(?:first|second|third|fourth)\s+)?(?:quarter|period)"
+    r"|\s+(?:in|during)\s+the\s+quarter)"
+)
+#: The same words as they give a number a direction, whoever's it is: whose ("attributable to
+#: Class B common stockholders", any capitalized name of up to four words with no word of a holder
+#: that is not a common one), the continuing operations, and any quarter or period named with no
+#: year ("in the second quarter", "during the period"). They say which way the number points
+#: (`_DIRECTION_OF_THIS_NUMBER`), never that it is the measure's.
+_NOT_THE_COMPANYS = (
+    r"(?!(?:non[\s\-\u2010-\u2015]*controlling|minority|preferred|redeemable|participating)\b)"
+)
+_ANY_HOLDERS_NAME = (
+    rf"{_NOT_THE_COMPANYS}(?-i:[A-Z])[\w&'\u2019.\-]*"
+    rf"(?:\s+{_NOT_THE_COMPANYS}(?-i:[A-Z])[\w&'\u2019.\-]*){{0,3}}"
+)
+_A_DIRECTIONS_OWN_TAIL = (
+    r"(?:\s+(?:attributable|available|applicable)\s+to\s+(?:"
+    rf"(?:the\s+company['\u2019]s\s+)?{_COMMON_HOLDERS}"
+    rf"(?:\s+of\s+(?:the\s+company|{_ANY_HOLDERS_NAME}))?"
+    rf"|the\s+company|{_ANY_HOLDERS_NAME}(?:\s+{_COMMON_HOLDERS})?)"
+    r"|\s+from\s+continuing\s+operations"
+    r"|\s+(?:for|in|during)\s+the\s+(?:(?:first|second|third|fourth)\s+)?(?:quarter|period))"
+)
+#: A measure's "income" or "loss" that is its bottom line, or the continuing operations' line, and
+#: no line above it nor an item's: "net income", "a net loss", or with the words that say whose it
+#: is or that it is the continuing operations' right behind it ("income attributable to common
+#: stockholders", "the loss attributable to the Company", "income from continuing operations").
+#: A bare "income" or "a loss" may be any line above the bottom one, an item's loss as well ("and
+#: the company recorded a loss of $20 million, or $0.05 per share"). "Earnings" and "profit" name
+#: the bottom line on their own.
+_ITS_BOTTOM_LINE = (
+    r"(?:(?<=\bnet\s)(?:loss(?:es)?|income)\b|(?:earnings|profits?)\b"
+    rf"|(?:loss(?:es)?|income)\b"
+    rf"(?={_THE_MEASURES_OWN_HOLDERS}|\s+from\s+continuing\s+operations\b))"
+)
 #: A direction the words give this very number, so no aside can hold it, with or without a verb
-#: before it: "the net loss per share was", "the net loss of $0.46", and the two spellings that
-#: follow a total with its per-share figure: "the net loss of $120 million, or $0.46", "... ($0.46".
+#: before it: "the net loss per share was", "the net loss of $0.46", "of approximately $0.46", and
+#: a total followed by its per-share figure: "the net loss of $120 million, or $0.46", "... ($0.46",
+#: "..., or approximately $0.46" (`_THE_SHARE_OF_A_TOTAL`), past the measure's own words and the
+#: year of its period ("a net loss from continuing operations of $120 million, or $0.46", "a net
+#: loss attributable to Acme of", "a net loss for the third quarter of 2026 of"): read as an aside's
+#: own direction, such a loss was taken out of the label, and the figure read as a profit.
 _DIRECTION_OF_THIS_NUMBER = (
-    r"(?:\s+per\b"
-    r"|\s+of\s+(?:u\.?s\.?d?\s*)?[$(\s]*"
-    r"(?:[\d.,]+\s*(?:[a-z]+\s*)?\)?\s*(?:,?\s*(?:or|and)\s+|\()[$(\s]*)?\Z)"
+    rf"(?:\s+per\b"
+    rf"|(?:{_A_DIRECTIONS_OWN_TAIL}(?:\s+of\s+(?:fiscal\s+)?(?:19|20)\d\d)?){{0,3}}"
+    rf"\s+of\s+{_ABOUT}(?:u\.?s\.?d?\s*)?[$(\s]*"
+    rf"(?:[\d.,]+\s*(?:[a-z]+\b)?\)?{_THE_SHARE_OF_A_TOTAL})?\Z)"
+)
+#: The verbs that end a clause with no commas: past one the words are the sentence's own.
+_CLAUSE_VERBS = (
+    r"(?:was|were|is|are|had|amounted|resulted|came|totaled|totalled|showed|swung|turned"
+    r"|narrowed|widened)"
+)
+#: The verbs that move a figure: "rose 5%", "fell to a loss", "soared and".
+_MOVES = (
+    r"(?:rose|fell|grew|increased|decreased|declined|improved|reached|climbed|jumped|dropped"
+    r"|soared|surged|slipped|slid|dipped|eased|expanded|contracted|rebounded|recovered|doubled"
+    r"|tripled|plunged|tumbled|deteriorated|worsened|shrank)"
+)
+#: Behind one of those words, the reach of a participle that names an item: "amounts recovered
+#: from insurance on hurricane losses was". It runs to an earnings word the figure's own verb
+#: follows, past no word that opens another clause, which a verb's clause always reaches first:
+#: "fell in Q3 and net loss was", "declined in Q3 as net loss was", "rose on volume so net loss",
+#: and past no full stop before a capital, where the next sentence opens: "declined in Q3. Net
+#: loss was", "in 2026. Net", "in the U.S. The net loss".
+_A_PARTICIPLES_REACH = (
+    r"\s+(?:from|in|on|at|for|during)\b"
+    r"(?:\s+(?!(?:and|or|but|while|whereas|as|so|although|though|because|since|when|where|with"
+    rf"|after|before|until|once|then|{_CLAUSE_VERBS}|{_MOVES})\b)(?![\-\u2013\u2014])"
+    r"(?![^\s,;:]*\.(?:\s+(?-i:[A-Z])|\s*\Z))[^\s,;:]+)"
+    r"{0,8}?\s+(?:loss(?:es)?|income|earnings|profits?)\s+(?:was|were|is|are|totall?ed|amounted"
+    r"|came|stood)\b"
+)
+#: One of those words as the verb it is: behind it a figure, punctuation, the end, a word that
+#: joins or tells when, or one that says how ("improved slightly"). Before any other word it says
+#: what that word is like ("increased losses"), and before a participle's reach it names an item
+#: (`_A_PARTICIPLES_REACH`).
+_A_MOVE = (
+    rf"{_MOVES}\b(?!{_A_PARTICIPLES_REACH})"
+    r"(?!\s+(?!(?:to|by|from|and|or|but|in|on|at|for|after|before|while|as|than|over"
+    r"|again|during|despite|amid|year|sequentially)\b)(?!(?-i:[a-z]+ly\b))[a-z])"
+)
+#: A word of such a clause: never one of those verbs, nor one that moves a figure (`_A_MOVE`), nor
+#: one that states a result ("reported a loss", "recorded a loss"), nor one that opens another
+#: clause ("but", "while"), nor one ending on a full stop in lower case (a dotted "U.S." goes on).
+_CLAUSE_WORD = (
+    rf"(?:(?!(?:{_CLAUSE_VERBS}|(?:reported|recorded|posted)\s+an?|but|while|whereas)\b)"
+    rf"(?!{_A_MOVE})[^\s,;:]+(?-i:(?<![a-z]\.))\s+)"
+)
+#: A year or a quarter's name, which is no figure: "2026", "Q3", "3Q26", "FY2026".
+_A_YEAR_OR_QUARTER = r"(?:(?:19|20)\d\d|q[1-4]|[1-4]q(?:\d\d)?|fy\d{2,4})(?=\s)"
+#: A word between the items of a list such a clause runs on through ("interest income and the
+#: loss on sale", "earnings from affiliates and losses on hedges", "interest income in 2026 and
+#: losses on hedges"): no verb, no word saying how, and no figure, which a year or a quarter's name
+#: is not. A clause of its own past the first item has them: "interest income rose 5% and the net
+#: loss was", "interest income up 5% in 2026 and net loss was".
+_LISTS_WORD = (
+    rf"(?:(?!(?:{_CLAUSE_VERBS}|{_MOVES}|reported|recorded|posted|but|while|whereas)\b)"
+    rf"(?!(?-i:[a-z]+ly\b))(?!(?=\S*\d)(?!{_A_YEAR_OR_QUARTER}))[^\s,;:%$]+"
+    r"(?-i:(?<![a-z]\.))\s+)"
+)
+_DIRECTION_WORD = r"(?:loss(?:es)?|income|earnings|profits?)\b"
+#: The direction word such a clause holds: one with an amount of its own right in front of it ("a
+#: $0.05 loss per share"), or one the words do not give this very number
+#: (`_DIRECTION_OF_THIS_NUMBER`).
+_THE_CLAUSES_DIRECTION = (
+    rf"(?:[$(]+\s*\.?\d[\d,.]*\)?\s+(?:(?:thousand|million|billion)\s+)?{_DIRECTION_WORD}"
+    rf"|{_DIRECTION_WORD}(?!{_DIRECTION_OF_THIS_NUMBER}))"
 )
 #: The same aside with no commas, up to the direction word it holds: "EPS excluding the loss on
-#: debt extinguishment was", "Net loss including income from a sale was". It holds no more than its
-#: own words. Punctuation ends it ("Excluding these items, the net loss"), and so do a verb
-#: ("Earnings excluding special items were a loss") and a full stop on a word in lower case (a
-#: dotted "U.S." goes on), past which the words are the figure's own again. A word with its own
-#: amount stays in it ("including a loss of $0.10 per share from the sale was $0.46"), unless that
-#: is this number (`_DIRECTION_OF_THIS_NUMBER`).
+#: debt extinguishment was", "Net loss including income from a sale was", and on through the next
+#: one a list joins to it: "excluding interest income and the loss on sale was". It holds no more
+#: than its own words. Punctuation ends it ("Excluding these items, the net loss"), and so do a verb
+#: ("Earnings excluding special items were a loss", "fell to a loss", "rose 5% and the net loss")
+#: and a full stop on a word in lower case, past which the words are the figure's own again. A word
+#: with its own amount stays in it ("including a loss of $0.10 per share from the sale was $0.46"),
+#: unless that is this number.
 _ASIDE_WITH_NO_COMMAS_RE = re.compile(
-    rf"\b{_ASIDE_OPENS}\s+"
-    r"(?:(?!(?:was|were|is|are|had|amounted|resulted|came|totaled|totalled|showed|swung|turned"
-    r"|narrowed|widened)\b)"
-    r"[^\s,;:]+(?-i:(?<![a-z]\.))\s+){0,6}?"
-    rf"(?:loss(?:es)?|income|earnings|profits?)\b(?!{_DIRECTION_OF_THIS_NUMBER})",
+    rf"\b(?P<opens>{_ASIDE_OPENS})\s+{_CLAUSE_WORD}{{0,6}}?{_THE_CLAUSES_DIRECTION}"
+    rf"(?:\s+{_LISTS_WORD}{{0,2}}?(?:and|or)\s+{_CLAUSE_WORD}{{0,3}}?{_THE_CLAUSES_DIRECTION})*",
     re.IGNORECASE,
 )
 #: Before such a clause, in its own part of the sentence, the measure it qualifies, or a "which"
 #: pointing back at one. With neither, it opens the sentence and what it reaches is the sentence's
-#: subject: "Excluding special items the net loss was $0.46". A decimal point ends nothing.
+#: subject: "Excluding special items the net loss was $0.46". A decimal point ends nothing, and an
+#: "and" or a "but" starts another part: "Operating income rose 3% and excluding the charge the
+#: net loss was".
 _MEASURE_BEFORE_RE = re.compile(
     r"\b(?:eps|a?ffo|earnings|income|profits?|loss(?:es)?|results?|shares?)\b"
-    r"(?:[^,;:.]|\.(?=\d))*\Z"
+    r"(?:(?!\b(?:and|but)\b)[^,;:.]|\.(?=\d))*\Z"
     r"|\b(?:which|that)\s+\Z",
     re.IGNORECASE,
 )
-#: A comma of the sentence, not one inside a number.
-_COMMA_RE = re.compile(r",(?!\d)")
-#: "from a loss of $0.12 to $0.46": that loss has its number, and this one is what came after it.
-#: "Net loss narrowed from $0.60 to $0.46" names no loss inside the span, and a loss that narrows
-#: or widens is still one, so both stay losses.
-_FROM_A_LOSS_RE = re.compile(
-    r"(?<!narrowed\s)(?<!widened\s)(?<!deepened\s)"
-    r"\bfrom\s+(?:[^\s,;]+\s+){0,4}?loss(?:es)?\b(?:[^,;]|,(?=\d))*?\bto\b",
+#: What opens the words a measure has of its own: "attributable to Acme", "for the quarter",
+#: "from continuing operations", "per diluted share", "of fiscal 2026".
+_ITS_OWN_WORDS_OPEN = (
+    r"(?:of|for|from|in|on|at|to|per|during|through|attributable|available|applicable)"
+)
+#: One of those words: no verb, whether a list names it or it ends on "-ed" in lower case ("Loss
+#: per share soared"), no joining word, no figure and no mark but a date's comma ("September 30,
+#: 2026"). "Ended" is the period's own word.
+_A_WORD_OF_ITS_OWN = (
+    rf"\s+(?!(?:and|but|or|{_CLAUSE_VERBS}|{_MOVES}|reported|recorded|posted)\b)"
+    r"(?!(?-i:(?!ended\b)[a-z]+ed\b))"
+    r"[^\s,;:%$]+(?-i:(?<![a-z]\.))(?:,(?=\s*\d{4}\b))?"
+)
+#: "After" and "before" also say when and why: "Earnings fell after the recall and the net loss
+#: was", "Revenue fell 5% after the strike". Their clause qualifies a measure only with nothing
+#: between them but the measure's own words (`_A_WORD_OF_ITS_OWN`): "Adjusted EPS after the loss on
+#: sale", "Revenue before reimbursable costs", "Net income attributable to Acme after", "Diluted
+#: EPS for the quarter ended September 30, 2026 after". Anything else between them, and the clause
+#: tells when or why.
+_MEASURE_IT_QUALIFIES_RE = re.compile(
+    r"\b(?:eps|a?ffo|earnings|income|profits?|loss(?:es)?|results?|shares?|revenues?|sales"
+    r"|turnover)\b"
+    rf"(?:(?=\s+{_ITS_OWN_WORDS_OPEN}\b)(?:{_A_WORD_OF_ITS_OWN}){{1,8}})?\s*\Z",
     re.IGNORECASE,
 )
-#: "Negative" speaks to a figure only right before its number, right before its name, or as what
-#: the figure "was" with no number of its own after it: "a negative impact of $0.02" is about
-#: something else, and so is the free cash flow in "was negative $120 million, or $0.46 per share".
+#: In front of a word that moves a figure, the words that make it an adjective, which no verb
+#: follows: "the loss on the expanded credit facility", "losses on recovered vehicles".
+_AN_ADJECTIVE_BEHIND = "".join(
+    rf"(?<!\b{word}\s)"
+    for word in ("the", "a", "an", "its", "their", "our", "this", "these", "those", "on", "of",
+                 "from", "in", "for", "with", "by", "at", "into", "over", "under")
+)
+#: Behind a comma, the words that tie what stands in front of it to this very number: "the net
+#: loss in the third quarter of 2026, which was $0.46", "the net loss for fiscal 2026, at $0.46",
+#: and a relative clause that arrives at it, past the words that say when or how ("the litigation
+#: charge, which settled at $0.05", "..., which was later settled at $0.05").
+_TIES_IT_TO_THIS_NUMBER = (
+    r"\s*(?:(?:which|that)\s+(?:(?:[a-z]+ly|later|then|since|subsequently|has|had|was|were|been)"
+    r"\s+){0,3}(?:was|were|is|are|came\s+in\s+at|came\s+to|totall?ed|amounted\s+to"
+    r"|stood\s+at|equall?ed|equat(?:es|ed)\s+to|reached"
+    r"|(?:landed|settled|ended|closed|finished|arrived)\s+at)|at|of|totall?ing|equal(?:l?ing)?\s+to"
+    rf"|equating\s+to|equivalent\s+to|amounting\s+to|representing|reaching){_HEDGED}\s+[$(\s]*\Z"
+)
+#: A word that moves a figure standing as an adjective behind an adverb or a possessive, read as
+#: one: "on the newly expanded", "on Acme's expanded", "from partially recovered", "on the
+#: company's doubled". "Sharply declined" with no such word in front is still the verb.
+_AN_ADJECTIVE_PHRASE = (
+    r"\b(?:the|a|an|its|their|our|this|these|those|on|of|from|in|for|with|by|at|into|over|under)"
+    rf"\s+(?:(?:the|its|their|our)\s+)?(?:(?-i:[a-z]+ly)|[\w\-]+['\u2019]s)\s+{_MOVES}\b"
+)
+#: From the end of such a clause, the comma that closes it: no verb comes before it, and neither
+#: a figure nor the words that lead to this number behind it. Past a verb the comma is the
+#: sentence's own ("narrowed, to $0.46"), and a word that moves a figure is that verb unless it
+#: stands as an adjective (`_AN_ADJECTIVE_BEHIND`, `_AN_ADJECTIVE_PHRASE`): "declined further, to
+#: $0.46" goes on, "the loss on the expanded credit facility, results were" and "the loss on the
+#: newly expanded credit facility, results were" close. A comma before a figure is the sentence's
+#: own too: ", or $0.46" ties a total to its per-share figure, ", $0.46 per share," gives the
+#: figure, and "September 30, 2026" is a date. An amount or a year inside the clause closes at its
+#: comma all the same: "Excluding the impairment loss of $120 million, results were", "Excluding
+#: the impairment loss, totaling $40 million, results were". The repeat of the clause's words
+#: (`_THE_CLAUSES_WORDS`) is possessive: a phrase read either as one or word by word reaches the
+#: same comma, and trying every split of a clause that never closes doubled the time with each
+#: phrase.
+_THE_CLAUSES_WORDS = (
+    rf"(?:{_AN_ADJECTIVE_PHRASE}"
+    rf"|(?!\b(?:{_CLAUSE_VERBS}|{_AN_ADJECTIVE_BEHIND}{_MOVES})\b)(?:[^,;]|,(?=\d)))*+"
+)
+_THE_CLAUSES_WORDS_RE = re.compile(_THE_CLAUSES_WORDS, re.IGNORECASE)
+_CLOSES_AT_ITS_COMMA = rf"{_THE_CLAUSES_WORDS},(?!\s*(?:(?:or|and)\s+)?[$(\d])"
+_CLOSES_THE_CLAUSE_RE = re.compile(_CLOSES_AT_ITS_COMMA, re.IGNORECASE)
+#: A clause that ran on into a subject of its own ("Excluding the hurricane the adjusted net loss
+#: for fiscal 2026, at $0.46") does not close before the words that lead to this number
+#: (`_TIES_IT_TO_THIS_NUMBER`): they describe that subject. Where the excluded item is all the
+#: clause holds, the number those words lead to is the item's (`_tied_to_an_excluded_item`).
+_CLOSES_UNLESS_TIED_RE = re.compile(
+    rf"{_CLOSES_AT_ITS_COMMA}(?!{_TIES_IT_TO_THIS_NUMBER})", re.IGNORECASE,
+)
+#: The words that qualify a measure in front of it: "adjusted", "net", "GAAP".
+_MEASURES_QUALIFIER = (
+    r"(?:adjusted|diluted|basic|net|gaap|non[\s\-]?gaap|operating|reported|core|comparable|total"
+    r"|consolidated)"
+)
+#: At the end of such a clause, after its opening word, a subject of its own that the excluded
+#: item stands in front of: a measure's words that open on "the", "its", "our" or "their" ("the
+#: adjusted net loss"), behind a word of the item ("hurricane", "items"). One behind a joining word
+#: or a preposition is still the item's: "the loss", "interest income and the loss", "charges on
+#: the net loss". With no such word in front, the measure's words may be the item's own name too:
+#: "the hurricane net loss", "special items net loss".
+_A_SUBJECT_OF_ITS_OWN_RE = re.compile(
+    rf"\b(?!(?:the|its|our|their|an?|{_MEASURES_QUALIFIER}|and|or|but|of|on|from|in|for|to|at|by"
+    r"|with|into|over|under|after|before|excluding|including)\b)[^\s,;:]+\s+"
+    rf"(?:the|its|our|their)\s+(?:{_MEASURES_QUALIFIER}\s+){{0,4}}{_DIRECTION_WORD}\s*\Z",
+    re.IGNORECASE,
+)
+#: The same words with no comma in front of them, which tie the number to the words right in front
+#: of it, so to an item when its clause runs right up to them: "the goodwill impairment loss of
+#: $0.46", "of approximately $0.46", "totaling", "which was", "that totaled", "equal to", "amounting
+#: to", "representing", "at", a dash set apart, and a parenthesis opening on "which" or "that"
+#: ("(which totaled $0.46"). Possessive, so a run of spaces has one reading.
+_TIES_IT_WITH_NO_COMMA = (
+    r"(?:\s++|\s*+\(\s*+(?=(?:which|that)\b))"
+    r"(?:(?:which|that)\s+(?:was|were|is|are|came\s+in\s+at|came\s+to|totall?ed|amounted\s+to"
+    r"|stood\s+at|equall?ed|equat(?:es|ed)\s+to|reached)|at|of|totall?ing|equal(?:l?ing)?\s+to"
+    rf"|equating\s+to|equivalent\s+to|amounting\s+to|representing|reaching){_HEDGED}\s++{_ABOUT}"
+    r"[$(\s]*+\Z"
+    rf"|\s++[\-\u2013\u2014]\s++{_ABOUT}[$(\s]*+\Z"
+)
+#: Right behind an item a clause leaves out or takes in, what ties the number after it to that item:
+#: the words that tie what stands in front of a comma to the number they run to
+#: (`_TIES_IT_TO_THIS_NUMBER`: ", which totaled $", ", at $", ", representing $"), what ties a
+#: total to its per-share figure, with a word that only says how exact it is or none: ", or $",
+#: " or $", " ($", ", or approximately $", and a bare comma (", $0.46 per share,"), or the first
+#: words with no comma at all (`_TIES_IT_WITH_NO_COMMA`: " of $", " totaling $", " which was $").
+#: Never the parenthesis a "$" stands in front of: "$ (0.46)" is the number's own minus.
+_TIED_TO_AN_ITEM_RE = re.compile(
+    rf"(?P<words>,{_TIES_IT_TO_THIS_NUMBER})"
+    rf"|(?P<share>(?:\s*,\s*(?:or\s++)?|\s+or\s++|\s*(?<!\$)(?<!\$\s)\(\s*){_ABOUT}[$(\s]*+\Z)"
+    rf"|(?P<bare>{_TIES_IT_WITH_NO_COMMA})",
+    re.IGNORECASE,
+)
+#: Such a tie that opens on "which" or "that": a relative clause, which speaks of the words right in
+#: front of it, so of the item, never of a measure further back.
+_A_RELATIVE_TIE_RE = re.compile(r"\b(?:which|that)\b", re.IGNORECASE)
+#: Such a tie that is a comma and nothing else (", $0.40 including them"): it ties the number to no
+#: total, so it says nothing of whose per-share figure the number is.
+_A_BARE_COMMA_TIE_RE = re.compile(rf"\s*,\s*{_ABOUT}[$(\s]*", re.IGNORECASE)
+#: Such a tie that is a parenthesis and nothing else: " (" in front of a number.
+_ONLY_A_PARENTHESIS_RE = re.compile(r"\s*\(\s*")
+#: Such a tie that is " at" with no comma, and in front of it a verb that arrives at a figure:
+#: "Adjusted EPS excluding the loss on the sale landed at $1.20". The "at" is that verb's, so the
+#: number is the measure's, never the item's, when the measure stands in front of the clause and
+#: the verb is no relative clause's: in "the hedging loss that ended at $0.05" it is the item's
+#: (`_ITS_RELATIVE_CLAUSE_ARRIVES_RE`).
+_AN_AT_TIE_RE = re.compile(r"\s+at\b", re.IGNORECASE)
+_ARRIVES_RIGHT_IN_FRONT_RE = re.compile(
+    r"(?<!\bthat\s)(?<!\bwhich\s)(?<!\bwho\s)"
+    r"\b(?:stood|landed|settled|ended|closed|finished|arrived|came(?:\s+in)?)\s*\Z",
+    re.IGNORECASE,
+)
+#: From the word that opens a clause about an item up to such an " at" tie, a relative clause on the
+#: item that arrives at the number, with nothing between its "that", "which" or "who" and the verb
+#: but words that say when or how it came to it, helper verbs, and a subject of its own: the
+#: company, "we", "management", a one-word name (`_A_RELATIVE_CLAUSES_SUBJECT`): "the hedging loss
+#: that later settled at", "the litigation charge which ultimately came in at", "the hedging loss
+#: that was later settled at", "the loss that the company later settled at", "the loss that Acme
+#: ultimately settled at", "the loss that has since finally settled at"; or, with no pronoun, such
+#: a subject of its own other than a name right in front ("the hedging loss the company later
+#: settled at", "the loss we settled at"). The arrival is the item's, and so is the number,
+#: whatever words name the item (`_tied_to_an_excluded_item`). A closed list: a relative clause
+#: with a verb of its own in front of the arrival describes the item, and the arrival is the
+#: measure's ("Adjusted EPS excluding items that management considers unusual landed at $1.20",
+#: and in a headline's capitals, "Items That Management Considers Unusual Landed At"). In front of
+#: it the clause runs on with no verb that would end it (`_CLAUSE_VERBS`).
+_A_HELPER_OR_WHEN = (
+    r"(?:[a-z]+ly|later|then|since|soon|once|again|also|still|now|already|has|have|had|was|were"
+    r"|is|are|been|being)"
+)
+_A_RELATIVE_CLAUSES_SUBJECT = (
+    r"(?:it|we|they|management|the\s+company|(?-i:[A-Z])[\w&'\u2019.\-]*)"
+)
+_ITS_RELATIVE_CLAUSE_ARRIVES_RE = re.compile(
+    rf"(?:(?!\b{_CLAUSE_VERBS}\b)[^,;])*?"
+    rf"(?:\b(?:that|which|who)\s+(?:{_A_HELPER_OR_WHEN}\s+){{0,3}}"
+    rf"(?:{_A_RELATIVE_CLAUSES_SUBJECT}\s+)?(?:{_A_HELPER_OR_WHEN}\s+){{0,3}}"
+    rf"|\b(?:we|they|management|the\s+company)\s+(?:{_A_HELPER_OR_WHEN}\s+){{0,3}})"
+    r"(?:stood|landed|settled|ended|closed|finished|arrived|came(?:\s+in)?)\s*",
+    re.IGNORECASE,
+)
+#: What opens a clause about an item a figure leaves out or takes in. Never a word joined to the
+#: next by a hyphen: "after-tax" and "before-tax" say what a total is, and open no clause ("The
+#: company's after-tax earnings of $120 million, or $0.46 per diluted share").
+_AN_ITEMS_CLAUSE_OPENS_RE = re.compile(
+    rf"\b{_ASIDE_OPENS}(?![\-\u00ad\u2010-\u2015])", re.IGNORECASE,
+)
+#: An aside about such an item: one a word of those opens, right behind its comma or behind a
+#: "which" or a "that" (", including a charge of $20 million,", ", which included a charge,").
+_AN_ITEMS_ASIDE_RE = re.compile(
+    rf",\s*(?:(?:which|that)\s+(?:also\s+)?)?{_ASIDE_OPENS}(?![\-\u00ad\u2010-\u2015])",
+    re.IGNORECASE,
+)
+#: Right in front of a clause's opening word, the comma that makes the clause an aside of what
+#: stands in front of it: ", including", ", which included".
+_AN_ASIDES_COMMA_RE = re.compile(r",\s*(?:(?:which|that)\s+(?:also\s+)?)?\Z", re.IGNORECASE)
+#: Where a subject of a number's own can open, behind the per-share figure its sentence printed for
+#: its measure (`_another_share_after_its_own`): a comma, or a word that joins clauses
+#: (`_JOINS_A_CLAUSE_RE`'s).
+_OPENS_A_SUBJECT_RE = re.compile(
+    r",|\b(?:and|but|while|whereas|as|so|since|because|when|although|though)\b", re.IGNORECASE,
+)
+_A_DIRECTION_WORD_RE = re.compile(rf"\b{_DIRECTION_WORD}", re.IGNORECASE)
+#: Inside such a clause, a word that gives its item a direction of its own, so a tie with no comma
+#: can make the number the item's figure: "the impairment loss of $0.46", "income from the sale of
+#: $0.46". Never the income of an income tax, which is a tax: "Net loss after income tax of $0.46
+#: per share".
+_AN_ITEMS_DIRECTION_RE = re.compile(
+    r"\b(?:loss(?:es)?|income(?![\s\-]+tax)|earnings|profits?)\b", re.IGNORECASE,
+)
+#: The same word right in front of a tie with no comma: "a loss of $0.05", "income of $0.05".
+_A_DIRECTION_RIGHT_IN_FRONT_RE = re.compile(
+    r"\b(?:loss(?:es)?|income(?![\s\-]+tax)|earnings|profits?)\s*\Z", re.IGNORECASE,
+)
+#: Between a word that moves a figure and the "from" of that move, what says by how much and how:
+#: "increased $20 million, or 20%, from", "grew 20% year over year from", "declined sharply from".
+_A_MOVES_OWN_WORD = (
+    rf"(?:[$(]*\.?\d[\d.,]*\)?%?|or|by|{_HEDGE}|thousand|million|billion|percent|per\s+cent"
+    r"|points?|year|over|year[\-\u2010-\u2015]over[\-\u2010-\u2015]year|sequentially"
+    r"|(?-i:[a-z]+ly))\s*,?\s+"
+)
+#: In front of a figure, a move from it, with no "to" yet between them: "rose from $100 million,
+#: or $", "swung from a loss of $", "improved from a net loss of $50 million, or $", "increased
+#: $20 million, or 20%, from $100 million, or $". The figure is where the move started, and the
+#: words behind it lead to where it went (`_WHERE_IT_WENT_RE`, `_another_share_after_its_own`).
+_MOVED_FROM_IT_RE = re.compile(
+    rf"\b(?:{_MOVES}|narrowed|widened|swung|turned|shifted|up|down)\s+"
+    rf"(?:{_A_MOVES_OWN_WORD}){{0,8}}?"
+    r"from\b(?:(?!\bto\b)[^;])*\Z",
+    re.IGNORECASE,
+)
+#: How far in front of a figure `_MOVED_FROM_IT_RE` reads: a total and its tie, with room.
+_MOVED_FROM_CHARS = 200
+#: "from a loss of $0.12 to $0.46": that loss has its number, and this one is what came after it.
+#: "Net loss narrowed from $0.60 to $0.46" names no loss inside the span, and a loss that narrows
+#: or widens is still one, so both stay losses. A loss a result moved TO is no loss it moved from:
+#: "swung from a profit to a loss of $120 million due to the impairment".
+_FROM_A_LOSS_RE = re.compile(
+    r"(?<!narrowed\s)(?<!widened\s)(?<!deepened\s)"
+    r"\bfrom\s+(?:(?!to\b)[^\s,;]+\s+){0,4}?loss(?:es)?\b(?:[^,;]|,(?=\d))*?\bto\b",
+    re.IGNORECASE,
+)
+#: What "negative" said of a figure stands before: the end of its clause, or a word that opens a
+#: time, a place or a comparison. "Negative growth" and "a negative currency effect" are something
+#: else.
+_NEGATIVE_SAID_OF_IT = (
+    r"(?=\s*(?:[,.;:)]|\Z|(?:at|in|for|to|from|on|during|over|again|compared|versus|vs|and|or"
+    r"|but|while|after|this|last|year|quarter|period)\b))"
+)
+#: A relative clause whose own verb takes "negative", which is then said of what that clause
+#: names: "a currency effect that was negative", "currency that turned negative". Right behind
+#: the measure, the clause names the measure itself: "Adjusted EPS which was negative".
+_ANOTHER_THING_WAS_NEGATIVE = (
+    r"(?<!\beps\s)(?<!\bshare\s)(?<!\bearnings\s)(?<!\bincome\s)(?<!\bresult\s)"
+    r"(?<!\bresults\s)"
+    r"\b(?:that|which|who)\s+(?:(?:also|itself|themselves)\s+)?(?:was|were|is|are|turned|became"
+    r"|went|remained|stayed|proved|has\s+been|have\s+been|had\s+been|came\s+in)\s+"
+    r"(?:(?:also|again)\s+)?negative\b"
+)
+#: "Negative" speaks to a figure right before its number, right before its name, or said of an
+#: earnings measure in the same clause, past its period, a date or its verbs ("Earnings per share
+#: came in negative at", "Diluted EPS, as reported, was negative", "Diluted EPS for the quarter
+#: ended September 30, 2026 was negative", "Diluted EPS fell sharply and was negative"): "a
+#: negative impact of $0.02" is about something else, so is the free cash flow in "was negative
+#: $120 million, or $0.46 per share", so are the comparable sales that "were negative", and so is
+#: what a relative clause names (`_ANOTHER_THING_WAS_NEGATIVE`).
 _SIGN_WORD_RE = re.compile(
     r"\b(?P<loss>loss(?:es)?\b|lost\b|(?-i:LPS)\b|negative(?=[\s$(]*\Z)"
     r"|negative\s+(?:(?:adjusted|diluted)\s+)*(?:eps|earnings)\b"
-    r"|(?:was|were|is|are|turned|went|remained|stayed)\s+negative\b(?!\s*[$(]))"
+    r"|(?:eps|share|earnings|income(?!\s+tax)|results?)\b(?:,[^,;.]{0,40},)?"
+    rf"(?:(?!{_ANOTHER_THING_WAS_NEGATIVE})(?:[^,;.]|\.(?=\d)|,(?=\s*\d{{4}}\b))){{0,64}}?"
+    rf"\bnegative\b{_NEGATIVE_SAID_OF_IT})"
     r"|\b(?:income\b(?!\s+tax)|earned\b|earnings\b|profits?\b|eps\b)",
+    re.IGNORECASE,
+)
+#: Between an earnings word and its amount, no mark of another clause: a date's comma at most.
+_ITS_OWN_CLAUSE_RE = re.compile(r"(?:[^,;]|,(?=\s*\d{4}\b))*")
+#: The same for a total named in front of an aside, where a comma that only sets off the total's
+#: own words is no other clause either: a date's ("September 30, 2026"), a company's name's ("Acme,
+#: Inc."), the two of a parenthesis that ends right before the verb (", as reported, was",
+#: "September 30, 2026, was"), and a move's carried on to its level ("increased 12%, to"). A list
+#: of commas, so one it does not name is another clause, and the sign is left open.
+#: Each alternative reads one character, and a comma two of them pass would double the time of a
+#: failed match for each such comma, so the repeat is possessive.
+_A_TOTALS_OWN_WORDS_RE = re.compile(
+    r"(?:[^,;]|,(?=\s*\d{4}\b)"
+    r"|,(?=\s*(?-i:Inc|Ltd|LLC|LP|L\.P|plc|PLC|N\.A|Corp|Co|S\.A|N\.V)\.?(?=[\s,]))"
+    r"|,(?=[^,;]{1,40},\s*(?:was|were|is|are)\b)|(?<=\S),(?=\s*(?:was|were|is|are)\b)"
+    r"|(?<=%),(?=\s*to\b))*+",
+    re.IGNORECASE,
+)
+#: A subject a sentence states results for: "results for the quarter", "the quarter's results".
+_RESULTS_RE = re.compile(r"\bresults?\b", re.IGNORECASE)
+#: A participle that only says on what basis a figure is given: "as reported", "as adjusted".
+_ON_ITS_BASIS_RE = re.compile(r"\bas\s+(?:reported|adjusted|restated|recorded)\b", re.IGNORECASE)
+#: In front of a measure word of another kind, a few words back, what makes it part of a
+#: subject's own words: "after preferred dividends", "excluding impairment charges".
+_QUALIFIES_THE_SUBJECT_RE = re.compile(
+    r"\b(?:excluding|including|before|after|net\s+of|exclusive\s+of|inclusive\s+of|less|excl\.)"
+    r"\s+(?:[^\s,;:]+\s+){0,3}\Z",
+    re.IGNORECASE,
+)
+#: Behind such a word, the subject's verb tying an amount to it: " was $", " totaled $".
+_ITS_SUBJECTS_VERB_RE = re.compile(
+    r"\s+(?:was|were|is|are|totall?ed|amounted\s+to|came\s+(?:in\s+)?(?:at|to)|stood\s+at|reached)"
+    rf"{_HEDGED}[$(\s]*",
+    re.IGNORECASE,
+)
+#: Where a part of the sentence with a subject of its own opens: "and results for the quarter",
+#: "but the net loss", "while earnings". "The U.S. and Canada," opens none.
+_A_PART_OF_ITS_OWN_RE = re.compile(
+    r"\b(?:and|but|while|whereas)\s+"
+    r"(?=(?:[\w\-'\u2019]+\s+){0,3}?(?:results?|earnings|income|loss(?:es)?|profits?|eps)\b)",
     re.IGNORECASE,
 )
 
 
-def _label_of(text: str) -> str:
+def _holds_its_total(aside: "re.Match[str]") -> Optional[bool]:
+    """Does an aside of `_ASIDE_RE` hold the total the number behind it is the per-share figure of?
+    True when it does, False when it does not, None when no reading of the sentence can say.
+
+    Only one the words of a total's per-share figure tie to that number can (`_TIES_THE_NUMBER_RE`:
+    "Results for the quarter, including a net loss of $120 million, or $0.46 per share", "...,
+    representing $0.46"), and it does when no amount stands in front of it in its own part of the
+    sentence. Its part runs back to the last ";", or to an "and", a "but", a "while" or a "whereas"
+    that opens a part with a subject of its own (`_A_PART_OF_ITS_OWN_RE`): "Operating income was
+    $50 million, and results for the quarter, including a net loss of ..." states its total in the
+    aside. It does not when the last amount in front of it is surely a total
+    (`_surely_names_a_total`) with nothing but its own words between them (`_only_its_own_words`):
+    the number is then that total's, as in "Net loss of $120 million, including income of $10
+    million, or $0.46" and "Net income was $120 million in the U.S. and Canada, including a loss of
+    $20 million, or $0.46". Any other amount in front of it may be the figure's total or another
+    subject's ("Although operating income rose 12%, to $50 million, results for the quarter,
+    including a net loss of ...", "Compared with net income of $120 million a year ago, the
+    quarter's results, including ..."), so when the words in front point the other way from the
+    aside's, each reading gives the other sign, and none is proved. When they point the same way,
+    either reading gives the aside's direction."""
+    text = aside.string
+    if _TIES_THE_NUMBER_RE.match(text, aside.end()) is None:
+        return False
+    part = text[:aside.start()]
+    part = part[part.rfind(";") + 1:]
+    part = part[max((found.end() for found in _A_PART_OF_ITS_OWN_RE.finditer(part)), default=0):]
+    figures = [tok for tok in _numbers_in(part) if _reads_as_a_figure(tok)]
+    if not figures:
+        return True
+    if _surely_names_a_total(part, figures[-1]) and _only_its_own_words(part[figures[-1].end:]):
+        return False
+    its_own = list(_SIGN_WORD_RE.finditer(aside.group()))
+    if not its_own:
+        return True
+    loss = its_own[-1].group("loss") is not None
+    if all((word.group("loss") is not None) == loss for word in _SIGN_WORD_RE.finditer(part)):
+        return True
+    return None
+
+
+def _surely_names_a_total(text: str, tok: _Printed) -> bool:
+    """Is the amount `tok` surely a total: is the nearest measure word in front of it an earnings
+    word (`_METRIC_WORD_RE`'s "total") whose subject it is, with only that subject's own words
+    between them (`_A_TOTALS_OWN_WORDS_RE`), no other figure, no "results", and one verb at most?
+    "Net income in the U.S. and Canada was $120 million", "Net income attributable to Acme, Inc.
+    was $120 million", "Net income, as reported, was $120 million" and "Net income increased 12%,
+    to $120 million" name one; "Net income rose, and with $1.2 billion of revenue" and "Although
+    operating income rose 12%, results for the quarter were $50 million" do not. A measure of
+    another kind that only qualifies the subject, with the subject's verb straight behind it, is no
+    nearer word (`_QUALIFIES_THE_SUBJECT_RE`): "Net income attributable to common stockholders
+    after preferred dividends was $120 million" names one, "Net income was $10 million after taxes
+    of $120 million" does not."""
+    words = list(_METRIC_WORD_RE.finditer(text, 0, tok.start))
+    if words and words[-1].lastgroup == "other" and _ITS_SUBJECTS_VERB_RE.fullmatch(
+            text, words[-1].end(), tok.start) is not None:
+        opener = _QUALIFIES_THE_SUBJECT_RE.search(text, 0, words[-1].start())
+        if opener is not None:
+            words = [word for word in words if word.start() < opener.start()]
+    if not words or words[-1].lastgroup != "total":
+        return False
+    between = text[words[-1].end():tok.start]
+    return (_A_TOTALS_OWN_WORDS_RE.fullmatch(between) is not None
+            and not any(_reads_as_a_figure(other) for other in _numbers_in(between))
+            and _RESULTS_RE.search(between) is None
+            and len(_predicates_in(_ON_ITS_BASIS_RE.sub(" ", between))) <= 1)
+
+
+def _only_its_own_words(between: str) -> bool:
+    """Do the words between a total and the aside behind it belong to that total: no mark of
+    another clause, no "results" and no verb? "in the U.S. and Canada", "in the third quarter of
+    2026", "on higher losses". A word of a direction there is the total's modifier, which
+    `_words_point_both_ways` weighs."""
+    return (re.search(r"[,;:]", between) is None
+            and _RESULTS_RE.search(between) is None
+            and not _predicates_in(between))
+
+
+def _without_asides(
+    text: str, mark: str, open_signs: Optional[List[str]] = None,
+) -> str:
+    """`text` with each aside about another figure put as `mark`: a list of what a figure leaves
+    out or takes in (`_LISTED_ASIDE_RE`), an aside opened by such a word or a "which" unless it
+    holds the figure's own total (`_holds_its_total`), and what stands between the last two commas
+    before the verb (`_LAST_ASIDE_RE`). An aside no reading can say holds the total or not stays,
+    and is collected in `open_signs` when one is given: the number's sign is then left open."""
+    text = _LISTED_ASIDE_RE.sub(mark, text)
+
+    def _aside(aside: "re.Match[str]") -> str:
+        holds = _holds_its_total(aside)
+        if holds is None and open_signs is not None:
+            open_signs.append(aside.group())
+        return mark if holds is False else aside.group()
+
+    text = _ASIDE_RE.sub(_aside, text)
+    return _LAST_ASIDE_RE.sub(mark, text)
+
+
+def _label_of(text: str, open_signs: Optional[List[str]] = None) -> str:
     """`text` without what names another figure: its asides, and a loss it has left behind. A
-    clause with no commas counts as an aside when it qualifies a measure or a comma closes it.
-    With neither, reading it as one could call a printed loss a profit, so it stands."""
-    for rule in (_GAINS_AND_LOSSES_RE, _ASIDE_RE, _LAST_ASIDE_RE):
-        text = rule.sub(" ", text)
+    clause with no commas counts as an aside when it qualifies a measure or a comma closes it
+    (`_CLOSES_THE_CLAUSE_RE`, or `_CLOSES_UNLESS_TIED_RE` once it has run on into a subject of its
+    own, `_A_SUBJECT_OF_ITS_OWN_RE`), and one opened by "after" or "before" only with nothing but
+    the measure's own words in front of it (`_MEASURE_IT_QUALIFIES_RE`). With neither, reading it as
+    one could call a printed loss a profit, so it stands. An aside that leaves the sign open is
+    collected in `open_signs` (`_without_asides`)."""
+    text = _without_asides(_GAINS_AND_LOSSES_RE.sub(" ", text), " ", open_signs)
 
     def _drop(clause: "re.Match[str]") -> str:
-        qualifies = (_MEASURE_BEFORE_RE.search(text, 0, clause.start()) is not None
-                     or _COMMA_RE.search(text, clause.end()) is not None)
+        within = clause.string
+        measure = (_MEASURE_IT_QUALIFIES_RE if clause.group("opens").lower() in ("after", "before")
+                   else _MEASURE_BEFORE_RE)
+        closes = (_CLOSES_UNLESS_TIED_RE
+                  if _A_SUBJECT_OF_ITS_OWN_RE.search(within, clause.end("opens"), clause.end())
+                  else _CLOSES_THE_CLAUSE_RE)
+        qualifies = (measure.search(within, 0, clause.start()) is not None
+                     or closes.match(within, clause.end()) is not None)
         return " " if qualifies else clause.group(0)
 
     return _FROM_A_LOSS_RE.sub(" ", _ASIDE_WITH_NO_COMMAS_RE.sub(_drop, text))
@@ -1101,33 +2004,1125 @@ def _could_be_an_eps(tok: _Printed) -> bool:
     return not tok.percent and tok.unit is None and (tok.dollar or tok.decimals > 0)
 
 
-def _reads_as_loss(quote: str, tok: _Printed) -> bool:
-    """Do the words of `quote` call the number `tok` a loss?
-
-    Loss straight after the number does ("$0.25 loss per share"), unless it starts the next row's
-    label: a table cell has no "$" touching it, and a label starts on a capital. Otherwise the
-    last word that names a direction before it decides, back to the last ";". An aside, a tax
-    line or a "(loss)" inside a label name no direction for this figure: "(loss)" says the line
-    can go either way ("earnings (loss) per share was $0.46"). It counts only when nothing else
-    names one ("Net (loss) per share of $0.46"). An aside never does: "Adjusted results excluding
-    the loss on sale were $0.46" names no direction at all.
-    """
+def _loss_right_behind(quote: str, tok: _Printed) -> bool:
+    """Is a loss straight after the number this number's ("$0.25 loss per share")? Not when it
+    starts the next row's label: a label starts on a capital, and behind a cell with no "$"
+    touching it, or before an amount of its own ("$0.46 GAAP loss per share $(0.12)"), that is
+    what it is."""
     after = _LOSS_AFTER_RE.match(quote, tok.end)
-    if after is not None and (tok.glued or not after.group().lstrip()[:1].isupper()):
-        return True
-    before = quote[:tok.start]
-    before = before[before.rfind(";") + 1:]
+    return after is not None and (
+        not after.group().lstrip()[:1].isupper()
+        or (tok.glued and _A_LABEL_WITH_ITS_OWN_AMOUNT_RE.match(quote, after.end()) is None))
+
+
+def _sign_label(before: str, open_signs: Optional[List[str]] = None) -> str:
+    """The words of `before`, which ends at a number, that can give it a direction: `_label_of`
+    over them with every closed parenthesis taken out, or with the parentheses kept when nothing
+    else names one ("Net (loss) per share of"). An aside that leaves the sign open is collected in
+    `open_signs`."""
     label, removed = before, 1
     while removed:
         label, removed = _CLOSED_PARENS_RE.subn(" ", label)
-    words = list(_SIGN_WORD_RE.finditer(_label_of(label)))
-    if not words:
-        words = list(_SIGN_WORD_RE.finditer(_label_of(before)))
+    cleaned = _label_of(label, open_signs)
+    if _SIGN_WORD_RE.search(cleaned) is not None:
+        return cleaned
+    return _label_of(before, open_signs)
+
+
+def _reads_as_loss(quote: str, tok: _Printed) -> bool:
+    """Do the words of `quote` call the number `tok` a loss?
+
+    Loss straight after the number does (`_loss_right_behind`). Otherwise the last word that names
+    a direction before it decides, back to the last ";". An aside, a tax line or a "(loss)" inside
+    a label name no direction for this figure: "(loss)" says the line can go either way
+    ("earnings (loss) per share was $0.46"). It counts only when nothing else names one ("Net
+    (loss) per share of $0.46"). An aside never does: "Adjusted results excluding the loss on sale
+    were $0.46" names no direction at all. Whether that last word can speak for the number at all
+    is `_words_point_both_ways`'s to say.
+    """
+    if _loss_right_behind(quote, tok):
+        return True
+    before = quote[:tok.start]
+    words = list(_SIGN_WORD_RE.finditer(_sign_label(before[before.rfind(";") + 1:])))
     return bool(words) and words[-1].group("loss") is not None
+
+
+#: Verbs that end a part of a label, beside `_CLAUSE_VERBS` and `_MOVES`: "Operating income
+#: stabilized gradually and net loss was". Only `_words_point_both_ways` reads them, where a verb
+#: missing from the list costs a figure and never gives it a sign. "Held" alone is the "held for
+#: sale" of a label, and a word of these standing as an adjective is none (`_AN_ADJECTIVE_BEHIND`).
+_ENDS_A_PART = (
+    r"stabili[sz]ed|steadied|held\s+(?:steady|flat|stable)|remained|stayed|softened|weakened"
+    r"|strengthened|moderated|accelerated|slowed|flattened|plateaued"
+)
+#: The verbs that state a result: "reported a loss of", "posted net income of".
+_STATES_A_RESULT = r"reported|recorded|posted|incurred"
+#: What stands between two words of a label as the verb of one of them, or as a verbless
+#: predicate ("up 5%"): past it the next word names a direction of its own ("Earnings were a loss",
+#: "Operating income up 5% and net loss was").
+_A_PREDICATE_RE = re.compile(
+    rf"{_AN_ADJECTIVE_BEHIND}\b(?:{_CLAUSE_VERBS}|{_MOVES}|{_ENDS_A_PART}|{_STATES_A_RESULT}"
+    rf"|earned|lost)\b|\b(?:up|down)\s+(?:{_HEDGE}\s+)?[\d.,]*\d\s?(?:%|percent\b)",
+    re.IGNORECASE,
+)
+#: Right in front of a verb, what makes it a relative clause's, inside the words of a label:
+#: "Diluted EPS on revenue that fell despite losses was".
+_A_RELATIVE_CLAUSE_RE = re.compile(r"\b(?:that|which|who)\s+(?:[^\s,;:]+\s+){0,2}\Z", re.IGNORECASE)
+#: How far in front of a verb `_A_RELATIVE_CLAUSE_RE` reads: its three words, with room.
+_RELATIVE_CHARS = 120
+#: A mark that ends a clause: ";", ":", "!", "?" and a dash set apart.
+_ENDS_A_CLAUSE_MARK_RE = re.compile(r"[;:!?]|\s[-\u2013\u2014]\s")
+#: A word that joins two clauses, behind a predicate of the first: "Operating income was negative
+#: in the quarter but diluted EPS was", "declined in Q3 as net loss was". Only "and", "but",
+#: "while" and "whereas" open the figure's own clause by themselves (`_OPENS_ITS_OWN_CLAUSE`); the
+#: others open one only for a subject of its own (`_ITS_OWN_SUBJECT_RE`): in "rose as losses
+#: narrowed and was" the figure is the first clause's.
+_JOINS_A_CLAUSE_RE = re.compile(
+    r"\b(?:and|but|while|whereas|as|so|since|because|when|although|though)\b", re.IGNORECASE,
+)
+_OPENS_ITS_OWN_CLAUSE = ("and", "but", "while", "whereas")
+#: Positive is a profit's direction in this reading only: "Diluted EPS turned positive from a
+#: loss and was". It never decides a sign.
+_POSITIVE_RE = re.compile(r"\bpositive\b", re.IGNORECASE)
+#: A profit a result moved away from, "swung from a profit to a loss", the mirror of
+#: `_FROM_A_LOSS_RE`.
+_FROM_A_PROFIT_RE = re.compile(
+    r"\bfrom\s+(?:(?!to\b)[^\s,;]+\s+){0,4}?(?:income|earnings|profits?)\b(?:[^,;]|,(?=\d))*?"
+    r"\bto\b",
+    re.IGNORECASE,
+)
+#: The words that carry a sentence on past them.
+_JOINING_WORDS = "and|or|but|nor|to|through|of|for|with|from|by|at|in|on|as|than|per|plus|versus"
+#: Behind a table's cell, a capital opens the next row: "$ 0.42 Provision for credit losses (30)
+#: (10) Net income per share $". Not one on a joining word with no word in lower case behind it:
+#: a headline set in capitals goes on through it ("NET LOSS OF $120 MILLION ON LOWER OPERATING
+#: INCOME"), where a row's label does not ("On a GAAP basis").
+_A_NEW_ROW_RE = re.compile(rf"[\s)%]*\s(?=[A-Z])(?!(?i:{_JOINING_WORDS})\b(?!\s+[a-z]))")
+#: Behind a word, nothing but the marks in front of the number: "negative $".
+_TOUCHING_THE_NUMBER_RE = re.compile(r"[\s$(]*\Z")
+#: Between two cells of a row, nothing but space and the marks of a cell.
+_CELLS_APART_RE = re.compile(r"[\s()$%]*")
+#: The words that tie a subject to its figure: "was", "of", "came in at", "rose to".
+_ITS_VERB = (
+    r"(?:was|were|is|are|of|came\s+(?:in\s+)?(?:at|to)|totall?ed|amounted\s+to|reached"
+    r"|stood\s+at|(?:rose|increased|improved|grew|climbed|jumped|fell|declined|decreased|dropped"
+    r"|narrowed|widened)\s+to)"
+)
+#: A word a measure carries of its own up to its verb: "per diluted share", "attributable to Acme",
+#: "for the quarter". No verb, no joining word, no figure.
+_A_MEASURES_OWN_WORD = (
+    rf"\s+(?!(?:and|but|or|while|whereas|{_CLAUSE_VERBS}|{_MOVES}|{_ENDS_A_PART}"
+    rf"|{_STATES_A_RESULT}|earned|lost)\b)[^\s,;:%$]+"
+)
+#: Behind a subject's verb, its total, when the number is that total's per-share figure: "$120
+#: million, or $", "$120 million ($", "$120 million, or approximately $" (`_THE_SHARE_OF_A_TOTAL`).
+#: Possessive, so a run of spaces has one reading.
+_THROUGH_ITS_TOTAL = (
+    r"(?:\.?\d[\d,]*+(?:\.\d+)?+\s*+(?:(?:thousand|million|billion|trillion|bn|mn|mm)\b|[mbk]\b)?+"
+    rf"\s*+\)?+{_THE_SHARE_OF_A_TOTAL})?"
+)
+#: A subject of the figure's own in front of it, behind a comma or a clause of its own: ", diluted
+#: EPS was", "and the net loss was", "and after the charge the adjusted net loss was", and one
+#: whose verb comes to the total the figure is the per-share figure of: ", net loss was $120
+#: million, or". Its measure may carry its own words ("net loss per diluted share attributable to
+#: Acme") and nothing else.
+_A_SUBJECTS_QUALIFIER = (
+    rf"(?:{_MEASURES_QUALIFIER}|quarterly|third[\s\-]quarter|q[1-4]|fiscal|20\d\d"
+    r"|full[\s\-]year|segment|pre[\s\-]?tax|after[\s\-]?tax)"
+)
+_ITS_OWN_SUBJECT_RE = re.compile(
+    r"\s*(?:(?:after|before|excluding|including|in|for|during)\s+(?:[^\s,;:]+\s+){1,4}?)?"
+    r"(?:(?:the|its|our|their|this)\s+)?"
+    rf"(?:{_A_SUBJECTS_QUALIFIER}\s+){{0,4}}"
+    r"(?:loss(?:es)?|income|earnings|profits?|eps|(?-i:LPS))\b"
+    rf"(?:{_A_MEASURES_OWN_WORD}){{0,8}}\s+{_ITS_VERB}{_HEDGED}[$(\s]*{_THROUGH_ITS_TOTAL}\Z",
+    re.IGNORECASE,
+)
+#: The same subject, the company that reports or earns its measure: "the company reported net
+#: income of $300 million, or", "it posted net income of", "the company earned $300 million, or"
+#: (`_another_share_after_its_own`). The measure only: its basis, scope and quarter in front
+#: (`_ITS_OWN_MEASURES_QUALIFIER`), its bottom line (`_ITS_BOTTOM_LINE`), and the measure's own
+#: words behind it (`_THE_MEASURES_OWN_TAIL`, its per-share words): "the company recorded a loss
+#: from discontinued operations of $20 million, or", "the company posted a segment loss of" report
+#: an item's total, and "the company recorded a loss of" one that may be, whose per-share figure is
+#: then not the measure's. The company is "the company", "it" or "we" and nothing else: a name may
+#: be a subsidiary's or a segment's ("and Acme Energy Services reported net income of", "and Georgia
+#: Power earned"). Only where the subject is the sentence's own, behind a figure of another period
+#: in front (`_ITS_NAME_REPORTS_ITS_OWN_RE`: "Following a net loss of $50 million, or $0.20 per
+#: diluted share, in the prior-year quarter, Acme earned"), may a name stand for the company.
+_A_COMPANY = r"(?:the\s+company|it|we)"
+_ITS_OWN_MEASURES_QUALIFIER = (
+    r"(?:adjusted|diluted|basic|net|gaap|non[\s\-]?gaap|reported|core|comparable|total"
+    r"|consolidated|record|quarterly|fiscal"
+    r"|(?:first|second|third|fourth)[\s\-\u2010-\u2015]+quarter|q[1-4])"
+)
+_ITS_OWN_MEASURES_WORDS = (
+    rf"{_THE_MEASURES_OWN_TAIL}{{0,3}}"
+    r"(?:\s+per\s+(?:(?:diluted|basic)\s+)?(?:(?:common|ordinary)\s+)?share)?"
+)
+_REPORTS_ITS_OWN_WORDS = (
+    rf"\s+(?:also\s+)?(?:reported|recorded|posted)\s+{_ABOUT}"
+    rf"(?:{_ITS_OWN_MEASURES_QUALIFIER}\s+){{0,4}}{_ITS_BOTTOM_LINE}"
+    rf"{_ITS_OWN_MEASURES_WORDS}\s+of{_HEDGED}[$(\s]*{_THROUGH_ITS_TOTAL}\Z"
+    rf"|\s+(?:also\s+)?earned{_HEDGED}[$(\s]*{_THROUGH_ITS_TOTAL}\Z"
+)
+_REPORTS_ITS_OWN_RE = re.compile(rf"\s*{_A_COMPANY}(?:{_REPORTS_ITS_OWN_WORDS})", re.IGNORECASE)
+#: The company's own name there: one word, and the word of its legal form or none ("Acme", "Pfizer
+#: Inc.", "UnitedHealth Group"). A name of more words may be a unit's ("Georgia Power", "Acme
+#: Discontinued Operations", "Duke Energy Carolinas").
+_ONE_NAME_AS_THE_COMPANY = rf"(?-i:[A-Z])[\w&'\u2019.\-]*(?:\s+{_A_LEGAL_FORM})?"
+_ITS_NAME_REPORTS_ITS_OWN_RE = re.compile(
+    rf"\s*(?:{_A_COMPANY}|{_ONE_NAME_AS_THE_COMPANY})(?:{_REPORTS_ITS_OWN_WORDS})", re.IGNORECASE,
+)
+#: `_ITS_OWN_SUBJECT_RE` with the measure's words only, as `_REPORTS_ITS_OWN_RE` reads them: ",
+#: adjusted net income of $350 million, or", "and net income attributable to Acme was", "and the
+#: company's net income was", "and in the third quarter net income was", never "and the loss from
+#: discontinued operations was $20 million, or", an item's subject, nor "and the loss was", which
+#: may be one (`_another_share_after_its_own`). In front of the measure, only "the", "our", the
+#: company's or this quarter's possessive, or this quarter with no year or date: "for the full year
+#: net income was", "in the prior-year quarter net income was", "that year's net income was" and
+#: "its net income was" may be another period's or a part's.
+_ITS_OWN_MEASURES_SUBJECT_RE = re.compile(
+    r"\s*(?:(?:in|for|during)\s+the\s+(?:(?:first|second|third|fourth)\s+)?quarter\s+)?"
+    r"(?:(?:the|our|(?:the\s+company|(?:the|this)\s+quarter)['\u2019]s)\s+)?"
+    rf"(?:{_ITS_OWN_MEASURES_QUALIFIER}\s+){{0,4}}"
+    rf"(?:{_ITS_BOTTOM_LINE}|(?:eps|(?-i:LPS))\b)"
+    rf"{_ITS_OWN_MEASURES_WORDS}\s+{_ITS_VERB}{_HEDGED}[$(\s]*{_THROUGH_ITS_TOTAL}\Z",
+    re.IGNORECASE,
+)
+#: The direction a later subject names, its first word of one: "net income" and "the company
+#: earned" a profit, "the net loss" and "LPS" a loss, "diluted EPS" none
+#: (`_another_share_after_its_own`).
+_A_SUBJECTS_DIRECTION_RE = re.compile(
+    r"\b(?:(?P<loss>loss(?:es)?|(?-i:LPS))|income|earnings|profits?|earned)\b", re.IGNORECASE,
+)
+#: Where the part of the sentence that prints a measure's own per-share figure opens on a word that
+#: sets that figure against the one behind it, with no verb up to it, so the figure is another
+#: period's and the later one this quarter's, which may point the other way: "Compared to the prior
+#: year's net income of $250 million, or $1.00 per diluted share, the company reported a net loss
+#: of", "Versus a net loss of", "Following a net loss of" (`_another_share_after_its_own`).
+_OPENS_ON_A_COMPARISON_RE = re.compile(
+    r"\s*(?:(?:as\s+)?compared\s+(?:to|with)|in\s+comparison\s+(?:to|with)|versus|vs\b\.?|against"
+    r"|following|relative\s+to|unlike)\b",
+    re.IGNORECASE,
+)
+#: A measure named on its own where its part of the sentence opens, up to the comma that opens an
+#: aside of its: "Net income,", "Net loss for the quarter,", "Net income attributable to Acme,".
+_A_BARE_MEASURE_RE = re.compile(
+    rf"\s*(?:(?:the|its|our|their)\s+)?(?:{_A_SUBJECTS_QUALIFIER}\s+){{0,4}}"
+    rf"(?:loss(?:es)?|income|earnings|profits?)\b(?:{_A_MEASURES_OWN_WORD}){{0,8}}?\s*,",
+    re.IGNORECASE,
+)
+#: A measure opening its sentence whose own verb takes an item in or leaves it out, the item behind
+#: that verb with no comma, figure or verb of its own, up to a tie with no comma: "GAAP EPS included
+#: special items of approximately", "Diluted EPS reflected special items totaling", "Reported EPS
+#: was reduced by special items of", "Adjusted EPS excludes special items of", "Net income included
+#: special items of". The verb is the measure's, so the number the tie gives belongs to what that
+#: verb took in, never to the measure (`_tied_to_an_excluded_item`). A participle is no such verb:
+#: in "Adjusted EPS excluding special items of $1.20" the number is the measure's.
+_ITS_VERB_TAKES_IN_AN_ITEM_RE = re.compile(
+    rf"\s*(?:(?:the|its|our|their)\s+)?(?:{_A_SUBJECTS_QUALIFIER}\s+){{0,4}}"
+    r"(?:loss(?:es)?|income|earnings|profits?|eps|(?-i:LPS))\b"
+    rf"(?:{_A_MEASURES_OWN_WORD}){{0,8}}?\s+(?:(?:also|further)\s+)?"
+    r"(?:included|includes|excluded|excludes|reflected|reflects"
+    r"|was\s+(?:reduced|lowered|increased|raised|impacted|affected|hurt|helped|boosted)\s+by"
+    r"|benefit(?:ed|s)\s+from)(?P<item>\s+"
+    rf"(?:(?!\b(?:{_CLAUSE_VERBS}|{_MOVES})\b)[^,;$\d])+?)",
+    re.IGNORECASE,
+)
+#: Behind the comma that closes such an aside, the measure's own verb to its total, and the tie of
+#: the number to that total: " was $300 million, or", " narrowed to $120 million (", " totaled",
+#: " increased 20% to $300 million, or".
+_ITS_VERB_AFTER_ITS_ASIDE_RE = re.compile(
+    r"\s*(?:was|were|is|are|came\s+(?:in\s+)?(?:at|to)|totall?ed|amounted\s+to|reached|stood\s+at"
+    rf"|(?:{_MOVES}|narrowed|widened)\s+(?:{_A_MOVES_OWN_WORD}){{0,8}}?to)"
+    rf"{_HEDGED}[$(\s]*{_THROUGH_ITS_TOTAL}\Z",
+    re.IGNORECASE,
+)
+#: Behind a comma or a word that joins clauses, a measure's label of its own, with nothing behind
+#: it: ", adjusted EPS", ", non-GAAP diluted EPS", ", diluted earnings per share". A figure in
+#: front of it is another label's (`_its_own_part`).
+_A_LABEL_OF_ITS_OWN_RE = re.compile(
+    rf"(?:,|\b(?:and|but|while|whereas)\b)\s*(?:(?:the|its|our|their)\s+)?"
+    rf"(?:{_A_SUBJECTS_QUALIFIER}\s+){{0,4}}"
+    r"(?:loss(?:es)?|income|earnings|profits?|eps|(?-i:LPS))\b"
+    rf"(?:{_A_MEASURES_OWN_WORD}){{0,8}}\s*\Z",
+    re.IGNORECASE,
+)
+#: In front of a measure's own total, the words that only say which of its totals it is: its basis
+#: and scope ("net", "GAAP", "reported", "consolidated", "total", "diluted"), "record", and the
+#: quarter it is ("third-quarter", "Q3"). Never a part of the measure ("operating", "segment"),
+#: another basis ("adjusted", "core", "comparable") or another period ("fiscal 2025", "2025",
+#: "quarterly"): each makes the amount a figure of something else.
+_THE_MEASURES_OWN_QUALIFIER = (
+    r"(?:net|gaap|reported|consolidated|total|diluted|record"
+    r"|(?:first|second|third|fourth)[\s\-\u2010-\u2015]+quarter|q[1-4])"
+)
+#: An aside's total that can be the total of the results in front of the aside, and of nothing
+#: else: an article, the measure's own qualifiers, its bottom line (`_ITS_BOTTOM_LINE`), the
+#: measure's own words and "of" its amount, in dollars or with a scale word, as in "Results for the
+#: quarter, including a net loss of $120 million, or $0.46 per diluted share", "Third-quarter
+#: results included record net income from continuing operations of $120 million", "...included
+#: income attributable to common stockholders of $120 million". An item's words anywhere in it ("a
+#: loss on debt extinguishment of $45 million", "a $45 million after-tax charge", "a gain on the
+#: sale of $50 million"), or a part's, another basis's or another period's ("an operating loss of
+#: $45 million", "fiscal 2025 income"), make the amount the item's, and the per-share figure tied to
+#: it the item's too (`_its_aside_holds_its_total`). A bare "income" or "a loss", with none of the
+#: measure's own words behind it, may be any line above the bottom one, an item's loss as well
+#: ("Third-quarter earnings results, including income of $45 million, or $0.12 per share, reflected
+#: the gain", "Results for the quarter, including a loss of $45 million ($0.12 per share), reflected
+#: the charge"). A year is no amount: "net income in the third quarter of 2025, or $0.46" is
+#: another period's figure, never a total.
+_THE_MEASURES_OWN_TOTAL_RE = re.compile(
+    rf"\s*(?:(?:a|an|the|its|our|their)\s+)?(?:{_THE_MEASURES_OWN_QUALIFIER}\s+){{0,4}}"
+    rf"{_ITS_BOTTOM_LINE}{_THE_MEASURES_OWN_TAIL}{{0,3}}"
+    rf"\s+of\s+{_ABOUT}(?:\$\s*\.?\d[\d,]*(?:\.\d+)?\s*(?:(?:thousand|million|billion|trillion)\b)?"
+    r"|\.?\d[\d,]*(?:\.\d+)?\s*(?:thousand|million|billion|trillion)\b)\s*",
+    re.IGNORECASE,
+)
+#: In front of such an aside, the words that may lead into the results with nothing of their own:
+#: a basis ("On a GAAP basis,"), "Overall,", "In summary,", "As a result,", "Accordingly,", this
+#: quarter with no year or date ("For the quarter,", "In the third quarter,"), and the company
+#: saying so ("The company said its", "Acme said that") (`_THE_QUARTERS_OWN_RESULTS_RE`).
+_A_RESULTS_LEAD_IN = (
+    r"(?:(?:on\s+an?\s+(?:gaap|reported|consolidated|u\.?s\.?\s+gaap)\s+basis|overall|in\s+summary"
+    r"|as\s+a\s+result|accordingly|(?:in|for|during)\s+the\s+(?:fiscal\s+)?(?:(?:first|second"
+    r"|third|fourth|current)\s+(?:fiscal\s+)?)?quarter)\s*,\s*"
+    r"|(?:the\s+company|(?-i:[A-Z])[\w&'\u2019.\-]*)\s+said\s+(?:that\s+)?(?:its\s+)?)"
+)
+#: An ordinal quarter in front of "results": "third-quarter", "fiscal third quarter", "third fiscal
+#: quarter", "third quarter fiscal".
+_A_QUARTER_IN_FRONT = (
+    r"(?:fiscal[\s\-\u2010-\u2015]+)?(?:first|second|third|fourth)[\s\-\u2010-\u2015]+"
+    r"(?:fiscal[\s\-\u2010-\u2015]+)?quarter(?:[\s\-\u2010-\u2015]+fiscal)?"
+)
+#: In front of such an aside, the results it can hold the total of: this quarter's, the whole
+#: company's, named with no year or date, with words that say only whose, which quarter, on what
+#: basis and of what kind they are: "Results", "Third-quarter results", "Results for the quarter",
+#: "Results for the fiscal third quarter", "Results this quarter", "Results for the reporting
+#: period", "The company's third-quarter results", "The Corporation's results", "Quarterly earnings
+#: results" ("earnings results" with no quarter named: `_AN_EARNINGS_WORD_RE`), "Q3 GAAP results",
+#: "Total company results", "Firmwide results", "Unaudited third-quarter results", "Results of
+#: operations for the quarter", "Third-quarter results for the company", and behind a lead-in
+#: that names nothing else (`_A_RESULTS_LEAD_IN`). A closed list: anything else may
+#: name another period's or a part's ("Prior-year results", "Full-year results", "Results of
+#: discontinued operations", "Segment results", "Acme's European results", "Third-quarter results
+#: for Acme Europe", and "its results" or "their results", which may be a unit's the sentence named
+#: in front: "Acme sold its European unit; its results, including ..."), and so may a year or a date
+#: ("Results for the third quarter of 2025", "Third-quarter 2025 results"), which these words cannot
+#: tell from this quarter's: the figure is then refused, and FMP fills it
+#: (`_its_aside_holds_its_total`).
+_THE_QUARTERS_OWN_RESULTS_RE = re.compile(
+    rf"\s*{_A_RESULTS_LEAD_IN}?"
+    r"(?:(?:the|our|this"
+    r"|(?:company|corporation|firm|group|partnership|trust|bank|quarter)['\u2019]s"
+    rf"|quarterly|q[1-4]|[1-4]q|current[\s\-\u2010-\u2015]+quarter|{_A_QUARTER_IN_FRONT}"
+    r"|gaap|reported|consolidated|earnings|financial|operating|unaudited|overall|total|company"
+    r"|firmwide)\s+){0,5}results?(?:\s+of\s+operations)?"
+    r"(?:\s+(?:this\s+quarter|(?:for|in|of|during)\s+the\s+(?:fiscal\s+)?(?:(?:first|second"
+    r"|third|fourth|current)\s+(?:fiscal\s+)?)?(?:quarter"
+    r"|(?:reporting\s+|(?:13|thirteen)[\s\-]+week\s+)?period)))?(?:\s+for\s+the\s+company)?\s*",
+    re.IGNORECASE,
+)
+#: "Earnings" in front of "results", which are this quarter's own only with no quarter named
+#: (`_its_aside_holds_its_total`).
+_AN_EARNINGS_WORD_RE = re.compile(r"\bearnings\b", re.IGNORECASE)
+#: An ordinal quarter, or its number: "third quarter", "third fiscal quarter", "Q3", "3Q"
+#: (`_its_aside_holds_its_total`).
+_A_QUARTERS_NUMBER_RE = re.compile(
+    r"\b(?:(?P<word>first|second|third|fourth)[\s\-\u2010-\u2015]+(?:fiscal[\s\-\u2010-\u2015]+)?"
+    r"quarter|q(?P<q>[1-4])|(?P<n>[1-4])q)\b",
+    re.IGNORECASE,
+)
+#: An ordinal quarter in any spelling: "second quarter", "second-quarter", "fourth fiscal quarter",
+#: "the third and fourth quarters", "2nd quarter", "Q2", "2Q", "2Q26" (`_an_ordinal_quarter_by`).
+_AN_ORDINAL_QUARTER_RE = re.compile(
+    r"\b(?:first|second|third|fourth|1st|2nd|3rd|4th)[\s\-\u2010-\u2015]++"
+    r"(?:fiscal[\s\-\u2010-\u2015]++)?quarters?\b"
+    r"|(?<![a-z0-9])(?:q[1-4]|[1-4]q)(?![a-z])",
+    re.IGNORECASE,
+)
+#: The words that say a measure is the company's own, or the quarter's, and name no quarter:
+#: "attributable to the Company", "attributable to the Company's common stockholders",
+#: "attributable to common shareholders of the Company", "attributable to common shareholders of
+#: Acme", "attributable to Acme common shareholders", "attributable to Boeing shareholders", and
+#: "in" or "during the quarter" behind another word (`_THE_MEASURES_OWN_HOLDERS`,
+#: `_THE_MEASURES_OWN_TAIL`). They never tell this quarter from another, so where an ordinal quarter
+#: stands beside them ("and net income attributable to the Company for the second quarter was",
+#: "Fourth-quarter results, including net income attributable to the Company of"), the figure may
+#: be another quarter's, and a subject or a total of them takes none
+#: (`_a_subject_of_its_own_behind`, `_its_aside_holds_its_total`). The bare words keep theirs as
+#: they always did ("and net income attributable to Acme for the second quarter was", "...
+#: attributable to common stockholders"), and so does "Common Stockholders" in capitals. "In the
+#: quarter" where a subject opens ("and in the quarter net income was") is no such word.
+_THE_COMPANYS_OWN_WORDS_RE = re.compile(
+    r"\b(?:attributable|available|applicable)\s+to\s+(?:the\s+company\b"
+    rf"|{_COMMON_HOLDERS}\s+of\s+(?:the\s+company\b|{_A_COMPANYS_NAME})"
+    rf"|(?!(?:common|ordinary)\s){_A_COMPANYS_NAME}\s+{_COMMON_HOLDERS}\b)"
+    r"|(?<=\S)\s+(?:in|during)\s+the\s+quarter\b",
+    re.IGNORECASE,
+)
+#: Where an aside about an item opens behind "earnings results", the words that take its total
+#: into them: ", including", ", which included", " included", " includes", ", inclusive of". One
+#: that leaves the total out (", excluding", ", before", " excluded") makes it an item's
+#: (`_earnings_results_hold_it`). "Included" or "includes" with no comma in front (`verb`, and no
+#: `comma`) is the results' own verb.
+_TAKES_THE_TOTAL_IN_RE = re.compile(
+    r"\s*(?P<comma>,\s*(?:(?:which|that)\s+(?:also\s+)?)?)?(?:also\s+)?"
+    r"(?:(?P<verb>included|includes)|including|inclusive\s+of)\b",
+    re.IGNORECASE,
+)
+#: Behind the comma that closes such an aside, the verb of the results themselves, a closed list:
+#: what they did against expectations or another period ("exceeded expectations", "beat", "topped",
+#: "surpassed", "missed", "met", "came in above", "were in line with", "were above", "were up 20%",
+#: "in line with"), what they took in ("reflected the charge", "included the gain") and how they
+#: moved ("rose", "fell", "improved", "declined", "increased", "decreased", "grew"), and each with
+#: the -s of a result named alone ("exceeds"). Anything else may say whose they are or which
+#: period's: "are reported in discontinued operations", "relate to the European unit", "are for the
+#: prior-year quarter", "were excluded from adjusted results", "were restated"
+#: (`_earnings_results_hold_it`).
+_THE_RESULTS_OWN_VERB_RE = re.compile(
+    r"\s*(?:(?:also|again)\s+)?(?:exceed(?:ed|s)?|surpass(?:ed|es)?|top(?:ped|s)?|beat(?:s)?"
+    r"|miss(?:ed|es)?|met|meets?|(?:came|comes?)\s+in|reflect(?:ed|s)?|includ(?:ed|es|e)"
+    r"|rose|rises?|fell|falls?|improv(?:ed|es|e)|declin(?:ed|es|e)|increas(?:ed|es|e)"
+    r"|decreas(?:ed|es|e)|grew|grows?"
+    r"|(?:were|was|are|is)\s+(?:(?:well|slightly|significantly|substantially|comfortably|modestly"
+    r"|just)\s+)?(?:in\s+line\s+with|above|below|ahead\s+of|better\s+than|worse\s+than|short\s+of"
+    r"|up|down|higher|lower)"
+    r"|in\s+line\s+with)\b",
+    re.IGNORECASE,
+)
+#: Where a move went, behind the words of the figure it started from (`_ITS_OWN_TAIL_RE`) and up
+#: to the tie of the number: "to $120 million", "to net income of $120 million", "to income" ("of
+#: $0.06"), and with a word that moves it, a move of the measure that printed that first figure
+#: ("Net income of $100 million, or $0.40 per diluted share, in the third quarter of 2025 rose to
+#: $120 million") (`_another_share_after_its_own`).
+_WHERE_IT_WENT_RE = re.compile(
+    rf"(?:(?P<verb>{_MOVES}|narrowed|widened|swung|turned|shifted)\s+)?to\s+"
+    rf"(?:{_ABOUT}(?:{_MEASURES_QUALIFIER}\s+){{0,4}}{_DIRECTION_WORD}(?:\s+of)?\s*"
+    rf"(?:{_ABOUT}[$(\s]*\.?\d[\d,]*(?:\.\d+)?\s*(?:(?:thousand|million|billion|trillion)\b)?\s*)?"
+    rf"|{_ABOUT}[$(\s]*\.?\d[\d,]*(?:\.\d+)?\s*(?:(?:thousand|million|billion|trillion)\b)?\s*)",
+    re.IGNORECASE,
+)
+#: In an item's clause, in front of the amount a total's tie gives the number, what makes that
+#: amount the measure's after all: a verb stating the measure's result, past which the clause has
+#: ended ("Adjusted earnings excluding special items reported a loss of $450 million, equal to"),
+#: never one that describes the item ("a charge recorded in the quarter of $45 million"), or a tax,
+#: which is a line of the measure and no item ("Net income after tax of $120 million, or")
+#: (`_tied_to_an_excluded_item`).
+_THE_MEASURES_AMOUNT_AFTER_ALL_RE = re.compile(
+    rf"\b(?:{_STATES_A_RESULT})\s+{_ABOUT}(?:{_MEASURES_QUALIFIER}\s+){{0,4}}{_DIRECTION_WORD}"
+    r"|\A\s*(?:(?:income|the)\s+)?tax(?:es)?\s+of\b",
+    re.IGNORECASE,
+)
+#: Behind a total, what makes the number right after it that total's per-share figure, whatever
+#: words stand between them (`_THE_SHARE_OF_A_TOTAL`).
+_THE_SHARE_OF_A_TOTAL_RE = re.compile(_THE_SHARE_OF_A_TOTAL, re.IGNORECASE)
+#: The same subject set apart by "with" and tied to its figure by "at": "declined in Q3 with net
+#: loss at $0.46 per share".
+_WITH_ITS_OWN_SUBJECT_RE = re.compile(
+    r"\bwith\s+(?:(?:the|its|our|their)\s+)?"
+    rf"(?:{_MEASURES_QUALIFIER}\s+){{0,4}}(?:loss(?:es)?|income|earnings|profits?|eps)\b"
+    rf"(?:{_A_MEASURES_OWN_WORD}){{0,8}}?\s+at{_HEDGED}[$(\s]*\Z",
+    re.IGNORECASE,
+)
+#: In front of a figure, the words that carry an earlier verb on to it, with no subject of its
+#: own: "and was", ", to", ", at", "and came in at".
+_CARRIES_A_VERB_ON_RE = re.compile(
+    r"(?:\b(?:and|but)|,)\s+(?:(?:then|also|later)\s+)?"
+    rf"(?:(?:{_CLAUSE_VERBS}|{_MOVES}|came\s+in|stood|totall?ed|reaching|totall?ing)\s+)?"
+    rf"(?:(?:in\s+)?(?:to|at|of)\s+)?{_ABOUT}[$(\s]*\Z",
+    re.IGNORECASE,
+)
+#: In front of a word, the verb that comes to it: "were a net loss", "fell in Q3 to a loss",
+#: "swung to a net loss", "resulted in a net loss", "reported a loss".
+_WHAT_ITS_VERB_CAME_TO_RE = re.compile(
+    rf"\b(?:{_CLAUSE_VERBS}|{_MOVES}|{_ENDS_A_PART}|{_STATES_A_RESULT})"
+    r"(?:\s+(?:in|during|for)\s+(?:the\s+)?[^\s,;:]+)?"
+    rf"(?:\s+(?:to|into|in))?(?:\s+an?)?(?:\s+{_MEASURES_QUALIFIER}){{0,3}}\s+\Z",
+    re.IGNORECASE,
+)
+
+
+def _own_row(before: str) -> str:
+    """The row of a flattened table that ends at the number: what stands behind the last cell
+    that a capital follows (`_A_NEW_ROW_RE`). A cell is an amount, a rate, a number in parentheses
+    ("(30)"), or a bare number right behind another ("84 13 59 71 NM 25 42 Net income"); a lone
+    count or year is no cell, so a sentence stays whole."""
+    cut = 0
+    last: Optional[_Printed] = None
+    for tok in _numbers_in(before):
+        row = _A_NEW_ROW_RE.match(before, tok.end)
+        if row is not None and (
+                _reads_as_a_figure(tok) or tok.percent or tok.negative
+                or (last is not None and _CELLS_APART_RE.fullmatch(before, last.end, tok.start))):
+            cut = row.end()
+        last = tok
+    return before[cut:]
+
+
+def _levels_in(text: str) -> List[Tuple[int, int]]:
+    """Where each figure of `text` that gives an earnings word in front of it its level, in its own
+    clause, stands ("net loss of $0.12 per share and adjusted EPS of"). A figure of another measure
+    ("on revenue of $1.2 billion and lower income") is none."""
+    words = list(_METRIC_WORD_RE.finditer(text))
+    ends = [word.end() for word in words]
+    levels: List[Tuple[int, int]] = []
+    for tok in _numbers_in(text):
+        if tok.percent or not (tok.dollar or tok.unit or tok.decimals):
+            continue
+        nearest = bisect_right(ends, tok.start) - 1
+        if (nearest >= 0 and words[nearest].lastgroup in ("total", "per_share")
+                and _ITS_OWN_CLAUSE_RE.fullmatch(text, ends[nearest], tok.start)):
+            levels.append((tok.start, tok.end))
+    return levels
+
+
+def _the_total_it_shares(text: str, levels: List[Tuple[int, int]]) -> Optional[Tuple[int, int]]:
+    """Of `levels`, the total the number at the end of `text` is the per-share figure of: the last
+    one, when no other figure stands behind it but inside an aside ("including a gain of $20
+    million") and the words that tie a total to its per-share figure end the text
+    (`_THE_SHARE_OF_A_TOTAL_RE`): "Net loss was $120 million on lower operating income, or"."""
+    if not levels:
+        return None
+    behind = text[levels[-1][1]:]
+    asides = [(aside.start(), aside.end()) for aside in _ASIDE_RE.finditer(behind)]
+    if any(_reads_as_a_figure(tok) and not any(start <= tok.start and tok.end <= stop
+                                               for start, stop in asides)
+           for tok in _numbers_in(behind)):
+        return None
+    return levels[-1] if _THE_SHARE_OF_A_TOTAL_RE.search(behind) is not None else None
+
+
+def _predicates_in(text: str) -> List[int]:
+    """Where each verb or verbless predicate of `text` that is no relative clause's opens
+    (`_A_PREDICATE_RE`, `_A_RELATIVE_CLAUSE_RE`), in order."""
+    return [verb.start() for verb in _A_PREDICATE_RE.finditer(text)
+            if _A_RELATIVE_CLAUSE_RE.search(text, max(0, verb.start() - _RELATIVE_CHARS),
+                                            verb.start()) is None]
+
+
+def _words_point_both_ways(quote: str, tok: _Printed) -> bool:
+    """Do the words of the number's own clause name both a loss and a profit, with nothing that
+    tells which is the number's? Then no sign is proved, and the figure waits for FMP.
+
+    The last word deciding (`_reads_as_loss`) is right only when that word is the figure's own: its
+    subject's ("the net loss was"), or what a verb came to ("Earnings were a loss"). A modifier with
+    no commas holds the other direction just as well: "Net loss per share on lower operating income
+    was $0.46" and "Adjusted EPS compared with a loss a year ago was $0.46" each name both, the last
+    one being the modifier's, and a model that slipped the sign then found its figure kept. So two
+    neighbouring words of opposite direction in the figure's clause leave the sign open, unless:
+      * a figure that gives the first its level, with no verb behind it, sets the second in a label
+        of its own (`_levels_in`): "net loss of $0.12 per share and adjusted EPS of". Never the
+        total the number is the per-share figure of (`_the_total_it_shares`): in "Net loss was $120
+        million on lower operating income, or $0.46" the words behind that total are its own;
+      * the second is a verb (`_A_PREDICATE_RE`, never a relative clause's): "Intel earned";
+      * a verb between them comes to the second (`_WHAT_ITS_VERB_CAME_TO_RE`): "were a net loss",
+        "fell in Q3 to a loss". Past any other verb the second may be another clause's: "rose as
+        losses narrowed and was", "rose on lower credit losses to".
+    The label read is the row the number ends (`_own_row`), in its own sentence, with the asides
+    `_sign_label` takes out and a profit the result moved away from (`_FROM_A_PROFIT_RE`). The
+    figure's clause opens behind ";", ":", "!", "?" or a dash set apart, or behind an "and", a "but",
+    a "while" or a "whereas" that follows a predicate and leads to a direction of its own, unless an
+    earlier verb carries straight on to the figure (`_CARRIES_A_VERB_ON_RE`: "and was", ", to"):
+    then the figure is the whole sentence's. An aside no reading can say holds the figure's total
+    or not (`_holds_its_total`) leaves the sign open as well.
+
+    These decide all the same: "negative" right in front of the number ("Diluted EPS of negative
+    $0.46"), and a subject of the figure's own right in front of it, behind a comma or a word that
+    joins clauses behind a predicate (`_ITS_OWN_SUBJECT_RE`: "In a quarter with heavy losses,
+    diluted EPS was", "declined in Q3 as net loss was", "Despite higher income, net loss was $120
+    million, or"; `_WITH_ITS_OWN_SUBJECT_RE`).
+
+    Residual: a list of verbs cannot be whole, so a verb missing from it refuses a figure the words
+    do give ("Segment profit dipped before the charge and net loss was"), and one it names inside
+    the label's own modifier, with no "that" or "which" in front, reads as the verb it would be.
+    """
+    before = quote[:tok.start]
+    unsure: List[str] = []
+    text = _sign_label(_own_row(before[before.rfind(";") + 1:]), unsure)
+    if unsure:
+        return True
+    text = text[_sentence_starts(text)[-1]:]
+    text = _FROM_A_PROFIT_RE.sub(lambda found: " " * len(found.group()), text)
+    found = list(_SIGN_WORD_RE.finditer(text))
+    if (found and found[-1].group().lower() == "negative"
+            and _TOUCHING_THE_NUMBER_RE.fullmatch(text, found[-1].end()) is not None):
+        return False
+    stops = [mark.end() for mark in _ENDS_A_CLAUSE_MARK_RE.finditer(text)]
+    predicates = _predicates_in(text)
+
+    def _a_predicate_in(start: int, end: int) -> List[int]:
+        return predicates[bisect_left(predicates, start):bisect_left(predicates, end)]
+
+    joins: List["re.Match[str]"] = []
+    for join in _JOINS_A_CLAUSE_RE.finditer(text):
+        opened = max([0, *(at for at in stops if at <= join.start()),
+                      *([joins[-1].end()] if joins else [])])
+        if _a_predicate_in(opened, join.start()):
+            joins.append(join)
+    for at in sorted({*stops, *(join.end() for join in joins),
+                      *(comma.end() for comma in re.finditer(",", text))}, reverse=True):
+        if (_ITS_OWN_SUBJECT_RE.fullmatch(text, at) is not None
+                and len(_SIGN_WORD_RE.findall(text, at)) == 1):
+            return False
+    own = _WITH_ITS_OWN_SUBJECT_RE.search(text)
+    if own is not None and len(_SIGN_WORD_RE.findall(text, own.start())) == 1:
+        return False
+    start = max([0, *stops])
+    if _CARRIES_A_VERB_ON_RE.search(text, start) is None:
+        start = max([start, *(join.end() for join in joins
+                              if join.group().lower() in _OPENS_ITS_OWN_CLAUSE
+                              and _SIGN_WORD_RE.search(text, join.end()) is not None)])
+    words = sorted([(w.start(), w.end(), w.group("loss") is not None) for w in found
+                    if w.start() >= start]
+                   + [(w.start(), w.end(), False) for w in _POSITIVE_RE.finditer(text, start)])
+    levels = _levels_in(text)
+    shared = _the_total_it_shares(text, levels)
+    levels = [level for level in levels if level != shared]
+    for (_, first_end, first), (second_start, second_end, second) in zip(words, words[1:]):
+        if first == second:
+            continue
+        scope = max([first_end, *(end for begin, end in levels
+                                  if first_end <= begin and end <= second_start)])
+        verbs = _a_predicate_in(scope, second_end)
+        if not verbs:
+            if scope == first_end:
+                return True
+        elif (verbs[-1] < second_start
+              and _WHAT_ITS_VERB_CAME_TO_RE.search(text, scope, second_start) is None):
+            return True
+    return False
+
+
+def _its_own_part(text: str, *, parts: bool = True) -> str:
+    """The end of `text` that is its own part of the sentence: from the last ";" and the last
+    sentence start, past an "and", a "but", a "while" or a "whereas" that opens a part with a
+    subject of its own (`_A_PART_OF_ITS_OWN_RE`), as `_holds_its_total` reads one, unless `parts`
+    is False, and past a comma or such a word that opens a label of its own with nothing behind it
+    (`_A_LABEL_OF_ITS_OWN_RE`: "Third quarter GAAP EPS of $1.20, adjusted EPS" ends on "adjusted
+    EPS", whose figure the GAAP one is not)."""
+    text = text[text.rfind(";") + 1:]
+    text = text[_sentence_starts(text)[-1]:]
+    if parts:
+        text = text[max((found.end() for found in _A_PART_OF_ITS_OWN_RE.finditer(text)),
+                        default=0):]
+    label = _A_LABEL_OF_ITS_OWN_RE.search(text)
+    return text if label is None else text[label.start():]
+
+
+def _its_own_share(text: str, *, parts: bool = True) -> Optional[_Printed]:
+    """The last per-share figure that `text` prints for its own measure, in its own part of the
+    sentence (`_its_own_part`, `parts` as there), as `text` prints it, or None: a number its words
+    name an EPS (`_metric_at`). "Net income was $300 million, or $1.20 per diluted share", "Net
+    income was $300 million ($1.20 per diluted share)", "Diluted EPS of $1.20". A figure of a
+    comparison or of another period is none ("compared with $0.40 per share a year ago"), and
+    neither is an item's ("Excluding a gain of $0.10 per share"), as far as `_metric_at` tells them
+    apart: one inside an aside in front of the measure's own verb, or in a lead-in in front of its
+    subject, is read as its own here, and `_another_share_after_its_own` reads on past it."""
+    part = _its_own_part(text, parts=parts)
+    offset = len(text) - len(part)
+    found = [printed for printed in _numbers_in(part)
+             if _could_be_an_eps(printed) and _metric_at(part, printed) == "per_share"]
+    if not found:
+        return None
+    return next((printed for printed in _numbers_in(text)
+                 if printed.start == offset + found[-1].start), None)
+
+
+def _its_verb_after_its_aside(before: str, own: _Printed, stop: int) -> bool:
+    """Is `own` printed inside an aside of a measure that opens its part of the sentence on its
+    own (`_A_BARE_MEASURE_RE`: "Net income,"), with that measure's verb to its total right behind
+    the comma that closes the aside (`_ITS_VERB_AFTER_ITS_ASIDE_RE`), up to `stop`? "Net income,
+    which included a $45 million ($0.12 per share) after-tax charge, was $300 million, or $1.20",
+    "Net income, up from $250 million, or $1.00 per diluted share, in 2025, was $300 million, or".
+    The figure behind that verb is the measure's own, and the aside's is not."""
+    head = before[:own.start]
+    opening = len(head) - len(_its_own_part(head))
+    subject = _A_BARE_MEASURE_RE.match(before, opening)
+    if subject is None or subject.end() > own.start:
+        return False
+    closes = stop
+    while True:
+        closes = before.rfind(",", own.end, closes)
+        if closes == -1:
+            return False
+        if not before[closes + 1:closes + 2].isdigit():
+            break
+    return _ITS_VERB_AFTER_ITS_ASIDE_RE.fullmatch(before, closes + 1) is not None
+
+
+def _a_subject_of_its_own_behind(quote: str, tok: _Printed, before: str, own: _Printed,
+                                 stop: int) -> bool:
+    """Does a subject of the number's own, the measure's (`_ITS_OWN_MEASURES_SUBJECT_RE`,
+    `_REPORTS_ITS_OWN_RE`), open behind the measure's own per-share figure `own` in `before` (the
+    words in front of the number `tok`, tied at `stop`), so the number is that subject's figure and
+    no other thing's (`_another_share_after_its_own`)? Behind a word that joins clauses, or behind a
+    comma with nothing between it and that figure but the figure's per-share words and a period
+    before this one that the figure is for (`_RIGHT_BEHIND_ITS_OWN_FIGURE_RE`: "Compared to the
+    prior year's net income of $250 million, or $1.00 per diluted share, the company reported",
+    "Versus a net loss of $50 million, or $0.20 per diluted share, a year ago, the company
+    reported"). A comma further on may close the words in front of a later subject that make it
+    another period's or a part's ("and for the full year, net income was", "and, in 2025, net
+    income was"), so it opens none.
+
+    The subject points the measure's way (`_A_SUBJECTS_DIRECTION_RE`), unless the figure in front
+    is another period's: one a period before this one follows, or one its part of the sentence sets
+    against the later figure with no verb up to it (`_OPENS_ON_A_COMPARISON_RE`). Behind net
+    income, a net loss is another figure, an item's as likely as not: "Net income was $300 million,
+    or $1.20 per diluted share, and the company recorded a net loss of $20 million, or $0.05 per
+    share". Only behind a comma and such a figure of another period may the company that reports be
+    named, with one word and its legal form (`_ITS_NAME_REPORTS_ITS_OWN_RE`: "..., in the prior-year
+    quarter, Acme earned").
+
+    And nothing behind the number may tie it to an item (`_ITS_CLAUSE_ENDS_BEHIND_RE`): past its
+    per-share words, the end of its clause, a comparison, the revenue it was earned on. Behind a
+    subject that names the measure with a verb of its own, or one that reports a profit, also what
+    drove it or what it included (`_ITS_MEASURES_CLAUSE_ENDS_BEHIND_RE`: ", driven by higher
+    volumes", ", which included a $0.05 per share charge"): behind a subject that reports a loss
+    those are an item's words ("and the company recorded a net loss of $20 million, or $0.05 per
+    share, due to the sale of the business")."""
+    # What the words in front of `own` say of it, read once and only for a subject found: whether
+    # it is a loss, whether it stands in a lead-in with no verb, and whether that lead-in sets it
+    # against the later figure.
+    read: List[bool] = []
+    for opens in _OPENS_A_SUBJECT_RE.finditer(before, own.end, stop):
+        behind = _RIGHT_BEHIND_ITS_OWN_FIGURE_RE.fullmatch(before, own.end, opens.start())
+        comma = opens.group() == ","
+        if comma and behind is None:
+            continue
+        measure = _ITS_OWN_MEASURES_SUBJECT_RE.fullmatch(before, opens.end())
+        subject = measure or _REPORTS_ITS_OWN_RE.fullmatch(before, opens.end())
+        named = None
+        if subject is None and comma:
+            named = subject = _ITS_NAME_REPORTS_ITS_OWN_RE.fullmatch(before, opens.end())
+        if subject is None:
+            continue
+        if not read:
+            head = before[:own.start]
+            part = _its_own_part(head, parts=False)
+            lead_in = not _predicates_in(part)
+            read.extend((own.negative or _reads_as_loss(before, own), lead_in,
+                         lead_in and _OPENS_ON_A_COMPARISON_RE.match(head, len(head) - len(part))
+                         is not None))
+        own_loss, lead_in, set_against = read
+        earlier = behind is not None and behind.group("period") is not None
+        # Behind a figure its own verb came to, a period and a comma may lead into the later
+        # subject ("net income was $300 million, or $1.20 per diluted share, a year earlier, net
+        # income was"): only a figure in a lead-in with no verb is followed by its own period.
+        if comma and earlier and not lead_in:
+            continue
+        another_period = set_against or earlier
+        if named is not None and not another_period:
+            continue
+        direction = _A_SUBJECTS_DIRECTION_RE.search(subject.group())
+        loss = direction is not None and direction.group("loss") is not None
+        if direction is not None and loss != own_loss and not another_period:
+            continue
+        ends = (_ITS_CLAUSE_ENDS_BEHIND_RE if measure is None and loss
+                else _ITS_MEASURES_CLAUSE_ENDS_BEHIND_RE).match(quote, tok.end)
+        if ends is None:
+            continue
+        # The company's own holders, or "in the quarter", beside an ordinal quarter: the figure may
+        # be another quarter's (`_THE_COMPANYS_OWN_WORDS_RE`).
+        if (_THE_COMPANYS_OWN_WORDS_RE.search(subject.group()) is not None
+                and _an_ordinal_quarter_by(quote, tok, ends.end())):
+            continue
+        return True
+    return False
+
+
+def _an_ordinal_quarter_by(quote: str, tok: _Printed, end: int) -> bool:
+    """Does `quote` name an ordinal quarter (`_AN_ORDINAL_QUARTER_RE`) in front of the number `tok`
+    in its sentence (behind a ";" as well: "For the second quarter; net income was ..."), or right
+    behind it, up to `end`, where the words that are still its own stop? A figure whose subject or
+    total says only that it is the company's or the quarter's (`_THE_COMPANYS_OWN_WORDS_RE`) may
+    then be another quarter's: "..., and net income attributable to the Company for the second
+    quarter was $250 million, or $1.00", "..., and in the second quarter net income attributable to
+    the Company was", "Second-quarter net income was $250 million, or $1.00 per diluted share, and
+    net income attributable to Acme common shareholders was", "..., and net income in the quarter
+    was $250 million, or $1.00 per diluted share, in Q2", "Fourth-quarter results, including net
+    income attributable to the Company of". Which quarter the release reports is not read here, so
+    its own is refused too ("Third-quarter results, including net income attributable to the
+    Company of"), and FMP fills it. Words behind the figure's own end name another figure's period,
+    not its: "..., compared with $0.90 in the second quarter"."""
+    opens = _sentence_starts(quote[:tok.start])[-1]
+    return (_AN_ORDINAL_QUARTER_RE.search(quote, opens, tok.start) is not None
+            or _AN_ORDINAL_QUARTER_RE.search(quote, tok.end, end) is not None)
+
+
+def _another_share_after_its_own(quote: str, tok: _Printed, cut: int, stop: int, *,
+                                 of_a_total: bool) -> bool:
+    """Is `tok`, tied at `stop` to the words in front of it (`quote` read from `cut`, its part of
+    the sentence behind the last ";"), the per-share figure of something its sentence names after
+    the per-share figure of its own measure (`_its_own_share`, read past an "and" or a "while"
+    that opens a part with a subject of its own: whether that subject is the measure's is said
+    below), on the same basis? The measure has its per-share figure, so this one is the other
+    thing's, never an EPS of the measure's: through a tie with a comma or the words that make a
+    number a total's per-share figure (`of_a_total`), a total's that is named after that figure
+    ("Net income was $300 million, or $1.20 per diluted share, reflecting income of $20 million
+    from discontinued operations, or $0.05 per diluted share", or "..., which totaled $0.05", and
+    another period's: "..., compared with net income of $30 million, or $0.12 per diluted share"),
+    or, with no amount printed between the two, the total a direction word right in front of the
+    tie names ("Diluted EPS was $1.20, reflecting losses totaling $0.05 per share on investment
+    securities"), and through any other tie with no comma, that of a direction word right in front
+    of it ("Diluted EPS was $1.20, reflecting a loss of $0.05 per share on the sale").
+
+    Not when a subject of the number's own opens behind that figure, with the measure's bottom line
+    and its own words alone, pointing its way, and nothing behind the number that may tie it to an
+    item or to another period (`_a_subject_of_its_own_behind`: "..., and net income attributable to
+    the Company was $300 million, or $1.20 per diluted share", "Compared to the prior year's net
+    income of $250 million, or $1.00 per diluted share, the company reported net income of $300
+    million, or $1.20"): a subject another period leads into ("and for the full year, net income
+    was"), one that names an item's total or a line above the bottom one ("and the company recorded
+    a loss from discontinued operations of $20 million, or", "and the loss was"), a part reporting
+    ("and Acme Energy Services reported net income of"), a loss behind net income, or a figure an
+    item's words follow ("..., or $0.05 per share, on the sale of the business"), leaves the number
+    the other thing's. Nor when that figure was printed inside an aside of a measure
+    whose own verb comes to the number's total behind it (`_its_verb_after_its_aside`: "Net income,
+    which included a $45 million ($0.12 per share) after-tax charge, was $300 million, or $1.20"),
+    unless the number's words set it against another period's figure, which makes its total how
+    far the measure moved (`_SET_AGAINST_ANOTHER_BEHIND_RE`: "..., was $20 million, or $0.05 per
+    share, lower than last year", "..., or $0.05 per share more than planned"; where it stands
+    against an expectation behind a comma, ", ahead of guidance", it is still the level), nor when
+    the number is on the other
+    basis (`_adjusted_at`: "GAAP net income was $300 million, or $1.52 per diluted share, compared
+    with adjusted net income of $340 million, or $1.72 per diluted share", "..., and $350 million,
+    or $1.35 per diluted share, on an adjusted basis", "Adjusted EPS was $1.35, compared with GAAP
+    earnings of $1.20 per share"): that is the measure's second figure, which `_eps_read` gives its
+    slot. Nor when that figure is where a move started and the number where it went, with nothing
+    but that figure's own words between it and the move's "to" (`_ITS_OWN_TAIL_RE`,
+    `_WHERE_IT_WENT_RE`): behind a move from it (`_MOVED_FROM_IT_RE`: "Net income rose from $100
+    million, or $0.40 per share, to $120 million, or $0.46 per share", "Net income increased $20
+    million, or 20%, from $100 million, or $0.40 per diluted share, to", "Diluted EPS swung from a
+    loss of $0.12 to income of $0.06"), or with the measure's own move to it ("Net income of $100
+    million, or $0.40 per diluted share, in the third quarter of 2025 rose to $120 million, or").
+    "..., a year ago, due to income of $20 million, or $0.08" goes nowhere the figure started from.
+    A basis neither figure's words say leaves it the other thing's."""
+    before = quote[cut:tok.start]
+    own = _its_own_share(before[:stop], parts=False)
+    if own is None:
+        return False
+    tail = _ITS_OWN_TAIL_RE.match(before, own.end)
+    went = _WHERE_IT_WENT_RE.fullmatch(before, tail.end(), stop)
+    if went is not None and (
+            went.group("verb") is not None
+            or _MOVED_FROM_IT_RE.search(before, max(0, own.start - _MOVED_FROM_CHARS),
+                                        own.start) is not None):
+        return False
+    if of_a_total:
+        if (not any(_reads_as_a_figure(printed) for printed in _numbers_in(before[own.end:stop]))
+                and _A_DIRECTION_RIGHT_IN_FRONT_RE.search(before, own.end, stop) is None):
+            return False
+    elif _A_DIRECTION_RIGHT_IN_FRONT_RE.search(before, own.end, stop) is None:
+        return False
+    if _a_subject_of_its_own_behind(quote, tok, before, own, stop):
+        return False
+    if (of_a_total and _its_verb_after_its_aside(before, own, stop)
+            and _SET_AGAINST_ANOTHER_BEHIND_RE.match(quote, tok.end) is None):
+        return False
+    figures = [printed for printed in _numbers_in(quote)
+               if _could_be_an_eps(printed) and _metric_at(quote, printed) == "per_share"]
+    first = next((printed for printed in _numbers_in(quote) if printed.start == cut + own.start),
+                 None)
+    theirs = None if first is None else _adjusted_at(quote, first, figures)
+    ours = _adjusted_at(quote, tok, figures)
+    return theirs is None or ours is None or theirs == ours
+
+
+def _its_aside_holds_its_total(quote: str, tok: _Printed, front: str, clause: str, *,
+                               opens: int) -> bool:
+    """Can the total an aside about an item holds, `clause` (its words from its opening word up
+    to the tie of the number `tok`), be the total of the results `front` names in front of it, so
+    `tok` their per-share figure? "Results for the quarter, including a net loss of $120 million,
+    or $0.46 per diluted share, reflected the charge", "Third-quarter results included net income
+    of $120 million, or $0.46 per diluted share, on revenue of $1.2 billion". Only when the front
+    names this quarter's own results, with no year or date and nothing but the words that say whose
+    they are, which quarter, and on what basis and of what kind (`_THE_QUARTERS_OWN_RESULTS_RE`:
+    "Quarterly earnings results", never "Prior-year results", "Full-year results", "Results of
+    discontinued operations" or "Results for the third quarter of 2025"), "earnings results" with
+    no quarter named (`_AN_EARNINGS_WORD_RE`: "Fourth-quarter earnings results" may be another
+    quarter's, which these words cannot tell from this one's) and only as their sentence holds them
+    (`_earnings_results_hold_it`), the aside's words are the measure's own total alone
+    (`_THE_MEASURES_OWN_TOTAL_RE`), naming no quarter but the one the front names
+    (`_quarters_named`: never "Earnings results, including a fourth-quarter net loss of $45
+    million"), and no ordinal quarter at all where they say only that the total is the company's or
+    the quarter's (`_THE_COMPANYS_OWN_WORDS_RE`, `_an_ordinal_quarter_by`: "Fourth-quarter results,
+    including net income attributable to the Company of"), and the per-share figure closes the
+    aside, past any words behind it that are still the measure's (`_CLOSES_THE_ASIDE_BEHIND_RE`).
+    `opens` is where the aside opens in `quote`, right behind `front`.
+    A measure that names a direction holds its total itself, so a total in its aside is a part of
+    it, whichever way it points: "Net income, including segment income of $45 million ($0.12 per
+    share), rose 20%", "Net loss for the quarter, including a loss of $45 million ($0.12 per
+    share), widened". Anything else is the item's figure too: "Results, including an operating
+    loss of $45 million ($0.12 per share)", "Net income for the quarter, including a loss on debt
+    extinguishment of $45 million ($0.12 per share), rose 5%", "Diluted EPS, including a net loss
+    of $45 million ($0.12 per share)" (no per-share measure has a total)."""
+    if (_THE_QUARTERS_OWN_RESULTS_RE.fullmatch(front) is None
+            or _THE_MEASURES_OWN_TOTAL_RE.fullmatch(clause) is None):
+        return False
+    closes = _CLOSES_THE_ASIDE_BEHIND_RE.match(quote, tok.end)
+    if closes is None:
+        return False
+    fronts = _quarters_named(front)
+    earnings = _AN_EARNINGS_WORD_RE.search(front) is not None
+    if fronts and earnings:
+        return False
+    if (_THE_COMPANYS_OWN_WORDS_RE.search(clause) is not None
+            and _an_ordinal_quarter_by(quote, tok, closes.end())):
+        return False
+    if earnings and not _earnings_results_hold_it(quote, tok, opens - len(front), opens, closes):
+        return False
+    return all(quarter in fronts for quarter in _quarters_named(clause))
+
+
+def _earnings_results_hold_it(quote: str, tok: _Printed, front_at: int, opens: int,
+                              closes: "re.Match[str]") -> bool:
+    """May "earnings results" with no quarter named, opening at `front_at` in `quote`, hold the
+    total of the aside that opens at `opens` and closes at `closes`, behind the number `tok`?
+    Their sentence may still make them a sold unit's or another period's, where "results" alone
+    are read as every version did. So only when it says nothing else of them: nothing stands in
+    front of them in their sentence, behind a ";" or a joining word either ("Acme sold its
+    European unit in the quarter; earnings results, including", "The European unit was sold in
+    October, and earnings results, including"), the aside takes the total in
+    (`_TAKES_THE_TOTAL_IN_RE`: never "Earnings results, excluding a net loss of $45 million ($0.12
+    per share), exceeded expectations"), and behind the comma that closes it stands their own verb
+    (`_THE_RESULTS_OWN_VERB_RE`: "exceeded expectations", "reflected the charge", never "are
+    reported in discontinued operations", "are for the prior-year quarter", "relate to the European
+    unit" or "were restated"), or, where their own verb took the total in, the end of the sentence
+    ("Earnings results included net income of $120 million, or $0.46 per diluted share."). An aside
+    whose sentence ends, or a quote that stops, with no verb behind it says too little (fails
+    closed: FMP fills the figure)."""
+    opening = _TAKES_THE_TOTAL_IN_RE.match(quote, opens)
+    if opening is None:
+        return False
+    sentence = max((at for at in _sentence_starts(quote[:tok.start]) if at <= front_at), default=0)
+    if quote[sentence:front_at].strip():
+        return False
+    end = closes.end()
+    closer = quote[end - 1] if end > tok.end and quote[end - 1] in ",.;" else ""
+    if closer == ",":
+        return _THE_RESULTS_OWN_VERB_RE.match(quote, end) is not None
+    return (closer != ";" and opening.group("comma") is None
+            and opening.group("verb") is not None)
+
+
+def _quarters_named(text: str) -> Set[int]:
+    """The numbers of the quarters `text` names (`_A_QUARTERS_NUMBER_RE`): "third-quarter", "Q3"
+    and "3Q" are 3. A total that names a quarter is the results' own only when they name the same
+    one (`_its_aside_holds_its_total`): "Earnings results, including a fourth-quarter net loss of
+    $45 million ($0.12 per share), were restated" hold another quarter's, "Third-quarter results
+    included third-quarter net income of" their own."""
+    numbers = set()
+    for found in _A_QUARTERS_NUMBER_RE.finditer(text):
+        word = found.group("word")
+        numbers.add(("first", "second", "third", "fourth").index(word.lower()) + 1 if word
+                    else int(found.group("q") or found.group("n")))
+    return numbers
+
+
+def _its_measure_goes_on(quote: str, tok: _Printed) -> bool:
+    """Does the measure in front of an item's clause go on, behind `tok`, to a figure of its own
+    (`_ITS_MEASURE_GOES_ON_RE`)? Only to one that reads as a figure (`_reads_as_a_figure`): "was
+    $1.20", "were $300 million", never "was 12% higher" or "was 5 cents better", which say how it
+    moved."""
+    goes = _ITS_MEASURE_GOES_ON_RE.match(quote, tok.end)
+    if goes is None:
+        return False
+    behind = quote[tok.end:goes.end() + _TIE_CHARS]
+    figure = next((printed for printed in _numbers_in(behind)
+                   if printed.start >= goes.end() - tok.end), None)
+    return (figure is not None and _reads_as_a_figure(figure)
+            and _CENTS_BEHIND_RE.match(behind, figure.end) is None)
+
+
+def _tied_to_an_excluded_item(quote: str, tok: _Printed) -> bool:
+    """Is `tok` the figure of an item a clause leaves out or takes in, never the EPS's? "Excluding
+    the goodwill impairment loss, which totaled $0.46 per diluted share, adjusted EPS was $1.20":
+    what ties a number to what stands in front of it (`_TIED_TO_AN_ITEM_RE`: ", which totaled",
+    ", at", ", or", " (", a bare comma, with a hedge or none, and " of", " totaling", " which was"
+    and the like with no comma) follows a clause opened by such a word, in the number's sentence,
+    that runs right up to it (`_THE_CLAUSES_WORDS`, past any aside of its own: to the tie's comma,
+    or to its "or", "(" or first word when it has none). Every such word of the sentence is tried,
+    the last first: a word of the item's own that opens a clause too ("Excluding the goodwill
+    impairment loss included in the third quarter, which totaled", "... loss after the merger, at")
+    stands behind the item's measure word, and the clause the first word opened still runs to the
+    number. Not when the clause ran on into a subject of its own, with words of that subject's
+    behind it or not (`_A_SUBJECT_OF_ITS_OWN_RE`: "Excluding the hurricane the adjusted net loss for
+    fiscal 2026, at $0.46"). A clause whose measure's words may name either the item or a subject
+    ("Excluding the hurricane net loss, at $0.46") is the item's as far as this can tell, and costs
+    that figure; so does a total such a clause takes in with no measure in front of it ("Including a
+    net loss of $120 million, or $0.46 per diluted share, results ...", "The quarter included a net
+    loss of $120 million, or $0.46").
+
+    With no comma, a tie reads only the words right in front of it, so the clause must name what
+    the number could be the figure of: a direction word (`_AN_ITEMS_DIRECTION_RE`: "the goodwill
+    impairment loss of $0.46", "income from the sale of $0.46") or the item itself, through a
+    relative clause, and no per-share measure, which would have it run on into the measure the
+    number is the figure of (`_A_PER_SHARE_WORD_RE`: "Excluding special items adjusted EPS of
+    $1.20"), nor a verb that arrives at a figure right in front of an "at" (`_AN_AT_TIE_RE`,
+    `_ARRIVES_RIGHT_IN_FRONT_RE`: "Adjusted EPS excluding the loss on the sale landed at $1.20"),
+    unless a relative clause on the item arrives there, whatever names the item
+    (`_ITS_RELATIVE_CLAUSE_ARRIVES_RE`: "Adjusted EPS excluding the litigation charge that was later
+    settled at $0.05"). A measure whose own verb took the item in gives the item every number a
+    tie with no comma gives it (`_ITS_VERB_TAKES_IN_AN_ITEM_RE`: "GAAP EPS included special items
+    of approximately $0.12 per share", "Adjusted EPS excludes special items totaling $0.12").
+
+    A measure in front of the clause takes the number ("Adjusted EPS excluding the impairment loss,
+    at $0.46", as `_label_of` reads one; in front of a total's tie any measure of the clause's part
+    of the sentence does: "Net income was $120 million after tax, or $0.46"), but for a tie that
+    speaks of the words right in front of it: a relative clause (`_A_RELATIVE_TIE_RE`: "Results
+    excluding the impairment loss, which totaled $0.46"), or one with no comma behind a direction
+    word ("Results excluding the impairment loss of $0.46": read as the measure's, the item's loss
+    would give it its sign). Nor when no total stands for a total's tie to make it the share of
+    ("Results excluding the impairment loss, or $0.46"), or when that total is the clause's own
+    amount, which is the item's ("Net income for the quarter included a charge of $45 million, or
+    $0.12", "Third-quarter net income included a $45 million ($0.12 per share) after-tax charge",
+    "Adjusted net income excluding investment gains and losses of $120 million, or $0.46"), unless
+    the measure's words could name it (`_its_aside_holds_its_total`: "Results for the quarter
+    included a net loss of $120 million ($0.46 per diluted share)"), a verb stating the measure's
+    result comes first, or it is a tax (`_THE_MEASURES_AMOUNT_AFTER_ALL_RE`: "Adjusted earnings
+    excluding special items reported a loss of $450 million, equal to $0.42", "Net income after tax
+    of $120 million, or $0.46"). Nor when that measure has its figure elsewhere in the sentence:
+    behind the number, a per-share one (`_its_measure_goes_on`: "Adjusted EPS excluding special
+    items of $0.15 per share was $1.20", never "... was 12% higher"), or its per-share figure in
+    front of the clause (`_its_own_share`: "Diluted EPS of $1.20 included a charge of $20 million,
+    or $0.05").
+
+    Whatever the words between: a total's per-share figure, or an item's a tie with no comma gives
+    it, is never the EPS of a measure whose own per-share figure the sentence printed before them
+    (`_another_share_after_its_own`: "Net income was $300 million, or $1.20 per diluted share,
+    reflecting income of $20 million from discontinued operations, or $0.05 per diluted share",
+    "Diluted EPS was $1.20, reflecting a loss of $0.05 per share on the sale"), but for the
+    measure's figure on its other basis ("..., and $350 million, or $1.35 per diluted share, on an
+    adjusted basis").
+
+    An aside about an item right in front of the tie's comma (`_AN_ITEMS_ASIDE_RE`: ", including a
+    charge of $20 million,") is what `_holds_its_total` weighs when the number is the per-share
+    figure of a total (`_TIES_THE_NUMBER_RE`): the aside's, or one in front of it. It is the item's
+    here when the measure in front has its figure elsewhere in the sentence, as above ("Net income
+    was $300 million, or $1.20 per diluted share, including a charge, or $0.05 per diluted share"),
+    when a relative clause speaks of it ("GAAP EPS, including the impairment loss, which totaled
+    $0.15 per share") unless the aside's total is what the number is the per-share figure of, and
+    when no total stands for the number to be the share of: none in the aside or in front of it
+    ("GAAP EPS, including the impairment loss, or $0.15 per share"), or only the aside's, which the
+    measure in front cannot take (`_its_aside_holds_its_total`: "The divestiture, including a loss
+    of $120 million, or $0.46 per diluted share", "Net income, including a gain on the sale of $50
+    million, or $0.20 per diluted share, rose 20%"). A clause opened behind a comma that runs to a
+    "(" or a bare "or" is such an aside too, kept only when its total is one the measure in front
+    can take, the same way ("Results for the quarter, including a net loss of $120 million ($0.46
+    per diluted share), reflected the charge"; never "Net income, including a $50 million ($0.20
+    per diluted share) gain on the sale of the business, rose 20%")."""
+    cut = quote.rfind(";", 0, tok.start) + 1
+    before = quote[cut:tok.start]
+    tie = _TIED_TO_AN_ITEM_RE.search(before)
+    if tie is None:
+        return False
+    comma = before.find(",", tie.start(), tie.end())
+    stop = comma if comma != -1 else tie.start()
+    shares_a_total = tie.group("share") is not None
+    bare = tie.group("bare") is not None
+    relative = _A_RELATIVE_TIE_RE.search(tie.group()) is not None
+    # A tie that names one (", or", " (", ", which", ", at"), where a bare comma names none: through
+    # it a measure that has printed its per-share figure takes no other.
+    named = _A_BARE_COMMA_TIE_RE.fullmatch(tie.group()) is None
+    # Words that make the number a total's per-share figure: ", or", " (", ", representing".
+    a_share_tie = named and (shares_a_total or _TIES_A_SHARE_RE.match(
+        before, stop + 1 if comma != -1 else stop) is not None)
+    goes_on = _its_measure_goes_on(quote, tok)
+    # A table's cell "(0.46)" with no "$" in front: a parenthesis that is the number's own minus,
+    # which ties it to no total.
+    its_own_minus = tok.negative and _ONLY_A_PARENTHESIS_RE.fullmatch(tie.group()) is not None
+    if (named and not its_own_minus
+            and _another_share_after_its_own(quote, tok, cut, stop,
+                                             of_a_total=a_share_tie or not bare)):
+        return True
+    if comma != -1:
+        opens = stop
+        while True:
+            opens = before.rfind(",", 0, opens)
+            if opens == -1 or not before[opens + 1:opens + 2].isdigit():
+                break
+        aside = _ASIDE_RE.fullmatch(before, opens, stop + 1) if opens != -1 else None
+        opening = _AN_ITEMS_ASIDE_RE.match(before, opens) if aside is not None else None
+        if opening is not None:
+            front = _its_own_part(before[:opens])
+            amount = any(_reads_as_a_figure(printed) for printed in _numbers_in(aside.group()))
+            in_front = any(_reads_as_a_figure(printed) for printed in _numbers_in(front))
+            if (goes_on or (named and _its_own_share(front) is not None)
+                    or (relative and not (a_share_tie and amount))
+                    or (a_share_tie and not in_front
+                        and not _its_aside_holds_its_total(quote, tok, front,
+                                                           before[opening.end():stop],
+                                                           opens=cut + opens))):
+                return True
+    # An aside of the clause's own between its item and the tie ("the loss on the sale, net of
+    # taxes, which totaled") is blanked to its closing comma, and so is an opening word inside one.
+    head = list(before[:stop + 1] if comma != -1 else before[:stop])
+    for aside in _ASIDE_RE.finditer(before, 0, len(head)):
+        head[aside.start():aside.end() - 1] = " " * (aside.end() - 1 - aside.start())
+    head_text = "".join(head)
+    sentence = _sentence_starts(head_text)[-1]
+    # A total the number can be the per-share figure of: an amount in the clause or in front of it.
+    totals = [printed for printed in _numbers_in(head_text[sentence:stop])
+              if _reads_as_a_figure(printed)]
+    at_tie = bare and _AN_AT_TIE_RE.match(tie.group()) is not None
+    took_in = (_ITS_VERB_TAKES_IN_AN_ITEM_RE.fullmatch(head_text, sentence, stop)
+               if bare and not at_tie else None)
+    if (took_in is not None
+            and _A_PER_SHARE_WORD_RE.search(head_text, took_in.start("item"), stop) is None):
+        return True
+    for opener in reversed(list(_AN_ITEMS_CLAUSE_OPENS_RE.finditer(head_text, sentence, stop))):
+        if (at_tie and _ITS_RELATIVE_CLAUSE_ARRIVES_RE.fullmatch(head_text, opener.end(), stop)
+                is not None):
+            return True
+        if _THE_CLAUSES_WORDS_RE.fullmatch(head_text, opener.end(), stop) is None:
+            continue
+        if bare and _A_PER_SHARE_WORD_RE.search(head_text, opener.end(), stop) is not None:
+            continue
+        if (at_tie and not goes_on
+                and _ARRIVES_RIGHT_IN_FRONT_RE.search(head_text, opener.end(), stop) is not None
+                and _MEASURE_BEFORE_RE.search(head_text, sentence, opener.start()) is not None):
+            continue
+        if any(_A_SUBJECT_OF_ITS_OWN_RE.search(head_text, opener.end(), word.end()) is not None
+               for word in _A_DIRECTION_WORD_RE.finditer(head_text, opener.end(), stop)):
+            continue
+        directed = bare and _AN_ITEMS_DIRECTION_RE.search(head_text, opener.end(), stop) is not None
+        clause = head_text[opener.end():stop]
+        its_comma = (_AN_ASIDES_COMMA_RE.search(head_text, sentence, opener.start())
+                     if shares_a_total and comma == -1 and not goes_on else None)
+        # ", including a net loss of $120 million ($0.46": the aside of what stands in front of it,
+        # as its comma twin is, when its total can be that measure's own.
+        if its_comma is not None and _its_aside_holds_its_total(
+                quote, tok, _its_own_part(head_text[sentence:its_comma.start()]), clause,
+                opens=cut + its_comma.start()):
+            continue
+        measure = (_MEASURE_IT_QUALIFIES_RE
+                   if opener.group().lower() in ("after", "before") and not shares_a_total
+                   else _MEASURE_BEFORE_RE)
+        if measure.search(head_text, sentence, opener.start()) is not None:
+            front = head_text[sentence:opener.start()]
+            # The total a total's tie gives the number: none, or the clause's own amount, which is
+            # the item's ("Net income for the quarter included a charge of $45 million, or $0.12")
+            # unless the measure's words could name it (`_its_aside_holds_its_total`).
+            amount_at = sentence + totals[-1].start if totals else -1
+            its_items = (amount_at >= opener.end()
+                         and _THE_MEASURES_AMOUNT_AFTER_ALL_RE.search(
+                             head_text[opener.end():amount_at]) is None
+                         and not _its_aside_holds_its_total(quote, tok, front, clause,
+                                                            opens=cut + opener.start()))
+            if not (relative or directed or goes_on or (a_share_tie and (not totals or its_items))
+                    or (named and _its_own_share(front) is not None)):
+                continue
+        elif bare and not (directed or relative or goes_on):
+            continue
+        return True
+    return False
 
 
 def _eps_prints(
     quote: str, value: Any, *, within: Optional[Tuple[int, int]] = None,
+    unnamed: Optional[List[_Printed]] = None,
 ) -> List[Tuple[_Printed, float, float]]:
     """The prints of the EPS in `quote`, or in its span `within`, each as (the number, dollars,
     half its last printed digit), with the sign the print proves.
@@ -1138,9 +3133,12 @@ def _eps_prints(
     for FMP: it is a dividend rate, or a footnote digit that flattened onto the figure and that
     would turn a tie with the consensus into a beat. Its sign comes from that number alone, never
     from another figure of the quote: closed parentheses or a touching minus ("(0.46)" is the
-    accounting spelling of -0.46), or the words around it (`_reads_as_loss`). A quote cut inside
-    its parentheses proves no sign on its own. A `value` with the other sign is refused: getting
-    the sign wrong turns a beat into a miss.
+    accounting spelling of -0.46), a loss right behind it, or the words in front of it
+    (`_reads_as_loss`). A quote cut inside its parentheses proves no sign on its own, and neither
+    does a label whose words point both ways (`_words_point_both_ways`): such a print is refused
+    whatever sign `value` has, and so is an excluded item's own figure, whatever its sign
+    (`_tied_to_an_excluded_item`). Both are collected in `unnamed` when one is given. A `value`
+    with the other sign is refused: getting the sign wrong turns a beat into a miss.
     """
     v = _model_number(value)
     if v is None or abs(v) > 1000:
@@ -1149,8 +3147,17 @@ def _eps_prints(
     for tok in _closest_prints(quote, abs(v), finest=_EPS_DECIMALS, within=within):
         if not _could_be_an_eps(tok) or tok.decimals > _EPS_DECIMALS:
             continue
+        if _tied_to_an_excluded_item(quote, tok):
+            if unnamed is not None:
+                unnamed.append(tok)
+            continue
         loss = tok.negative or _reads_as_loss(quote, tok)
         if tok.cut and not loss:
+            continue
+        if (tok.value != 0 and not tok.negative and not _loss_right_behind(quote, tok)
+                and _words_point_both_ways(quote, tok)):
+            if unnamed is not None:
+                unnamed.append(tok)
             continue
         if v != 0 and (v < 0) != loss:
             continue
@@ -1168,8 +3175,12 @@ def eps_from_quote(quote: str, value: Any) -> Optional[float]:
 _HYPHEN = r"[\s\-\u00ad\u2010-\u2015]*"
 #: A footnote inside a label: "Adjusted(3) diluted EPS", "Adjusted* EPS", "Adjusted 1 EPS", and
 #: "Adjusted EPS1", which is what `html_to_text` leaves of a superscript `_drop_footnote_marks`
-#: cannot recognise.
-_LABEL_FOOTNOTE = r"(?:\s*(?:\(\w{1,3}\)|\d{1,2}|\*+))?"
+#: cannot recognise. A number before a rate's unit is no footnote: "a comparable 40 basis points",
+#: "Operating income 12 per cent higher".
+_LABEL_FOOTNOTE = (
+    r"(?:\s*(?:\(\w{1,3}\)|\d{1,2}(?!\d)(?!\s*(?:basis\b|bps\b|per\s*cent\b|%))"
+    r"|\*+))?"
+)
 #: After a label that ends on "adjusted", any short note: "Diluted EPS, as adjusted (unaudited),".
 _ENDING_NOTE = r"(?:\s*(?:\([^()]{1,40}\)|\d{1,2}|\*+))?"
 #: Where a label that ends on "adjusted" stops: punctuation, its figure, "per diluted share" or a
@@ -1195,6 +3206,10 @@ _STATEMENT_LINE = (
     r"(?:(?:net\s+)?(?:interest|financ\w+|depreciation|(?:income\s+)?tax(?:es)?)"
     r"|other\s+(?:operating\s+)?\(?(?:income|expenses?))(?![\w\-])"
 )
+#: "(Non-)operating income" and "(non-)operating expenses" are such a line right behind "before":
+#: "Income before operating expenses". With a word of their own in front they are what an
+#: exclusion names: "before non-recurring operating expenses", "before special operating expenses".
+_OPERATING_LINE = r"(?:non[\s\-]?)?operating\s+(?:income|expenses?)(?![\w\-])"
 _EXCLUDED_ITEM = (
     r"(?:items?|charges?|costs?|expenses?|benefits?|gains?|loss(?:es)?|impacts?|effects?"
     r"|adjustments?|impairments?|restructuring|amortization|compensation)"
@@ -1208,13 +3223,14 @@ _ADJUSTED_MEASURE_RE = re.compile(
     rf"(?P<non_gaap>\bnon{_HYPHEN}(?:gaap|ifrs)(?![A-Za-z]))"
     rf"|(?P<exclusion>\b(?:exclud(?:ing|es?)|excl\.?)\s+(?:\S+\s+){{0,5}}?{_EXCLUDED_ITEM}\b"
     r"|\bex[\s\-\u00ad\u2010-\u2015]+(?:\S+\s+){0,3}?items?\b"
-    rf"|\bbefore\s+(?:(?!{_STATEMENT_LINE})\S+\s+){{0,5}}?{_EXCLUDED_ITEM}\b)"
+    rf"|\bbefore\s+(?!{_OPERATING_LINE})(?:(?!{_STATEMENT_LINE})\S+\s+){{0,5}}?{_EXCLUDED_ITEM}\b)"
     rf"|(?P<adjective>{_NOT_THE_ADJUSTED_MEASURE}\b(?:adj(?:usted|\.)?|core|comparable|underlying"
     rf"|normali[sz]ed|ongoing|recurring|distributable|pro{_HYPHEN}forma){_LABEL_FOOTNOTE}\s+"
     rf"(?:(?:fully|(?:basic|diluted)\s+(?:and|&)|basic|diluted|continuing|net|operating|operational"
     rf"|per{_HYPHEN}share|after{_HYPHEN}tax)\s+)*"
-    rf"(?:eps|earnings(?!\s+before\s+{_STATEMENT_LINE})"
-    rf"|income(?!\s+tax|\s+before\s+{_STATEMENT_LINE})|loss(?:es)?|profit|basis|results?)"
+    rf"(?:eps|earnings(?!\s+before\s+(?:{_STATEMENT_LINE}|{_OPERATING_LINE}))"
+    rf"|income(?!\s+tax|\s+before\s+(?:{_STATEMENT_LINE}|{_OPERATING_LINE}))|loss(?:es)?|profit"
+    r"|basis|results?)"
     r"(?![A-Za-z])"
     r"|\boperating\s+(?:diluted\s+)?eps(?![A-Za-z])"
     rf"|\boperating\s+(?:earnings|income){_LABEL_FOOTNOTE}\s+"
@@ -1237,22 +3253,26 @@ _FOREIGN_NAMES = f"{_FOREIGN_CODES}|{_FOREIGN_WORDS}"
 _SCALE_AFTER_DIGIT = r"(?:\s*(?:thousand|million|billion|trillion|bn|mn|mm|mil|[kmb])\b)?"
 _OTHER_DOLLAR_PLACES = r"hong\s+kong|singapore|new\s+zealand|(?:new\s+)?taiwan"
 #: Another currency printed beside a number, or named by a table's header. Capitals touching a
-#: "$" are another country's, whichever it is, unless they are "US", "USD" or the label glued to
-#: its figure ("EPS$0.46"); "U.S.$" ends on a dot and "a$1.2 billion" is a typo. Set apart from
-#: the "$" they are listed, leaving out what is also a word: "A $1.2 billion quarter" and "REVENUE
-#: OF $1.2 BILLION" are English, while "CA $1.2 billion" reads as the money even though a state
-#: has those letters, the refusal being the cheap side of that doubt. A code alone refuses
-#: nothing: "CAD software" and "AUD patients" are no money, so it counts only beside a "$", a
-#: digit or a scale. The same goes for a bare name, "a weaker euro" being commentary on a dollar
-#: figure, and a singular "Canadian dollar" too, unless a figure comes right before it.
+#: "$" are another country's, whichever it is, unless they are "US", "USD", the label glued to its
+#: figure ("EPS$0.46") or a table's scale ("(in M$)", "(in MM$)", "(in K$)", which
+#: `_quote_scale` reads as one); "U.S.$" ends on a dot and "a$1.2 billion" is a typo. Set apart
+#: from the "$" they are listed, leaving out what is also a word: "A $1.2 billion quarter",
+#: "REVENUE OF $1.2 BILLION" and "Can $1.2 billion" are English, while "CA $1.2 billion" reads as
+#: the money even though a state has those letters, the refusal being the cheap side of that
+#: doubt; "Can." with its dot is Canada's. A code alone refuses nothing: "CAD software" and "AUD
+#: patients" are no money, so it counts only beside a "$", a digit or a scale ("$1.2 billion in
+#: CAD"). The same goes for a bare name, "a weaker euro" being commentary on a dollar figure, and a
+#: singular "Canadian dollar" too, unless a figure comes right before it.
 _FOREIGN_MONEY_RE = re.compile(
     "[€£¥₹₩₪₽₺₫]"
-    r"|(?<![A-Za-z.])(?!(?:US|USD|EPS)\$)(?-i:[A-Z]{1,3}|Aus|Can|Cdn|Mex)\$"
-    r"|(?<![A-Za-z.])(?-i:AU|CA|CAN|CDN|Cdn|HK|Mex|MEX|MX|NT|NZ|SG)\.?\s\$"
+    r"|(?<![A-Za-z.])(?!(?:US|USD|EPS|MM?|K)\$)(?-i:[A-Z]{1,3}|Aus|Aust|Can|Cdn|Mex)\$"
+    r"|(?<![A-Za-z.])(?-i:AU|Aus|Aust|CA|CAN|CDN|Cdn|HK|Mex|MEX|MX|NT|NZ|SG)\.?\s\$"
+    r"|(?<![A-Za-z.])(?-i:Aus|Aust|Can|Cdn|Mex)\.\s?\$"
     r"|(?<![A-Za-z.])(?<!class\s)(?<!series\s)(?-i:C)\s\$"
     rf"|\b(?:{_FOREIGN_CODES})\s?\$"
     rf"|\b(?:{_FOREIGN_NAMES})\s?\$?\s?\.?\d"
     rf"|\d{_SCALE_AFTER_DIGIT}\s*\(?\s*(?:{_FOREIGN_NAMES})\b"
+    rf"|\d{_SCALE_AFTER_DIGIT}\s+in\s+(?-i:{_FOREIGN_CODES})\b"
     rf"|\d{_SCALE_AFTER_DIGIT}\s+pounds?\b(?!\s+of\b)"
     rf"|\d{_SCALE_AFTER_DIGIT}\s+(?:canadian|australian)\b"
     rf"|\d{_SCALE_AFTER_DIGIT}\s+(?:{_OTHER_DOLLAR_PLACES})\s+dollars?\b"
@@ -1274,9 +3294,11 @@ _DOLLAR_COUNTRIES = rf"canadian|australian|{_OTHER_DOLLAR_PLACES}"
 #: dollars count only as a header's, with a scale: "(Canadian dollars in millions)".
 _FOREIGN_RELEASE_RE = re.compile(
     "[€£¥₹₩₪₽₺₫]"
-    r"|(?<![A-Za-z.])(?!(?:US|USD|EPS)\$)(?-i:[A-Z]{1,3}|Aus|Can|Cdn|Mex)\$"
-    r"|(?<![A-Za-z.])(?-i:AU|CAN|Cdn|HK|Mex|MEX|MX|NT|NZ|SG)\.?\s\$"
+    r"|(?<![A-Za-z.])(?!(?:US|USD|EPS|MM?|K)\$)(?-i:[A-Z]{1,3}|Aus|Aust|Can|Cdn|Mex)\$"
+    r"|(?<![A-Za-z.])(?-i:AU|Aus|Aust|CAN|Cdn|HK|Mex|MEX|MX|NT|NZ|SG)\.?\s\$"
+    r"|(?<![A-Za-z.])(?-i:Aus|Aust|Can|Cdn|Mex)\.\s?\$"
     rf"|\b(?-i:{_FOREIGN_CODES})\s?\$?\s?\.?\d"
+    rf"|\d\s*(?:{_SCALE_NAMES})\s+in\s+(?-i:{_FOREIGN_CODES})\b"
     rf"|\b(?:{_FOREIGN_WORDS})\s?\.?\d[\d,.]*\s*(?:{_SCALE_NAMES})\b"
     rf"|\d\s*(?:{_SCALE_NAMES})\s+(?:(?-i:{_FOREIGN_CODES})\b"
     rf"|(?:euros?|yen|yuan|renminbi|rupees?|pesos?|francs?|kron[aeo]r?|zlotys?|shekels?"
@@ -1350,17 +3372,72 @@ _LIST_GLYPHS = (
 #: A quote mark or bracket behind a sentence's last word. Straight only: the gate reads normalised
 #: text.
 _CLOSERS = "\"')]"
+#: In front of a table's cell, the mark that says how rough it is: "~25.6%", "≈$18,500", "approx.
+#: $18.5B". Never "±", which a sentence prints behind a figure: "growth of 4% ±1%".
+_ROUGHLY = r"(?:[~\u2248]|(?i:approx)\.?\s*)"
+#: The same in words, in front of a rate cell: "At least 5% growth", "Approx. 5% growth".
+_ROUGHLY_IN_WORDS = r"(?i:at\s+least|approx(?:imately|\.)?|about|around|roughly|nearly)"
 #: A table's "$" is a cell of its own (`_Printed.glued`), and only a table sets two amounts or two
-#: rates side by side with no word between them. A negative second cell is in parentheses that
-#: close right on its number ("$354 ($4,781)", "3.9 % (6.5 %)", "1.5 % (20.5) %"). Parentheses that
-#: go on past it are an aside: "10% (11% in constant currencies)", "$4.25 ($4.50 adjusted)".
+#: rates side by side with no word between them: a mark of how rough the second is ("~$17,500
+#: ~$18,500", "~25.6% ~25.8%"), a sign on a rate ("+4% +6%", "+1% to +5% -1% to -2%", where a
+#: sentence writes a range "4% - 5%" or "4%-5%"), the scale letter of the first ("$3.46B
+#: $3.52B") or a "Y/Y" between two rates ("+5-7% Y/Y ~7%") change nothing. Nor does the word a
+#: column prints behind each of its rates, the same word for both: "At least 5% growth Approx. 5%
+#: growth", "At least 9% growth 7% to 8% growth"; never a joining word, which a sentence says
+#: behind both ends of a range: "increase 3% to 4% to $5.0 billion". A negative second cell is in
+#: parentheses that close right on its number ("$354 ($4,781)", "3.9 % (6.5 %)", "1.5 % (20.5) %").
+#: Parentheses that go on past it are an aside: "10% (11% in constant currencies)", "$4.25 ($4.50
+#: adjusted)", and so is a word between two cells: "~$17.5B to ~$18.5B", "5% growth in the
+#: quarter and 7% growth".
 _TABLE_CELL_RE = re.compile(
     r"\$\s+\(?\.?\d"
-    r"|\$\(?\.?\d(?:[\d.,]*\d)?\)?\s+(?:\$|\(\$[\d.,]*\d\s*\))"
-    r"|[\d)]\s?%\s+(?:\d[\d.]*\s?%|\(\d[\d.]*(?:\s?%\s*\)|\)\s?%))"
+    rf"|\$\(?\.?\d(?:[\d.,]*\d)?(?i:[bmk]|bn|mm)?\)?\s+{_ROUGHLY}?(?:\$|\(\$[\d.,]*\d\s*\))"
+    r"|[\d)]\s?%\s+(?:(?i:y/y|yoy|q/q|qoq)\s+)?"
+    rf"(?:{_ROUGHLY}|[+\-\u2212])?(?:\d[\d.]*\s?%|\(\d[\d.]*(?:\s?%\s*\)|\)\s?%))"
+    rf"|\d\s?%\s+(?P<label>(?!(?i:{_JOINING_WORDS})\b)[A-Za-z]+)\s+(?:{_ROUGHLY_IN_WORDS}\s+)?"
+    r"(?:[~\u2248+]\s*)?\d[\d.]*\s?%(?:\s*(?:to|-|\u2013)\s*\d[\d.]*\s?%)?\s+(?P=label)\b"
 )
-#: The words that carry a sentence on past them.
-_JOINING_WORDS = "and|or|but|nor|to|through|of|for|with|from|by|at|in|on|as|than|per|plus|versus"
+#: The columns of a guide that shows the new outlook beside the one before it.
+_GUIDE_COLUMNS = ("Current", "Prior", "Previous", "Revised", "Updated", "New", "Initial", "Original")
+_GUIDE_COLUMN = "|".join([*_GUIDE_COLUMNS, *(word.upper() for word in _GUIDE_COLUMNS)])
+#: A table's headings, which no sentence prints: two columns' years side by side ("(Dollars in
+#: millions) 2026 2025"), two periods' headings in a row ("Three months ended September 30 Nine
+#: months ended September 30"), the GAAP and non-GAAP columns side by side ("Q4 2026 GAAP
+#: Non-GAAP Revenue ($B)"), and two of a guide's columns side by side, set in capitals as a heading
+#: is ("Full Year 2026 Guidance Current Prior"). A sentence joins its periods and bases ("2026 and
+#: 2025", "GAAP and non-GAAP"), and says "its prior outlook" in lower case.
+_TABLE_HEADINGS_RE = re.compile(
+    r"\b(?:19|20)\d\d\s+(?:19|20)\d\d\b"
+    r"|\b(?:three|six|nine|twelve|3|6|9|12)\s+months\s+ended\b[^.,;:]{0,40}?"
+    r"\b(?:three|six|nine|twelve|3|6|9|12)\s+months\s+ended\b"
+    r"|\bgaap\s+non[\s\-]?gaap\b|\bnon[\s\-]?gaap\s+gaap\b"
+    rf"|(?-i:\b(?:{_GUIDE_COLUMN})\s+(?:{_GUIDE_COLUMN})\b)",
+    re.IGNORECASE,
+)
+#: The mark that closes a sentence: a full stop, "!", "?", or the ";" of a list's line. A dot
+#: between two digits is a decimal point: "Diluted EPS 1.25 1.10" closes nothing. But behind a year
+#: a word or a date names ("fiscal 2027", "December 31, 2027", "Q4 2027") or a figure that already
+#: has its cents ("$4.30"), it is the full stop a footnote's digit was glued to: "for fiscal
+#: 2027.1", "$4.10 to $4.30.2". A year right behind another cell ("1,980.2 2025.5") is a cell, and
+#: its dot a decimal point.
+_A_CLOSING_MARK = (
+    r"(?:(?<!\d)\.|\.(?!\d)"
+    r"|(?<=\b(?:19|20)\d\d)(?<![\d.]\s(?:19|20)\d\d)\.|(?<=\b[Qq][1-4]\s(?:19|20)\d\d)\."
+    r"|(?<=\.\d\d)\.|[!?;])"
+)
+#: The footnote marks a closed sentence may carry behind its mark, but "*", which a run covers on
+#: its own: so a run of them has one reading.
+_MARKS_BUT_A_STAR = _FOOTNOTE_SYMBOLS.replace("*", "")
+#: At the end of a sentence, its closing mark, with a closing quote and a footnote behind it
+#: ("previously.(2)", "growth.*", "year.1"). The repeat is possessive and each footnote has one
+#: reading ("12" is never "1" and "2"): trying every split of a chart's axis flattened behind a
+#: full stop held the event loop for seconds, tripling with each label.
+_A_CLOSED_SENTENCE_RE = re.compile(
+    rf"{_A_CLOSING_MARK}[{re.escape(_CLOSERS)}]*"
+    rf"(?:\s*(?:\(\w{{1,3}}\)|\*+|[{_MARKS_BUT_A_STAR}]|\d{{1,2}}(?!\d)))*+\s*\Z"
+)
+#: Right behind a quote, the closing mark the model left off: "...for the year" before ". Revenue".
+_CLOSES_RIGHT_BEHIND_RE = re.compile(r"[.!?;]")
 #: What no sentence ends on, whatever comes after it: a mark that carries a clause or a range on,
 #: or a word that needs another, in any capitals but "A", which also ends "Class A".
 _OPEN_END_RE = re.compile(
@@ -1402,6 +3479,22 @@ _QUALIFIER_END_RE = re.compile(r"\b(?i:adjusted|diluted|non-gaap)\Z")
 _NOT_A_SCALE = rf"(?!(?i:{_SCALE_AFTER_NUMBER}|percent)\b)"
 _NOT_JOINING = rf"(?!(?i:{_JOINING_WORDS})\b(?!\s+[a-z]))"
 _NEXT_LINE_RE = re.compile(rf"\s+{_NOT_A_SCALE}{_NOT_JOINING}[A-Z]")
+#: Behind a line of prose, which capitalises none of its own joining words, a capitalised one opens
+#: the next line whatever follows it: " For 2027, Acme expects", " In August 2026", " In-store".
+_NEXT_LINE_IN_PROSE_RE = re.compile(rf"\s+{_NOT_A_SCALE}[A-Z]")
+#: The words of a line, to tell one set in capitals (title case or all of it) from prose.
+_A_LINES_WORD_RE = re.compile(r"[A-Za-z][\w'\-]*")
+#: How many of a line's last words show it is set in capitals.
+_CAPITALS_WORDS = 3
+
+
+def _set_in_capitals(line: str) -> bool:
+    """Do the last words of `line` all open on a capital, as a headline's or a table's do? A
+    sentence's do not: "for the quarter", "billion to $18.5"."""
+    words = _A_LINES_WORD_RE.findall(line)[-_CAPITALS_WORDS:]
+    return bool(words) and all(word[0].isupper() for word in words)
+
+
 #: "CINCINNATI, October 22, 2026 - The Procter": the headlines above it have no full stop, and the
 #: first sentence of a release opens here.
 _DATELINE_RE = re.compile(r"\b20\d\d\s*[-\u2013\u2014]+\s*(?=[A-Z])")
@@ -1416,19 +3509,35 @@ _NOTHING_BETWEEN_RE = re.compile(
 #: Past an abbreviation an all-capitals word goes on ("U.S. GAAP") and a sentence opens with one
 #: capital, a joining word's too ("in the U.S. For the year").
 _NEW_SENTENCE_RE = re.compile(rf"\s+{_NOT_A_SCALE}[A-Z](?![A-Z])")
+#: How many of a time "the following" may count: "the following 12 months", "the following two
+#: quarters".
+_A_COUNT = r"(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|several|few)"
 #: A sentence that only points at figures printed somewhere else: the following guidance, as
-#: follows, below is, the table below. "The following" is also a time, "in the following quarter",
-#: and a bare "below" a word like any other: "(details below)", "below last year's".
+#: follows, below is, the table below, is provided below. "The following" is also a time, "in the
+#: following quarter", "over the following 12 months", "the following day", and a bare "below" a
+#: word like any other: "(details below)", "below last year's", "the reasons described below".
 _POINTS_ELSEWHERE_RE = re.compile(
     r"\bthe\s+following\b"
-    r"(?!\s+(?:(?:fiscal|calendar)\s+)?(?:year|quarter|period|month)s?\b"
+    rf"(?!\s+(?:{_A_COUNT}\s+)?(?:(?:fiscal|calendar)\s+)?"
+    r"(?:year|quarter|period|month|week|day|season)s?\b"
     r"(?!\s+(?:\d|guidance|outlook)))"
-    r"|\bas\s+follows\b|\bbelow\s+(?:is|are)\b|\btables?\s+below\b|\bbelow\.?\Z",
+    r"|\bas\s+follows\b|\bbelow\s+(?:is|are)\b|\btables?\s+below\b"
+    r"|\b(?:is|are|provided|summari[sz]ed|shown|presented|listed|outlined)\s+below\.?\Z",
     re.IGNORECASE,
 )
-#: What prints a figure. A year or a quarter's name does not, and "per cent" ends on "cent".
+#: The words for a number, or for a rough one, before a unit word that then prints a figure: "two
+#: to four percent", "low-single-digit percent", "mid-teens percent", "a few percent".
+_NUMBER_WORDS = (
+    r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty"
+    r"|forty|fifty|sixty|seventy|eighty|ninety|hundred|digits?|teens|few|several)"
+)
+#: What prints a figure: a mark, a decimal or a thousands comma, basis points, or a unit word behind
+#: a number. A year or a quarter's name does not, and neither does a unit with no number on it: "in
+#: U.S. dollars", "the stronger dollar", "as a percent of net sales". "Per cent" ends on "cent".
 _PRINTS_A_FIGURE_RE = re.compile(
-    r"[$%]|\d\.\d|\b(?:percent|cents?|dollars?|thousand|million|billion|trillion)\b",
+    r"[$%]|\d\.\d|\d,\d{3}|\b(?:bps|basis\s+points?)\b"
+    rf"|(?:\d|\b{_NUMBER_WORDS})\s*(?:percent|per\s+cent|cents?|dollars?|thousand|million|billion"
+    r"|trillion)\b",
     re.IGNORECASE,
 )
 #: How much text on each side of a quote the gate reads.
@@ -1465,7 +3574,7 @@ _FORWARD_LOOKING_RE = re.compile(
 #: What states a financial figure. A number of units or a year does not, and neither does "a
 #: half-trillion dollar run rate".
 _FINANCIAL_FIGURE_RE = re.compile(
-    r"[$%]|\b(?:percent|cents?|basis\s+points?)\b", re.IGNORECASE,
+    r"[$%]|\b(?:percent|cents?|basis\s+points?|bps)\b", re.IGNORECASE,
 )
 #: A sentence that sends the reader somewhere else, whatever it prints: a call, a webcast, a
 #: letter, or the legal notice about all of them.
@@ -1491,9 +3600,12 @@ def _sentence_goes_on(needle: str, after: str) -> bool:
     the dot of an abbreviation only where a new sentence plainly opens. So does a comma inside a
     closing quote mark, with its attribution behind it, and so does a ";" where it ends a line of a
     list. A quote with no closing punctuation stands only where its line ends: this names what may
-    follow, not what may not, because no list of the marks that carry a sentence on can be whole. A
-    footnote mark is no word of the sentence, so the reading starts behind it. What this cannot see
-    is in `_outlook_problem`'s residual.
+    follow, not what may not, because no list of the marks that carry a sentence on can be whole.
+    A capital opens the next line, except a joining word behind a line set in capitals
+    (`_set_in_capitals`), which capitalises its own: " To $18.5 Billion" carries a headline on,
+    and " For 2027, Acme expects" behind a line of prose is the next sentence. A footnote mark is
+    no word of the sentence, so the reading starts behind it. What this cannot see is in
+    `_outlook_problem`'s residual.
     """
     at = 0
     while at < len(after) and _is_footnote_mark(after[at]):
@@ -1518,7 +3630,8 @@ def _sentence_goes_on(needle: str, after: str) -> bool:
         return _sentence_goes_on(needle + rest[0], rest[1:])
     if _LINE_STOPS_RE.match(rest):
         return False
-    return _QUALIFIER_END_RE.search(needle) is not None or _NEXT_LINE_RE.match(rest) is None
+    next_line = _NEXT_LINE_RE if _set_in_capitals(needle) else _NEXT_LINE_IN_PROSE_RE
+    return _QUALIFIER_END_RE.search(needle) is not None or next_line.match(rest) is None
 
 
 def _opens_mid_sentence(needle: str, before: str) -> bool:
@@ -1540,14 +3653,35 @@ def _opens_mid_sentence(needle: str, before: str) -> bool:
             or _ABBREVIATION_END_RE.search(closed) is not None)
 
 
-def _sentence_starts(text: str) -> List[int]:
-    """Where each sentence of `text` opens. "U.S. GAAP" and "Inc. Revenue" go on past their dots."""
+def _sentence_starts(text: str, *, glyphs: bool = True) -> List[int]:
+    """Where each sentence of `text` opens. "U.S. GAAP" and "Inc. Revenue" go on past their dots.
+    With `glyphs` false, a line of a list opens none: only a full stop, "!" or "?" ends one."""
     starts = [0]
     for stop in _SENTENCE_STOP_RE.finditer(text):
+        if not glyphs and stop.group()[:1] not in ".!?":
+            continue
         end = stop.start() + 1
         if _ABBREVIATION_END_RE.search(text, max(0, end - _ABBREVIATION_CHARS), end) is None:
             starts.append(stop.end())
     return starts
+
+
+def _runs_past_its_sentence(needle: str, after: str) -> bool:
+    """Does `needle` go on past the end of a sentence into words that end none, with `after` the
+    text printed right behind it? Behind a full stop, a heading or a table's row has no closing
+    mark of its own: "...reduced GE9X impact. Defense & Propulsion Technologies (DPT) Three months
+    ended September 30". A last sentence whose closing mark the model left off, where the release
+    prints it right behind the quote, is whole, and so is a line of a list behind a sentence (the
+    ";" of the line is its end, and a list's glyph opens it)."""
+    body = needle.strip(f"{_LIST_GLYPHS} ")
+    last = body[_sentence_starts(body, glyphs=False)[-1]:]
+    if last == body or any(glyph in last for glyph in _LIST_GLYPHS):
+        return False
+    rest = after
+    while rest[:1] and _is_footnote_mark(rest[0]):
+        rest = rest[1:]
+    return (_A_CLOSED_SENTENCE_RE.search(last) is None
+            and _CLOSES_RIGHT_BEHIND_RE.match(rest) is None)
 
 
 def _states_an_outlook(needle: str) -> bool:
@@ -1570,34 +3704,48 @@ def _outlook_problem(quote: str, texts: Sequence[str]) -> Optional[str]:
     A verbatim span can still say what the release does not. A model trimming a long sentence to
     fit stops anywhere: the low end of "$17.5 billion to $18.5 billion" reads as the whole outlook,
     and "expects revenue of $18 billion" as the opposite of the "no longer expects" it came from.
-    The rows of a table are verbatim too, and read as nothing a person wrote, and a whole sentence
-    that only points at figures ("the following guidance", "Below is our outlook") leaves the sheet
-    saying that they exist, with the figures in lines it never shows. A model with no outlook to
-    report also fills the slot with the nearest sentence that sounds like one: a CEO's praise, a
-    remark on the economy, a program update, a pointer to the call. So a sentence shows only when
-    it looks ahead, states a financial figure and sends the reader nowhere else
-    (`_states_an_outlook`). The figure is money or a rate: a guide in vehicles is no figure here.
+    The rows of a table are verbatim too, and read as nothing a person wrote, with its columns lost:
+    two cells side by side (`_TABLE_CELL_RE`: "~25.6% ~25.8%" leaves the quarter's figure and the
+    year's for the reader to guess, "At least 5% growth Approx. 5% growth" this outlook's and the
+    last one's), a table's headings (`_TABLE_HEADINGS_RE`: "2026 2025", "GAAP Non-GAAP", "Current
+    Prior"), and a sentence that runs on past its full stop into words that end no sentence, a
+    heading or a row (`_runs_past_its_sentence`; a decimal point is no full stop: "Diluted EPS 1.25
+    1.10"). A whole sentence that only points at figures
+    ("the following guidance", "Below is our outlook") leaves the sheet saying that they exist, with
+    the figures in lines it never shows. A model with no outlook to report also fills the slot with
+    the nearest sentence that sounds like one: a CEO's praise, a remark on the economy, a program
+    update, a pointer to the call. So a sentence shows only when it looks ahead, states a financial
+    figure and sends the reader nowhere else (`_states_an_outlook`). The figure is money or a rate:
+    a guide in vehicles is no figure here.
 
-    Residual: a table of one column reads as a line of a list, and a next line opening on a capital
-    behind a line with no closing punctuation reads as cut when the quote opens there. The other
-    way round, a quote with no closing punctuation that stops right before a capitalised word, on
-    a last word none of these lists names, reads as a line that ended ("we now expect" before
-    " Reality Labs losses to rise"), and whatever the sentence printed past it is lost, figures
-    included. The prompt forbids that cut, but this gate cannot see it. A word list cannot be whole,
-    so a sentence pointing at figures in other words stands too, an outlook in words this gate
-    does not list ("we see revenue of $5 billion") is refused, and a past sentence naming guidance
-    ("ahead of our guidance of 3%") or a target stands, since nothing here can date it.
+    Residual: a table of one column reads as a line of a list, a heading in front of the sentence
+    stays ("Business Outlook Acme expects"), and a table's row the sentence leads into with no full
+    stop and no heading of the table's ("as follows: Revenue $15.0 - $16.0") reads as the
+    sentence's own words. A next line opening on a capital
+    behind a line with no closing punctuation reads as cut when the quote opens there, as does one
+    opening on a capitalised joining word behind prose that ends on a name ("at Acme Health
+    Services" before " For 2027"). The other way round, a quote with no closing punctuation that
+    stops right before a capitalised word, on a last word none of these lists names, reads as a
+    line that ended ("we now expect" before " Reality Labs losses to rise"), and whatever the
+    sentence printed past it is lost, figures included. The prompt forbids that cut, but this
+    gate cannot see it. A word list cannot be whole, so a sentence pointing at figures in other
+    words stands too, an outlook in words this gate does not list ("we see revenue of $5
+    billion") is refused, and a past sentence naming guidance ("ahead of our guidance of 3%") or a
+    target stands, since nothing here can date it.
     """
     needle = normalize_peg_text(quote)
-    if _TABLE_CELL_RE.search(needle):
+    if _TABLE_CELL_RE.search(needle) or _TABLE_HEADINGS_RE.search(needle):
         return "table_cell"
     for text in texts:
         at = text.find(needle)
         while at != -1:
             end = at + len(needle)
+            after = text[end:end + _QUOTE_CONTEXT_CHARS]
             if (_opens_mid_sentence(needle, text[max(0, at - _QUOTE_CONTEXT_CHARS):at])
-                    or _sentence_goes_on(needle, text[end:end + _QUOTE_CONTEXT_CHARS])):
+                    or _sentence_goes_on(needle, after)):
                 return "cut_sentence"
+            if _runs_past_its_sentence(needle, after):
+                return "table_cell"
             at = text.find(needle, end)
     if _POINTS_ELSEWHERE_RE.search(needle) and _PRINTS_A_FIGURE_RE.search(needle) is None:
         return "lead_in"
@@ -1677,6 +3825,216 @@ _METRIC_WORD_RE = re.compile(
 )
 #: A "per share" right behind a number.
 _TIED_PER_SHARE_RE = re.compile(rf"\s*[()]?\s*(?:{_PER_SHARE})", re.IGNORECASE)
+#: Inside the words of an item's clause, one that names a per-share measure ("EPS", "per diluted
+#: share"): with one there, the clause has run on into the measure the number is the figure of
+#: ("Excluding special items adjusted EPS of $1.20", "Excluding these items earnings per share of
+#: $1.20"), and a tie with no comma in front of the number ties it to that measure
+#: (`_tied_to_an_excluded_item`).
+_A_PER_SHARE_WORD_RE = re.compile(
+    rf"\b(?:eps|(?-i:LPS))(?![A-Za-z])|{_PER}(?:[a-z][\w\-]*\s+){{0,5}}?(?:shares?|ads|adr)"
+    r"(?![A-Za-z])",
+    re.IGNORECASE,
+)
+#: Behind a number an item's clause ties to its item, past its per-share words, the verb of the
+#: measure in front of that clause going on to a figure of its own: "Adjusted EPS excluding
+#: special items of $0.15 per share was $1.20", "GAAP EPS, including the impairment loss, at $0.15
+#: per share, was $1.20". The measure has its figure there, so the number tied to the item is the
+#: item's. It ends in front of that figure, which must read as one (`_its_measure_goes_on`).
+#: Possessive, so a run of spaces has one reading.
+_ITS_MEASURE_GOES_ON_RE = re.compile(
+    rf"(?:\s*+\)?\s*+(?:{_PER_SHARE}))?[\s)]*+,?\s*+"
+    r"(?:was|were|is|are|came\s+(?:in\s+)?(?:at|to)|totall?ed|amounted\s+to|reached|stood\s+at"
+    r"|(?:rose|increased|improved|grew|climbed|jumped|fell|declined|decreased|dropped|narrowed"
+    rf"|widened)\s+to){_HEDGED}\s+{_ABOUT}[$(\s]*(?=\.?\d)",
+    re.IGNORECASE,
+)
+#: Behind a figure, "cents": "was 5 cents better than expected" says by how much, not what.
+_CENTS_BEHIND_RE = re.compile(r"\s*(?:cents?|\u00a2)", re.IGNORECASE)
+#: Behind a figure where a move started, the words that are that figure's own, up to where the move
+#: went (`_WHERE_IT_WENT_RE`): its per-share words, the period it was in ("a year ago", "in 2025",
+#: "in the third quarter of 2025", "in the prior-year quarter") and the commas between them. A
+#: word of anything else is no such tail: "..., due to income of $20 million" goes elsewhere.
+_ITS_OWN_TAIL_RE = re.compile(
+    rf"(?:\s*\)?\s*(?:{_PER_SHARE}))?\s*\)?\s*,?"
+    r"(?:\s*(?:a\s+year\s+(?:ago|earlier)|last\s+year|year[\s\-]+over[\s\-]+year"
+    r"|(?:in|for|during)\s+(?:(?:the|its)\s+)?(?:(?:(?!(?:to|from|and|or|due)\b)[\w\-]+)\s+){0,4}?"
+    r"(?:quarters?|periods?|years?)(?:\s+(?:of\s+)?(?:fiscal\s+)?(?:19|20)\d\d)?"
+    r"|(?:in|for|during)\s+(?:fiscal\s+)?(?:19|20)\d\d)\s*,?)?\s*",
+    re.IGNORECASE,
+)
+#: Behind a number, its per-share words and the close of the aside it is printed in, with nothing
+#: of the item's own behind them: "($0.46 per diluted share),", "or $0.46 per diluted share,", or
+#: the sentence's end, past words that are still the measure's: the revenue it was earned on (" on
+#: revenue of $1.2 billion", ", on net sales of $1.2 billion"), the continuing operations it comes
+#: from, the quarter it is for, named with no year or date (" for the quarter", ", in the third
+#: quarter"), and ", in line with". A period with a year or a date may be another period's ("for
+#: the quarter ended September 30, 2025"), which these words cannot tell from this one, so it
+#: closes nothing. "($0.12 per share) from the sale" and "..., or $0.12 per share, related to the
+#: sale" go on with the item's words (`_its_aside_holds_its_total`).
+_CLOSES_THE_ASIDE_BEHIND_RE = re.compile(
+    rf"(?:\s*\)?\s*(?:{_PER_SHARE}))?\s*\)?"
+    r"(?:\s*,?\s*on\s+(?:net\s+)?(?:revenues?|sales)\s+of\s+"
+    rf"{_ABOUT}[$\s]*\.?\d[\d,]*(?:\.\d+)?(?:\s*(?:thousand|million|billion|trillion)\b)?"
+    r"|\s*,?\s*from\s+continuing\s+operations\b"
+    r"|\s*,?\s*(?:for|in|during)\s+the\s+(?:(?:first|second|third|fourth)\s+)?(?:quarter|period)"
+    r"\b(?![\s,]*(?:(?:of|ended|ending)\b|\d)))?\s*"
+    r"(?:[.;]|\Z|,(?=\s*in\s+line\s+with\b)"
+    r"|,(?!\s*(?:from|on|in|for|of|with|related|associated|attributable|due|resulting"
+    r"|stemming|arising|tied|linked|connected|primarily|mainly|largely|partly|reflecting"
+    r"|including|excluding|which|that|net)\b))",
+    re.IGNORECASE,
+)
+#: Behind a word that sets a figure against another, an expectation it is set against, which a
+#: level is as often as a distance: "guidance", "the high end of guidance", "expected", "the
+#: consensus estimate", "analysts' estimates", "the company's outlook". A closed list: any other
+#: figure it is set against may be another period's.
+_AN_EXPECTATION = (
+    r"\s+(?:(?:expected|anticipated|forecast|projected|planned|estimated)"
+    r"|(?:(?:the|its|our|their|company['\u2019]s|analysts['\u2019]?|analyst|street['\u2019]s"
+    r"|wall|street|consensus|high|low|upper|lower|top|bottom|end|midpoint|of|prior|previous|initial"
+    r"|original|raised|updated|revised|current|average|mean)\s+){0,6}"
+    r"(?:guidance|consensus|expectations?|estimates?|outlook|forecasts?|plan|targets?"
+    r"|projections?))(?![\w\-\u2010-\u2015])"
+)
+#: Right behind "above", "ahead of", "better than" and the like, an expectation (`_AN_EXPECTATION`):
+#: where a level stands against what was expected of it, which says nothing of a move: ", ahead of
+#: guidance", ", above the high end of guidance", ", better than expected". A word that says how
+#: far ("more than", "lower than") says how much the measure beat by, and so does any of them with
+#: no comma in front ("$0.05 per share above consensus").
+_A_LEVEL_AGAINST_AN_EXPECTATION = (
+    r"(?:(?:better|worse)\s+than|below|above|(?:ahead|short|shy)\s+of|behind)\b"
+    rf"(?={_AN_EXPECTATION})"
+)
+#: Behind a number and its per-share words, what sets the amount in front of them against another
+#: figure, so that amount is how far a measure moved, never its level: ", lower than last year",
+#: "higher than a year ago", "below the prior year", "above the prior-year quarter", "$0.05 per
+#: share more than planned" (`_another_share_after_its_own`). Never a level set against an
+#: expectation behind a comma (`_A_LEVEL_AGAINST_AN_EXPECTATION`): ", ahead of guidance", ", above
+#: the high end of guidance", ", better than expected" say nothing of a move.
+_SET_AGAINST_ANOTHER_BEHIND_RE = re.compile(
+    rf"(?:\s*\)?\s*(?:{_PER_SHARE}))?\s*\)?\s*(?:,\s*(?!{_A_LEVEL_AGAINST_AN_EXPECTATION}))?"
+    r"(?:(?:lower|higher|less|more|greater|smaller|better|worse)\s+than|below|above"
+    r"|(?:ahead|short|shy)\s+of|behind)\b",
+    re.IGNORECASE,
+)
+#: Between a measure's own per-share figure and a comma behind it that opens a later subject of
+#: the measure's own, nothing but the figure's per-share words and parenthesis, and a period before
+#: this one that the figure is for (`period`): "$1.00 per diluted share, the company reported",
+#: "$0.20 per diluted share, a year ago, the company reported", "$0.20 per diluted share, in the
+#: prior-year quarter, the company reported". A closed list: other words may lead into the later
+#: subject and make it another period's or a part's ("$1.20 per diluted share, and for the full
+#: year, net income was", "..., for the nine months, net income was")
+#: (`_a_subject_of_its_own_behind`).
+_A_PERIOD_BEFORE_THIS_ONE = (
+    r"(?:a\s+year\s+(?:ago|earlier)|last\s+year"
+    r"|(?:in|for|during)\s+the\s+(?:(?:same|comparable|corresponding|prior|previous"
+    r"|year[\s\-\u2010-\u2015]+(?:ago|earlier)|prior[\s\-\u2010-\u2015]+year"
+    r"|last[\s\-\u2010-\u2015]+year['\u2019]s)\s+){1,3}(?:quarter|period|year)"
+    r"(?:\s+(?:of\s+)?(?:last|the\s+prior|the\s+previous)\s+year)?)"
+)
+_RIGHT_BEHIND_ITS_OWN_FIGURE_RE = re.compile(
+    rf"(?:\s*\)?\s*(?:{_PER_SHARE}))?\s*\)?(?:\s*,\s*(?P<period>{_A_PERIOD_BEFORE_THIS_ONE}))?"
+    r"\s*,?\s*",
+    re.IGNORECASE,
+)
+#: Behind a later subject's per-share figure (`_a_subject_of_its_own_behind`), the words that only
+#: say more of what it is: its per-share words, "basic and diluted", "(diluted)" or "on a fully
+#: diluted basis" (`_A_LABELS_JOINED_WORDS`), the stock it is a share of ("of Class A common
+#: stock"), a footnote's mark ("(1)", "*") and the parenthesis around it.
+_ITS_PER_SHARE_WORDS_BEHIND = (
+    rf"(?:\s*+\)?\s*+(?:{_PER_SHARE}))?+(?:\s*+\))?+"
+    rf"(?:\s*+,?\s*+(?:{_A_LABELS_JOINED_WORDS}))?+"
+    r"(?:\s++of\s++(?:class\s++[a-z]\s++)?(?:common|ordinary)\s++(?:stock|shares?)\b)?+"
+    r"(?:\s*+(?:\(\s*+\d{1,2}\s*+\)|\*{1,3}|[\u2020\u2021]))?+\s*+\)?+"
+)
+#: What parts those words from the next: a comma, a colon, a dash set apart, or nothing. Whatever
+#: follows must still be on the closed lists below: ": on the sale of the business" is an item's.
+_A_SEPARATOR = r"\s*+(?:[,:]|(?<=\s)[\-\u2013\u2014](?=\s))?\s*+"
+#: Then this quarter, named with no year or date, or the continuing operations the figure comes
+#: from: " for the quarter", ", in the fiscal third quarter", " this quarter", " in Q3", " for the
+#: reporting period", " from continuing operations". "For the quarter ended September 30, 2025"
+#: and "in the third quarter of 2026" may be another period's, which these words cannot tell from
+#: this one.
+_THIS_QUARTER_BEHIND = (
+    r"(?:(?:for|in|during)\s++the\s++(?:fiscal\s++)?(?:(?:first|second|third|fourth|current)\s++"
+    r"(?:fiscal\s++)?)?(?:quarter|(?:reporting\s++)?period)|this\s++quarter|in\s++q[1-4]"
+    r"|from\s++continuing\s++operations)\b(?![\s,]*+(?:(?:of|ended|ending)\b|\d))"
+)
+#: Then a note that names no other figure: the basis the figure is on (", on a GAAP basis", "
+#: (GAAP)", ", as reported"), or that it is a record (", a record", ", a new quarterly record", "
+#: (a record)", ", a record high", ", a record for the company", ", which was a record", ", both
+#: records", ", the highest in the company's history"). "A record loss on the sale of the
+#: business" goes on into an item's words: a note stands only where another, or the end, follows.
+_A_NOTE_ON_THE_FIGURE = (
+    r"\(?\s*+(?:on\s++an?\s++(?:fully\s++)?(?:gaap|reported|as[\s\-]++reported|u\.?s\.?\s++gaap"
+    r"|diluted|basic(?:\s++and\s++diluted)?|per[\s\-]++share)\s++basis"
+    r"|(?:gaap|u\.?s\.?\s++gaap|unaudited)(?=\s*+\))|as\s++reported"
+    r"|(?:which\s++(?:was|is)\s++)?(?:an?|both)\s++(?:new\s++)?(?:(?:quarterly|all[\s\-]++time"
+    r"|(?:first|second|third|fourth)[\s\-]++quarter)\s++)?records?"
+    r"(?:\s++(?:high|for\s++(?:the\s++company|any\s++quarter|the\s++(?:(?:first|second|third"
+    r"|fourth)\s++)?quarter)))?+"
+    r"|the\s++highest\s++in\s++(?:the\s++company['\u2019]s|its|our)\s++history)\b\s*+\)?+"
+)
+#: Then where the figure's own words end: the end of its clause or sentence, or of its line in a
+#: list; another part of the sentence (", and", ", while"); a comparison with another period's
+#: figure (", compared with $1.00 a year ago", " (compared with $1.00 a year ago)", ", up 20%",
+#: ", versus $1.00", ", against $1.00", ", which compares with $1.00", ", from $1.00 a year ago",
+#: ", year over year", ", an increase of 20%", ", growth of 20%", ", or 20% higher than a year
+#: ago"); a level set against an expectation behind a comma (", ahead of guidance", ", which
+#: exceeded guidance", ", ahead of the $1.10 consensus", `_AN_EXPECTATION`), or in line with one;
+#: or the revenue it was earned on (", on revenue of $1.2 billion").
+_ITS_CLAUSE_ENDS = (
+    rf"(?:[.;!?]|\Z|[{_LIST_GLYPHS}]"
+    r"|\(?\s*+(?:and|but|while|whereas|(?:as\s++)?compared|versus|vs|up|down|against"
+    r"|relative\s++to|which\s++compares|year[\s\-]++over[\s\-]++year|sequentially)\b"
+    r"|from\s++[$(]*+\.?\d"
+    r"|(?:representing\s++)?an?\s++(?:(?:year[\s\-]++over[\s\-]++year|sequential)\s++)?"
+    r"(?:[\d.,]++\s*+(?:%|percent\b)\s*+)?(?:increase|decrease|decline|rise|drop|improvement)\b"
+    r"|growth\s++of\s++[\d.,]++\s*+(?:%|percent\b)"
+    r"|(?:or\s++)?[\d.,]++\s*+(?:%|percent\b)\s*+(?:higher|lower|more|less|above|below)\b"
+    r"|(?:increas|decreas|declin|ris|improv|grow)ing\b"
+    r"|(?:(?<=,)|(?<=,\s))(?:(?:well|comfortably|slightly|significantly|substantially|modestly"
+    r"|just)\s++)?(?:which\s++)?(?:above|below|(?:ahead|short|shy)\s++of|behind"
+    r"|(?:better|worse)\s++than|beat(?:ing|s)?|exceed(?:ing|ed|s)?|surpass(?:ing|ed|es)?"
+    rf"|top(?:ping|ped|s)?)(?=(?:\s++the\s++\$?\d[\d.,]*+)?{_AN_EXPECTATION})"
+    r"|in\s++line\s++with\b"
+    rf"|on\s++(?:net\s++)?(?:revenues?|sales)\s++of\s++{_ABOUT}[$\s]*+\.?\d"
+    r"|or\s++[$(]*+\.?\d[\d.,]*+\)?\s++(?:on\s++an?\s++(?:adjusted|non[\s\-]?gaap|core"
+    r"|comparable)\s++basis|excluding|adjusted|non[\s\-]?gaap)\b)"
+)
+#: Behind a subject that names the measure with a verb of its own, or reports a profit, also what
+#: drove the figure or what it took in: ", driven by higher volumes", ", reflecting higher sales",
+#: ", primarily due to higher volumes", " as revenue rose 5%", ", which included a $0.05 per share
+#: charge", ", including a $0.05 per share charge". Behind a subject that reports a loss these are
+#: an item's words ("and the company recorded a net loss of $20 million, or $0.05 per share, due to
+#: the sale of the business").
+_WHAT_DROVE_IT = (
+    r"(?:(?:primarily|mainly|largely|partly|partially|in\s++part)\s++)?"
+    r"(?:driven\s++by|reflecting|due\s++to|as\s++a\s++result\s++of|benefit(?:ing|ed)\s++from"
+    r"|resulting\s++from|helped\s++by|led\s++by|as(?!\s++(?:compared|reported)\b)|despite"
+    r"|(?:which\s++)?(?:includ(?:ed|es|ing)|reflect(?:ed|s))|including)\b"
+)
+#: Behind a per-share figure that a later subject of its own frees, what may stand for that figure
+#: to stay the subject's (`_a_subject_of_its_own_behind`): its per-share words
+#: (`_ITS_PER_SHARE_WORDS_BEHIND`), this quarter or the continuing operations
+#: (`_THIS_QUARTER_BEHIND`), notes (`_A_NOTE_ON_THE_FIGURE`), and the end of its words
+#: (`_ITS_CLAUSE_ENDS`). A closed list: anything else may be the words of an item whose total the
+#: subject named, the figure then that item's share (", on the sale of the business", " from the
+#: divestiture", ", related to the hurricane", ", in discontinued operations", ", attributable to
+#: noncontrolling interests", ", a charge tied to the sale"), or of another period (", year to
+#: date", ", in the third quarter of 2025", ", for the nine months"). Possessive, so a run of
+#: spaces has one reading.
+_ITS_CLAUSE_ENDS_BEHIND_RE = re.compile(
+    rf"{_ITS_PER_SHARE_WORDS_BEHIND}{_A_SEPARATOR}(?:{_THIS_QUARTER_BEHIND}{_A_SEPARATOR})?+"
+    rf"(?:{_A_NOTE_ON_THE_FIGURE}{_A_SEPARATOR})*+{_ITS_CLAUSE_ENDS}",
+    re.IGNORECASE,
+)
+#: The same, with what drove the figure or what it took in (`_WHAT_DROVE_IT`).
+_ITS_MEASURES_CLAUSE_ENDS_BEHIND_RE = re.compile(
+    rf"{_ITS_PER_SHARE_WORDS_BEHIND}{_A_SEPARATOR}(?:{_THIS_QUARTER_BEHIND}{_A_SEPARATOR})?+"
+    rf"(?:{_A_NOTE_ON_THE_FIGURE}{_A_SEPARATOR})*+(?:{_ITS_CLAUSE_ENDS}|{_WHAT_DROVE_IT})",
+    re.IGNORECASE,
+)
 #: What ends the words tied to a number from behind: a mark of the clause, the next figure, or a
 #: word that starts something else. "$1.2 billion on revenue of" is no revenue, and "$0.09 reflects
 #: a special charge" is no charge.
@@ -1695,10 +4053,6 @@ _TIE_LINK_RE = re.compile(r"\s*(?:in|of)\b", re.IGNORECASE)
 _TIE_CHARS = 80
 _TIE_WORDS_LINKED = 4
 _TIE_WORDS_BARE = 2
-#: In front of a number, the words that only say how exact it is.
-_HEDGE = r"(?:approximately|about|nearly|roughly|around|almost)"
-_ABOUT = rf"(?:(?:a|an|the|some|{_HEDGE})\s+)?"
-_HEDGED = rf"(?:\s+{_HEDGE})?"
 #: Around a number, what makes it a change in the metric and not its level: "rose $1.2 billion",
 #: "an increase of about $1.2 billion", "an $80 million increase in revenues", any "by $3.20", and
 #: a change given twice, "rose 5%, or $1.2 billion". "More than doubled" says how much, not by what.
@@ -1820,11 +4174,14 @@ _A_MARK_BEFORE_THE_NUMBER_RE = re.compile(r";[$(\s]*\Z")
 #: A word no longer counts as the label when it sits inside an aside with no commas: "EPS excluding
 #: the loss on debt extinguishment was", "Revenue before reimbursable costs was". A verb ends one.
 _INSIDE_AN_ASIDE_RE = re.compile(
-    rf"\b{_ASIDE_OPENS}\s+"
+    rf"\b(?P<opens>{_ASIDE_OPENS})\s+"
     r"(?:(?!(?:was|were|is|are|rose|fell|grew|increased|decreased|declined|improved|reached"
     r"|totaled|totalled)\b)[^\s,;:]+\s+){0,6}\Z",
     re.IGNORECASE,
 )
+#: Inside an "after" or a "before" that tells when or why ("Revenue fell 5% after the strike"), an
+#: "and" opens a new subject: in "after the strike and the net loss was" the loss is the sentence's.
+_A_NEW_SUBJECT_RE = re.compile(r"\b(?:and|or)\s", re.IGNORECASE)
 #: In front of a "per share", what makes it the tail of a figure. A footnote or a "(loss)" is none.
 _BEHIND_A_FIGURE_RE = re.compile(r"(?:\d\.\d+|\$\s*\d(?:[\d,.]*\d)?)\s*\)?\s*\Z")
 _FIGURE_CHARS = 24
@@ -2040,9 +4397,7 @@ def _labels_before(quote: str, tok: _Printed) -> List[str]:
     whose reach stopped short of this number (`_label_ended`), or "bare" for a "per share" that
     names no measure, which reads on for the word that does. Another measure's word keeps its
     number however far: refusing is the safe side of that doubt."""
-    head = quote[_clause_start(quote, tok):tok.start]
-    for rule in (_ASIDE_RE, _LAST_ASIDE_RE):
-        head = rule.sub(_WHERE_AN_ASIDE_WAS, head)
+    head = _without_asides(quote[_clause_start(quote, tok):tok.start], _WHERE_AN_ASIDE_WAS)
     # "$0.06 per share" and "$5.0 billion in revenue" name that figure, never the next one. A total
     # stays: "net income of $1.0 billion, or $0.46 per share".
     figures = [figure for figure in _numbers_in(head) if _reads_as_a_figure(figure)]
@@ -2064,8 +4419,14 @@ def _labels_before(quote: str, tok: _Printed) -> List[str]:
 
     def _own(word: "re.Match[str]") -> bool:
         aside = _INSIDE_AN_ASIDE_RE.search(head, max(0, word.start() - _ASIDE_CHARS), word.start())
-        return aside is None or (_SPLITS_OFF_AN_AMOUNT_RE.match(aside.group()) is not None
-                                 and _ITS_AMOUNT_RE.fullmatch(head, word.end()) is not None)
+        if aside is None:
+            return True
+        if (word.lastgroup == "total" and aside.group("opens").lower() in ("after", "before")
+                and _MEASURE_IT_QUALIFIES_RE.search(head, 0, aside.start()) is None
+                and _A_NEW_SUBJECT_RE.search(aside.group()) is not None):
+            return True
+        return (_SPLITS_OFF_AN_AMOUNT_RE.match(aside.group()) is not None
+                and _ITS_AMOUNT_RE.fullmatch(head, word.end()) is not None)
 
     labels: List[str] = []
     # With every word in an aside, the clause opens on it: "Excluding items the net loss was".
@@ -2489,10 +4850,13 @@ def _eps_read(
 ) -> Tuple[Optional[Tuple[_Printed, float, float]], str]:
     """(the EPS as (the number, dollars, half its last printed digit) or None, the reason) for one
     slot, read in `text`, from the numbers of its span `within`. The print is the one that names
-    the metric and this slot's basis, on the diluted count: two can print the same number."""
-    prints = _eps_prints(text, value, within=within)
+    the metric and this slot's basis, on the diluted count: two can print the same number. A print
+    whose words point both ways, or that is an excluded item's own figure, is no figure the quote
+    names as this one, so its reason is `wrong_metric`."""
+    unnamed: List[_Printed] = []
+    prints = _eps_prints(text, value, within=within, unnamed=unnamed)
     if not prints:
-        return None, "value_mismatch"
+        return None, "wrong_metric" if unnamed else "value_mismatch"
     figures = [printed for printed in _numbers_in(text)
                if _could_be_an_eps(printed) and _metric_at(text, printed) == "per_share"]
     named = [p for p in prints if p[0] in figures and not _reads_as_basic(text, p[0])]
@@ -2677,8 +5041,8 @@ def unwrap_json(raw: Any) -> Any:
 #: another version reads as no row (`earnings_live_service.held_filing_from`). A fix here cannot
 #: reach a figure the table holds, and nothing on a row tells a misread from a good one, so
 #: without this the deploy that fixes a misread would restore it, and a false outlook, which FMP
-#: never replaces, would stay for its live days. Move it by one with every change to what
-#: `verify_extraction` keeps, or to anything it reads (a test pins the two together:
+#: never replaces, would stay on every day its record is read. Move it by one with every change
+#: to what `verify_extraction` keeps, or to anything it reads (a test pins the two together:
 #: test_the_verifier_cannot_change_without_its_version_moving), and with any change to `_SYSTEM`
 #: that should reach the filings held. That deploy reads today's pending filings once more while
 #: the SEC watch is open (06:00–22:00 ET), and after 22:00 ET they wait for FMP like any other: no
@@ -2849,17 +5213,33 @@ def verify_extraction(
     return (figures if figures.has_figures or guidance else None), reasons
 
 
-def poll_interval_seconds(now_et: datetime) -> Optional[int]:
+def poll_interval_seconds(now_et: datetime,
+                          windows: Collection[str] = BOTH_RELEASE_WINDOWS) -> Optional[int]:
     """How often one symbol's submissions may be read at `now_et`, or None outside EDGAR's
-    hours and on a weekend (nothing new can be accepted then). A weekday federal holiday is
-    polled like any weekday, because `market_hours` keeps the market's calendar, not EDGAR's."""
+    hours and on a weekend (nothing new can be accepted then): every `_FAST_POLL_SECONDS` inside
+    one of `windows`, the ones its company puts its results out in
+    (`EarningsFilingWatcher.release_windows`), and in EDGAR's last minute whatever they are
+    (`_EDGAR_LAST_MINUTE`), and every `_SLOW_POLL_SECONDS` otherwise. A name with no hours here
+    speeds nothing up. A weekday federal holiday is polled like any weekday, because
+    `market_hours` keeps the market's calendar, not EDGAR's."""
     hm = (now_et.hour, now_et.minute)
     if now_et.weekday() >= 5 or not (_EDGAR_OPEN <= hm < _EDGAR_CLOSE):
         return None
-    for start, end in _RELEASE_WINDOWS:
-        if start <= hm < end:
+    if hm >= _EDGAR_LAST_MINUTE:
+        return _FAST_POLL_SECONDS
+    for name in windows:
+        hours = RELEASE_WINDOW_HOURS.get(name) if isinstance(name, str) else None
+        if hours is not None and hours[0] <= hm < hours[1]:
             return _FAST_POLL_SECONDS
     return _SLOW_POLL_SECONDS
+
+
+def _model_deadline_seconds() -> float:
+    """How long one read's model step may take: a whole call, and the room behind it
+    (`_MODEL_DEADLINE_MARGIN_SECONDS`), which is all a call's own timeout set to nothing or less
+    leaves."""
+    return (max(0.0, float(settings.GEMINI_REQUEST_TIMEOUT_SECONDS))
+            + _MODEL_DEADLINE_MARGIN_SECONDS)
 
 
 def build_prompt(symbol: str, report_date: date, text: str) -> str:
@@ -2907,6 +5287,18 @@ class _Watch:
         return max(interval, self.retry_gap, rest)
 
 
+@dataclass(frozen=True)
+class _Learned:
+    """A company's release windows, learned on its first read of an ET day (`_learn_habit`)."""
+
+    windows: FrozenSet[str]
+    # The day of the read that learned them.
+    day: date
+    # The end of that day, on the monotonic clock: from then on the answer is both windows again,
+    # until the next day's first read learns it anew.
+    until: float
+
+
 @dataclass
 class EarningsFilingWatcher:
     """Per-process state of the SEC watch, its held filings restored at boot (`restore`). One
@@ -2915,21 +5307,99 @@ class EarningsFilingWatcher:
     _watch: Dict[Tuple[str, date], _Watch] = field(default_factory=dict)
     # Releases only, by accession: the figures, or None for one with none that verified.
     _extracted: Dict[str, Optional[FilingFigures]] = field(default_factory=dict)
+    # When each company puts its results out, by symbol, as its own record showed it today
+    # (`release_windows`).
+    _habits: Dict[str, _Learned] = field(default_factory=dict)
+    # Each report day's tickers in their places, first place first (`_placed`).
+    _order: Dict[date, List[str]] = field(default_factory=dict)
+    # One entry per submissions read, oldest first, for the minute's count of reads
+    # (`_forget_reads_a_minute_back`): its round's start on the loop's clock (`_ticked`) and on
+    # the monotonic clock.
+    _reads: Deque[Tuple[float, float]] = field(default_factory=deque)
+    # The loop's clock: at least how long the loop's ticks have run from this process's first
+    # round to its latest one (`_start_round`), and when that latest round started and ended on
+    # the monotonic clock (no end while it runs, or if one never came).
+    _ticked: float = 0.0
+    _round_started: Optional[float] = None
+    _round_ended: Optional[float] = None
     _parked_until: float = 0.0
     calls: int = 0
+    # Model calls made, each one's read's (`_extract`).
+    model_calls: int = 0
 
     def reset(self) -> None:
         self._watch.clear()
         self._extracted.clear()
+        self._habits.clear()
+        self._order.clear()
+        self._reads.clear()
+        self._ticked = 0.0
+        self._round_started = self._round_ended = None
         self._parked_until = 0.0
         self.calls = 0
+        self.model_calls = 0
 
     def prune(self, keep_days: Sequence[date]) -> None:
         keep = set(keep_days)
         for key in [k for k in self._watch if k[1] not in keep]:
             self._watch.pop(key, None)
+        for day in [d for d in self._order if d not in keep]:
+            self._order.pop(day, None)
         if len(self._extracted) > 512:
             self._extracted.clear()
+        mono = time.monotonic()
+        for symbol in [s for s, held in self._habits.items() if mono >= held.until]:
+            self._habits.pop(symbol, None)
+
+    def release_windows(self, symbol: str) -> FrozenSet[str]:
+        """The release windows `symbol`'s company puts its results out in, as its own SEC record
+        shows them: {`RELEASE_WINDOW_MORNING`}, {`RELEASE_WINDOW_CLOSE`} or both
+        (`_release_habit`). Learned from the read the watch makes anyway, at no extra SEC call, on
+        the symbol's first read of the ET day, and kept until that day ends. So it is both windows
+        until then, and all day for a ticker SEC does not list under a CIK, a foreign filer, a
+        record that does not say, or one never read. The SEC cadence reads it, and the FMP one may.
+        Never raises."""
+        if not isinstance(symbol, str):
+            return BOTH_RELEASE_WINDOWS
+        return self._windows_of(symbol.strip().upper(), time.monotonic())
+
+    def _windows_of(self, symbol: str, mono: float) -> FrozenSet[str]:
+        held = self._habits.get(symbol)
+        if held is None or mono >= held.until:
+            return BOTH_RELEASE_WINDOWS
+        return held.windows
+
+    def _learn_habit(self, symbol: str, report_day: date, data: Any, day_ends: float) -> None:
+        """Read the company's release windows from the record just fetched, on its first read of
+        the report day only (`release_windows`): again on its next report day, or once the day
+        they were learned on has ended at midnight ET, whichever comes first. A record that cannot
+        be read teaches nothing, so the next read tries again."""
+        held = self._habits.get(symbol)
+        if held is not None and held.day == report_day and time.monotonic() < held.until:
+            return
+        try:
+            habit = _release_habit(data, report_day)
+        except Exception as e:
+            # Never the read's cost: both windows for the day, and said once, not every minute.
+            logger.warning(
+                "[earnings-live-filing] sym=%s day=%s release windows not read from the record "
+                "(%s: %s): both windows today", symbol, report_day.isoformat(),
+                type(e).__name__, e, exc_info=True,
+            )
+            habit = _Habit(BOTH_RELEASE_WINDOWS, 0, "record not read")
+        if habit == _UNREADABLE_HABIT:
+            return
+        self._habits[symbol] = _Learned(habit.windows, report_day, day_ends)
+        logger.info(
+            "EARNINGS_LIVE_FILING sym=%s day=%s windows=%s releases=%d (%s)",
+            symbol, report_day.isoformat(),
+            "+".join(name for name in RELEASE_WINDOW_HOURS if name in habit.windows),
+            habit.releases, habit.why,
+        )
+
+    def _interval(self, symbol: str, now_et: datetime, mono: float) -> Optional[int]:
+        """The symbol's own SEC cadence at `now_et` (`poll_interval_seconds`)."""
+        return poll_interval_seconds(now_et, self._windows_of(symbol, mono))
 
     def _finished(self, key: Tuple[str, date]) -> bool:
         """Has this report's watch ended? It stays on the caller's list until its record is
@@ -2945,15 +5415,8 @@ class EarningsFilingWatcher:
         w.done, w.figures = True, figures
         self._extracted[figures.accession] = figures
 
-    def release_windows(self, symbol: str) -> frozenset:
-        """The release windows `symbol`'s company puts its results out in, by name ("morning",
-        "close"), read by the FMP cadence (`earnings_live_service._fmp_cadence`). This is the
-        both-windows answer: nothing here learns a company's own window yet, and a company
-        nothing is known about counts as both."""
-        return frozenset({"morning", "close"})
-
     def _due(self, key: Tuple[str, date], now_et: datetime, mono: float) -> bool:
-        interval = poll_interval_seconds(now_et)
+        interval = self._interval(key[0], now_et, mono)
         if interval is None or self._finished(key):
             return False
         w = self._watch.get(key)
@@ -2961,14 +5424,142 @@ class EarningsFilingWatcher:
             return True
         return mono - w.checked_mono >= w.wait_seconds(interval) - _DUE_SLACK_SECONDS
 
+    def _held_stamp(self, symbol: str, w: _Watch, now_et: datetime, ended: float) -> float:
+        """The stamp the hold at the end of a round that spent an attempt (`_run_round`) gives a
+        filing waiting on its next attempt: the one it comes due from a minute after `ended`, on
+        the cadence of the round that started at `now_et`, and never one earlier than its own."""
+        # Never the fallback: no symbol comes due outside EDGAR's hours.
+        interval = self._interval(symbol, now_et, ended) or _FAST_POLL_SECONDS
+        return max(w.checked_mono, ended + _FAST_POLL_SECONDS - w.wait_seconds(interval))
+
+    def _gives_way_for(self, read: Sequence[str], left: Sequence[str], report_day: date,
+                       now_et: datetime, started: float) -> List[str]:
+        """After a model call: the tickers of `read`, those a round that started at `started` on
+        the monotonic clock (`now_et` on ET's) has read, that the next round would read again,
+        were this one to stop now and leave it `left` (`run_once`). None, so the round reads on:
+          * until it has run into the loop's next tick (`EARNINGS_LIVE_INTERVAL_SECONDS`, its
+            slack aside), which the next round never starts before. On a loop slower than a
+            minute, a round stopped at a ticker's own minute left the watcher idle until the tick,
+            with the releases below unread;
+          * when a ticker of `left` would not be due in the next round: a release window, or
+            EDGAR's day, closed by then, which would cost it the window's last read, and in EDGAR's
+            last minute its last read of the day.
+        The next round is judged where it would start, at the loop's tick or the loop's rest after
+        this round (`_LOOP_REST_SECONDS`), and again the slack after, for the tick's own work
+        before the round: a ticker due at only one of the two is not due. A filing of `left` that
+        waits on its next attempt is judged on its own stamp. The hold at the end of a round that
+        spent an attempt keeps that stamp only when the minute it holds the filing for would let
+        it in after its window or EDGAR's day has closed, and holds it otherwise, so the next round
+        can find it not due after all (`_run_round`)."""
+        elapsed = max(0.0, time.monotonic() - started)
+        loop = float(settings.EARNINGS_LIVE_INTERVAL_SECONDS)
+        if elapsed < loop - _DUE_SLACK_SECONDS:
+            return []
+        starts = max(loop, elapsed + _LOOP_REST_SECONDS)
+        moments = [(now_et + timedelta(seconds=at), started + at)
+                   for at in (starts, starts + _DUE_SLACK_SECONDS)]
+
+        def _due_then(symbol: str) -> bool:
+            return all(self._due((symbol, report_day), at_et, at_mono)
+                       for at_et, at_mono in moments)
+
+        if not all(_due_then(symbol) for symbol in left):
+            return []
+        return [symbol for symbol in read if _due_then(symbol)]
+
+    def _start_round(self, mono: float) -> None:
+        """Move the loop's clock (`_ticked`) on to the round starting at `mono` on the monotonic
+        clock. The loop starts a round its interval after the last one's tick, or its rest after
+        that tick's end when it ran longer (`earnings_live_service._forever`,
+        `_LOOP_REST_SECONDS`), and a round runs inside its tick, so two rounds' ticks are at least
+        the interval apart and at least the earlier round and the rest: the clock moves on by the
+        larger of the two, never more. Only by the interval when that round's end is not known."""
+        if self._round_started is not None:
+            apart = float(settings.EARNINGS_LIVE_INTERVAL_SECONDS)
+            if self._round_ended is not None:
+                apart = max(apart,
+                            self._round_ended - self._round_started + _LOOP_REST_SECONDS)
+            self._ticked += apart
+        self._round_started, self._round_ended = mono, None
+
+    def _forget_reads_a_minute_back(self, mono: float) -> None:
+        """Take off the minute's count the reads of the rounds a minute before the one starting at
+        `mono` on the monotonic clock (`run_once`). A minute on the loop's clock (`_start_round`)
+        as well as on the monotonic one. A round's start can fall a moment short of its tick, the
+        tick's own work coming first, so on the monotonic clock a minute needs the slack
+        (`_DUE_SLACK_SECONDS`), and with the slack alone a round 55-59 s after another read a
+        second cap in one minute: on a loop of 55-59 s, of 19, 28 or 29 s at a multiple of it, or,
+        on any loop under a minute, a second after a round that ran 54-58 s. The loop's clock
+        knows none of that slack, and it never runs ahead of the loop's ticks. And a read comes
+        off a minute and the slack on, on the monotonic clock alone: a tick with no report pending
+        starts no round here, so the loop's clock can fall behind the ticks."""
+        while self._reads:
+            ticked, started = self._reads[0]
+            age = mono - started
+            if age < _FAST_POLL_SECONDS - _DUE_SLACK_SECONDS:
+                return
+            if (age < _FAST_POLL_SECONDS + _DUE_SLACK_SECONDS
+                    and self._ticked - ticked < _FAST_POLL_SECONDS):
+                return
+            self._reads.popleft()
+
     def _holds_a_slot(self, key: Tuple[str, date], now_et: datetime, mono: float) -> bool:
         """Does this report count against the cap this round? Not once its watch has ended, and
         not while a foreign filer rests: it has no read coming, and the slot can serve a ticker
-        that does. Its rest over, it stands in its rank like any other."""
+        that does. Its rest over, it stands in its place like any other (`_placed`).
+
+        Nor, inside a release window its own company does not use, between two of its 15 min
+        reads: that window is other companies' minute, and a slot held there left the cap's reads
+        idle while a company placed below waited, with no read, for a release due in that very
+        window, until after the close. It holds one in the round its read is due, in its place,
+        so the cap still bounds every round's reads. Between the windows a ticker keeps its slot
+        while it waits, so the cap still counts tickers at a time, not reads a round: a slot
+        handed down the list there would put more tickers on SEC's shared circuit, for no one's
+        minute."""
         w = self._watch.get(key)
         if w is not None and w.foreign:
             return self._due(key, now_et, mono)
-        return not self._finished(key)
+        if self._finished(key):
+            return False
+        if (self._interval(key[0], now_et, mono) == _SLOW_POLL_SECONDS
+                and poll_interval_seconds(now_et) == _FAST_POLL_SECONDS):
+            return self._due(key, now_et, mono)
+        return True
+
+    def _placed(self, symbols: Sequence[str], report_day: date) -> List[str]:
+        """`symbols`, upper-cased and once each, in their places for `report_day`, first place
+        first. A ticker keeps the place it was given for the day, wherever a later list puts it
+        and through a while off the list: the watched list is read again through the day, and
+        tickers watched as often can trade places in it each time, as can a company that gains
+        watchers on its report day; a slot would then pass back and forth, and each ticker lose its
+        minute in turn. A ticker that joins the day's list goes ahead of every ticker placed
+        already that the list ranks below it, or last when it outranks none of them: the list is
+        most-watched first, and a report can join it at any time (FMP's 15:30 memo round dates one
+        today hours after the morning placed the rest), so the most-watched company never waits
+        behind everything placed. Tickers that join together keep the list's order between them.
+        The next report day is placed afresh."""
+        listed = list(dict.fromkeys(map(str.upper, symbols)))
+        order = self._order.setdefault(report_day, [])
+        place = {symbol: n for n, symbol in enumerate(order)}
+        # Each joining ticker by the place it goes in front of: the first place among the placed
+        # tickers the list ranks below it, read from the end of the list.
+        joining: Dict[int, List[str]] = {}
+        ahead_of = len(order)
+        for symbol in reversed(listed):
+            if symbol in place:
+                ahead_of = min(ahead_of, place[symbol])
+            else:
+                joining.setdefault(ahead_of, []).append(symbol)
+        if joining:
+            merged: List[str] = []
+            for n in range(len(order) + 1):
+                merged.extend(reversed(joining.get(n, ())))
+                if n < len(order):
+                    merged.append(order[n])
+            order[:] = merged
+            place = {symbol: n for n, symbol in enumerate(order)}
+        listed.sort(key=place.__getitem__)
+        return listed
 
     async def run_once(
         self,
@@ -2987,25 +5578,60 @@ class EarningsFilingWatcher:
         call per filing, so what is read first must not wait for the rest. It is awaited, so the
         next read starts only once the figure has been stored as well as shown.
 
-        `symbols` must already be ordered most-watched first; the round keeps the first
-        `EARNINGS_LIVE_SEC_MAX_SYMBOLS` that hold a slot (`_holds_a_slot`), due or not, so a ticker
-        between two reads keeps it and a round can never read past the cap. Never raises:
-        a failure for one symbol costs only that symbol's round, a round that spends an attempt
-        holds every filing waiting on a retry for a minute, a throttle parks the whole watcher,
-        and a delivery that fails is logged, and that figure is not offered again in this
-        process.
+        `symbols` must already be ordered most-watched first, and a ticker keeps the place the
+        day gave it (`_placed`). The round keeps the first `EARNINGS_LIVE_SEC_MAX_SYMBOLS` that
+        hold a slot (`_holds_a_slot`), due or not, so a ticker between two reads keeps it (but
+        inside a release window its own company does not use), and reads those that are due, no
+        more of them than the cap less the reads of the rounds that started in the minute before
+        it (`_forget_reads_a_minute_back`): no minute reads past the cap, however often the loop
+        runs. A round reads in place order and, after a model call, gives way to a ticker it read
+        before that the next round would read again (`_gives_way_for`): it stops there, and the
+        next round starts at the top, so a release filed a moment after its company's read waits
+        for one model call, not for every release placed below it. Only once it has run into the
+        loop's next tick, and never when a ticker it would leave is not due in the next round. A
+        round of reads alone is never cut short: reads can fill a minute, and one cut there would
+        stop at the same ticker every time. Never raises: a failure for one symbol costs only that
+        symbol's round, a round that spends an attempt holds every filing waiting on a retry for a
+        minute (but one a give-way leaves, when that minute would cost its window), a throttle
+        parks the whole watcher, and a delivery that fails is logged, and that figure is not
+        offered again in this process.
         """
         if not settings.EARNINGS_LIVE_FILINGS_ENABLED or not user_agent_configured():
             return {}
         mono = time.monotonic()
+        # A parked round is one of the loop's rounds too: its tick came the interval after the
+        # last one's.
+        self._start_round(mono)
+        try:
+            return await self._run_round(now, symbols, report_day, mono, sec=sec, gemini=gemini,
+                                         cik_map=cik_map, sleep=sleep, on_figures=on_figures)
+        finally:
+            self._round_ended = time.monotonic()
+
+    async def _run_round(
+        self,
+        now: datetime,
+        symbols: Sequence[str],
+        report_day: date,
+        mono: float,
+        *,
+        sec: Any,
+        gemini: Any,
+        cik_map: Optional[Mapping[str, str]],
+        sleep: Any,
+        on_figures: Optional[Callable[[str, FilingFigures], Awaitable[None]]],
+    ) -> Dict[str, FilingFigures]:
+        """The round of `run_once`, started at `mono` on the monotonic clock."""
         if mono < self._parked_until:
             return {}
         now_et = now.astimezone(ET)
         cap = max(0, int(settings.EARNINGS_LIVE_SEC_MAX_SYMBOLS))
-        holding = [s for s in map(str.upper, symbols)
+        holding = [s for s in self._placed(symbols, report_day)
                    if self._holds_a_slot((s, report_day), now_et, mono)]
         wanted = holding[:cap]
-        due = [s for s in wanted if self._due((s, report_day), now_et, mono)]
+        self._forget_reads_a_minute_back(mono)
+        room = max(0, cap - len(self._reads))
+        due = [s for s in wanted if self._due((s, report_day), now_et, mono)][:room]
         if not due:
             return {}
         client = sec if sec is not None else get_sec_edgar_client()
@@ -3023,27 +5649,59 @@ class EarningsFilingWatcher:
                 return {}
         from app.services.learn_weekly.signals import cik_for
 
+        # What a company's record says about its release windows holds until midnight ET.
+        day_ends = mono + _seconds_left_in_et_day(now)
         new: Dict[str, FilingFigures] = {}
         spent = False
         first = True
-        for symbol in due:
+        # The tickers this round has read, in order, and whether the last read asked the model.
+        read: List[str] = []
+        asked = False
+        # What a give-way leaves to the next round, which reads it in its place.
+        left: Set[str] = set()
+        for at, symbol in enumerate(due):
+            if asked:
+                again = self._gives_way_for(read, due[at:], report_day, now_et, mono)
+                if again:
+                    logger.info(
+                        "EARNINGS_LIVE_FILING day=%s round gave way %.0fs in, %s due again: %d "
+                        "left for the next round (%s)", report_day.isoformat(),
+                        time.monotonic() - mono, " ".join(again), len(due) - at,
+                        " ".join(due[at:]),
+                    )
+                    left = set(due[at:])
+                    break
             key = (symbol, report_day)
             w = self._watch.setdefault(key, _Watch())
             cik = cik_for(symbol, cik_map)
             if cik is None:
-                w.done = True  # not an SEC filer under this ticker (foreign / OTC): FMP only
+                # Not an SEC filer under this ticker: FMP only, for the day. A listing abroad
+                # never had the fast path; a US ticker missing from SEC's map (renamed, newly
+                # listed, a map up to a day old) has lost it, which is worth a WARNING. Said once:
+                # the watch ends here.
+                w.done = True
+                logger.log(
+                    logging.WARNING if _US_TICKER_RE.fullmatch(symbol) else logging.INFO,
+                    "EARNINGS_LIVE_FILING sym=%s day=%s result=no_cik: SEC lists no company "
+                    "under this ticker, so its report waits for FMP", symbol,
+                    report_day.isoformat(),
+                )
                 continue
             if not first:
                 await sleep(_CALL_SPACING_SECONDS)
             first = False
             # The round's start, not this read's: the reads inside a round are spaced out, so
             # a stamp per read would leave every symbol but the first short of the cadence at
-            # the next round, and each would be read every other minute.
+            # the next round, and each would be read every other minute. The minute's count takes
+            # the same stamp, so the round a minute on finds this one's reads gone.
             w.checked_mono = mono
+            self._reads.append((self._ticked, mono))
+            read.append(symbol)
             spent_before = sum(w.attempts.values())
+            asked_before = self.model_calls
             try:
                 figures = await self._check_one(client, gemini, symbol, cik, report_day, w,
-                                                sleep)
+                                                sleep, day_ends)
             except SECRateLimitException as e:
                 park = e.retry_after if isinstance(e.retry_after, (int, float)) and e.retry_after > 0 \
                     else _THROTTLE_PARK_SECONDS
@@ -3068,6 +5726,7 @@ class EarningsFilingWatcher:
                 # Here and not after the `try`: the walk can spend an attempt on one filing and
                 # raise on the next.
                 spent = spent or sum(w.attempts.values()) > spent_before
+                asked = self.model_calls > asked_before
             if figures is not None:
                 new[symbol] = figures
                 if on_figures is not None:
@@ -3085,21 +5744,39 @@ class EarningsFilingWatcher:
         # attempt may be another company's filing failing on its own, which says nothing about
         # this one, so what is left of a wait stands and none starts over. Restarted, a 15 minute
         # rest ran past an hour with the model long recovered. A round that spent none moves
-        # nothing. The cadence is this round's, so the round before 15:55 ET can let a retry go
-        # inside that minute. It has still served its own rest, which is what limits its attempts.
+        # nothing. The cadence is each symbol's own at this round, so the round before its window
+        # opens, or before EDGAR's last minute, can let a retry go inside that minute. It has
+        # still served its own rest, which is what limits its attempts. A retry this round gave
+        # way before, which the give-way judged due in the next round, keeps its own stamp when
+        # held it would not be due in the round that lets it in, its window or EDGAR's day closed
+        # by then: the next round reads it in its place. Held, it lost that window's last read.
+        # That round is the first on the loop's cadence at or after the minute's end, and never
+        # the next round itself: the round after it on a 60 s loop, and as many on as the minute
+        # takes on a shorter one. Due there, it holds like the rest, which keeps every retry in
+        # its place. A retry no give-way left holds whatever its window: nothing promised it the
+        # next round, and the minute's pause is what the hold is for.
         if spent:
             ended = time.monotonic()
-            # Never the fallback: no symbol comes due outside EDGAR's hours.
-            interval = poll_interval_seconds(now_et) or _FAST_POLL_SECONDS
-            for w in self._watch.values():
-                if w.retry_gap and not w.done:
-                    w.checked_mono = max(w.checked_mono,
-                                         ended + _FAST_POLL_SECONDS - w.wait_seconds(interval))
+            loop = float(settings.EARNINGS_LIVE_INTERVAL_SECONDS)
+            # On the round's clock: when the next round starts, how far past that the minute's
+            # hold ends, and the first round on the loop's cadence at or after that end.
+            first = max(loop, ended - mono + _LOOP_REST_SECONDS)
+            behind = ended - mono + _FAST_POLL_SECONDS - _DUE_SLACK_SECONDS - first
+            after_next = first + max(1.0, -(-behind // loop)) * loop
+            for (symbol, day), w in self._watch.items():
+                if not w.retry_gap or w.done:
+                    continue
+                own = w.checked_mono
+                w.checked_mono = self._held_stamp(symbol, w, now_et, ended)
+                if day == report_day and symbol in left and not all(
+                        self._due((symbol, day), now_et + timedelta(seconds=at), mono + at)
+                        for at in (after_next, after_next + _DUE_SLACK_SECONDS)):
+                    w.checked_mono = own
         return new
 
     async def _check_one(
         self, client: Any, gemini: Any, symbol: str, cik: str, report_day: date, w: _Watch,
-        sleep: Any,
+        sleep: Any, day_ends: float,
     ) -> Optional[FilingFigures]:
         """Walk the symbol's results filings, newest first, until one settles the report.
 
@@ -3108,6 +5785,8 @@ class EarningsFilingWatcher:
         this round: whatever failed would fail the next read too, and an older filing must not
         settle the report while a newer one is undecided. A record with nothing to walk that
         shows foreign forms alone says nothing about the report either, and rests the symbol.
+        The same record says when the company puts its results out, on the day's first read
+        (`release_windows`), until `day_ends` on the monotonic clock.
         """
         self.calls += 1
         # The round came due, so the rest is served: only a new failed read owes another. Reset
@@ -3115,7 +5794,8 @@ class EarningsFilingWatcher:
         # filing's first read or a report still to come to the last rest on the ladder.
         w.retry_gap = 0.0
         data = await client.get_submissions(cik)
-        filings = find_results_filings(data, report_day)
+        self._learn_habit(symbol, report_day, data, day_ends)
+        filings = find_results_filings(data, report_day, symbol=symbol)
         foreign = not filings and furnishes_on_6k(data)
         if foreign and not w.foreign:
             logger.info("EARNINGS_LIVE_FILING sym=%s day=%s result=foreign_filer rest=%ds",
@@ -3168,7 +5848,8 @@ class EarningsFilingWatcher:
         filing and spend no attempt. Any other SEC error is a refusal of the document itself (over
         the size cap, or a 4xx), which would come back the same every time, so it is final, like
         everything verification decides, a raise included: it is pure, so the same text raises
-        again, and every retry would pay for another model call.
+        again, and every retry would pay for another model call. The model step, retries and all,
+        ends by its deadline (`_model_deadline_seconds`), or it is a failed read.
         """
         acc = filing.accession
         day = report_day.isoformat()
@@ -3218,28 +5899,39 @@ class EarningsFilingWatcher:
                 "[earnings-live-text-capped] sym=%s acc=%s %d chars cut to %d for the model",
                 symbol, acc, len(release), len(text),
             )
+        deadline: Optional[float] = None
+        limit: Optional[asyncio.Timeout] = None
         try:
             model = gemini
             if model is None:
                 from app.integrations.gemini import get_gemini_client
 
                 model = get_gemini_client()
-            answer = await model.generate_json(
-                build_prompt(symbol, report_day, text),
-                system_instruction=_SYSTEM,
-                model_name=settings.EARNINGS_LIVE_EXTRACT_MODEL,
-                response_schema=EXTRACTION_SCHEMA,
-                thinking_budget=0,
-                temperature=0,
-                usage_tag="earnings_live_extract",
-                # One release is read once; caching it would only evict chat entries from the
-                # shared 256-slot response cache.
-                cache=False,
-            )
+            deadline = _model_deadline_seconds()
+            self.model_calls += 1
+            async with asyncio.timeout(deadline) as limit:
+                answer = await model.generate_json(
+                    build_prompt(symbol, report_day, text),
+                    system_instruction=_SYSTEM,
+                    model_name=settings.EARNINGS_LIVE_EXTRACT_MODEL,
+                    response_schema=EXTRACTION_SCHEMA,
+                    thinking_budget=0,
+                    temperature=0,
+                    usage_tag="earnings_live_extract",
+                    # One release is read once; caching it would only evict chat entries from
+                    # the shared 256-slot response cache.
+                    cache=False,
+                )
         except Exception as e:
+            # The deadline's own timer says when it ran out. Every other timeout is a
+            # TimeoutError too, the client's own per-call one (GeminiTimeoutError) among them, and
+            # is named as itself.
+            why = (f"no answer within the read's {deadline:g}s deadline"
+                   if limit is not None and limit.expired()
+                   else f"{type(e).__name__}: {e}")
             logger.warning(
-                "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=gemini_failed (%s: %s)",
-                symbol, day, acc, type(e).__name__, e,
+                "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=gemini_failed (%s)",
+                symbol, day, acc, why,
             )
             return _Read.RETRY, None
         # A blocked or cut answer does not raise, and its text can even parse: it is not the

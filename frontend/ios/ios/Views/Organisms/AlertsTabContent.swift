@@ -310,8 +310,8 @@ struct AlertsTabContent: View {
         let upcomingTickers = Set(
             trackingViewModel.filteredAlerts.filter(\.isUpcoming).compactMap(upcomingTicker)
         )
-        let upcomingReports = Set(
-            trackingViewModel.filteredAlerts.filter(\.isUpcoming).compactMap(upcomingReport)
+        let resultCardReports = Set(
+            trackingViewModel.filteredAlerts.filter(\.isUpcoming).compactMap(resultCardReport)
         )
         // Everything this section COULD show, before the chips narrow it. The available
         // chip set and the visible list must both derive from this same array — deriving
@@ -319,7 +319,7 @@ struct AlertsTabContent: View {
         // is hidden, i.e. a chip that filters to nothing on its first tap.
         let candidates = notifications.items.filter {
             !duplicatesUpcomingCard($0, upcomingTickers: upcomingTickers)
-                && !duplicatesLiveResultCard($0, upcomingReports: upcomingReports)
+                && !duplicatesLiveResultCard($0, resultCardReports: resultCardReports)
         }
         let available = availableFilters(rollups: rollups, items: candidates)
         // Intersect on EVERY read rather than trusting the stored set. A pull-to-refresh can
@@ -362,30 +362,54 @@ struct AlertsTabContent: View {
         return nil
     }
 
-    /// "TICKER|YYYY-MM-DD" for an earnings card that knows its report date, else nil.
-    private func upcomingReport(_ alert: AppAlert) -> String? {
+    /// "TICKER|YYYY-MM-DD" for an earnings card that stands in for its report's result row, and
+    /// knows its report date. Else nil. Two cards do:
+    ///   * a LIVE one: while this tab is on screen the Tracking poll refetches whenever a card
+    ///     is LIVE, after 20:00 ET too, so it is never more than 30 s behind the server;
+    ///   * a reported one whose result is final (`showsFinalResult`): it already shows every
+    ///     figure a result row can state.
+    ///
+    /// Never any other card. Outside market hours nothing else refreshes the feed, so a card can
+    /// be the one loaded before the report ("reports earnings on NOV 13") or before its last
+    /// figure ("EPS not out yet", a figure from the company's release) long after the result
+    /// row arrived, and the row is then the only copy on screen of what it says.
+    private func resultCardReport(_ alert: AppAlert) -> String? {
         guard case .earnings(let data) = alert,
+              data.status == .live || showsFinalResult(data),
               let date = data.reportDate, !date.isEmpty,
               !data.ticker.isEmpty else { return nil }
         return "\(data.ticker.uppercased())|\(date)"
     }
 
+    /// The card shows its report's result as final: reported, on FMP's own figures (none from
+    /// the company's release still waiting for FMP's), with EPS in and revenue in unless no
+    /// consensus says any is coming. The backend's `is_complete`, read from the fields a card
+    /// carries: a held figure is not in, and a revenue consensus the card does not print counts
+    /// as none, as it does in the card's own sentence (`earningsResultsLine`).
+    private func showsFinalResult(_ data: AppAlert.EarningsData) -> Bool {
+        guard data.status == .reported, !data.isPreliminary, data.epsActual != nil else { return false }
+        if data.revenueActual != nil { return true }
+        return data.revenueEstimate == nil && !data.revenueChecking
+    }
+
     /// Is this RESULT notification (`earnings_result` / `earnings_live`) the same report as a
-    /// card on screen? That card carries the figures themselves, estimate vs actual, live — so
-    /// the row is the weaker copy (live results, 2026-10-29).
+    /// card on screen that is LIVE or shows the final result (`resultCardReport`)? That card
+    /// carries the figures themselves, estimate vs actual — so the row is the weaker copy (live
+    /// results, 2026-10-29).
     ///
     /// Matched on ticker AND report date, never the ticker alone: last quarter's result row must
     /// stay visible while next quarter's card sits in Upcoming. FAILS OPEN like its sibling: a
-    /// row without `report_date` (sent before the route carried it) is never hidden.
+    /// row without `report_date` (sent before the route carried it) is never hidden, nor is one
+    /// whose card is no longer polled and may not show what the row says.
     private func duplicatesLiveResultCard(
         _ item: NotificationEventDTO,
-        upcomingReports: Set<String>
+        resultCardReports: Set<String>
     ) -> Bool {
         guard AlertDestination.isEarningsResult(item.kind) else { return false }
         let ticker = (item.route["ticker"] ?? "").uppercased()
         guard !ticker.isEmpty,
               let date = item.route["report_date"], !date.isEmpty else { return false }
-        return upcomingReports.contains("\(ticker)|\(date)")
+        return resultCardReports.contains("\(ticker)|\(date)")
     }
 
     /// Is this notification row a strictly poorer copy of a card already on screen above it?

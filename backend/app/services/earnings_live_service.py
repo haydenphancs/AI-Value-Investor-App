@@ -8,9 +8,10 @@ own, because whichever lands first is shown first ("if revenue comes out, show i
 TWO SOURCES, ONE RECORD PER (symbol, report date).
   * FMP `/stable/earnings-calendar`. The consensus, and eventually the actuals. Its EPS
     actual is the adjusted figure, the consensus's own basis (`earnings_service.py` header).
-    FMP fills the actuals ~1–3 h after a release and an after-close report can wait until
-    the next morning (`earnings_window_service._HOT_REFRESH_SECONDS`), so on its own it is
-    near-live at best.
+    FMP fills the actuals some time after a release, from minutes to hours (in a dry run on
+    2026-11-12 it filled three releases 1–18 min after their 8-K was read, and one not within
+    the next 2 h 20 min), and an after-close report can wait until the next morning
+    (`earnings_window_service._HOT_REFRESH_SECONDS`), so on its own it is near-live at best.
   * The company's own 8-K Item 2.02 press release (`earnings_filing_service`): minutes after
     the release, every figure a verbatim quote. PRELIMINARY until FMP has the same metric.
   A record is STICKY: a figure, once verified, never goes back to "not out yet" (only an FMP
@@ -34,12 +35,15 @@ decides the same again (every tick and feed build folds the same rows). Each met
 comes from one row with that row's own estimate, a pending twin supplies neither, and the
 record takes one landing decision. An estimate moves only with its own actual, or while that
 metric has no FMP actual, so a surprise is never worked out against another row's consensus.
-The card and the sheet read the same pick (`one_row_per_report`).
+The card and the sheet read the same pick (`one_row_per_report`), and the daily push pass reads a
+report from the row its EPS comes from here (`eps_row_per_report`), and one listed more than once,
+or whose EPS is 0, from the record itself, with the row its fold took the EPS from
+(`observe_rows`).
   A row left out still counts as evidence: the consensus every row states is read before
 anything folds (`_note_consensus`) and kept GUARD-ONLY. The sanity guards, the zero rules and
 "is a revenue still due" read it; a surprise, the card and the sheet never do, with one exception:
 a filing figure has no row of its own, so with no FMP figure for the metric it reads the stated
-consensus it sits on (`_record_for_filing`).
+consensus it sits on, or the largest held when it sits on none (`_record_for_filing`).
 
 THE MEMO. The live days (`live_days`): every calendar day from the previous trading day
 through today, one single-day calendar call each — a multi-day request is cut at 4,000 rows
@@ -53,7 +57,8 @@ forgotten must never reach it again, or it reads as new on every round.
     the push it wakes opens that report by date. No card and no landing reads such a day, no
     cadence fetches it, and each refresh prunes to `sheet_days` first. A restart inside the night
     leaves it unread, so a sheet asking for it puts one look on the loop's next round
-    (`sheet_asked`): only someone looking pays for that call.
+    (`sheet_asked`), and so does a filing the table gives back for it (A RESTART): only someone
+    looking, or a report the restart took back, pays for that call.
   * Today's rows ride on the Tracking memo (`tracking_service._cached_earnings_calendar`,
     30 min, the owner's 2026-10-22 cadence), and every reader folds them in. The tick pays the
     memo a round only for its own needs (`tick_refreshes_memo`, the owner's rule of 2026-11-11):
@@ -108,17 +113,18 @@ forgotten must never reach it again, or it reads as new on every round.
     and is then asked at the slow cadence above until it lists something or leaves the window.
     A closed day's blank is an answer the first time.
   * Cost with nobody opening the app, both loops walked minute by minute (pinned in the
-    tests), SEC at the watch's own cadence (every minute in the windows, every 5 min outside
-    them, until a release is read):
+    tests), SEC at the watch's own cadence (every minute in the company's own windows, both
+    while nothing is known of them, every 15 min outside, until a release is read):
       - a day of after-close reports, today's and the previous trading day's, FMP filling each
         at 08:00 the next morning, each company's window known: 151 FMP calls (106 for today,
-        41 for the previous day, 4 for the memo) and 304 SEC reads;
-      - a mixed day, a morning reporter beside those: 199 FMP calls and 337 SEC reads;
+        41 for the previous day, 4 for the memo) and 53 SEC reads;
+      - a mixed day, a morning reporter beside those: 199 FMP calls and 86 SEC reads;
       - either of those two with nothing known of any company's window, both counting (what
         `EarningsFilingWatcher.release_windows` answers then): 208 FMP calls, today's
-        after-close company asked every 3 min across the morning window too, and SEC as above;
+        after-close company asked every 3 min across the morning window too, and SEC every
+        minute in both windows too: 253 and 286 SEC reads;
       - the worst day, today's and the previous day's watched reports waiting all day, nothing
-        known of their windows and no release on SEC: 288 FMP calls (163, 121, 4) and 488 SEC
+        known of their windows and no release on SEC: 288 FMP calls (163, 121, 4) and 409 SEC
         reads;
       - a trading day with no watched report: 5 FMP calls (the memo's two rounds and a first
         look at the previous trading day) and no SEC read;
@@ -135,6 +141,14 @@ forgotten must never reach it again, or it reads as new on every round.
   * Fetched by the live loop ONLY (`run_earnings_live_loop`, 60 s); the daily pass's answer
     folds in too, at no extra call. Feed builds and the sheet endpoint fold the Tracking memo and
     read; they never fetch, so the live state adds no latency to the feed.
+  * One more read, whatever a day's cadence: a held push that asks again about a report with
+    no answer yet has its day read in the two ticks before its next look (`read_before_look`),
+    timed from the instant the dispatcher holds the row to, unless a read already falls there or
+    that report has answered by then, whatever else on its day still waits. A closed day reads a
+    day before it only every 2 h, so without it every look of a held row could read one answer
+    while FMP had recovered in between. One read per look, a failed one aside, on any day a
+    record is still held for, and shared: the rows of one hand-out look at one instant, and a
+    read answers every look whose window opens before the tick after it.
 
 A REPORT FMP MOVES. Each day is judged on its own rows, so a report moved off its date would
 stay there: LIVE with FMP's fetch and an SEC slot until 22:00, then a card the next morning
@@ -191,8 +205,12 @@ with a date and a dedup key of its own, and the owner's rule is one push per rep
     before stops nothing, so a stale earlier row never costs the true report its card. Only the
     reading changes: the record stays on the SEC watch and keeps asking FMP, so a true report on
     that date still lands.
-  A filing's figures live in this process, so a restart loses them, and until FMP fills, the row
-  reads as its own again.
+  A restart rebuilds the report before as it rebuilds any record: on a live day by its first
+  look again, and on the sheet's day before the live days from the table, with one look of its
+  own (A RESTART), so the row reads as that report again. With the table down or not there yet,
+  a filing's figures went with the process, and until FMP fills, the row reads as its own. A
+  report FMP alone filled leaves nothing in the table, so once its day has left the live days,
+  a restart leaves its leftover reading as its own.
 
 TWO LOOPS UNDER ONE TASK (`run_earnings_live_loop`), each on its own 60 s clock, so neither
 source can hold the other up.
@@ -216,7 +234,9 @@ A RESTART. The records are this process's own, but what only a filing says must 
 may still have no figures, and it never has the outlook or the link. So each filing goes to
 `earnings_filing_cache` (migration 209: figures from SEC filings only, never FMP data) the moment
 it is on its record (`keep_filing`), best effort, and the first thing either tick does in a new
-process is take back what the table holds for the live days (`restore_filings`).
+process is take back what the table holds for every day a record stays readable (`sheet_days`,
+`restore_filings`): the live days, and the trading day before them, which a held push can still
+open (THE MEMO). Never an older day: the sheet refuses its date, and each refresh prunes it.
   * Once per process, and before anything decides, so the filing tick cannot read a filing the
     table gives back, and whichever tick comes second joins the same read.
   * A restored figure is never a landing, and FMP's fill on it after a restart is none either
@@ -225,6 +245,19 @@ process is take back what the table holds for the live days (`restore_filings`).
     deploy, its push not yet sent, goes without one.
   * A restored filing is not read again, by SEC or by Gemini, even while its report stays
     incomplete and pending (`EarningsFilingWatcher.restore`).
+  * A record given back on a day past the live days also puts that day on the loop's next
+    round, as a sheet asking for it does (`sheet_asked`). The table holds no consensus and no
+    FMP figure, and no cadence reads that day: without the look, the sheet would show the filing
+    alone with no verdict, and a held result push waking on it, which may state only FMP's own
+    EPS, would go out in its own words, never checked against FMP's answer, or, held already for
+    that answer, wait for one nothing reads (`earnings_live_sender.copy_at_wake`). One FMP call
+    per such day, once per process, and none for a day the table gives nothing back for. Until
+    the look answers, a sheet open on that record asks again every 30 s (THE SHEET'S POLL).
+  * Until FMP's first answer reaches a record the table gave back, on any day, a held result
+    push waking on it in the words it landed with goes out in them, as with no record at all:
+    what the record holds is the company's release, which that push may not state and which says
+    nothing against it. One a wake already held for that answer waits for it, as it would with no
+    restart (A HELD ROW'S TEXT in `earnings_live_sender`).
   * A row is trusted only by the verifier that kept it (`FILING_VERIFIER_VERSION`), or the deploy
     that fixes a misread would restore it, with nothing on the row to tell it from a good one.
     One of another version is no row, so that one deploy costs what a restart cost before the
@@ -260,7 +293,11 @@ THE SHEET'S POLL (`sheet_poll_seconds`, `poll_seconds` on the wire). 30 s while 
 while `reported` with a preliminary figure on show, inside `fmp_window_open`: FMP's fill is what
 replaces that figure, and the loop is still asking FMP then. None otherwise, past those hours
 too: the record moves too rarely to poll, and the next open reads it. The two rules ship as one,
-or the sheet would poll a record nothing updates.
+or the sheet would poll a record nothing updates. Where they say None, a record that still wants
+FMP (`needs_fmp`) asks again in 30 s while the loop has yet to load its day, or the day of the
+report it reads as (`awaits_first_load`, `EarningsLiveService.snapshot`): that load is on the
+loop's next round and brings FMP's answer, and a record the table gave back holds no consensus
+and no FMP figure until it comes (A RESTART).
   One more 30 s, with no record at all: an answer this read could not tell (`recheck`). `none`
 says a day was read and lists no report, and iOS prints that and stops asking, so a day nobody
 has read reads as a report not in yet instead: `upcoming`, or `awaiting` before today, with no
@@ -298,8 +335,10 @@ GUARDS, each a defect found elsewhere in this repo:
     alone, and stays printed, until a figure is more than 5x off the larger: that figure is held
     (`_estimate_overtaken`);
   * a filing figure with no FMP figure beside it reads whichever stated consensus it sits on
-    when the estimate on show does not bear it out, so the same evidence decides alike whichever
-    twin FMP touched last (`_record_for_filing`);
+    when the estimate on show does not bear it out, and the largest held when it sits on none,
+    the one a hold of it prints too, so the same evidence decides alike whichever twin FMP
+    touched last (`_record_for_filing`). Only a figure inside both twins' bands is left to the
+    row touched last: two consensus figures that close are one consensus and a stale row;
   * a GAAP-only EPS is shown labelled GAAP with no beat/miss — the consensus is adjusted (the
     owner's 2026-09-27 caution, `news_insight_service._earnings_line`);
   * a figure is only as exact as its print: "$17.1 billion" is anything from $17.05B to $17.15B
@@ -314,15 +353,42 @@ GUARDS, each a defect found elsewhere in this repo:
     consensus, or none, it is an unfilled field, never a -100% miss and never a landing. It
     shows only while that holds: a consensus that turns material, or a positive filing figure,
     takes it off, so a shown zero stays on the SEC watch until its filing has been read
-    (`pending_symbols`), and a report left with nothing on show leaves `landed_snapshots`;
+    (`pending_symbols`), and a report left with nothing on show leaves `landed_snapshots`. One
+    held from before the release leaves the record at the next fold once the release's revenue
+    is there, as if it had come after it, so the consensus it held can move
+    (`_release_takes_zero_revenue_off`);
   * a row with an EPS of exactly 0 beside a zero or negative revenue is unfilled as a whole,
     unless that revenue stands and no EPS is held, the filing's included. Such a row stored
     earlier as a real report gives way as a whole to the same later evidence, to any EPS the
     filing prints (`_fmp_zeros_unfilled`), or to a real figure from FMP for either field. The next
     fold then drops both zeros (`_zeros_gave_way`), so neither comes back with a later fill, the
     estimates they stood on can move, and the record ends as if the row had never come, in either
-    order. Beside a real revenue, or with no revenue on the row, 0 is a real breakeven. The daily
-    push pass asks the same rule (`eps_is_unfilled`).
+    order, but for what the row showed: FMP sends this report's fields as zeros while it has not
+    filled them. A row of zeros the fold refuses at once (beside a material consensus or none, or
+    beside a figure held, the filing's included) shows the same. So from then on a zero FMP sends
+    with nothing real beside it on its own row (an EPS of 0 with no positive revenue, a revenue
+    of 0 with no EPS other than 0) is that field unfilled, in the answer that refused the zeros
+    or took them off and every later one (`_Record.unfilled_zeros_seen`, `_lone_zero`), wherever
+    the company's release falls. One it sent that way before is that field too: still held, it
+    leaves the record in that answer (`_drop_lone_zeros`), whatever has come to sit beside it
+    since, unless a real row gave that same zero or it is one of a pair of zeros, which stands or
+    gives way whole. A pair two answers complete, a zero each, gives way in the fold that
+    completes it if it already reads as unfilled, so a repeat of that answer decides what its
+    first fold did. A pair, from two rows or two answers, whose revenue of 0 only the release's
+    revenue kept off the record folds as FMP's answers alone would have folded it
+    (`EarningsLiveService._without_release`), on the revenue consensus that zero would have held;
+    FMP's unfilled shape is refused there too, and beside it an answer's zeros sent alone pair
+    nothing. Unfilled even so, the pair gives way in its fold as above, and otherwise it leaves at
+    once as the small name's report the next fold would have taken off had the release come
+    later, with nothing of its answer taken until the next. So the record reads the same after it
+    wherever the release fell. Answers that send a report's fields as zeros a row or an answer at
+    a time can still, in a few shapes this rule narrows, end on another figure, consensus or
+    verdict depending on where the release falls. A restart forgets what the record learnt, as it
+    forgets the zeros. Beside a real revenue, or with no revenue on the row and no row of zeros
+    from FMP before it, stored or refused, 0 is a real breakeven, the latter until FMP's zeros
+    show its field unfilled. The daily push pass reads the same rule through the record itself,
+    which holds what the rule weighs a zero against, and through the row it reads
+    (`eps_row_per_report`) only with no record to follow.
 """
 
 from __future__ import annotations
@@ -350,7 +416,7 @@ from typing import (
 
 from app.config import settings
 from app.services._earnings_common import (
-    EPS_ROUNDING_SLACK,
+    eps_band_covers,
     eps_digit_shift_suspect,
     eps_print_covers,
 )
@@ -394,7 +460,8 @@ _RELEASE_WINDOW_BOUNDS: Dict[str, Tuple[Tuple[int, int], Tuple[int, int]]] = dic
 #: What a company nothing is known about counts: both windows.
 _BOTH_WINDOWS = frozenset(_RELEASE_WINDOW_BOUNDS)
 #: How often the sheet asks again: while live, while FMP can still confirm what a reported report
-#: shows (`sheet_poll_seconds`), and on an answer a read could not tell (`live_payload`).
+#: shows (`sheet_poll_seconds`), while a load the loop has yet to make can (`EarningsLiveService.
+#: snapshot`), and on an answer a read could not tell (`live_payload`).
 EARNINGS_LIVE_POLL_SECONDS = 30
 EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS = 120
 #: A memo row held this long opens no record (THE MEMO in the module docstring). Longer than the
@@ -527,6 +594,31 @@ class _Record:
     # The fold runs on every tick and feed build: a refusal is logged once per record.
     revenue_refusal_logged: bool = False
     eps_refusal_logged: bool = False
+    # FMP sent this report a row of zeros that turned out to be its unfilled shape: the fold
+    # refused it as such (`_storable_figures`), or a stored one gave way (`_zeros_gave_way`). A
+    # zero FMP sends from then on with nothing real beside it is the field it never filled
+    # (`_lone_zero`), and so is one it sent that way before, still held (`_drop_lone_zeros`).
+    # Sticky.
+    unfilled_zeros_seen: bool = False
+    # Is FMP's figure held for each field a zero only ever sent with nothing real beside it on its
+    # row (`_lone_zero`, `_alone_after`)? Set with the figure and read when `unfilled_zeros_seen`
+    # turns on (`_drop_lone_zeros`): only a row could make that zero real, never a figure that came
+    # to sit beside it in the record since.
+    fmp_eps_alone: bool = False
+    fmp_revenue_alone: bool = False
+    # Did FMP send a revenue of 0 that only the company's release keeps off the record? Refused
+    # beside the release's revenue (`_storable_revenue`), or taken off by it once it came
+    # (`_release_takes_zero_revenue_off`), with nothing else of FMP's to keep it out. Read while
+    # `unfilled_zeros_seen` is off, as FMP's own revenue would stand without the release
+    # (`EarningsLiveService._without_release`), so a zero FMP sends for the other field completes
+    # the same pair of zeros wherever the release fell.
+    fmp_revenue_kept_off: bool = False
+    # The revenue consensus FMP's answers alone would hold beside that zero, which the copy reads
+    # with it. An estimate moves only with its own figure (`_settled`), so the zero would have
+    # kept the one its row brought, while the record's moved on with each answer once the release
+    # kept the zero off: a pair the zero completes is judged on this one, as FMP's answers alone
+    # would judge it. None while the flag above is off.
+    fmp_revenue_kept_off_estimate: Optional[float] = None
     # What the guards last did to this revenue, None after a clean answer: each change is logged
     # once (`_log_guarded_revenue`).
     revenue_guard_note: Optional[str] = None
@@ -543,10 +635,18 @@ class LiveSnapshot:
     preliminary: bool
     checked_at: Optional[datetime]
     filing: Optional[FilingFigures]
-    # How often the sheet should ask again (`sheet_poll_seconds`); None when it should not.
+    # How often the sheet should ask again (`sheet_poll_seconds`, and while a load is due
+    # `EarningsLiveService.snapshot`); None when it should not.
     poll_seconds: Optional[int] = None
     # The date of the report these figures are, when it is not `day` (ONE REPORT, TWO DATES).
     reads_as: Optional[date] = None
+    # The record it reads from held a figure at some point in this process (`_Record.landed_at`:
+    # a landing, a first sight already reported, after a restart too, or a restored filing,
+    # which always shows one), even if every one has since been taken off (an FMP zero, GUARDS).
+    # A held push's wake reads it: a record with no figure that never held one says nothing
+    # against the row's text, one that did has dropped the figure the row states
+    # (`earnings_live_sender.copy_at_wake`).
+    landed: bool = False
 
 
 @dataclass(frozen=True)
@@ -605,6 +705,13 @@ def sheet_days(today: date) -> List[date]:
     return [first + timedelta(days=i) for i in range((today - first).days + 1)]
 
 
+def _look_read_lead_seconds() -> float:
+    """How long before a held push's next look its report's day is read (`read_before_look`):
+    two of the loop's ticks and a fetch's deadline, so a tick falls in it at any interval the
+    setting allows, and the look reads FMP's answer of that moment."""
+    return 2.0 * settings.EARNINGS_LIVE_INTERVAL_SECONDS + _FETCH_DEADLINE_SECONDS
+
+
 def eps_surprise_pct(actual: Optional[float], estimate: Optional[float]) -> Optional[float]:
     """(a - e) / |e| as a percent (2 dp), or None when there is no honest one."""
     if actual is None or estimate is None or abs(estimate) < MIN_ABS_EPS_ESTIMATE:
@@ -641,9 +748,7 @@ def eps_metric(rec: _Record) -> LiveMetric:
             held = True
             continue
         if source == SOURCE_FILING:
-            rounding = filing.eps_rounding
-            covered = (est is not None and rounding is not None
-                       and abs(value - est) <= rounding + EPS_ROUNDING_SLACK)
+            covered = eps_band_covers(value, est, filing.eps_rounding)
         else:
             covered = eps_print_covers(value, est)
         surprise = None if covered else eps_surprise_pct(value, est)
@@ -713,17 +818,23 @@ def _record_for_filing(rec: _Record, value: float) -> _Record:
     """The record a filing figure reads against. With no FMP figure for the metric the estimate
     on show is only the row FMP touched last, and it may move (DUPLICATE ROWS in the module
     docstring). So when it does not bear this figure out and another stated consensus does, that
-    one stands in for this figure alone, and which twin FMP touched last decides nothing. An FMP
-    figure, a zero aside, keeps its own row's estimate, or its lack of one. A figure the estimate
-    on show does bear out stays with it, even if a twin would too: only `lastUpdated` can choose
-    between two consensus figures that close."""
+    one stands in for this figure alone, and which twin FMP touched last decides nothing. When no
+    stated consensus bears it out, none is the one it sits on, so the largest the record holds
+    stands in for the estimate on show, as the guard reads a response by its largest
+    (`_note_consensus`), whichever row it came on. With no estimate on show no row chose one,
+    and the figure keeps none. An FMP figure, a zero aside, keeps its own row's estimate, or its
+    lack of one. A figure the estimate on show does bear out stays with it, even if a twin would
+    too: only `lastUpdated` can choose between two consensus figures that close."""
     est = rec.revenue_estimate
     if rec.fmp_revenue or (est is not None and _near(value, est)):
         return rec
     for stated in (rec.revenue_smallest_estimate, rec.revenue_guard_estimate):
         if stated is not None and _near(value, stated):
             return replace(rec, revenue_estimate=stated)
-    return rec
+    largest = rec.revenue_guard_estimate
+    if est is None or largest is None or largest <= est:
+        return rec
+    return replace(rec, revenue_estimate=largest)
 
 
 def _guard_estimate(rec: _Record, value: float) -> Optional[float]:
@@ -825,8 +936,11 @@ def revenue_metric(rec: _Record) -> LiveMetric:
             return LiveMetric(shown, value, None, source)
         return LiveMetric(read, value, revenue_surprise_pct(value, read), source)
     if candidates:
-        out_of_date = any(_estimate_out_of_date(rec, value) for value, _, _ in candidates)
-        return LiveMetric(None if out_of_date else est, checking=True)
+        # The consensus the figures were judged on: the filing's own reading with no positive
+        # FMP figure beside it, so a hold prints the same estimate in either row order.
+        held = _record_for_filing(rec, filed) if filed is not None else rec
+        out_of_date = any(_estimate_out_of_date(held, value) for value, _, _ in candidates)
+        return LiveMetric(None if out_of_date else held.revenue_estimate, checking=True)
     return LiveMetric(est, due=est is not None or rec.revenue_guard_estimate is not None)
 
 
@@ -986,6 +1100,7 @@ def snapshot_of(rec: _Record, today: date, now_et: datetime) -> LiveSnapshot:
         preliminary=preliminary, checked_at=shown.checked_at, filing=shown.filing,
         poll_seconds=sheet_poll_seconds(status, preliminary, shown.day, now_et),
         reads_as=shown.day if shown is not rec else None,
+        landed=shown.landed_at is not None,
     )
 
 
@@ -1257,6 +1372,49 @@ def one_row_per_report(
     return best
 
 
+def eps_row_per_report(
+    rows: Iterable[Any], today: date,
+) -> Dict[Tuple[str, date], Optional[Dict[str, Any]]]:
+    """PURE. For each (symbol, date) the rows name, first-seen order kept, the row whose EPS a
+    record holding nothing keeps when these rows fold into it, or None when it keeps none.
+
+    The fold's own pick (`_fold_report`): of the rows `_rows_to_fold` keeps, the strongest by
+    `_row_rank` whose EPS `_storable_figures` stores, with the consensus every row states read
+    first (`_note_consensus`), and none whose EPS is a zero with nothing real beside it when one
+    of those rows is FMP's unfilled row of zeros, refused (`_Record.unfilled_zeros_seen`). Not
+    `one_row_per_report`'s row, which can be a twin carrying only the revenue. For the daily push
+    pass (`earnings_sender.select_results`): a report FMP lists twice is read from the row the
+    sheet reads, and a row the fold refuses, FMP's unfilled row of zeros, never goes out as a
+    -100% miss at 16:00 ET either. What rows alone cannot show, a record holding a figure or a
+    consensus from an earlier answer, the pass reads from the record itself for a report listed
+    more than once or whose EPS is 0, telling it only with an EPS the fold took from its answer
+    (`observe_rows`). Non-dict, symbol-less and undated rows are skipped.
+    """
+    groups: Dict[Tuple[str, date], List[Dict[str, Any]]] = {}
+    for row in rows:
+        symbol, day = _row_symbol(row), _row_date(row)
+        if symbol and day is not None:
+            groups.setdefault((symbol, day), []).append(row)
+    picked: Dict[Tuple[str, date], Optional[Dict[str, Any]]] = {}
+    for (symbol, day), group in groups.items():
+        ranked = _ranked_rows(group, today)
+        stated = _Record(symbol=symbol, day=day)
+        _note_consensus(stated, ranked)
+        taken = []
+        for row in _rows_to_fold(ranked, today):
+            eps, revenue = finite(row.get("epsActual")), finite(row.get("revenueActual"))
+            stored, _ = _storable_figures(eps, revenue, None, None, stated.revenue_guard_estimate)
+            taken.append((row, revenue, stored, _unfilled_shape(eps, revenue) and stored is None))
+        unfilled_seen = any(refused for *_, refused in taken)
+        picked[(symbol, day)] = next(
+            (row for row, revenue, stored, _ in reversed(taken)
+             if stored is not None
+             and not (unfilled_seen and _lone_zero(stored, revenue, beside_is_revenue=True))),
+            None,
+        )
+    return picked
+
+
 def _eps_estimate(row: Dict[str, Any]) -> Optional[float]:
     return finite(row.get("epsEstimated"))
 
@@ -1297,15 +1455,22 @@ def _storable_revenue(actual: Optional[float], held: Optional[float],
     return None
 
 
+def _unfilled_shape(eps: Optional[float], revenue: Optional[float]) -> bool:
+    """Is this FMP's unfilled shape for a row: an EPS of exactly 0 beside a zero or negative
+    revenue?"""
+    return eps == 0 and revenue is not None and revenue <= 0
+
+
 def _storable_figures(eps: Optional[float], revenue: Optional[float],
                       held_eps: Optional[float], held_revenue: Optional[float],
                       consensus: Optional[float]) -> Tuple[Optional[float], Optional[float]]:
     """What one FMP row may store, as (EPS, revenue), each None when refused. An EPS of 0.0 is
     a real breakeven, except beside a zero or negative revenue: that row is FMP's unfilled
-    shape, unless the revenue stands by itself and no EPS is held, so it stores nothing.
-    Storing it would read as a -100% miss and a landing, or take a real EPS back."""
+    shape (`_unfilled_shape`), unless the revenue stands by itself and no EPS is held, so it
+    stores nothing. Storing it would read as a -100% miss and a landing, or take a real EPS
+    back."""
     stored = _storable_revenue(revenue, held_revenue, consensus)
-    if eps == 0 and revenue is not None and revenue <= 0 and (stored is None or held_eps):
+    if _unfilled_shape(eps, revenue) and (stored is None or held_eps):
         return None, None
     return eps, stored
 
@@ -1329,13 +1494,120 @@ def _zeros_gave_way(rec: _Record, *picks: Optional[Tuple[Dict[str, Any], float]]
     return rec.fmp_eps == 0 and rec.fmp_revenue == 0 and (filled or _fmp_zeros_unfilled(rec))
 
 
-def eps_is_unfilled(eps: Optional[float], row: Dict[str, Any]) -> bool:
-    """PURE. Would `_storable_figures` refuse this calendar row's `eps`, read alone with nothing
-    held? For the daily push pass (`earnings_sender.select_results`), which has no record behind
-    it: a row the fold reads as unfilled must not go out as a -100% miss at 16:00 ET either."""
-    revenue = finite(row.get("revenueActual"))
-    kept, _ = _storable_figures(eps, revenue, None, None, _revenue_estimate(row))
-    return eps is not None and kept is None
+def _zeros_complete_unfilled(rec: _Record, rows: List[Dict[str, Any]],
+                             eps_pick: Optional[Tuple[Dict[str, Any], float]],
+                             revenue_pick: Optional[Tuple[Dict[str, Any], float]]) -> bool:
+    """Would this response settle the record into a row of zeros that already reads as unfilled?
+    Two answers can make one, a zero each: a zero revenue held from a tiny consensus, then an
+    EPS of 0 with no revenue beside a consensus since turned material. That pair gives way in the
+    fold that makes it, as it would on the next one, so a repeat of the response decides what
+    its first fold did (DUPLICATE ROWS in the module docstring)."""
+    eps, eps_estimate = _settled(rec.fmp_eps, rec.eps_estimate, eps_pick, rows, _eps_estimate)
+    revenue, revenue_estimate = _settled(rec.fmp_revenue, rec.revenue_estimate, revenue_pick,
+                                         rows, _revenue_estimate)
+    return eps == 0 and revenue == 0 and _fmp_zeros_unfilled(replace(
+        rec, fmp_eps=eps, eps_estimate=eps_estimate, fmp_revenue=revenue,
+        revenue_estimate=revenue_estimate))
+
+
+def _release_revenue(rec: _Record) -> Optional[float]:
+    """The company's release's revenue when it is above zero, else None: what refuses a revenue
+    of 0 from FMP (`_storable_revenue`) and takes a held one off
+    (`_release_takes_zero_revenue_off`)."""
+    filing = rec.filing
+    revenue = filing.revenue if filing is not None else None
+    return revenue if revenue is not None and revenue > 0 else None
+
+
+def _release_takes_zero_revenue_off(rec: _Record) -> bool:
+    """Does the company's release's revenue take a revenue of 0 FMP gave off the record? Beside it
+    a zero is never stored (`_storable_revenue`), so one stored before the release came leaves it
+    too, and the revenue consensus can move again (`_settled`): held, it kept the estimate its
+    row brought, and the record read as it would not had the release come first. A pair of zeros
+    is not taken off here: beside the release it gives way whole (`_zeros_gave_way`)."""
+    return rec.fmp_revenue == 0 and rec.fmp_eps != 0 and _release_revenue(rec) is not None
+
+
+def _lone_zero(value: Optional[float], beside: Optional[float], *, beside_is_revenue: bool) -> bool:
+    """Is `value` a zero its row gives nothing real beside? An EPS of 0 needs a positive revenue
+    on its own row to be a breakeven, a revenue of 0 an EPS other than 0. It decides only for a
+    report FMP has sent a row of zeros that turned out unfilled (`_Record.unfilled_zeros_seen`):
+    FMP sends that report's fields as zeros while it has not filled them, so a zero it sends alone
+    is that field unfilled, not a figure, from then on (`_picks`), and one it sent alone before
+    leaves the record then (`_drop_lone_zeros`). The record notes it of every figure it takes."""
+    if value != 0:
+        return False
+    if beside_is_revenue:
+        return beside is None or beside <= 0
+    return beside is None or beside == 0
+
+
+def _alone_after(held: Optional[float], held_alone: bool,
+                 pick: Optional[Tuple[Dict[str, Any], float]], *, beside_is_revenue: bool) -> bool:
+    """Is the figure a field holds once `pick` folds a zero only ever sent alone on its row
+    (`_Record.fmp_eps_alone`)? A picked figure brings its own row's answer, except that a zero
+    sent alone over the same zero a real row gave stays real: taken off, the record would read as
+    if that real row had never come either. With no pick the field keeps what it held."""
+    if pick is None:
+        return held_alone
+    row, value = pick
+    beside = finite(row.get("revenueActual" if beside_is_revenue else "epsActual"))
+    alone = _lone_zero(value, beside, beside_is_revenue=beside_is_revenue)
+    return alone and (held_alone or held != value)
+
+
+def _drop_lone_zeros(rec: _Record, *, log: bool = True) -> None:
+    """Take off each zero FMP only ever sent alone on its row (`_Record.fmp_eps_alone`,
+    `fmp_revenue_alone`) the moment the record learns FMP sends this report's fields as zeros
+    while it has not filled them (`_Record.unfilled_zeros_seen`). It is that field unfilled, as a
+    zero sent alone from then on is, so the record reads as if it never came, wherever it fell in
+    the order: held, it stayed on show as a -100% miss, and kept the other field's zero from
+    completing the pair that takes it off (`_zeros_complete_unfilled`). A figure that came to sit
+    beside it in the record since, a fill of the other field included, changes nothing: only a row
+    could make that zero real. A zero that came beside a real figure on its own row is what it
+    says, and stays, sent alone again or not (`_alone_after`). So does a pair of zeros, from one
+    row or two answers: that is a row of zeros held as a small name's report, which stands or
+    gives way whole (`_zeros_gave_way`), never half of it. Each zero taken off is logged: a figure
+    leaving the record is never silent. Only the copy `EarningsLiveService._without_release`
+    folds, which no reader sees, passes `log=False`."""
+    pair = rec.fmp_eps == 0 and rec.fmp_revenue == 0
+    eps_alone = rec.fmp_eps == 0 and rec.fmp_eps_alone and not pair
+    revenue_alone = rec.fmp_revenue == 0 and rec.fmp_revenue_alone and not pair
+    for metric, alone in (("EPS", eps_alone), ("revenue", revenue_alone)):
+        if alone and log:
+            logger.warning(
+                "[earnings-live] %s %s: FMP %s 0 sent alone in an earlier answer taken off: its "
+                "row of zeros shows the field unfilled (held EPS %s, revenue %s; filing %s)",
+                rec.symbol, rec.day.isoformat(), metric, rec.fmp_eps, rec.fmp_revenue,
+                rec.filing is not None,
+            )
+    if eps_alone:
+        rec.fmp_eps = None
+    if revenue_alone:
+        rec.fmp_revenue = None
+
+
+def _log_lone_zero(rec: _Record, metric: str, eps: Optional[float],
+                   revenue: Optional[float]) -> None:
+    logger.warning(
+        "[earnings-live] %s %s: FMP %s 0 refused: its row of zeros was unfilled, so a zero FMP "
+        "sends again with nothing real beside it is the field it never filled (row EPS %s, "
+        "revenue %s)", rec.symbol, rec.day.isoformat(), metric, eps, revenue,
+    )
+
+
+def _log_unfilled_zeros_refused(rec: _Record, held: Tuple[Optional[float], Optional[float]]
+                                ) -> None:
+    """Once per record, when a refused row of zeros arms `_Record.unfilled_zeros_seen`. Each
+    metric logs one refusal per record (`_picks`), and the row of zeros' own refusal is usually
+    that one, so the zeros FMP sends later are refused in silence: this line is what explains
+    them."""
+    logger.warning(
+        "[earnings-live] %s %s: FMP's row of zeros refused as unfilled (holding %s and %s, "
+        "largest consensus %s), so a zero it sends from here with nothing real beside it reads "
+        "as unfilled too", rec.symbol, rec.day.isoformat(), held[0], held[1],
+        rec.revenue_guard_estimate,
+    )
 
 
 def _revenue_guard_outcome(rec: _Record, shown: LiveMetric) -> Optional[str]:
@@ -1350,7 +1622,9 @@ def _revenue_guard_outcome(rec: _Record, shown: LiveMetric) -> Optional[str]:
     if shown.source == SOURCE_FMP and _far_apart(fmp, filed):
         return "the filing is set aside"
     if shown.source == SOURCE_FILING and shown.estimate not in (None, rec.revenue_estimate):
-        return "the filing reads the consensus it sits on"
+        if _near(value, shown.estimate):
+            return "the filing reads the consensus it sits on"
+        return "the filing reads the largest consensus held"
     other = filed if shown.source == SOURCE_FMP else None
     return "no verdict" if _guards_take_the_verdict(rec, value, other) else None
 
@@ -1484,10 +1758,17 @@ class EarningsLiveService:
         # Reports own fetches ended: day -> {symbol: monotonic time of its latest end}
         # (`ended_since`).
         self._ended_at: Dict[date, Dict[str, float]] = {}
+        # (symbol, day) of the reports an own fetch ended after their record had held a figure,
+        # one since taken off (`ended_after_a_figure`).
+        self._ended_after_a_figure: Set[Tuple[str, date]] = set()
         # (symbol, day) whose release windows could not be read, logged once each.
         self._windows_unreadable: Set[Tuple[str, date]] = set()
-        # Days past the live days a sheet opened with no read here (`sheet_asked`).
+        # Days past the live days a sheet opened, or the restore gave a record back on, with no
+        # read here (`sheet_asked`).
         self._sheet_asked: Set[date] = set()
+        # (symbol, report date) -> the instants held pushes about that report look at it again,
+        # the ones the dispatcher holds them to (`read_before_look`).
+        self._looks: Dict[Tuple[str, date], Set[datetime]] = {}
         self._failed_until: float = 0.0
         self._extras: Dict[Tuple[str, date], Tuple[float, Optional[HistoryExtras]]] = {}
         # Keyed by (round kind, ET date) — the same shape as every other `_inflight` map, so
@@ -1504,7 +1785,7 @@ class EarningsLiveService:
     def observe_rows(self, day: date, rows: Iterable[Any], now: datetime,
                      *, symbols: Optional[Collection[str]] = None,
                      fetched: bool = False,
-                     stored_at: Optional[float] = None) -> None:
+                     stored_at: Optional[float] = None) -> Dict[str, Optional[Dict[str, Any]]]:
         """Fold FMP calendar rows dated `day` into their records. Sticky (module docstring).
 
         Each symbol's rows decide TOGETHER (`_rows_to_fold`, DUPLICATE ROWS in the module
@@ -1528,6 +1809,12 @@ class EarningsLiveService:
         skipped before anything folds, and so are rows of unknown age. Memo rows too old to open
         a record (`_too_old_to_open`) open none, with one WARNING per fold, and still fold into
         a record that exists.
+
+        Returns, by symbol, each report these rows folded into with the row its record took
+        its EPS from, None when it took none (`_fold_report`). A report the rows did not reach,
+        skipped above, is left out. The daily pass reads it to tell an EPS its own answer gave a
+        record from one the record held before, which reads the same, a zero above all
+        (`earnings_sender._live_record_reader`).
         """
         wanted = {s.upper() for s in symbols} if symbols is not None else None
         groups: Dict[str, List[Dict[str, Any]]] = {}
@@ -1540,6 +1827,7 @@ class EarningsLiveService:
         today = et_now(now).date()
         too_old = not fetched and _too_old_to_open(stored_at)
         unopened: List[str] = []
+        took: Dict[str, Optional[Dict[str, Any]]] = {}
         for symbol, group in groups.items():
             rec = self._records.get((symbol, day))
             if rec is None:
@@ -1552,7 +1840,8 @@ class EarningsLiveService:
                 continue
             ranked = _ranked_rows(group, today)
             _note_consensus(rec, ranked)
-            self._fold_report(rec, _rows_to_fold(ranked, today), now, fetched=fetched)
+            took[symbol] = self._fold_report(rec, _rows_to_fold(ranked, today), now,
+                                             fetched=fetched)
             self._note_landing(rec, now)
         if unopened:
             logger.warning(
@@ -1561,6 +1850,7 @@ class EarningsLiveService:
                 day.isoformat(), (time.monotonic() - stored_at) / 3600, len(unopened),
                 ", ".join(sorted(unopened)[:5]),
             )
+        return took
 
     def old_rows_would_open(self, day: date, rows: Iterable[Any], stored_at: Optional[float],
                             symbols: Collection[str]) -> bool:
@@ -1578,23 +1868,175 @@ class EarningsLiveService:
         return False
 
     def _fold_report(self, rec: _Record, rows: List[Dict[str, Any]], now: datetime,
-                     *, fetched: bool) -> None:
+                     *, fetched: bool) -> Optional[Dict[str, Any]]:
         """One response's rows for one report, weakest first, into its record: each metric's
         figure is the strongest row's that may be stored (`_settled` settles its estimate).
         The surprise behind a figure keeps the figure's consensus through a later pending row,
         and the landing is the caller's, once per report. A row of zeros that has given way
-        (`_zeros_gave_way`) leaves the record first, with both its zeros, so from here on the
-        record is the one that row never reached and its estimates can move again. An own fetch
-        also stamps the record, which is the line later memo rows must clear (`observe_rows`),
-        and having listed the report it ends any gap `_end_unlisted` was counting."""
+        (`_zeros_gave_way`) leaves the record first, with both its zeros, so from here on its
+        estimates can move again. So does a pair this response would complete already unfilled
+        (`_zeros_complete_unfilled`): its zero replaces the figure held before it, as the newest
+        answer does, and the pair leaves whole. And a pair only the company's release kept apart,
+        one FMP's answers alone would settle the record into (`_without_release`), leaves as it
+        would had the release come after this response: at once, re-read like the pair above,
+        when it reads unfilled even so, and otherwise as the stored small name's report the next
+        fold would take off, with nothing of this response taken and the consensus its own rows
+        brought kept. A row of zeros the fold refuses as FMP's unfilled shape
+        (`_storable_figures`) says the same of the report without ever being stored. The
+        record remembers each (`unfilled_zeros_seen`): a zero FMP sends with nothing real beside
+        it on its row, in this response or a later one, is the field it never filled and is not
+        taken (`_lone_zero`), and one an earlier response sent so, still held, leaves the record
+        here unless it is one of a pair of zeros (`_drop_lone_zeros`). So a figure stored after
+        the zeros left, or a real one held when FMP sent them, stays, wherever the company's
+        release falls. A revenue of 0 held from before the release leaves once the release's
+        revenue is there (`_release_takes_zero_revenue_off`), and the record notes that FMP sent
+        it, and the consensus that zero would hold (`fmp_revenue_kept_off`,
+        `fmp_revenue_kept_off_estimate`). Each figure taken notes whether its own row left it a
+        zero alone (`_alone_after`), the one thing the record cannot read later. An own fetch also
+        stamps the record, which is the line later memo rows must clear (`observe_rows`), and
+        having listed the report it ends any gap `_end_unlisted` was counting. Returns the row the
+        record took its EPS from, None when it took none. A record holds the EPS it took and may
+        still not show it: FMP's unfilled zeros (`_fmp_zeros_unfilled`), or a dropped digit held
+        as "checking" (`eps_metric`)."""
+        held = _held_figures(rec)
+        alone = self._without_release(rec, rows)
+        eps_pick, revenue_pick, refused = self._picks(rec, rows)
+        gave_way = (_zeros_gave_way(rec, eps_pick, revenue_pick)
+                    or _zeros_complete_unfilled(rec, rows, eps_pick, revenue_pick))
+        # A pair of zeros only the company's release keeps apart: FMP's answers alone would
+        # settle the record into one. Had the release come after this response, the pair either
+        # reads unfilled already and gives way in this fold, as `_zeros_complete_unfilled`'s
+        # does, or is stored as a small name's report, which the release shows unfilled and the
+        # next fold takes off whole (`_zeros_gave_way`) with nothing of this response kept.
+        kept_apart = (not gave_way and alone is not None
+                      and alone.fmp_eps == 0 and alone.fmp_revenue == 0)
+        stored_then_off = kept_apart and not _fmp_zeros_unfilled(alone)
+        if gave_way or kept_apart:
+            # One line explains the zeros: a row of zeros this answer sent, refused beside the
+            # release, is logged as refused below, whatever FMP alone would have made of it.
+            if gave_way or not refused:
+                logger.warning(
+                    "[earnings-live] %s %s: revenue guard: FMP's row of zeros gave way%s (this "
+                    "answer EPS %s, revenue %s; filing %s; consensus %s, largest stated %s)",
+                    rec.symbol, rec.day.isoformat(),
+                    ", its revenue of 0 kept off by the company's release" if kept_apart else "",
+                    eps_pick and eps_pick[1], revenue_pick and revenue_pick[1],
+                    rec.filing is not None, rec.revenue_estimate, rec.revenue_guard_estimate,
+                )
+            rec.fmp_eps = rec.fmp_revenue = None
+        if (gave_way or kept_apart or refused) and not rec.unfilled_zeros_seen:
+            if refused and not gave_way:
+                _log_unfilled_zeros_refused(rec, held)
+            rec.unfilled_zeros_seen = True
+            # A zero an earlier answer sent alone is the same unfilled field, and so are this
+            # response's own: it leaves, and the response is taken again without them, with the
+            # memory on from the first row, so a repeat of it decides the same. Unless the pair
+            # this response makes would have been stored: then the pair was all it gave, and its
+            # rows count from the next fold on, as they would after a release that came later.
+            _drop_lone_zeros(rec)
+            if stored_then_off:
+                eps_pick = revenue_pick = None
+            else:
+                eps_pick, revenue_pick, _ = self._picks(rec, rows)
+        if _release_takes_zero_revenue_off(rec):
+            logger.warning(
+                "[earnings-live] %s %s: FMP revenue 0 taken off: the company's release reports "
+                "%s, beside which FMP's zero is never kept (held EPS %s, consensus %s)",
+                rec.symbol, rec.day.isoformat(), _release_revenue(rec), rec.fmp_eps,
+                rec.revenue_estimate,
+            )
+            rec.fmp_revenue = None
+            rec.fmp_revenue_alone = False
+        rec.fmp_eps_alone = _alone_after(rec.fmp_eps, rec.fmp_eps_alone, eps_pick,
+                                         beside_is_revenue=True)
+        rec.fmp_revenue_alone = _alone_after(rec.fmp_revenue, rec.fmp_revenue_alone, revenue_pick,
+                                             beside_is_revenue=False)
+        if stored_then_off:
+            # The consensus the stored pair's own rows brought it, which its leaving keeps.
+            rec.eps_estimate, rec.revenue_estimate = alone.eps_estimate, alone.revenue_estimate
+        else:
+            rec.fmp_eps, rec.eps_estimate = _settled(
+                rec.fmp_eps, rec.eps_estimate, eps_pick, rows, _eps_estimate)
+            rec.fmp_revenue, rec.revenue_estimate = _settled(
+                rec.fmp_revenue, rec.revenue_estimate, revenue_pick, rows, _revenue_estimate)
+        rec.fmp_revenue_kept_off = (not rec.unfilled_zeros_seen and rec.fmp_revenue is None
+                                    and alone is not None and alone.fmp_revenue == 0)
+        rec.fmp_revenue_kept_off_estimate = (alone.revenue_estimate if rec.fmp_revenue_kept_off
+                                             and alone is not None else None)
+        if fetched:
+            rec.fmp_fetched_mono = time.monotonic()
+            rec.unlisted_since = None
+            if rec.checked_at is None or now > rec.checked_at:
+                rec.checked_at = now
+        return eps_pick[0] if eps_pick is not None else None
+
+    @classmethod
+    def _without_release(cls, rec: _Record, rows: List[Dict[str, Any]]) -> Optional[_Record]:
+        """The record as FMP's answers alone would leave it after this response, had the company's
+        release never been held: a copy, folded the way `_fold_report` takes and settles figures,
+        with nothing logged and `rec` untouched. None when the release cannot change what FMP
+        keeps: it holds no revenue above zero, or the record already knows FMP sends this
+        report's fields as zeros while it has not filled them (`unfilled_zeros_seen`). The release
+        decides what FMP may keep in one place only, a revenue of 0 under a small consensus, which
+        it refuses (`_storable_revenue`) or takes off (`_release_takes_zero_revenue_off`); the
+        record notes that FMP sent one (`fmp_revenue_kept_off`), so the copy holds it, with the
+        revenue consensus it would have held (`fmp_revenue_kept_off_estimate`) in place of the
+        record's, which moved on without it.
+
+        A row FMP alone refuses as its unfilled shape (`_storable_figures`) teaches the copy what
+        it teaches the record: the copy turns `unfilled_zeros_seen` on, its zeros sent alone leave
+        (`_drop_lone_zeros`) and the response is taken again, so zeros beside that row in the same
+        answer pair nothing. The copy stops there, short of a pair giving way: a pair it settles
+        into, unfilled or not, is `_fold_report`'s to read."""
+        if rec.unfilled_zeros_seen or _release_revenue(rec) is None:
+            return None
+        kept_off = rec.fmp_revenue is None and rec.fmp_revenue_kept_off
+        alone = replace(rec, filing=None, fmp_revenue=0.0 if kept_off else rec.fmp_revenue,
+                        revenue_estimate=(rec.fmp_revenue_kept_off_estimate if kept_off
+                                          else rec.revenue_estimate),
+                        eps_refusal_logged=True, revenue_refusal_logged=True)
+        eps_pick, revenue_pick, refused = cls._picks(alone, rows)
+        if refused:
+            alone.unfilled_zeros_seen = True
+            _drop_lone_zeros(alone, log=False)
+            eps_pick, revenue_pick, _ = cls._picks(alone, rows)
+        alone.fmp_eps, alone.eps_estimate = _settled(
+            alone.fmp_eps, alone.eps_estimate, eps_pick, rows, _eps_estimate)
+        alone.fmp_revenue, alone.revenue_estimate = _settled(
+            alone.fmp_revenue, alone.revenue_estimate, revenue_pick, rows, _revenue_estimate)
+        return alone
+
+    @staticmethod
+    def _picks(rec: _Record, rows: List[Dict[str, Any]],
+               ) -> Tuple[Optional[Tuple[Dict[str, Any], float]],
+                          Optional[Tuple[Dict[str, Any], float]], bool]:
+        """(EPS, revenue) this response's rows, weakest first, would give the record, each as
+        (row, figure) or None: the strongest row's figure that may be stored. Then whether a row
+        was refused as FMP's unfilled shape (`_storable_figures`), which `_fold_report` reads
+        before any figure is taken. A refusal is logged once per record and metric."""
         eps_pick: Optional[Tuple[Dict[str, Any], float]] = None
         revenue_pick: Optional[Tuple[Dict[str, Any], float]] = None
+        refused_unfilled = False
         held_eps, held_revenue = _held_figures(rec)
         for row in rows:
             reported_eps = finite(row.get("epsActual"))
             reported_revenue = finite(row.get("revenueActual"))
             eps, revenue = _storable_figures(reported_eps, reported_revenue, held_eps,
                                              held_revenue, rec.revenue_guard_estimate)
+            if _unfilled_shape(reported_eps, reported_revenue) and eps is None:
+                refused_unfilled = True
+            if rec.unfilled_zeros_seen and _lone_zero(eps, reported_revenue,
+                                                      beside_is_revenue=True):
+                eps = None
+                if not rec.eps_refusal_logged:
+                    rec.eps_refusal_logged = True
+                    _log_lone_zero(rec, "EPS", reported_eps, reported_revenue)
+            if rec.unfilled_zeros_seen and _lone_zero(revenue, reported_eps,
+                                                      beside_is_revenue=False):
+                revenue = None
+                if not rec.revenue_refusal_logged:
+                    rec.revenue_refusal_logged = True
+                    _log_lone_zero(rec, "revenue", reported_eps, reported_revenue)
             if revenue is not None:
                 revenue_pick, held_revenue = (row, revenue), revenue
             elif reported_revenue is not None and not rec.revenue_refusal_logged:
@@ -1615,24 +2057,7 @@ class EarningsLiveService:
             name = row.get("companyName")
             if isinstance(name, str) and name.strip():
                 rec.company_name = name.strip()
-        if _zeros_gave_way(rec, eps_pick, revenue_pick):
-            logger.warning(
-                "[earnings-live] %s %s: revenue guard: FMP's row of zeros gave way (this answer "
-                "EPS %s, revenue %s; filing %s; consensus %s, largest stated %s)",
-                rec.symbol, rec.day.isoformat(), eps_pick and eps_pick[1],
-                revenue_pick and revenue_pick[1], rec.filing is not None,
-                rec.revenue_estimate, rec.revenue_guard_estimate,
-            )
-            rec.fmp_eps = rec.fmp_revenue = None
-        rec.fmp_eps, rec.eps_estimate = _settled(
-            rec.fmp_eps, rec.eps_estimate, eps_pick, rows, _eps_estimate)
-        rec.fmp_revenue, rec.revenue_estimate = _settled(
-            rec.fmp_revenue, rec.revenue_estimate, revenue_pick, rows, _revenue_estimate)
-        if fetched:
-            rec.fmp_fetched_mono = time.monotonic()
-            rec.unlisted_since = None
-            if rec.checked_at is None or now > rec.checked_at:
-                rec.checked_at = now
+        return eps_pick, revenue_pick, refused_unfilled
 
     def _note_landing(self, rec: _Record, now: datetime) -> None:
         """Note a record's first results, or that it has none yet. Results land from pending
@@ -1718,9 +2143,11 @@ class EarningsLiveService:
             rec.landed_from_pending = False
 
     async def restore_filings(self, now: datetime) -> None:
-        """Take back what `earnings_filing_cache` holds for the live days, once per process, in
-        the first tick of either loop, before it decides anything (A RESTART in the module
-        docstring). Never raises. A failed read tries again `_FAILURE_RETRY_SECONDS` later."""
+        """Take back what `earnings_filing_cache` holds for every day a record stays readable
+        (`sheet_days`), once per process, in the first tick of either loop, before it decides
+        anything (A RESTART in the module docstring). A record given back on a day past the live
+        days puts that day on the loop's next round, as a sheet asking for it would. Never
+        raises. A failed read tries again `_FAILURE_RETRY_SECONDS` later."""
         if self._filings_restored or not settings.EARNINGS_LIVE_FILINGS_ENABLED:
             return
         if time.monotonic() < self._restore_retry_at - _DUE_SLACK_SECONDS:
@@ -1731,7 +2158,8 @@ class EarningsLiveService:
     async def _restore_filings(self, now: datetime) -> None:
         from app.services.earnings_filing_service import get_earnings_filing_watcher
 
-        days = live_days(et_now(now).date())
+        today = et_now(now).date()
+        days = sheet_days(today)
         try:
             held = await _read_held_filings(days)
             watcher = get_earnings_filing_watcher()
@@ -1739,6 +2167,11 @@ class EarningsLiveService:
                 self.restore_filing(filing.symbol, filing.day, filing.figures, now,
                                     checked_at=filing.computed_at)
                 watcher.restore(filing.symbol, filing.day, filing.figures)
+                # The table holds no consensus and no FMP figure, and no cadence reads a day past
+                # the live days: without one look, neither the sheet nor a held result push
+                # waking on it would ever read FMP's answer. A live day is not taken: it has a
+                # first look of its own.
+                self.sheet_asked(filing.day, today)
         except Exception as e:
             self._restore_retry_at = time.monotonic() + _FAILURE_RETRY_SECONDS
             logger.warning(
@@ -1748,9 +2181,12 @@ class EarningsLiveService:
             )
             return
         self._filings_restored = True
-        logger.info("[earnings-live] restored %d filing(s) for %s to %s (%s)", len(held),
-                    days[0].isoformat(), days[-1].isoformat(),
-                    ", ".join(f"{f.symbol} {f.day.isoformat()}" for f in held[:20]))
+        looks = sorted(d for d in {f.day for f in held}
+                       if d in self._sheet_asked and d not in self._fetched)
+        logger.info("[earnings-live] restored %d filing(s) for %s to %s (%s); FMP look due on: %s",
+                    len(held), days[0].isoformat(), days[-1].isoformat(),
+                    ", ".join(f"{f.symbol} {f.day.isoformat()}" for f in held[:20]),
+                    ", ".join(d.isoformat() for d in looks) or "none")
 
     async def keep_filing(self, symbol: str, day: date, at: datetime) -> None:
         """Write what the record holds for (symbol, day) to `earnings_filing_cache`: the record's
@@ -1762,11 +2198,21 @@ class EarningsLiveService:
     # ── reading ────────────────────────────────────────────────────
 
     def snapshot(self, symbol: str, day: date, now: datetime) -> Optional[LiveSnapshot]:
+        """One report as every reader sees it, or None with no record. Where the record's own
+        rules ask nothing, a report that still wants FMP's answer (`needs_fmp`) asks again in
+        30 s while the loop has yet to load its day, or the day of the report it reads as
+        (`awaits_first_load`): that load is on the loop's next round and brings the answer
+        (THE SHEET'S POLL in the module docstring)."""
         rec = self._records.get((symbol.upper(), day))
         if rec is None:
             return None
         n = et_now(now)
-        return snapshot_of(rec, n.date(), n)
+        snap = snapshot_of(rec, n.date(), n)
+        if snap.poll_seconds is None and needs_fmp(snap.eps, snap.revenue) and any(
+                self.awaits_first_load(d, n.date())
+                for d in (day, snap.reads_as) if d is not None):
+            snap = replace(snap, poll_seconds=EARNINGS_LIVE_POLL_SECONDS)
+        return snap
 
     def recent_snapshots(self, symbols: Collection[str], now: datetime) -> List[LiveSnapshot]:
         """The cards from before today worth showing (`recent_card_visible`), ONE per symbol
@@ -1846,6 +2292,53 @@ class EarningsLiveService:
                 and day not in self._fetched):
             self._sheet_asked.add(day)
 
+    def read_before_look(self, symbol: str, day: date, at: datetime) -> None:
+        """A held push about the (symbol, day) report looks at it again at `at`, the instant the
+        dispatcher holds its row to (`earnings_live_sender.copy_at_wake`). The loop reads that day
+        on a tick in the `_look_read_lead_seconds` before the look, unless a read already falls
+        there, so the look reads FMP's answer of that moment: the day's own cadence can be 2 h on
+        a closed day, and a recovery inside the hold would otherwise reach the record after the
+        last look. The hold's own instant, never this call's moment: the flush reads its clock
+        once per hand-out, and a row reached late in a long one would book its read after its
+        look. So the rows of one hand-out look at one instant and share one read (`_looks_due`).
+        A look whose report no longer wants FMP by then costs nothing. Pure bookkeeping, so the
+        flush may call it on the event loop."""
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        self._looks.setdefault((symbol.upper(), day), set()).add(at)
+
+    def _looks_due(self, now: datetime) -> List[date]:
+        """The days a held push's next look waits on whose read is due on the tick at `now`, oldest
+        first: the look is inside `_look_read_lead_seconds` (its window), its own report still
+        wants FMP (`needs_fmp`), whatever else on its day waits, and no read of its day answers it
+        yet. A read answers every look whose window opens before the tick after it, so looks less
+        than a tick apart share one. A look that has passed, one a read answers, and one whose
+        report has answered or gone, are forgotten. The looks are instants on the dispatcher's
+        clock, put on this module's monotonic one through this tick's own `now`."""
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        mono = time.monotonic()
+        lead = _look_read_lead_seconds() + _DUE_SLACK_SECONDS
+        tick = settings.EARNINGS_LIVE_INTERVAL_SECONDS
+        due: Set[date] = set()
+        for key in list(self._looks):
+            looks = self._looks[key]
+            last = self._fetched.get(key[1])
+            for look in sorted(looks):
+                ahead = (look - now).total_seconds()
+                opens = mono + ahead - lead
+                if ahead <= 0 or (last is not None and last >= opens - tick):
+                    looks.discard(look)
+                elif mono >= opens:
+                    rec = self._records.get(key)
+                    if rec is not None and needs_fmp(eps_metric(rec), revenue_metric(rec)):
+                        due.add(key[1])
+                        break
+                    looks.discard(look)
+            if not looks:
+                del self._looks[key]
+        return sorted(due)
+
     # ── refresh (the live loop only) ───────────────────────────────
 
     def _waiting(self, day: date, symbols: Collection[str]) -> Iterable[str]:
@@ -1873,6 +2366,14 @@ class EarningsLiveService:
         if not ended or stored_at is None:
             return False
         return any(ended.get(symbol.upper(), stored_at) > stored_at for symbol in symbols)
+
+    def ended_after_a_figure(self, symbol: str, day: date) -> bool:
+        """Did an own fetch end this report's record (A REPORT FMP MOVES) after it had held a
+        figure in this process? An end takes only a record holding no raw figure, so that figure
+        was taken off first (an FMP zero, GUARDS). A held push's wake reads it where the record is
+        gone, or came back with no figure of its own, so the zero the row states is not buzzed
+        (`earnings_live_sender.copy_at_wake`). Kept for the `sheet_days`, like every record."""
+        return (symbol.upper(), day) in self._ended_after_a_figure
 
     def _release_windows(self, symbol: str, day: date) -> frozenset:
         """The windows `symbol`'s company releases in (`EarningsFilingWatcher.release_windows`).
@@ -1947,22 +2448,31 @@ class EarningsLiveService:
     def _prune(self, now: datetime) -> None:
         """Forget every day outside `sheet_days`, the window a record stays readable in."""
         days = set(sheet_days(et_now(now).date()))
-        for key in [k for k in self._records if k[1] not in days]:
-            self._records.pop(key, None)
+        for by_report in (self._records, self._looks):
+            for key in [k for k in by_report if k[1] not in days]:
+                by_report.pop(key, None)
         for held in (self._fetched, self._blank_since, self._ended_at):
             for day in [d for d in held if d not in days]:
                 held.pop(day, None)
+        self._ended_after_a_figure = {
+            key for key in self._ended_after_a_figure if key[1] in days}
         self._sheet_asked &= days
         self._windows_unreadable = {key for key in self._windows_unreadable if key[1] in days}
 
     async def refresh(self, now: datetime, *, fmp: Any, symbols: Collection[str]) -> None:
-        """Prune, then fetch the due days and fold them in. The prune comes before every early
-        return: the days roll with nothing due and during a failure wait too. Never raises (a
-        failure keeps the records of the live days)."""
+        """Prune, then fetch the due days and fold them in, with any day a held push's next
+        look waits on (`read_before_look`). The prune comes before every early return: the days
+        roll with nothing due and during a failure wait too. Never raises (a failure keeps the
+        records of the live days)."""
         self._prune(now)
         if time.monotonic() < self._failed_until - _DUE_SLACK_SECONDS:
             return
         days = self.due_days(now, symbols)
+        looked = [day for day in self._looks_due(now) if day not in days]
+        if looked:
+            logger.info("[earnings-live] reading %s before a held push looks again",
+                        ", ".join(day.isoformat() for day in looked))
+            days = sorted(days + looked)
         if not days:
             return
         await self._run_once(("refresh", days[-1]), lambda: self._fetch(now, fmp, days))
@@ -2050,7 +2560,10 @@ class EarningsLiveService:
             elif mono - rec.unlisted_since >= hold:
                 ended.append(symbol)
         for symbol in ended:
-            del self._records[(symbol, day)]
+            if self._records.pop((symbol, day)).landed_at is not None:
+                # It holds no raw figure, so the one it held was taken off: a held push's wake
+                # must still know that once the record is gone (`ended_after_a_figure`).
+                self._ended_after_a_figure.add((symbol, day))
             self._ended_at.setdefault(day, {})[symbol] = mono
         if left_out:
             logger.info(
@@ -2189,7 +2702,9 @@ def live_payload(
     loop has not seen it) still carries its consensus and its status. `found` False answers
     `none`, unless `recheck` says this read could not tell: then it reads as a report not in
     yet and the sheet asks again (THE SHEET'S POLL in the module docstring). A record has its
-    own status and poll, so `recheck` has no say over one."""
+    own status and poll, so `recheck` has no say over one. The year-ago block goes only with a
+    figure to draw: its revenue, or its EPS where that is on today's basis (never a GAAP figure
+    beside an adjusted one, the owner's rule in `history_extras_from`)."""
     if snap is None:
         eps = LiveMetric(eps_estimate)
         revenue = LiveMetric(revenue_estimate)
@@ -2217,15 +2732,17 @@ def live_payload(
             {"quarter": q.quarter, "result": q.result, "surprise_pct": q.surprise_pct}
             for q in extras.last_quarters
         ]
-        if extras.year_ago_quarter or extras.year_ago_revenue is not None or extras.year_ago_eps is not None:
-            comparable = extras.year_ago_eps_comparable and eps.basis in (None, BASIS_ADJUSTED)
+        comparable = extras.year_ago_eps_comparable and eps.basis in (None, BASIS_ADJUSTED)
+        year_ago_eps = extras.year_ago_eps if comparable else None
+        # The sheet draws this block's heading whenever it is sent and each line only with its
+        # figure, so a block left with no figure, a label alone, is not sent.
+        if extras.year_ago_revenue is not None or year_ago_eps is not None:
             year_ago = {
                 "quarter": extras.year_ago_quarter,
                 "revenue": extras.year_ago_revenue,
-                "eps": extras.year_ago_eps if comparable else None,
+                "eps": year_ago_eps,
                 "revenue_growth_pct": yoy_growth_pct(revenue.actual, extras.year_ago_revenue),
-                "eps_growth_pct": (yoy_growth_pct(eps.actual, extras.year_ago_eps)
-                                   if comparable else None),
+                "eps_growth_pct": yoy_growth_pct(eps.actual, year_ago_eps),
             }
     filing_payload = None
     guidance = None

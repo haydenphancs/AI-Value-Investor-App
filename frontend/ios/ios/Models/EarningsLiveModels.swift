@@ -65,6 +65,10 @@ struct EarningsMetricOutcome: Equatable {
 
     var hasLanded: Bool { actual != nil }
 
+    /// The server called the figure a beat or a miss, so it and its consensus are two different
+    /// figures, and a row prints them apart (`EarningsFigureFormat.revenueRow` / `epsRow`).
+    var isBeatOrMiss: Bool { result == .beat || result == .missed }
+
     /// `.pending` until the figure lands. `.noEstimate` when there is nothing comparable —
     /// no consensus, a GAAP figure against an adjusted one, or a figure the server sent with
     /// no surprise: it judges every figure, and that is its answer for a print whose rounding
@@ -122,35 +126,41 @@ struct EarningsMetricOutcome: Equatable {
 /// Dollar figures for earnings. NOT `CompactNumberFormat`: that one drops to whole units at
 /// 10+ for chart axes, which would print a $17.1B actual against a $16.6B estimate as
 /// "17B vs 17B" — the one comparison this screen exists to make. `nonisolated`: pure string
-/// formatting, and `eps` / `revenue` are passed around as plain `(Double) -> String` values.
+/// formatting, and `eps` / `revenue` and each row's format are passed around as plain
+/// `(Double) -> String` values.
 enum EarningsFigureFormat {
 
     /// "$0.41", "-$0.25" (the sign before the dollar — "$-0.25" is how the old card read).
     nonisolated static func eps(_ value: Double) -> String {
-        guard value.isFinite else { return "—" }
-        let sign = value < 0 ? "-" : ""
-        return sign + String(format: "$%.2f", abs(value))
+        epsFigure(value, extraDecimals: 0)
     }
 
-    /// "$17.1B", "$113.4B", "$523.4M", "$950K". One decimal at every scale so two nearby
-    /// figures stay distinguishable; small pre-revenue estimates read "$23.5M", not "$0.0B".
+    /// "$17.1B", "$113.4B", "$523.4M", "$950K": one decimal from millions to billions, so a
+    /// small pre-revenue estimate reads "$23.5M", not "$0.0B". Two figures of one row can still
+    /// round alike at that: `revenueRow` prints those apart.
     nonisolated static func revenue(_ value: Double) -> String {
-        guard value.isFinite else { return "—" }
-        let sign = value < 0 ? "-" : ""
-        let v = abs(value)
-        let body: String
-        if v >= 1_000_000_000_000 {
-            body = String(format: "$%.2fT", v / 1_000_000_000_000)
-        } else if v >= 1_000_000_000 {
-            body = String(format: "$%.1fB", v / 1_000_000_000)
-        } else if v >= 1_000_000 {
-            body = String(format: "$%.1fM", v / 1_000_000)
-        } else if v >= 1_000 {
-            body = String(format: "$%.0fK", v / 1_000)
-        } else {
-            body = String(format: "$%.0f", v)
-        }
-        return sign + body
+        revenueFigure(value, extraDecimals: 0)
+    }
+
+    /// The format for one EPS row's estimate and actual, as `revenueRow` decides it: FMP's
+    /// $0.0523 against a $0.05 consensus is a beat that reads "$0.05" twice at two decimals.
+    nonisolated static func epsRow(actual: Double?, estimate: Double?,
+                                   beatOrMiss: Bool) -> (Double) -> String {
+        let extra = decimalsApart(actual, estimate, beatOrMiss: beatOrMiss, epsFigure)
+        return { EarningsFigureFormat.epsFigure($0, extraDecimals: extra) }
+    }
+
+    /// The format for one revenue row's estimate and actual, the card's and the sentence's. A
+    /// figure the server called a beat or a miss is not its consensus and must not read as it:
+    /// at one decimal FMP's $2.53B against a $2.47B estimate prints "$2.5B" twice. Such a pair
+    /// takes the fewest extra decimals, two at most, that print the two apart ("$2.53B" against
+    /// "$2.47B"). That never goes past a company's own print: the server judges its figure only
+    /// where the print's rounding cannot cover the estimate, and there the two already differ at
+    /// the print's own decimals. Any other pair, and a figure alone, keeps `revenue(_:)`.
+    nonisolated static func revenueRow(actual: Double?, estimate: Double?,
+                                       beatOrMiss: Bool) -> (Double) -> String {
+        let extra = decimalsApart(actual, estimate, beatOrMiss: beatOrMiss, revenueFigure)
+        return { EarningsFigureFormat.revenueFigure($0, extraDecimals: extra) }
     }
 
     /// "+24.8%" / "-3.1%" for a year-over-year change.
@@ -158,6 +168,44 @@ enum EarningsFigureFormat {
         guard pct.isFinite else { return "—" }
         let sign = pct > 0 ? "+" : (pct < 0 ? "-" : "")
         return sign + String(format: "%.1f%%", abs(pct))
+    }
+
+    /// How many decimals past a metric's own a judged pair needs before its two figures print
+    /// differently: none for a pair nobody judged, two at most.
+    private nonisolated static func decimalsApart(_ actual: Double?, _ estimate: Double?,
+                                                  beatOrMiss: Bool,
+                                                  _ figure: (Double, Int) -> String) -> Int {
+        guard beatOrMiss, let actual, let estimate else { return 0 }
+        var extra = 0
+        while extra < 2, figure(actual, extra) == figure(estimate, extra) {
+            extra += 1
+        }
+        return extra
+    }
+
+    private nonisolated static func epsFigure(_ value: Double, extraDecimals extra: Int) -> String {
+        guard value.isFinite else { return "—" }
+        let sign = value < 0 ? "-" : ""
+        return sign + String(format: "$%.\(2 + extra)f", abs(value))
+    }
+
+    private nonisolated static func revenueFigure(_ value: Double, extraDecimals extra: Int) -> String {
+        guard value.isFinite else { return "—" }
+        let sign = value < 0 ? "-" : ""
+        let v = abs(value)
+        let body: String
+        if v >= 1_000_000_000_000 {
+            body = String(format: "$%.\(2 + extra)fT", v / 1_000_000_000_000)
+        } else if v >= 1_000_000_000 {
+            body = String(format: "$%.\(1 + extra)fB", v / 1_000_000_000)
+        } else if v >= 1_000_000 {
+            body = String(format: "$%.\(1 + extra)fM", v / 1_000_000)
+        } else if v >= 1_000 {
+            body = String(format: "$%.\(extra)fK", v / 1_000)
+        } else {
+            body = String(format: "$%.\(extra)f", v)
+        }
+        return sign + body
     }
 }
 
@@ -326,6 +374,10 @@ extension AppAlert.EarningsData {
     /// header cannot fall behind the results card under it: the card's fields are the copy taken
     /// at the tap. Every field `AppAlert.title` and `earningsDescription` read comes from here,
     /// but `liveCheckEnded`: that is no answer's to give, and the sheet sets it on the result.
+    /// The Tracking card takes its own route's answer the same way when the poll asks about a
+    /// LIVE card alone (`TrackingViewModel.refreshLiveEarningsCards`), once that answer settles
+    /// the card's own report (`TrackingViewModel.liveCardStep`): a moved or unlisted report is
+    /// the feed's to redraw there, since the list can already hold a card for the new date.
     ///
     /// Two answers do not describe the figures this card holds, and neither may take them back:
     /// `none` (the server has no such report right now), and an answer for another date (the

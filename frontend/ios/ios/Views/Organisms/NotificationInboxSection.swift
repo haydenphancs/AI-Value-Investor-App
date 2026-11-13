@@ -177,7 +177,7 @@ enum NotificationInboxSection {
         return "\(item.kind)|\(ticker)"
     }
 
-    /// Relative time, plus a note ONLY when the user's own quiet hours held the buzz back.
+    /// Relative time, plus a note ONLY while the buzz is held back.
     ///
     /// ⚠️ `no_device` ("not sent to this device") and `failed` ("couldn't be delivered") used to
     /// be shown here too, and were removed on request (2026-09-23). The developer asked what they
@@ -188,11 +188,18 @@ enum NotificationInboxSection {
     /// configured on this server"), i.e. dev noise shown to the account that ran them.
     ///
     /// The state still lives in `notification_events.push_state` / `last_error` for support.
-    /// Quiet hours stays: it is a setting the user chose, and it explains a late buzz.
+    /// The hold stays: it explains why the phone has not buzzed for this row. Its words are true
+    /// of every hold the server makes, and promise nothing. The holds: the user's own Quiet
+    /// Hours, and the night hold an earnings result gets when the user never set any
+    /// (22:00-07:00 their time). "Quiet hours" would send that user to a Settings toggle that
+    /// reads Off, and "until morning" is false for a daytime window the user chose. No promise
+    /// either ("delivered later", "not sent yet"): the wake re-checks a held row and may never
+    /// send it (a figure that moved, a category turned off, the day's cap). The note goes when
+    /// the row stops being held, sent or not.
     private static func footnote(for item: NotificationEventDTO) -> String {
         let note: String?
         switch item.deliveryState {
-        case "deferred":  note = "held during quiet hours"
+        case "deferred":  note = "held back"
         default:          note = nil
         }
         guard let note else { return item.relativeTime }

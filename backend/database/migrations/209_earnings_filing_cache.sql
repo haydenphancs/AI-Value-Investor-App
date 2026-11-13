@@ -12,22 +12,25 @@
 --
 -- One row per (symbol, report_date), written by `earnings_live_service` the moment a verified
 -- filing is on its record, and read back once per process, by whichever live tick runs first,
--- for the live days only (`live_days`: the previous trading day through today, weekends and
--- holidays included). A restored filing is not read again, so it costs SEC and Gemini nothing,
--- and a restored figure is never a landing, so it announces nothing.
+-- for the days a record stays readable and no older one (`sheet_days`): the live days, the
+-- previous trading day through today with weekends and holidays included, and the trading day
+-- before them, which the sheet still opens because a result push held for a user's morning can
+-- wake on it. A restored filing is not read again, so it costs SEC and Gemini nothing, and a
+-- restored figure is never a landing, so it announces nothing.
 --
 -- A row is trusted only by the verifier that kept it. `verifier_version` holds
 -- `earnings_filing_service.FILING_VERIFIER_VERSION`, moved with every change to the verifier, and
 -- a row of another version reads as no row. Before this table a deploy during the SEC watch read
 -- that day's pending filings again with the fixed code. With the table alone a misread would
 -- outlive its fix: restored with no read and nothing on the row to tell it from a good one, a
--- false figure until FMP fills and a false outlook, which FMP never replaces, for all its live
--- days. So the one deploy that moves the version costs what any restart cost before: a report of
--- today still pending has its filing read once more while the SEC watch is open (06:00-22:00 ET),
--- and after 22:00 ET it waits for FMP like any other: no figure until FMP fills, no outlook or
--- link at all. Any other restart reads no filing the table gives back. One with no row, because
--- it gave nothing or a write failed, is read again by each new process, on the same terms. A row
--- wrong for a reason no verifier change covers needs a hand, then a restart:
+-- false figure until FMP fills and a false outlook, which FMP never replaces, on every day its
+-- record is read. So the one deploy that moves the version costs what any restart cost before:
+-- a report of today still pending has its filing read once more while the SEC watch is open
+-- (06:00-22:00 ET), and after 22:00 ET it waits for FMP like any other: no figure until FMP
+-- fills, no outlook or link at all. Any other restart reads no filing the table gives back. One
+-- with no row, because it gave nothing or a write failed, is read again by each new process, on
+-- the same terms. A row wrong for a reason no verifier change covers needs a hand, then a
+-- restart:
 --   DELETE FROM public.earnings_filing_cache WHERE symbol = 'XYZ' AND report_date = 'YYYY-MM-DD';
 --
 -- Holds ONLY what the company's own release said: each figure is the number printed in the SEC
@@ -35,9 +38,9 @@
 -- NEVER FMP data: no consensus, no FMP actual, no company name. Those come back from FMP.
 --
 -- No expires_at, on purpose. Most *_cache tables here carry none (they judge age from a stamp and
--- a constant), and this one has no age to judge: a row is read only while its report_date is a
--- live day, so it ages out by its own date, and a TTL could only lose a figure over a long
--- weekend. computed_at stays, because the sheet's "updated" time is restored from it.
+-- a constant), and this one has no age to judge: a row is read only while its report_date is
+-- one of those days, so it ages out by its own date, and a TTL could only lose a figure over a
+-- long weekend. computed_at stays, because the sheet's "updated" time is restored from it.
 --
 -- No clean-up job, on purpose. The tables that have one are a different case: ticker_news_cache
 -- holds licensed third-party news text, and news_sentiment_log, search_pick_daily and
@@ -46,7 +49,7 @@
 -- watched list is clamped at 1,000 tickers and each reports 4 times a year, so about 4,000 rows
 -- a year at the very worst, each under 1 KB. EARNINGS_LIVE_SEC_MAX_SYMBOLS (25) does not bound
 -- this: it limits a round, and a report with its figures in leaves the list for the next one.
--- Rows past the live days are simply never read.
+-- Rows older than those days are simply never read.
 --
 -- RLS is service-role ONLY. SEC data is public domain, but every cache table has been
 -- service-role-only since 164: the iOS app has no Supabase client, every reader is the backend's
@@ -109,10 +112,11 @@ COMMENT ON TABLE public.earnings_filing_cache IS
     'What each company''s own 8-K Item 2.02 earnings release said, for the live earnings card: '
     'FMP can take until the next morning to fill the same figures, and FMP never carries the '
     'outlook or the filing link. One row per (symbol, report date), written when a verified '
-    'filing reaches its record and read back once per process for the live days, so a restart '
-    'neither loses a figure nor reads the filing again. A row of another verifier_version reads '
-    'as no row. Figures from SEC filings only, never FMP data. report_date is its TTL: no '
-    'expires_at and no clean-up job. service_role only. Written and read only by '
+    'filing reaches its record and read back once per process for the days a record stays '
+    'readable (the live days and the trading day before them), so a restart neither loses a '
+    'figure nor reads the filing again. A row of another verifier_version reads as no row. '
+    'Figures from SEC filings only, never FMP data. report_date is its TTL: no expires_at and '
+    'no clean-up job. service_role only. Written and read only by '
     'app/services/earnings_live_service.py.';
 
 COMMENT ON COLUMN public.earnings_filing_cache.symbol IS

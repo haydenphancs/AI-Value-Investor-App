@@ -67,9 +67,15 @@ struct EarningsResultChips: View {
                     ? "\(name) not out yet" : "\(name) not available"
             }
             if o.isGAAP { return "\(name) reported on a GAAP basis" }
+            // The size alone after "by": the verb says which way, and "missed by -26.8%" read
+            // aloud is a double negative. The push says "missed consensus by 27%".
+            let size: String? = o.surpriseText.map { text in
+                String(text.drop(while: { $0 == "+" || $0 == "-" }))
+            }
+            let by: String = size.map { " by \($0)" } ?? ""
             switch o.result {
-            case .beat: return "\(name) beat \(o.surpriseText.map { "by \($0)" } ?? "")"
-            case .missed: return "\(name) missed \(o.surpriseText.map { "by \($0)" } ?? "")"
+            case .beat: return "\(name) beat\(by)"
+            case .missed: return "\(name) missed\(by)"
             case .matched: return "\(name) in line"
             case .pending, .noEstimate: return "\(name) reported"
             }

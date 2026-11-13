@@ -15,6 +15,7 @@ decisions that determine whether a notification is welcome or an uninstall:
      kind with `night_hold_by_default` is deferred the same way for a user who never set
      them, across the default night on that user's clock, and its wake asks twice more
      what the landing could not know: the user's own clock, and the report as it stands.
+     A held row the user has already opened in the inbox is not buzzed at its wake.
   5. **Once.** A unique claim in `notification_events` (migration 119) inserted BEFORE
      the send, so a retry, a re-trip of the same scope, or two overlapping Railway
      instances cannot produce a second buzz.
@@ -29,9 +30,14 @@ Unchanged (each of these is a property with a test behind it):
   * the claim is INSERTed before the send, and a failed claim round-trip means DO NOT
     send — if we cannot prove an alert is unsent, we don't send it;
   * the volume cap is checked BEFORE the claim, so a suppressed alert does not burn
-    that key's dedup slot and silently cost the user tomorrow's alert too;
+    that key's dedup slot and silently cost the user tomorrow's alert too (a night-hold
+    kind held past the user's midnight is the exception: it buzzes on a later day, and the
+    flush applies that day's cap — see `decide`);
   * a preference read failure fails OPEN to the declared default — a DB blip must not
-    be indistinguishable from a broken feature;
+    be indistinguishable from a broken feature (a night-hold kind then waits for the next
+    flush's read rather than buzz on ET's clock, which may be the user's night, and if that
+    read finds the kind turned off the flush makes such a row the kind sharing its key that the
+    user takes, when its sender would start it, or else deletes it, freeing the key);
   * a count read failure fails OPEN — the dedup key still prevents real repeats;
   * one bad recipient never abandons the rest of the fan-out, and this module never
     raises into the sweep that called it, unless that caller asks to hear about a failed
@@ -52,7 +58,9 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple,
+)
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -70,6 +78,7 @@ from app.services.notification_kinds import (
 from app.services.push_service import LEDGER_BODY_LIMIT, PushService, truncate_for_banner
 
 from app.utils.postgrest_paging import PAGE_SIZE, fetch_all_rows
+from app.utils.supabase_errors import retry_idempotent_sync
 
 if TYPE_CHECKING:
     from app.services.notification_senders.earnings_live_sender import WakeCopy
@@ -103,6 +112,17 @@ _BATCH = 200
 # DST hour. 48h is comfortably clear and the rows are filtered per user afterwards.
 _COUNT_LOOKBACK_HOURS = 48
 
+#: Why a claimed row went back to `deferred` when a redeploy cut its flush off
+#: (`_return_to_deferred`), written to its `last_error`.
+FLUSH_CANCELLED_MID_BATCH = "flush cancelled mid-batch (shutdown) — requeued"
+FLUSH_CANCELLED_DURING_CLAIM = "flush cancelled during claim (shutdown) — requeued"
+#: A held row's `last_error` when its wake asked again with the user's settings unread, so the
+#: look could not be checked against their night (`flush_deferred`).
+UNREAD_CLOCK_ASK = "asked again with the user's settings unread"
+#: The `last_error` of a held row whose last hand-out ended with no judgment on the user's own
+#: clock: a flush cut off, or a look booked on an unread one (`_last_hand_out_unjudged`).
+_UNJUDGED_NOTES = ("flush cancelled", UNREAD_CLOCK_ASK)
+
 # Push states (mirrors the CHECK constraint in migration 119).
 STATE_PENDING = "pending"
 STATE_DEFERRED = "deferred"
@@ -132,6 +152,18 @@ def trading_date_et() -> str:
 def _chunks(items: Sequence[str], size: int = _BATCH) -> Iterable[Sequence[str]]:
     for i in range(0, len(items), size):
         yield items[i : i + size]
+
+
+def _last_hand_out_unjudged(row: Mapping[str, Any]) -> bool:
+    """Did a claimed row's last hand-out end with no judgment on the user's own clock? A flush a
+    redeploy cut off judged nothing, and a look asked for with the settings unread could not be
+    checked against the user's night, so neither spends a night-hold row's one night hold. Read
+    from the note each leaves on the row (`last_error`), the only trace a later hand-out has. A
+    hold or a look booked on a good read leaves no note, so after one the row still reads as the
+    hand-out before it: its next wake is outside the user's night unless their clock has moved,
+    and then a hold is what they want, up to the attempts ceiling (`flush_deferred`)."""
+    note = row.get("last_error")
+    return isinstance(note, str) and note.startswith(_UNJUDGED_NOTES)
 
 
 @dataclass
@@ -172,7 +204,10 @@ class _Recipient:
     #: explicitly because of the per-batch increment.
     badge: Optional[int] = None
     # False when the bulk read failed for this user, so per-user code can fail OPEN in
-    # the same direction the single-user reads always did.
+    # the same direction the single-user reads always did. Set by `resolve_recipients` (the
+    # landing and the admin preview), where `decide` keeps a night-hold kind off ET's clock on
+    # it. The flush leaves it True and reads its own failed re-read off the blob, so a row it
+    # judges is never parked for itself again.
     preferences_known: bool = True
 
 
@@ -322,18 +357,25 @@ class PushDispatchService:
         reads the same as "nobody was told".
 
         Reads the `(user_id, dedup_key)` unique index. One read per `_BATCH` users stays far
-        under PostgREST's 1,000-row clamp while the caller names a few keys.
+        under PostgREST's 1,000-row clamp while the caller names a few keys. Each batch is a
+        read, so a transient edge failure is read again in place (`retry_idempotent_sync`):
+        any one of them failing would otherwise cost every watcher of the ticker this try.
         """
         holders: set = set()
         keys = list(dedup_keys)
         for chunk in _chunks(list(user_ids)):
-            rows = (
-                self.supabase.table(TABLE)
-                .select("user_id")
-                .in_("user_id", list(chunk))
-                .in_("dedup_key", keys)
-                .execute()
-                .data
+            wanted = list(chunk)
+            rows = retry_idempotent_sync(
+                lambda wanted=wanted: (
+                    self.supabase.table(TABLE)
+                    .select("user_id")
+                    .in_("user_id", wanted)
+                    .in_("dedup_key", keys)
+                    .execute()
+                    .data
+                ),
+                what=f"who of {len(wanted)} user(s) holds {keys}",
+                logger=logger,
             ) or []
             holders.update(r["user_id"] for r in rows if r.get("user_id"))
         return holders
@@ -869,6 +911,24 @@ class PushDispatchService:
         ORDER IS LOAD-BEARING. The cap is evaluated before the claim (which happens in
         the caller) so a suppressed alert does not burn the dedup slot: the user should
         still be able to receive that key's alert tomorrow.
+
+        Two exceptions, both for a night-hold kind (`NotificationKind.night_hold_by_default`):
+
+          * held past the user's midnight, it buzzes on a later day than this one, so this day's
+            count says nothing about it: the row is parked whatever that count, and the flush
+            applies the cap of the day it wakes on (a row capped there stays in the inbox).
+            Judged here, a result landing at 23:30 behind four earlier alerts got no row at all,
+            while the same result at 00:30 went out at 07:00 against a fresh budget;
+          * with the preference read failed (`_Recipient.preferences_known`), ET's daytime may
+            be the user's night, from Berlin to Tokyo. So a row that would go out now is parked
+            for the next flush instead (reason `preferences_unread`), which reads the
+            settings again and judges it on the user's own clock; a second failed read sends it
+            then, a minute late, whatever the hour by then (one parked in the minute before
+            22:00 ET can go out just after it). In ET's own night it is still parked to ET's
+            07:00, so a second failed read sends it in New York's morning, not its night. Such a
+            park holds the report's key on a guess: if the flush finds the kind turned off, the
+            row goes on as the kind sharing its key that the user takes, or is deleted
+            (`flush_deferred`).
         """
         uid = recipient.user_id
         prefs = recipient.preferences
@@ -883,35 +943,67 @@ class PushDispatchService:
             if not self._coerce_toggle(prefs.get(key), default, key=key, user_id=uid):
                 return Decision(uid, False, f"preference_off:{key}")
 
-        # 2. Per-category daily volume, counted in the user's own timezone.
-        cap = category_cap(kind.category, settings.PUSH_MAX_ALERTS_PER_USER_PER_DAY)
-        if cap is not None and recipient.category_sent_today >= cap:
-            return Decision(uid, False, f"cap_reached:{kind.category}:{cap}")
+        # Quiet hours are read before the cap, because a night-hold kind's wake decides which
+        # day's cap it meets; they are applied after it (step 3).
+        wake, wakes_another_day = self._quiet_wake(recipient, kind, now)
+
+        # 2. Per-category daily volume, counted in the user's own timezone: today's, unless a
+        #    night-hold kind is held past the user's midnight (the flush applies that day's).
+        capped = self._cap_reason(recipient, kind)
+        if capped and not (kind.night_hold_by_default and wakes_another_day):
+            return Decision(uid, False, capped)
 
         # 3. Quiet hours DEFER; they never drop. The ledger row is still written, so
         #    the in-app inbox shows it immediately — only the buzz waits. A night-hold kind
         #    keeps the default night for a user who never set them; a toggle they did touch
         #    is their answer, off included.
-        if kind.respects_quiet_hours:
-            try:
-                tz = qh.resolve_timezone(prefs)
-                window = qh.resolve_window(prefs)
-                if kind.night_hold_by_default and qh.quiet_hours_never_set(prefs):
-                    window = qh.NIGHT_HOLD_WINDOW
-                if qh.is_within(window, now.astimezone(tz)):
-                    wake = qh.next_end_utc(window, now, tz)
-                    if wake is not None:
-                        return Decision(uid, False, "quiet_hours", deliver_after=wake)
-            except Exception as e:
-                # Fail to NOT QUIET. A bug in the wraparound math must not silently
-                # queue every notification forever; the caps still bound the volume.
-                logger.warning(
-                    "push: quiet-hours evaluation failed for user=%s (%s: %s) — "
-                    "treating as not quiet",
-                    uid, type(e).__name__, e,
-                )
+        if wake is not None:
+            return Decision(uid, False, "quiet_hours", deliver_after=wake)
+
+        # 4. A night-hold kind whose preference read failed is never sent on ET's word alone. Its
+        #    own reason, so the fan-out's log line does not count it as quiet hours at 16:05 ET.
+        if kind.night_hold_by_default and not recipient.preferences_known:
+            return Decision(uid, False, "preferences_unread", deliver_after=now)
 
         return Decision(uid, True, "ok")
+
+    @staticmethod
+    def _cap_reason(recipient: _Recipient, kind: NotificationKind) -> Optional[str]:
+        """`cap_reached:<category>:<n>` when the recipient's day is at the cap, else None."""
+        cap = category_cap(kind.category, settings.PUSH_MAX_ALERTS_PER_USER_PER_DAY)
+        if cap is not None and recipient.category_sent_today >= cap:
+            return f"cap_reached:{kind.category}:{cap}"
+        return None
+
+    def _quiet_wake(
+        self, recipient: _Recipient, kind: NotificationKind, now: datetime
+    ) -> Tuple[Optional[datetime], bool]:
+        """When quiet hours let this out, and whether that is on a later day of the user's own
+        than `now`: `(None, False)` when nothing holds it now."""
+        if not kind.respects_quiet_hours:
+            return None, False
+        prefs = recipient.preferences
+        try:
+            tz = qh.resolve_timezone(prefs)
+            window = qh.resolve_window(prefs)
+            if kind.night_hold_by_default and qh.quiet_hours_never_set(prefs):
+                window = qh.NIGHT_HOLD_WINDOW
+            if not qh.is_within(window, now.astimezone(tz)):
+                return None, False
+            wake = qh.next_end_utc(window, now, tz)
+            if wake is None:
+                return None, False
+            # Calendar dates on the user's clock, the day the cap counts (`local_day_start_utc`).
+            return wake, wake.astimezone(tz).date() > now.astimezone(tz).date()
+        except Exception as e:
+            # Fail to NOT QUIET. A bug in the wraparound math must not silently
+            # queue every notification forever; the caps still bound the volume.
+            logger.warning(
+                "push: quiet-hours evaluation failed for user=%s (%s: %s) — "
+                "treating as not quiet",
+                recipient.user_id, type(e).__name__, e,
+            )
+            return None, False
 
     # ── once ─────────────────────────────────────────────────────────
 
@@ -984,11 +1076,15 @@ class PushDispatchService:
         error: Optional[str] = None,
         sent: bool = False,
         only_if_state: Optional[str] = None,
+        attempts: Optional[int] = None,
     ) -> None:
         """Stamp the outcome on a claimed row. Best-effort.
 
         `sent_at` is what the per-category cap counts, so it is set ONLY on a real
         delivery — a deferred, dry-run or failed row must not consume the budget.
+
+        `attempts`, when given, is written too: the shutdown requeue gives back the hand-out
+        the claim RPC counted (`_return_to_deferred`).
 
         `only_if_state` makes the write CONDITIONAL (`push_state = only_if_state`). The
         shutdown requeue uses it: a row whose APNs POST was accepted has its `sent` stamp
@@ -1006,6 +1102,8 @@ class PushDispatchService:
             patch["sent_at"] = datetime.now(timezone.utc).isoformat()
         if error:
             patch["last_error"] = error[:500]
+        if attempts is not None:
+            patch["attempts"] = attempts
         try:
             q = (
                 self.supabase.table(TABLE)
@@ -1299,9 +1397,10 @@ class PushDispatchService:
                         # will not message would burn their dedup slot and silently
                         # suppress a LATER alert they did want.
                         continue
-                    # Quiet hours: claim and PARK it. The claim first makes the
-                    # deferral idempotent — a second trigger of the same event finds
-                    # the row already claimed instead of queueing a duplicate.
+                    # Quiet hours, or a night-hold kind with its settings unread: claim and
+                    # PARK it. The claim first makes the deferral idempotent — a second
+                    # trigger of the same event finds the row already claimed instead of
+                    # queueing a duplicate.
                     await asyncio.to_thread(
                         self.claim_send, uid, key,
                         kind=nkind.key, category=nkind.category,
@@ -1466,10 +1565,15 @@ class PushDispatchService:
 
         A kind with `night_hold_by_default` asks two more things at its wake, in the loop
         below: is this still the user's night, and what does the report say now. A report that
-        has yet to answer waits and is asked again, never past `MAX_FLUSH_ATTEMPTS` hand-outs.
+        has yet to answer waits and is asked again, never past `MAX_FLUSH_ATTEMPTS` hand-outs,
+        and never in the user's night: a row held for that night on the last of them comes back
+        once more, and goes out then. Such a row the user's settings now turn off goes on as the
+        kind sharing its key, when the user takes that one and its sender would start it now
+        (`rekinded`), and is otherwise deleted (`released`), so its report's key is free again. A
+        row the user opened in the inbox before its wake is ended there, unbuzzed.
         """
         stats = {"claimed": 0, "sent": 0, "stale": 0, "no_device": 0,
-                 "failed": 0, "suppressed": 0, "requeued": 0}
+                 "failed": 0, "suppressed": 0, "requeued": 0, "released": 0, "rekinded": 0}
         rows = await self._claim_due_guarded(settings.NOTIFICATION_DISPATCH_BATCH)
         if not rows:
             return stats
@@ -1639,6 +1743,25 @@ class PushDispatchService:
                         )
                         continue
 
+                    if row.get("read_at"):
+                        # The inbox lists a held row, and stamps it read when the user opens it
+                        # (by its id, or the key a push names; a mark-all leaves a held row
+                        # alone, `NotificationInboxService.mark_read`), so they have read what the
+                        # buzz would tell them. It ends here, before any count, hold or new text,
+                        # with no `sent_at` (nothing charged to the cap). Buzzed, it repeated what
+                        # they had read, and its `aps.badge` (`unread + 1`) counted a row the inbox
+                        # no longer counts: the icon said 1 over an inbox with nothing unread.
+                        # Every evening result of a default-settings user east of New York is
+                        # held, so this is the common case, not a corner. A figure that moves
+                        # after the read is not told, as for a row buzzed at once.
+                        stats["suppressed"] += 1
+                        await asyncio.to_thread(
+                            self.mark_state, uid, key, STATE_FAILED,
+                            error="suppressed on flush: read in the app before its wake",
+                            sent=False,
+                        )
+                        continue
+
                     prefs = preferences.get(uid) or {}
                     budget_key = (uid, nkind.category)
                     if budget_key not in charged:
@@ -1679,33 +1802,97 @@ class PushDispatchService:
                     #
                     # A night-hold row gets one more hold, because its first wake can be on the
                     # wrong clock: a failed read at the landing parked it on ET, whose 07:00 is
-                    # the small hours further west, or the user has flown since. Only on this
-                    # flush's own good read (an empty blob says nothing about where they are),
-                    # and only on the row's first hand-out, which is what bounds it: the claim
-                    # RPC counts `attempts`, so a held row comes back as the second and goes
-                    # out whatever the clock says then. If the hold cannot be written the row
-                    # is delivered, the cost of the row stuck at `pending` being a lost alert.
+                    # the small hours further west, or parked it for this flush in ET's daytime
+                    # (`decide`), or the user has flown since. Only on this flush's own good
+                    # read (an empty blob says nothing about where they are), and only on the
+                    # row's first hand-out that judged the user's clock: a held row comes back
+                    # as a later one and goes out whatever the clock says then. A hand-out that
+                    # judged nothing spends no hold (`_last_hand_out_unjudged`): a look asked for
+                    # with the settings unread, which could land in the user's night, and a flush
+                    # a redeploy cut off. That holds up to the `MAX_FLUSH_ATTEMPTS`-th hand-out,
+                    # the last look a row can ask for, so two looks on unread clocks still leave
+                    # the third its hold; a row held there comes back once more, and that is
+                    # what bounds it: the claim RPC counts `attempts`, and no hand-out past the
+                    # ceiling is held, whatever its note says. A hold on a good read leaves the
+                    # row's note as it was. If the hold cannot be written the row is delivered,
+                    # the cost of the row stuck at `pending` being a lost alert.
+                    attempts = int(row.get("attempts") or 0)
                     gate = self.decide(recipient, nkind, now)
+                    route = row.get("route") if isinstance(row.get("route"), dict) else {}
+                    title, body = row.get("title") or "", row.get("body") or ""
+                    if nkind.night_hold_by_default and gate.reason.startswith("preference_off:"):
+                        # The two night-hold kinds and the daily pass share ONE key per report
+                        # (`earnings_sender.result_dedup_key`), and a row the user's settings turn
+                        # off here was claimed on a guess (a failed read at the landing) or before
+                        # they changed them. The result kind behind a live row found that key taken
+                        # and is done with the report, and the 16:00 ET pass keeps to its own
+                        # window, so the row goes on as the kind the user does take when its sender
+                        # would start it now (`earnings_live_sender.instead_at_wake`), as a landing
+                        # that had read the settings would have sent it. Only on a send or a hold:
+                        # a toggle or the cap leaves no row at the landing, and the delete below
+                        # leaves none here. Written first, so the inbox, the badge and a later wake
+                        # read one kind; a row that cannot be written is deleted as before.
+                        instead = self._wake_instead(nkind, route, now)
+                        if instead is not None:
+                            other, other_copy = instead
+                            other_gate = self.decide(recipient, other, now)
+                            other_route = {**route, "kind": other.key}
+                            if (other_gate.send or other_gate.deliver_after is not None) and (
+                                await asyncio.to_thread(
+                                    self._rekind, uid, key, other,
+                                    other_copy.title, other_copy.body, other_route,
+                                )
+                            ):
+                                stats["rekinded"] += 1
+                                logger.info(
+                                    "push: held %s row user=%s key=%s is off at its wake (%s) — "
+                                    "it goes on as %s, which the user takes: %r",
+                                    nkind.key, uid, key, gate.reason, other.key, other_copy.body,
+                                )
+                                nkind, gate, route = other, other_gate, other_route
+                                title, body = other_copy.title, other_copy.body
                     if (
                         gate.deliver_after is not None
                         and nkind.night_hold_by_default
                         and preferences.get(uid) is not None
-                        and int(row.get("attempts") or 0) <= 1
+                        and (attempts <= 1 or (attempts <= self.MAX_FLUSH_ATTEMPTS
+                                               and _last_hand_out_unjudged(row)))
                         and await asyncio.to_thread(
                             self._hold_again, uid, key, gate.deliver_after
                         )
                     ):
                         stats["requeued"] += 1
                         continue
+                    if gate.deliver_after is not None:
+                        # Not held again, so it goes out now and spends today's budget: the cap
+                        # `decide` leaves to the wake of a hold past midnight is this flush's.
+                        capped = self._cap_reason(recipient, nkind)
+                        if capped:
+                            gate = Decision(uid, False, capped)
 
-                    route = row.get("route") if isinstance(row.get("route"), dict) else {}
-                    title, body = row.get("title") or "", row.get("body") or ""
+                    if nkind.night_hold_by_default and gate.reason.startswith("preference_off:"):
+                        # Off, with nothing it goes on as (above). Ended, it kept the shared key
+                        # from the kind the user does want: a live row parked for a user with Live
+                        # Results off and Results & Surprises on made the 16:00 ET pass a duplicate,
+                        # and the result kind's own round once FMP's EPS stands. Deleted, the key is
+                        # free, as a landing that had read the settings would have left it. Nothing
+                        # was buzzed, so nothing can be buzzed twice. If it cannot be deleted it is
+                        # ended, as it was before.
+                        if await asyncio.to_thread(self._release, uid, key):
+                            stats["released"] += 1
+                            logger.info(
+                                "push: held %s row user=%s key=%s is off at its wake (%s) — "
+                                "deleted, so the report's key is free for what the user does want",
+                                nkind.key, uid, key, gate.reason,
+                            )
+                            continue
+
                     # The text was frozen at the landing and a report's figures can move under
                     # it. Read before the gate below, because the inbox shows a row that is
                     # never buzzed too.
                     wake = None
                     if nkind.night_hold_by_default:
-                        wake = self._wake_copy(nkind, route, now)
+                        wake = self._wake_copy(nkind, route, now, (title, body))
                     if wake is not None and (wake.title, wake.body) != (title, body):
                         logger.info(
                             "push: held row user=%s key=%s moved under its text: %r -> %r "
@@ -1727,10 +1914,28 @@ class PushDispatchService:
                         # with FMP's recovery minutes away. The attempts ceiling is the bound,
                         # and it is the same one a failed try counts against. Checked after the
                         # gate above, which no later look can change.
-                        attempts = int(row.get("attempts") or 0)
                         if wake.ask_again_in is not None and attempts < self.MAX_FLUSH_ATTEMPTS:
                             again = now + wake.ask_again_in
-                            if await asyncio.to_thread(self._hold_again, uid, key, again):
+                            if preferences.get(uid) is not None:
+                                # The look asked for is a later hand-out, after this one judged the
+                                # user's clock, so no hold may be left for it
+                                # (`_last_hand_out_unjudged`): landing in the user's night it would
+                                # buzz there. A row parked on a failed read at 21:30 has its first
+                                # hand-out at 21:31 and would ask again at 22:31. It waits for the
+                                # night's end instead. On a good read only, like that hold: an
+                                # empty blob would put everyone on ET's night, 04:00 in Los Angeles
+                                # at ET's 07:00.
+                                night_end, _ = self._quiet_wake(recipient, nkind, again)
+                                again = night_end or again
+                                held = await asyncio.to_thread(self._hold_again, uid, key, again)
+                            else:
+                                # With the settings unread the look keeps its hour, so it can
+                                # land in the user's night: the row says so, and that look's own
+                                # read may hold it for the night's end then (`decide`'s hold
+                                # above), as this hand-out judged nothing.
+                                held = await asyncio.to_thread(
+                                    self._hold_again, uid, key, again, note=UNREAD_CLOCK_ASK)
+                            if held:
                                 logger.info(
                                     "push: held row user=%s key=%s has no answer yet, asking "
                                     "again at %s (hand-out %d of %d)", uid, key,
@@ -1820,7 +2025,7 @@ class PushDispatchService:
                 # the rows would stay stranded anyway.
                 returned = await asyncio.shield(asyncio.to_thread(
                     self._return_to_deferred, unsettled,
-                    reason="flush cancelled mid-batch (shutdown) — requeued",
+                    reason=FLUSH_CANCELLED_MID_BATCH,
                 ))
                 stats["requeued"] += returned
                 logger.warning(
@@ -1834,25 +2039,101 @@ class PushDispatchService:
         return stats
 
     def _wake_copy(
-        self, kind: NotificationKind, route: Dict[str, Any], now: datetime
+        self, kind: NotificationKind, route: Dict[str, Any], now: datetime, text: Tuple[str, str]
     ) -> "Optional[WakeCopy]":
         """The sender's text for a held row at its wake, or None to keep the row's own.
 
         Imported here because the sender imports this module. A failure keeps the row's own
         text, as a record that is gone does: a bug in the re-read must not cost the buzz, and
-        retrying it every minute would only repeat the bug.
+        retrying it every minute would only repeat the bug. Only a bug reaches the except (the
+        re-read does no I/O), and its line is all it leaves, so the line carries the stack: a
+        WARNING still, so a bug that meets every held row of a ticker is not one Sentry event
+        per row. `text` is the row's own title and body: only they tell a row an earlier wake
+        left waiting from one in its landing's words.
         """
         try:
             from app.services.notification_senders.earnings_live_sender import copy_at_wake
 
-            return copy_at_wake(kind.key, route, now)
+            return copy_at_wake(kind.key, route, now, text=text)
         except Exception as e:
             logger.warning(
                 "push: could not re-read the report behind a held %s for %s %s (%s: %s) — "
                 "sending the row's own text",
                 kind.key, route.get("ticker"), route.get("report_date"), type(e).__name__, e,
+                exc_info=True,
             )
             return None
+
+    def _wake_instead(
+        self, kind: NotificationKind, route: Dict[str, Any], now: datetime
+    ) -> "Optional[Tuple[NotificationKind, WakeCopy]]":
+        """The kind a held row the user's settings turn off at its wake goes out as instead, with
+        its text, or None to delete the row (`earnings_live_sender.instead_at_wake`, which owns the
+        switch and the record). A failure is None too, so the row is deleted as it was before: like
+        `_wake_copy`, only a bug reaches the except, so its line carries the stack."""
+        try:
+            from app.services.notification_senders.earnings_live_sender import instead_at_wake
+
+            found = instead_at_wake(kind.key, route, now)
+            if found is None:
+                return None
+            other, other_copy = found
+            return get_kind(other), other_copy
+        except Exception as e:
+            logger.warning(
+                "push: could not read what a held %s for %s %s goes out as instead (%s: %s) — "
+                "deleting it, as with nothing to go out as",
+                kind.key, route.get("ticker"), route.get("report_date"), type(e).__name__, e,
+                exc_info=True,
+            )
+            return None
+
+    def _rekind(
+        self,
+        user_id: str,
+        dedup_key: str,
+        kind: NotificationKind,
+        title: str,
+        body: str,
+        route: Dict[str, Any],
+    ) -> bool:
+        """Make a claimed row a row of `kind`, with that kind's text and route, so the inbox, the
+        badge and a later wake all read the kind the phone is told. True = written; False = it was
+        not, and the caller deletes the row as it would with nothing to go out as.
+
+        Matches the row only while it is still `pending`, as `_release` does."""
+        try:
+            written = (
+                self.supabase.table(TABLE)
+                .update({
+                    "kind": kind.key,
+                    "category": kind.category,
+                    "title": title,
+                    "body": truncate_for_banner(body, LEDGER_BODY_LIMIT),
+                    "route": route,
+                })
+                .eq("user_id", user_id)
+                .eq("dedup_key", dedup_key)
+                .eq("push_state", STATE_PENDING)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            logger.warning(
+                "push: could not make the held row of user=%s key=%s a %s row (%s: %s) — "
+                "deleting it instead",
+                user_id, dedup_key, kind.key, type(e).__name__, e,
+            )
+            return False
+        if not written:
+            logger.warning(
+                "push: making the held row of user=%s key=%s a %s row changed nothing (no pending "
+                "row matched) — deleting it instead",
+                user_id, dedup_key, kind.key,
+            )
+            return False
+        return True
 
     def _rewrite_text(self, user_id: str, dedup_key: str, title: str, body: str) -> None:
         """Put a held row's new text on its ledger row, which is what the inbox draws. Best-effort
@@ -1872,13 +2153,52 @@ class PushDispatchService:
                 user_id, dedup_key, type(e).__name__, e,
             )
 
-    def _hold_again(self, user_id: str, dedup_key: str, deliver_after: datetime) -> bool:
+    def _release(self, user_id: str, dedup_key: str) -> bool:
+        """Delete a claimed row, so its dedup key can be claimed again. True = deleted; False =
+        nothing was, and the caller ends the row as it did before.
+
+        The DELETE matches a row only while it is still `pending`, the state the claim RPC gave
+        the row this flush is handling, so it can never remove one that has gone out."""
+        try:
+            deleted = (
+                self.supabase.table(TABLE)
+                .delete()
+                .eq("user_id", user_id)
+                .eq("dedup_key", dedup_key)
+                .eq("push_state", STATE_PENDING)
+                .execute()
+                .data
+                or []
+            )
+        except Exception as e:
+            logger.warning(
+                "push: could not delete the held row of user=%s key=%s (%s: %s) — ending it "
+                "instead, which keeps its key",
+                user_id, dedup_key, type(e).__name__, e,
+            )
+            return False
+        if not deleted:
+            logger.warning(
+                "push: deleting the held row of user=%s key=%s removed nothing (no pending row "
+                "matched) — ending it instead",
+                user_id, dedup_key,
+            )
+            return False
+        return True
+
+    def _hold_again(self, user_id: str, dedup_key: str, deliver_after: datetime, *,
+                    note: Optional[str] = None) -> bool:
         """Put a claimed row back to wake at `deliver_after`. False = it is still `pending`, and
-        the caller must finish it now: nothing else would ever pick it up."""
+        the caller must finish it now: nothing else would ever pick it up. `note` becomes the
+        row's `last_error`, what its next hand-out reads of this one (`_last_hand_out_unjudged`)."""
+        patch: Dict[str, Any] = {"push_state": STATE_DEFERRED,
+                                 "deliver_after": deliver_after.isoformat()}
+        if note is not None:
+            patch["last_error"] = note
         try:
             (
                 self.supabase.table(TABLE)
-                .update({"push_state": STATE_DEFERRED, "deliver_after": deliver_after.isoformat()})
+                .update(patch)
                 .eq("user_id", user_id)
                 .eq("dedup_key", dedup_key)
                 .eq("push_state", STATE_PENDING)
@@ -1945,7 +2265,7 @@ class PushDispatchService:
             if rows:
                 returned = await asyncio.shield(asyncio.to_thread(
                     self._return_to_deferred, rows,
-                    reason="flush cancelled during claim (shutdown) — requeued",
+                    reason=FLUSH_CANCELLED_DURING_CLAIM,
                 ))
                 logger.warning(
                     "push: quiet-hours flush CANCELLED during claim — returned %d/%d "
@@ -1959,9 +2279,12 @@ class PushDispatchService:
 
         `mark_state` directly, NOT `_requeue_or_fail`: a redeploy is not the row's
         fault, and spending one of `MAX_FLUSH_ATTEMPTS` on it would let a few unlucky
-        restarts fail a notification terminally. `deliver_after` is already in the past
-        and untouched by the claim, so writing `deferred` back is enough for the next
-        cycle to re-claim it.
+        restarts fail a notification terminally. So the hand-out the claim RPC counted is
+        given back with the same write, and a night-hold row keeps its one night hold for a
+        hand-out that judges the user's clock (`flush_deferred`); `reason` says on the row that
+        this one did not (`_last_hand_out_unjudged`). The stale cutoff still bounds a row that
+        keeps being cut off: the claim never moves `deliver_after`. `deliver_after` is already
+        in the past, so writing `deferred` back is enough for the next cycle to re-claim it.
 
         CONDITIONAL on the row still reading `pending`: a row whose APNs POST was
         accepted has a shielded `sent` stamp in flight, and that must win in either
@@ -1973,10 +2296,14 @@ class PushDispatchService:
             uid, key = r.get("user_id"), r.get("dedup_key")
             if not uid or not key:
                 continue
+            counted = r.get("attempts")
+            given_back = (max(0, counted - 1)
+                          if isinstance(counted, int) and not isinstance(counted, bool) else None)
             try:
                 self.mark_state(
                     uid, key, STATE_DEFERRED,
                     error=reason, sent=False, only_if_state=STATE_PENDING,
+                    attempts=given_back,
                 )
                 returned += 1
             except Exception as exc:            # pragma: no cover - best effort

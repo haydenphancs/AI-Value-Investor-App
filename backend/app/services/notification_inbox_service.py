@@ -47,6 +47,10 @@ UNREAD_PROBE_CAP = 200
 # `push_state` values that mean the buzz genuinely went out.
 _DELIVERED = {"sent"}
 
+# The `push_state` of a row still waiting for its wake (migration 119's `deferred`): listed, never
+# delivered yet, and left unread by a mark-all (`mark_read`).
+_HELD = "deferred"
+
 # The columns `_to_response` reads, for both read paths.
 _COLUMNS = "id, kind, category, title, body, route, claimed_at, read_at, sent_at, push_state"
 
@@ -381,6 +385,14 @@ class NotificationInboxService:
 
         `ids` wins if both are supplied — one filter per query, and the caller that has
         real ids is the in-app list, which is the more specific request.
+
+        `mark_all` leaves a HELD row (`deferred`, waiting for its quiet-hours or night-hold wake)
+        unread. The app sends it when the Alerts screen comes on screen, over every row, including
+        ones a filter chip or the fold keeps off it, so it says nothing about a held row. A held
+        row the user really opened is named by its id or key and stamped like any other, and the
+        flush then ends it unbuzzed (`PushDispatchService.flush_deferred`); stamped by a mark-all, a
+        row nobody had looked at lost its only buzz. The badge never counted a held row, so the
+        icon is the same either way, and the row's wake makes it a delivered unread one.
         """
         from datetime import datetime, timezone
 
@@ -392,7 +404,9 @@ class NotificationInboxService:
                 .eq("user_id", user_id)
                 .is_("read_at", "null")   # idempotent: never re-stamp an older read
             )
-            if not mark_all:
+            if mark_all:
+                query = query.neq("push_state", _HELD)
+            else:
                 wanted = [str(i) for i in (ids or []) if i]
                 keys = [str(k) for k in (dedup_keys or []) if k]
                 if wanted:

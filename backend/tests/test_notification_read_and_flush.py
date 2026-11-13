@@ -59,6 +59,10 @@ class _Query:
         self.rec.setdefault("in", []).append((col, list(vals)))
         return self
 
+    def neq(self, col, val):
+        self.rec.setdefault("neq", []).append((col, val))
+        return self
+
     def execute(self):
         # EXECUTION is the thing worth recording. The builder is assembled before the
         # "nothing was named" branch returns, so asserting on the filters alone cannot
@@ -134,6 +138,25 @@ def test_mark_all_still_needs_no_selector():
     assert svc.mark_read("u1", mark_all=True) == 1
     assert ("user_id", "u1") in rec["eq"]
     assert "in" not in rec
+
+
+def test_mark_all_leaves_a_held_row_unread_for_its_wake():
+    """`all` is what the Alerts screen sends on sight, over rows a filter chip or the fold keeps
+    off the screen, so it says nothing about a held row. That row was never delivered: it keeps no
+    read mark, and its wake still buzzes it. The badge never counted it, so the icon is the same."""
+    svc, rec = _inbox()
+    svc.mark_read("u1", mark_all=True)
+    assert rec.get("neq") == [("push_state", "deferred")]
+
+
+@pytest.mark.parametrize("selector", [{"ids": ["abc"]}, {"dedup_keys": ["k"]}],
+                         ids=["row_tap", "push_button"])
+def test_a_row_the_user_opened_is_marked_read_whatever_its_state(selector):
+    """A tap on the row, or the push's own button, names that very notification: held or not, the
+    user has read it, so its wake must not buzz it again."""
+    svc, rec = _inbox()
+    svc.mark_read("u1", **selector)
+    assert "neq" not in rec
 
 
 def test_a_failed_mark_read_raises_rather_than_reporting_zero():

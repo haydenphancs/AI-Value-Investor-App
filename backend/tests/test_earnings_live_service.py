@@ -13,9 +13,13 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
     of 0.0 beside a refused revenue is the same unfilled field;
   * a bad FMP revenue never hides a sound filing figure or sends a reported report back to live;
   * a row of zeros reads the same whichever of it and a filing came first, leaves no trace once
-    it gives way, whatever FMP fills next, and a shown zero stays on the SEC watch until the
-    filing that can take it off has been read;
-  * which of two consensus twins FMP touched last never decides a filing figure;
+    it gives way, whatever FMP fills next, but a zero FMP sends again with nothing real beside it
+    is still the field it never filled, whether the fold stored the zeros or refused them and
+    wherever the filing falls, and so is one it sent alone before them, which leaves with them
+    in any order unless a real row gave that zero, and a shown zero stays on the SEC watch until
+    the filing that can take it off has been read;
+  * which of two consensus twins FMP touched last never decides a filing figure, on either of
+    them or on neither;
   * the newest FMP answer wins: a memo row older than a record's last own fetch is skipped at
     the tick, the card and the sheet, and a memo refreshed after that fetch still folds;
   * the loop asks FMP about a day only while a watched report on it still wants FMP, 06:00–22:00
@@ -53,7 +57,8 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
     like any other;
   * a record outlives that window by one trading day (`sheet_days`), for the sheet alone, since
     a held push can wake on that day: no card, no landing and no cadence reads it, after a
-    restart only a sheet asking for it pays for a look, and the sheet refuses any earlier date;
+    restart only a sheet asking for it, or a filing the table gives back for it, pays for a look,
+    and the sheet refuses any earlier date;
   * an awaiting card stays up until 12:00 ET on the next trading day and drops once;
   * a report still awaiting never hides an older reported one, on the card or in the sheet
     opened with no date, which always name the same report;
@@ -67,9 +72,18 @@ What is pinned here, each a way the LIVE card could lie or cost too much:
   * a failed or empty calendar read is never `none` and never an error about a day it left
     unread: the sheet reads as a report not in yet and asks again in 30 s, a record still
     answers through it, and the days held from a read that worked still answer `none`;
-  * a restart keeps what only a filing says: the figures of every live day, the outlook and the
-    link, each exactly as verified, restored once per process before a tick decides anything,
-    never as a landing, and a table that fails or is not there yet leaves the old behaviour;
+  * a restart keeps what only a filing says: the figures of every day a record stays readable,
+    the sheet's day past the live days included, the outlook and the link, each exactly as
+    verified, restored once per process before a tick decides anything, never as a landing, and
+    a table that fails or is not there yet leaves the old behaviour;
+  * a record the table gives back past the live days gets one FMP look, so a held result push
+    waking on it, a leftover row reading as it and the sheet all read FMP's answer, and a record
+    that still wants FMP on a day the loop has yet to load, an outlook alone included, has the
+    sheet ask again in 30 s; only that day takes a look, never a live day or today;
+  * until FMP has answered a record the table gave back, on any day, a held result push waking
+    on it in the words it landed with goes out in them, as with no record at all: never held an
+    hour for that answer, and never lost to a look that fails; one a wake already held for that
+    answer waits for it whatever the new process holds, and never goes out in that wake's words;
   * a row another verifier wrote is no row, so what it kept never comes back after a fix;
   * a bad cadence or SEC budget fails the deploy, and both loops run on the cadence that passed.
 Hermetic: inline fakes for FMP, SEC, the dispatcher and `earnings_filing_cache`; the clock is
@@ -82,6 +96,7 @@ import dataclasses
 import itertools
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -147,6 +162,20 @@ def _reset_all() -> None:
     if efs._watcher is not None:
         efs._watcher.reset()
     ts.reset_earnings_calendar_cache()
+
+
+@pytest.fixture(autouse=True)
+def _a_test_leaves_no_method_on_the_process_record():
+    """monkeypatch undoes a patch on an INSTANCE by writing the original back onto it: on the
+    process's live record, which `_svc` is, that method outlives the test and hides every later
+    patch of the class, as one of `EarningsLiveService.snapshot` did here when another file left
+    it. Named to sort before `_clean`, so it is set up first and looks after monkeypatch's undo."""
+    yield
+    service = els._service
+    left = [] if service is None else sorted(
+        name for name, value in vars(service).items()
+        if callable(value) and hasattr(type(service), name))
+    assert not left, f"this test, or a file before it, left methods on the live record: {left}"
 
 
 @pytest.fixture(autouse=True)
@@ -615,6 +644,121 @@ def test_one_row_per_report_skips_junk_and_never_raises():
             {"symbol": "INTC", "date": "soon", "epsActual": float("nan"),
              "lastUpdated": ["x"]}]
     assert set(els.one_row_per_report(rows, REPORT)) == {("INTC", None)}
+
+
+# ── the row a report's EPS comes from (the daily pass's pick) ────────────────
+#
+# The owner's choice, 2026-11-11: "Follow the record". The 16:00 ET pass tells each report from
+# the row its record takes the EPS from, so whatever the fold picks, `eps_row_per_report` must
+# pick too, for any rows FMP can list for one report, in any order.
+
+_EPS_ROW_SHAPES = {
+    "eps": [None, 0.0, 0.60],
+    "rev": [None, 0, -5e6, 17.1e9],
+    "eps_est": [None, 0.41],
+    "rev_est": [None, 30e6, 16.6e9],
+    "touched": ["2026-10-01", "2026-10-20"],
+}
+
+
+def _shaped_rows(**values) -> List[dict]:
+    """One row of INTC's report per combination of `values`, each a list."""
+    names = list(values)
+    rows = []
+    for combo in itertools.product(*(values[name] for name in names)):
+        shape = dict(zip(names, combo))
+        touched = shape.pop("touched")
+        rows.append({**_row("INTC", REPORT, **shape), "lastUpdated": touched})
+    return rows
+
+
+def _eps_the_fold_keeps(rows: List[dict]):
+    """(EPS, its estimate) a fresh record holds once `rows` fold into it, or None for no EPS."""
+    svc = els.EarningsLiveService()
+    svc.observe_rows(REPORT, rows, _et(REPORT, 17))
+    rec = svc._records[("INTC", REPORT)]
+    return None if rec.fmp_eps is None else (rec.fmp_eps, rec.eps_estimate)
+
+
+def _eps_of_the_pick(rows: List[dict]):
+    row = els.eps_row_per_report(rows, REPORT)[("INTC", REPORT)]
+    if row is None:
+        return None
+    return float(row["epsActual"]), row["epsEstimated"]
+
+
+def test_the_eps_row_is_the_folds_own_pick_for_every_pair_in_either_order(caplog):
+    """Every ordered pair of shapes: results against none, a zero beside a tiny consensus or a
+    material one, a revenue-only twin beside a zero, FMP's touch either way, a tie."""
+    caplog.set_level(logging.ERROR, logger=els.__name__)
+    shapes = _shaped_rows(**_EPS_ROW_SHAPES)
+    differ = [(first, second) for first, second in itertools.product(shapes, repeat=2)
+              if _eps_of_the_pick([first, second]) != _eps_the_fold_keeps([first, second])]
+    assert differ == [], f"{len(differ)} pairs, the first: {differ[:1]}"
+
+
+def test_the_eps_row_is_the_folds_own_pick_for_three_rows(caplog):
+    caplog.set_level(logging.ERROR, logger=els.__name__)
+    shapes = _shaped_rows(**{**_EPS_ROW_SHAPES, "eps": [None, 0.0, 0.60, 0.169, -0.05],
+                             "eps_est": [None, 0.41, 1.65]})
+    rng = random.Random(20261111)
+    for _ in range(3000):
+        rows = rng.sample(shapes, 3)
+        assert _eps_of_the_pick(rows) == _eps_the_fold_keeps(rows), rows
+
+
+@pytest.mark.parametrize("newest_first", [False, True])
+def test_a_report_listed_twice_takes_its_eps_from_the_row_fmp_touched_last(newest_first):
+    """The pair the 16:00 ET pass used to tell two ways: one actual, two consensus figures."""
+    old = {**_row("INTC", REPORT, eps=0.60, rev=17.1e9, eps_est=0.41), "lastUpdated": "2026-10-01"}
+    new = {**_row("INTC", REPORT, eps=0.60, rev=17.1e9, eps_est=0.70), "lastUpdated": "2026-10-20"}
+    rows = [new, old] if newest_first else [old, new]
+    assert els.eps_row_per_report(rows, REPORT)[("INTC", REPORT)] is new
+
+
+def test_an_eps_twin_beats_a_newer_row_with_no_eps():
+    """The card's one row can be the revenue's, and then it is not where the EPS comes from."""
+    eps_row = _row("INTC", REPORT, eps=0.44, eps_est=0.41)
+    revenue_row = {**_row("INTC", REPORT, rev=17.1e9), "lastUpdated": "2026-10-30"}
+    rows = [eps_row, revenue_row]
+    assert els.one_row_per_report(rows, REPORT)[("INTC", REPORT)] is revenue_row
+    assert els.eps_row_per_report(rows, REPORT)[("INTC", REPORT)] is eps_row
+
+
+@pytest.mark.parametrize("rows", [
+    [_row("INTC", REPORT)],
+    [_row("INTC", REPORT, eps=0.0, rev=0)],
+    [_row("INTC", REPORT, eps=0.0, rev=0, rev_est=30e6), _row("INTC", REPORT, rev_est=16.6e9)],
+    [_row("INTC", REPORT, eps=0.0, rev=0, rev_est=30e6), _row("INTC", REPORT, rev=17.1e9)],
+], ids=["pending", "a_row_of_zeros", "a_zero_beside_a_material_consensus",
+        "a_zero_beside_a_reported_revenue"])
+def test_a_report_whose_eps_the_fold_refuses_has_no_eps_row(rows):
+    assert els.eps_row_per_report(rows, REPORT) == {("INTC", REPORT): None}
+    assert _eps_the_fold_keeps(rows) is None
+
+
+def test_a_zero_a_tiny_consensus_stands_behind_is_a_report_like_any_other():
+    """A pre-revenue name can report exactly nothing: the consensus every row states decides."""
+    zero = _row("TINY", REPORT, eps=0.0, rev=0, eps_est=-0.02, rev_est=None)
+    rows = [zero, _row("TINY", REPORT, eps_est=-0.02, rev_est=30e6)]
+    assert els.eps_row_per_report(rows, REPORT)[("TINY", REPORT)] is zero
+
+
+def test_the_eps_rows_keep_the_first_listed_order_and_skip_junk():
+    later = REPORT + timedelta(days=3)
+    junk_twins = [{"symbol": "INTC", "date": REPORT.isoformat(), "epsActual": "x",
+                   "revenueActual": {}, "lastUpdated": 5},
+                  {**_row("INTC", REPORT, eps=float("nan"), rev=float("inf"), eps_est="x"),
+                   "lastUpdated": {"bad": 1}}]
+    rows = [None, "garbage", 7, {}, {"symbol": "  ", "date": REPORT.isoformat()},
+            {"symbol": "AAPL", "date": "soon", "epsActual": 1.9},
+            _row("INTC", later), _row("AAPL", REPORT, eps=1.9), *_pair(False), *junk_twins]
+    picked = els.eps_row_per_report(rows, REPORT)
+    assert list(picked) == [("INTC", later), ("AAPL", REPORT), ("INTC", REPORT)]
+    assert picked[("INTC", later)] is None
+    assert picked[("AAPL", REPORT)]["epsActual"] == 1.9
+    assert picked[("INTC", REPORT)]["epsActual"] == 0.44
+    assert els.eps_row_per_report([], REPORT) == {}
 
 
 # ── a zero revenue ───────────────────────────────────────────────────────────
@@ -1184,15 +1328,676 @@ def test_a_row_of_zeros_stands_while_nothing_says_otherwise(later):
     assert (snap.eps.actual, snap.revenue.actual) == (0.0, 0.0)
 
 
-def test_a_row_of_zeros_sent_again_after_it_gave_way_stays_refused():
+_ZERO_AGAIN = {"the_whole_row": dict(eps=0, rev=0), "its_eps_alone": dict(eps=0),
+               "its_revenue_alone": dict(rev=0)}
+
+
+@pytest.mark.parametrize("again", _ZERO_AGAIN.values(), ids=_ZERO_AGAIN.keys())
+def test_a_row_of_zeros_sent_again_after_it_gave_way_stays_refused(again):
     svc = _svc()
     now = _et(REPORT, 17)
     _zeros_step(svc, _et(REPORT, 16))
     _revenue_fill(svc, _et(REPORT, 16, 1))
-    _zeros_step(svc, _et(REPORT, 16, 2))
+    svc.observe_rows(REPORT, [_pending_row(**again)], _et(REPORT, 16, 2))
     rec = svc._records[("JOBY", REPORT)]
     assert (rec.fmp_eps, rec.fmp_revenue) == (None, 33.2e6)
     assert svc.snapshot("JOBY", REPORT, now).eps.actual is None
+
+
+_GAVE_WAY_TO = {
+    "a_revenue_fill": _revenue_fill,
+    "the_filing": _filing_step,
+    "an_eps_only_filing": lambda svc, at: _filing_step(svc, at, dict(eps_adjusted=0.44)),
+    "a_revenue_only_filing": lambda svc, at: _filing_step(svc, at, dict(revenue=33e6)),
+    "a_material_consensus": _material_pending,
+}
+
+
+@pytest.mark.parametrize("again", _ZERO_AGAIN.values(), ids=_ZERO_AGAIN.keys())
+@pytest.mark.parametrize("gave_way", _GAVE_WAY_TO.values(), ids=_GAVE_WAY_TO.keys())
+def test_a_zero_fmp_sends_again_after_its_row_of_zeros_gave_way_reads_as_no_figure(gave_way,
+                                                                                    again):
+    """The row of zeros was FMP's unfilled shape, so a zero it sends again for either field is
+    that field unfilled, never a real breakeven: the record reads as it would had FMP sent the
+    pending row instead, never "missed consensus by 100%"."""
+    outcomes = []
+    for later in ({}, again):
+        svc = els.EarningsLiveService()
+        svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+        _zeros_step(svc, _et(REPORT, 16))
+        gave_way(svc, _et(REPORT, 16, 1))
+        svc.observe_rows(REPORT, [_pending_row(**later)], _et(REPORT, 16, 2))
+        outcomes.append(_outcome(svc, _et(REPORT, 17)))
+    assert outcomes[1] == outcomes[0]
+
+
+@pytest.mark.parametrize("again", _ZERO_AGAIN.values(), ids=_ZERO_AGAIN.keys())
+def test_a_zero_in_the_answer_that_shows_its_row_of_zeros_unfilled_is_no_figure_either(again):
+    """The material consensus and the zero come in one answer: the zero is the same unfilled
+    field, in that answer as in every later one."""
+    outcomes = []
+    for later in ({}, again):
+        svc = els.EarningsLiveService()
+        svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+        _zeros_step(svc, _et(REPORT, 16))
+        svc.observe_rows(REPORT, [_pending_row(rev_est=16.6e9, **later)], _et(REPORT, 16, 1))
+        outcomes.append(_outcome(svc, _et(REPORT, 17)))
+    assert outcomes[1] == outcomes[0]
+    assert outcomes[1][0] == els.LiveMetric(0.41), "no EPS, never 0.0 at -100%"
+
+
+#: Per consensus: the release, and the revenue FMP fills last.
+_RELEASE_FOR = {30e6: (dict(revenue=33e6, eps_adjusted=0.44), 33.2e6),
+                16.6e9: (dict(revenue=17.1e9, eps_adjusted=0.44), 16.9e9)}
+
+
+@pytest.mark.parametrize("consensus", list(_RELEASE_FOR),
+                         ids=["a_small_name_whose_zeros_are_stored", "a_material_consensus"])
+@pytest.mark.parametrize("filing_at", [0, 1, 2],
+                         ids=["filing_first", "filing_between", "filing_last"])
+@pytest.mark.parametrize("zeros_first", [True, False],
+                         ids=["the_zeros_first", "the_lone_zero_first"])
+def test_where_the_filing_falls_never_decides_a_zero_fmp_repeats(zeros_first, filing_at,
+                                                                 consensus):
+    """FMP sends its row of zeros and an EPS of 0 with no revenue, in either order: the field it
+    never filled, wherever the company's release falls, whether the fold stored the zeros (a small
+    name's report until the release shows them unfilled) or refused them (beside a material
+    consensus, or beside the release's figures). An EPS of 0 sent alone before the zeros is taken
+    as a breakeven until they come, and goes with them. The filing's $0.44 used to stand in some
+    orders and lose to a -100% miss in the others."""
+    filed, filled = _RELEASE_FOR[consensus]
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row(rev_est=consensus)], _et(REPORT, 15))
+    steps = [lambda at: svc.observe_rows(REPORT, [_pending_row(eps=0, rev=0, rev_est=consensus)],
+                                         at),
+             lambda at: svc.observe_rows(REPORT, [_pending_row(eps=0, rev_est=consensus)], at)]
+    if not zeros_first:
+        steps.reverse()
+    steps.insert(filing_at, lambda at: _filing_step(svc, at, filed))
+    for minute, step in enumerate(steps):
+        step(_et(REPORT, 16, minute))
+    svc.observe_rows(REPORT, [_pending_row(rev=filled, rev_est=consensus)], _et(REPORT, 16, 4))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.eps.surprise_pct, snap.eps.source) == (
+        0.44, 7.32, els.SOURCE_FILING)
+    assert (snap.revenue.actual, snap.revenue.source) == (filled, els.SOURCE_FMP)
+
+
+@pytest.mark.parametrize("filing_first", [False, True],
+                         ids=["zeros_then_filing", "filing_then_zeros"])
+def test_a_zero_revenue_fmp_sends_again_beside_an_eps_only_filing_is_still_due(filing_first):
+    """Before the release the zeros are a small name's report, stored until it prints an EPS;
+    after it they are refused at once. Either way the revenue of 0 FMP sends next is unfilled."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    steps = [_zeros_step, lambda svc, at: _filing_step(svc, at, dict(eps_adjusted=0.44))]
+    for minute, step in enumerate(steps[::-1] if filing_first else steps):
+        step(svc, _et(REPORT, 16, minute))
+    svc.observe_rows(REPORT, [_pending_row(rev=0)], _et(REPORT, 16, 2))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert snap.revenue == els.LiveMetric(30e6, due=True), "never revenue 0.0, -100%"
+    assert snap.status == els.STATUS_LIVE
+
+
+#: A zero FMP sends alone before its row of zeros, the other field's zero it sends after them, and
+#: the consensus: (first, other, consensus).
+_A_LONE_ZERO_BEFORE_ITS_ZEROS = {
+    "its_eps_under_a_small_consensus": (dict(eps=0), dict(rev=0), 30e6),
+    "its_eps_under_a_material_consensus": (dict(eps=0), dict(rev=0), 16.6e9),
+    "its_revenue_under_a_small_consensus": (dict(rev=0), dict(eps=0), 30e6),
+}
+
+
+@pytest.mark.parametrize("first,other,consensus", _A_LONE_ZERO_BEFORE_ITS_ZEROS.values(),
+                         ids=_A_LONE_ZERO_BEFORE_ITS_ZEROS.keys())
+def test_a_zero_fmp_sent_alone_before_the_fold_refused_its_row_of_zeros_goes_with_them(
+        first, other, consensus):
+    """The release prints an EPS of $0.44 and no revenue. FMP then sends one field as 0 with nothing
+    beside it, which nothing yet says is unfilled, so the record takes it. Its row of zeros comes
+    next and the fold refuses it beside the release, which shows FMP sends this report's fields as
+    zeros while it has not filled them: the zero it sent alone is that field too, so it goes, and
+    the other field's zero after the zeros is refused. From the zeros on, the record reads as it
+    would had FMP sent the pending row in place of every zero. Left in, the zero stayed on show as
+    "missed consensus by 100%" or a $0 revenue at -100%, and kept the other field's zero from
+    completing the pair that would have taken it off."""
+    answers = ([_pending_row(rev_est=consensus, **first)],
+               [_pending_row(eps=0, rev=0, rev_est=consensus)],
+               [_pending_row(rev_est=consensus, **other)])
+    outcomes = []
+    for zeros_sent in (False, True):
+        svc = els.EarningsLiveService()
+        svc.observe_rows(REPORT, [_pending_row(rev_est=consensus)], _et(REPORT, 15))
+        _filing_step(svc, _et(REPORT, 15, 30), dict(eps_adjusted=0.44))
+        seen = []
+        for minute, answer in enumerate(answers):
+            svc.observe_rows(REPORT, answer if zeros_sent else [_pending_row(rev_est=consensus)],
+                             _et(REPORT, 16, minute))
+            seen.append(_outcome(svc, _et(REPORT, 17)))
+        outcomes.append(seen[1:])
+        rec = svc._records[("JOBY", REPORT)]
+        assert (rec.fmp_eps, rec.fmp_revenue) == (None, None), zeros_sent
+    assert outcomes[1] == outcomes[0]
+    eps, revenue, status = outcomes[1][0][:3]
+    assert (eps.actual, eps.surprise_pct, eps.source) == (0.44, 7.32, els.SOURCE_FILING)
+    assert (revenue, status) == (els.LiveMetric(consensus, due=True), els.STATUS_LIVE)
+
+
+@pytest.mark.parametrize("consensus", list(_RELEASE_FOR),
+                         ids=["a_small_name", "a_material_consensus"])
+def test_where_fmps_zeros_its_fill_and_the_release_fall_never_decides_what_shows(consensus):
+    """FMP's row of zeros, an EPS of 0 and a revenue of 0 each sent alone, its revenue fill and the
+    company's release ($0.44, no revenue), in every order: the release's $0.44 and FMP's revenue
+    show. A zero FMP sent alone before its zeros is the field it never filled whatever came to sit
+    beside it in the record by then, FMP's own revenue fill included: what makes a zero real is a
+    figure on its own row. Held when the zeros came, it stayed on show as "missed consensus by
+    100%" in some orders."""
+    filled = _RELEASE_FOR[consensus][1]
+
+    def _fmp(**figures):
+        return lambda svc, at: svc.observe_rows(
+            REPORT, [_pending_row(rev_est=consensus, **figures)], at)
+
+    steps = {"an_eps_of_0_alone": _fmp(eps=0), "a_revenue_of_0_alone": _fmp(rev=0),
+             "the_row_of_zeros": _fmp(eps=0, rev=0), "the_revenue_fill": _fmp(rev=filled),
+             "the_release": lambda svc, at: _filing_step(svc, at, dict(eps_adjusted=0.44))}
+    for order in itertools.permutations(steps):
+        svc = els.EarningsLiveService()
+        svc.observe_rows(REPORT, [_pending_row(rev_est=consensus)], _et(REPORT, 15))
+        for minute, name in enumerate(order):
+            steps[name](svc, _et(REPORT, 16, minute))
+        snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+        assert (snap.eps.actual, snap.eps.surprise_pct, snap.eps.source) == (
+            0.44, 7.32, els.SOURCE_FILING), order
+        assert (snap.revenue.actual, snap.revenue.source) == (filled, els.SOURCE_FMP), order
+        assert (snap.status, snap.preliminary) == (els.STATUS_REPORTED, True), order
+
+
+@pytest.mark.parametrize("repeated", [False, True], ids=["once", "its_zero_sent_alone_again"])
+@pytest.mark.parametrize("row,again", [(dict(eps=0, rev=33.2e6), dict(eps=0)),
+                                       (dict(eps=-0.19, rev=0), dict(rev=0))],
+                         ids=["a_breakeven_beside_a_real_revenue",
+                              "a_zero_revenue_beside_a_real_eps"])
+def test_a_zero_with_a_real_figure_on_its_own_row_stays_when_its_row_of_zeros_comes_after(
+        row, again, repeated):
+    """Only a zero FMP sends with nothing real beside it on its own row is the field it never
+    filled. A breakeven beside a real revenue, and a pre-revenue name's $0 beside a real EPS, are
+    what they say, and FMP's row of zeros coming after them takes neither off. Nor does FMP
+    sending that same zero again alone before the zeros: it says nothing new, and the zero is
+    still the one a real row gave."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    svc.observe_rows(REPORT, [_pending_row(**row)], _et(REPORT, 16))
+    held = _outcome(svc, _et(REPORT, 17))
+    if repeated:
+        svc.observe_rows(REPORT, [_pending_row(**again)], _et(REPORT, 16, 1))
+        assert _outcome(svc, _et(REPORT, 17)) == held
+    _zeros_step(svc, _et(REPORT, 16, 2))
+    assert svc._records[("JOBY", REPORT)].unfilled_zeros_seen, "the zeros were refused"
+    assert _outcome(svc, _et(REPORT, 17)) == held
+
+
+#: How a small name's row of zeros comes to be held: one row, or two answers a zero each.
+_A_PAIR_OF_ZEROS_HELD = {
+    "from_one_row": (dict(eps=0, rev=0),),
+    "from_two_answers": (dict(eps=0), dict(rev=0)),
+}
+
+
+@pytest.mark.parametrize("answers", _A_PAIR_OF_ZEROS_HELD.values(),
+                         ids=_A_PAIR_OF_ZEROS_HELD.keys())
+def test_a_pair_of_zeros_held_as_a_small_names_report_stands_or_goes_whole(answers):
+    """Under a $30M consensus, with nothing else held, two zeros are a pre-revenue name's report,
+    whichever answers brought them. FMP's unfilled shape coming next, an EPS of 0 beside a
+    negative revenue, is refused and shows FMP sends this report's fields as zeros, but takes
+    neither zero off alone: the pair still stands. A real figure later takes it off whole, so no
+    half of it is left behind as a $0 revenue at -100%."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    for minute, figures in enumerate(answers):
+        svc.observe_rows(REPORT, [_pending_row(**figures)], _et(REPORT, 16, minute))
+    held = _outcome(svc, _et(REPORT, 17))
+    assert (held[0].actual, held[1].actual) == (0.0, 0.0)
+    svc.observe_rows(REPORT, [_pending_row(eps=0, rev=-1e6)], _et(REPORT, 16, 5))
+    assert svc._records[("JOBY", REPORT)].unfilled_zeros_seen, "the unfilled shape was refused"
+    assert _outcome(svc, _et(REPORT, 17)) == held
+    _eps_fill(svc, _et(REPORT, 16, 6))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.eps.source) == (0.44, els.SOURCE_FMP)
+    assert snap.revenue == els.LiveMetric(30e6, due=True), "never revenue 0.0, -100%"
+
+
+def test_a_zero_completing_a_pair_beside_a_real_figure_never_leaves_half_of_it():
+    """FMP's revenue of 0 beside a real loss, then an EPS of 0 sent alone: together a pair of
+    zeros under a $30M consensus. FMP's unfilled shape refused next takes neither half off, and
+    its EPS fill then takes the pair off whole: the revenue is due, never $0 at -100%."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    svc.observe_rows(REPORT, [_pending_row(eps=-0.19, rev=0)], _et(REPORT, 16))
+    svc.observe_rows(REPORT, [_pending_row(eps=0)], _et(REPORT, 16, 1))
+    svc.observe_rows(REPORT, [_pending_row(eps=0, rev=-1e6)], _et(REPORT, 16, 2))
+    _eps_fill(svc, _et(REPORT, 16, 3))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.eps.source) == (0.44, els.SOURCE_FMP)
+    assert snap.revenue == els.LiveMetric(30e6, due=True), "never revenue 0.0, -100%"
+
+
+def _older(row: dict) -> dict:
+    """The same row as FMP last touched it a day earlier: it ranks below a row touched today."""
+    return {**row, "lastUpdated": (REPORT - timedelta(days=1)).isoformat()}
+
+
+#: FMP's zeros sent a field at a time, under a $30M consensus: across two answers, either field
+#: first, or across two rows of one answer listing the report twice, the other row with a real EPS
+#: (0.45 against 0.41) beside its revenue of 0. Then the same with more around them: a real EPS FMP
+#: sent before the zero that pairs, which the zero replaces as the newest answer does; a later
+#: answer that no longer lists the row the real EPS was on; a row stating another consensus beside
+#: the pair; a pair that reads unfilled even with no release, under a consensus since turned
+#: material, beside a real EPS on another row; a row of zeros in an answer whose newer row of the
+#: report is FMP's unfilled shape (an EPS of 0 beside a negative revenue, stating a $0.00 EPS
+#: consensus), then a real EPS; and a revenue of 0 sent on an older row beside a newer one stating
+#: $5M, after an answer stating $200M, then an EPS of 0 sent alone beside a loss on an older row,
+#: then a real EPS. Each with the release, by default $33M and $0.44, and what the report ends on:
+#: its EPS, the EPS's source, the surprise a result push and the 16:00 ET pass would tell, and its
+#: revenue and that one's source.
+_ZEROS_SENT_APART = {
+    "two_answers_eps_first": (
+        ([_pending_row(eps=0)], [_pending_row(rev=0)]), None,
+        (0.44, els.SOURCE_FILING, None, 33e6, els.SOURCE_FILING)),
+    "two_answers_revenue_first": (
+        ([_pending_row(rev=0)], [_pending_row(eps=0)]), None,
+        (0.44, els.SOURCE_FILING, None, 33e6, els.SOURCE_FILING)),
+    "one_answer_two_rows": (
+        ([_pending_row(eps=0), _pending_row(eps=0.45, rev=0)],), None,
+        (0.45, els.SOURCE_FMP, pytest.approx(0.0976, abs=1e-4), 33e6, els.SOURCE_FILING)),
+    "a_real_eps_before_the_zero_that_pairs": (
+        ([_pending_row(eps=0.45, rev=0, eps_est=None)], [_pending_row(eps=0, rev_est=90e6)]),
+        None, (0.44, els.SOURCE_FILING, None, 33e6, els.SOURCE_FILING)),
+    "a_later_answer_drops_the_row_its_eps_was_on": (
+        ([_pending_row(eps=0, eps_est=None, rev_est=None),
+          _pending_row(eps=-0.21, rev=0, eps_est=None)],
+         [_older(_pending_row(eps=0, rev=0, eps_est=None, rev_est=200e6))]), None,
+        (0.44, els.SOURCE_FILING, None, None, None)),
+    "a_later_answer_drops_the_row_its_eps_was_on_and_the_release_has_none": (
+        ([_pending_row(eps=0, eps_est=None, rev_est=None),
+          _pending_row(eps=-0.21, rev=0, eps_est=None)],
+         [_older(_pending_row(eps=0, rev=0, eps_est=None, rev_est=200e6))]), dict(revenue=33e6),
+        (None, None, None, None, None)),
+    "the_consensus_the_pairs_own_rows_brought": (
+        ([_older(_pending_row(eps=-0.21, rev=0, eps_est=-0.25, rev_est=None)),
+          _pending_row(eps=0, eps_est=None)],
+         [_pending_row(eps=-0.21, rev=33e6, eps_est=None, rev_est=90e6)]), None,
+        (-0.21, els.SOURCE_FMP, pytest.approx(-1.5122, abs=1e-4), 33e6, els.SOURCE_FMP)),
+    "a_pair_unfilled_even_without_the_release": (
+        ([_pending_row(eps=-0.21, rev=0, eps_est=None, rev_est=5e6)],
+         [_older(_pending_row(eps=0.45, rev_est=90e6)), _pending_row(eps=0, rev_est=200e6)],
+         [_older(_pending_row(eps=0, rev=0, eps_est=None, rev_est=90e6))]), None,
+        (0.45, els.SOURCE_FMP, pytest.approx(0.0976, abs=1e-4), 33e6, els.SOURCE_FILING)),
+    "a_row_of_zeros_beside_fmps_unfilled_shape_in_one_answer": (
+        ([_pending_row(eps=0, rev=-5e6, eps_est=0.0, rev_est=90e6),
+          _older(_pending_row(eps=0, rev=0, eps_est=None))],
+         [_pending_row(eps=0.45, rev=0, eps_est=None, rev_est=None)]), None,
+        (0.45, els.SOURCE_FMP, None, 33e6, els.SOURCE_FILING)),
+    "the_consensus_a_zero_kept_off_would_have_held": (
+        ([_pending_row(rev_est=200e6)],
+         [_pending_row(eps=0.45, rev_est=5e6),
+          _older(_pending_row(eps=0.45, rev=0, eps_est=None, rev_est=None))],
+         [_older(_pending_row(eps=-0.21, rev=-5e6, eps_est=None, rev_est=None)),
+          _pending_row(eps=0, eps_est=-0.25, rev_est=None)],
+         [_pending_row(eps=0.45, eps_est=None, rev_est=30e6)]), None,
+        (0.45, els.SOURCE_FMP, pytest.approx(0.0976, abs=1e-4), 33e6, els.SOURCE_FILING)),
+}
+
+
+def _release_falls_at(answers, at: int, release=None) -> tuple:
+    """Each answer folded in turn, the company's release (by default $33M and $0.44) at position
+    `at`, then the last answer again, as the next round reads it: what the report ends on, and the
+    surprise the result push and the 16:00 ET pass would tell from it."""
+    svc = els.EarningsLiveService()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    steps = [lambda at_, rows=rows: svc.observe_rows(REPORT, rows, at_) for rows in answers]
+    steps.insert(at, lambda at_: _filing_step(svc, at_, release))
+    steps.append(lambda at_: svc.observe_rows(REPORT, answers[-1], at_))
+    for minute, step in enumerate(steps):
+        step(_et(REPORT, 16, minute))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    return snap.eps, snap.revenue, snap.status, sender.record_surprise(snap)
+
+
+@pytest.mark.parametrize("answers,release,ends_on", _ZEROS_SENT_APART.values(),
+                         ids=_ZEROS_SENT_APART.keys())
+def test_zeros_fmp_sends_a_field_at_a_time_read_the_same_wherever_the_release_falls(
+        answers, release, ends_on):
+    """Before the release the two zeros are held as a small name's report, and the release takes
+    them off whole. After it, the release's revenue kept FMP's zero revenue off, so nothing paired
+    the zeros and the EPS of 0 stood as a breakeven, "missed consensus by 100%", told by the push
+    and the 16:00 ET pass in some orders and not in others. Folded as FMP's answers alone would
+    have folded them, the pair now leaves the same way in every order, with what its own answer
+    held: re-reading that answer at once took a row a later answer no longer lists, -0.21 told
+    as a 151% miss in one order and nothing in the others, and a consensus the pair never had.
+    FMP's answers alone refuse its unfilled shape as well, which shows the zeros beside it in the
+    same answer unfilled, so they pair nothing: read without that refusal, they paired with the
+    release first only, kept the old 0.41 consensus the answer had replaced with $0.00, and the
+    later $0.45 went out as a 10% beat in that order alone. And FMP alone keeps the $200M
+    consensus beside its zero revenue, under which the pair that zero makes reads unfilled: read
+    on the $5M the record moved to once the release kept the zero off, the pair stood as a small
+    name's report with the release before it, kept its EPS of 0's -0.25 consensus, and the later
+    $0.45 went out as a 280% beat there and a 10% one in every other order."""
+    outcomes = [_release_falls_at(answers, at, release) for at in range(len(answers) + 1)]
+    assert all(outcome == outcomes[0] for outcome in outcomes), outcomes
+    eps, revenue, _, told = outcomes[0]
+    assert (eps.actual, eps.source, told, revenue.actual, revenue.source) == ends_on
+
+
+def test_an_eps_of_0_beside_the_release_with_no_zero_revenue_from_fmp_stays_a_breakeven():
+    """Only FMP's own zero revenue pairs its EPS of 0: the release's figures alone never make the
+    zero unfilled, wherever the release falls."""
+    answers = ([_pending_row(eps=0)],)
+    outcomes = [_release_falls_at(answers, at) for at in range(2)]
+    assert outcomes[0] == outcomes[1]
+    assert (outcomes[0][0].actual, outcomes[0][0].source) == (0.0, els.SOURCE_FMP)
+
+
+def test_a_zero_revenue_the_release_keeps_off_is_logged_as_the_pair_it_makes(caplog):
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _filing_step(svc, _et(REPORT, 15, 30))
+    svc.observe_rows(REPORT, [_pending_row(rev=0)], _et(REPORT, 16))
+    assert svc._records[("JOBY", REPORT)].fmp_revenue is None, "beside the release it is not kept"
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        svc.observe_rows(REPORT, [_pending_row(eps=0)], _et(REPORT, 16, 1))
+        svc.observe_rows(REPORT, [_pending_row(eps=0)], _et(REPORT, 16, 2))
+    (line,) = [r.getMessage() for r in caplog.records
+               if "kept off by the company's release" in r.getMessage()]
+    assert "JOBY" in line and REPORT.isoformat() in line
+    assert svc._records[("JOBY", REPORT)].unfilled_zeros_seen
+
+
+def test_an_answer_whose_pair_would_have_been_stored_gives_its_eps_at_the_next_fold():
+    """As had the release come after it: the pair the answer makes is all it gives that fold, so
+    the 16:00 ET pass tells nothing from it, and the next fold takes its real EPS with the zeros
+    known for FMP's unfilled fields. Taken at once, the same EPS stayed when the next answer no
+    longer listed its row, and in that order only."""
+    svc = els.EarningsLiveService()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _filing_step(svc, _et(REPORT, 15, 30))
+    rows = [_pending_row(eps=0), _pending_row(eps=0.45, rev=0)]
+    assert svc.observe_rows(REPORT, rows, _et(REPORT, 16)) == {"JOBY": None}
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 16, 1))
+    assert (snap.eps.actual, snap.eps.source) == (0.44, els.SOURCE_FILING)
+    assert sender.record_surprise(snap) is None
+
+    took = svc.observe_rows(REPORT, rows, _et(REPORT, 16, 2))
+    assert took["JOBY"]["epsActual"] == 0.45
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 16, 3))
+    assert sender.record_surprise(snap) == pytest.approx(0.0976, abs=1e-4)
+
+
+def test_reading_an_answer_as_fmp_alone_would_touches_nothing_and_logs_nothing_of_its_own(caplog):
+    """Each fold beside a release reads its answer a second time, as FMP's answers alone would
+    have it, on a copy: the record is left as it was, and a figure the copy refuses is not logged
+    beside the record's own one line for it, once per record."""
+    svc = els.EarningsLiveService()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _filing_step(svc, _et(REPORT, 15, 30))
+    rows = [_pending_row(eps=0.45, rev=0, rev_est=200e6)]
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        for minute in range(3):
+            svc.observe_rows(REPORT, rows, _et(REPORT, 16, minute))
+    refused = [r.getMessage() for r in caplog.records
+               if "FMP revenue 0" in r.getMessage() and "refused" in r.getMessage()]
+    assert len(refused) == 1, refused
+
+    rec = svc._records[("JOBY", REPORT)]
+    before = dataclasses.asdict(rec)
+    alone = svc._without_release(rec, rows)
+    assert dataclasses.asdict(rec) == before
+    assert alone is not rec and alone.filing is None and rec.filing is not None
+    assert (alone.fmp_eps, alone.fmp_revenue) == (0.45, None)
+
+
+#: The release's revenue ($6M) and a newer row of FMP's with a revenue of 0 and no consensus
+#: beside the report's older row stating $90M: the zero's own row brings no estimate.
+_RELEASE_6M = dict(revenue=6e6, eps_adjusted=-0.21)
+
+
+def _zero_revenue_beside_a_twin(svc, at) -> None:
+    rows = [_row("JOBY", REPORT, rev=0, eps_est=None, rev_est=None),
+            {**_row("JOBY", REPORT, eps_est=-0.24, rev_est=90e6), "lastUpdated": "2026-10-28"}]
+    svc.observe_rows(REPORT, rows, at)
+
+
+@pytest.mark.parametrize("release_first", [True, False], ids=["release_first", "fmp_first"])
+def test_a_zero_revenue_the_release_takes_off_frees_the_consensus_it_held(release_first, caplog):
+    """Beside the release's revenue a zero from FMP is never kept, so one held from before the
+    release leaves the record when it comes, and the consensus moves as it would had the zero
+    never been held: $6M against $90M either way, not against no consensus in one order."""
+    svc = _svc()
+    steps = [lambda at: _filing_step(svc, at, _RELEASE_6M),
+             lambda at: _zero_revenue_beside_a_twin(svc, at)]
+    for minute, step in enumerate(steps if release_first else steps[::-1]):
+        step(_et(REPORT, 16, minute))
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        _zero_revenue_beside_a_twin(svc, _et(REPORT, 16, 5))
+        _zero_revenue_beside_a_twin(svc, _et(REPORT, 16, 6))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.revenue.actual, snap.revenue.estimate, snap.revenue.surprise_pct,
+            snap.revenue.source) == (6e6, 90e6, -93.33, els.SOURCE_FILING)
+    assert svc._records[("JOBY", REPORT)].fmp_revenue is None
+    taken_off = [r.getMessage() for r in caplog.records
+                 if "FMP revenue 0 taken off" in r.getMessage()]
+    assert len(taken_off) == (0 if release_first else 1), taken_off
+    if taken_off:
+        assert "JOBY" in taken_off[0] and REPORT.isoformat() in taken_off[0]
+
+
+#: A zero FMP sends alone, and the words its taking off is logged with.
+_A_LONE_ZERO_TAKEN_OFF = {
+    "its_eps": (dict(eps=0), "FMP EPS 0 sent alone"),
+    "its_revenue": (dict(rev=0), "FMP revenue 0 sent alone"),
+}
+
+
+@pytest.mark.parametrize("alone,words", _A_LONE_ZERO_TAKEN_OFF.values(),
+                         ids=_A_LONE_ZERO_TAKEN_OFF.keys())
+def test_a_zero_its_row_of_zeros_takes_off_is_logged_once_with_its_report(caplog, alone, words):
+    """A figure leaving the record is never silent: one line, with the report, the field and
+    what stood beside it, however many folds read the zeros again."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _filing_step(svc, _et(REPORT, 15, 30), dict(eps_adjusted=0.44))
+    svc.observe_rows(REPORT, [_pending_row(**alone)], _et(REPORT, 16))
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        for minute in range(1, 4):
+            _zeros_step(svc, _et(REPORT, 16, minute))
+    lines = [r.getMessage() for r in caplog.records if "sent alone" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert words in lines[0] and "JOBY" in lines[0] and REPORT.isoformat() in lines[0]
+
+
+def test_a_zero_taken_off_beside_a_release_with_revenue_is_logged_once(caplog):
+    """Beside a release with revenue the fold reads each answer twice, the second time as FMP's
+    answers alone would have it, on a copy no reader sees. FMP's unfilled shape takes the EPS of
+    0 it sent alone off in both readings, and only the record's says so: one line, however many
+    folds read the shape again."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _filing_step(svc, _et(REPORT, 15, 30))
+    svc.observe_rows(REPORT, [_pending_row(eps=0)], _et(REPORT, 16))
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        for minute in range(1, 4):
+            svc.observe_rows(REPORT, [_pending_row(eps=0, rev=-1e6)], _et(REPORT, 16, minute))
+    lines = [r.getMessage() for r in caplog.records if "sent alone" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "FMP EPS 0 sent alone" in lines[0] and "JOBY" in lines[0]
+    assert svc._records[("JOBY", REPORT)].fmp_eps is None
+
+
+#: What the record holds, or states, when FMP's row of zeros comes, so that the fold refuses it
+#: at once: each step runs before the zeros, with the consensus every row of the report states.
+_ZEROS_REFUSED_BESIDE = {
+    "a_material_consensus": (lambda svc, at: None, 16.6e9),
+    "the_release": (_filing_step, 30e6),
+    "an_eps_only_release": (lambda svc, at: _filing_step(svc, at, dict(eps_adjusted=0.44)), 30e6),
+    "a_revenue_only_release": (lambda svc, at: _filing_step(svc, at, dict(revenue=33e6)), 30e6),
+    "fmps_own_eps": (_eps_fill, 30e6),
+}
+
+
+@pytest.mark.parametrize("again", _ZERO_AGAIN.values(), ids=_ZERO_AGAIN.keys())
+@pytest.mark.parametrize("before,consensus", _ZEROS_REFUSED_BESIDE.values(),
+                         ids=_ZEROS_REFUSED_BESIDE.keys())
+def test_a_zero_fmp_sends_after_the_fold_refused_its_row_of_zeros_reads_as_no_figure(
+        before, consensus, again):
+    """A row of zeros the fold refuses was never stored, so nothing gave way, and a zero FMP sent
+    next on its own read as a real breakeven: "missed consensus by 100%" over the release's $0.44,
+    or over nothing at all beside a material consensus. The refused row shows what a stored one
+    that gave way shows, so the record reads as it would had FMP sent the pending row instead."""
+    outcomes = []
+    for later in ({}, again):
+        svc = els.EarningsLiveService()
+        svc.observe_rows(REPORT, [_pending_row(rev_est=consensus)], _et(REPORT, 15))
+        before(svc, _et(REPORT, 15, 30))
+        held = _outcome(svc, _et(REPORT, 17))
+        svc.observe_rows(REPORT, [_pending_row(eps=0, rev=0, rev_est=consensus)], _et(REPORT, 16))
+        assert _outcome(svc, _et(REPORT, 17)) == held, "the row of zeros is refused whole"
+        svc.observe_rows(REPORT, [_pending_row(rev_est=consensus, **later)], _et(REPORT, 16, 1))
+        outcomes.append(_outcome(svc, _et(REPORT, 17)))
+    assert outcomes[1] == outcomes[0]
+
+
+def test_a_real_figure_beside_a_zero_after_the_fold_refused_its_row_of_zeros_still_stands():
+    """Only a zero FMP sends with nothing real beside it is the unfilled field, whichever way its
+    row of zeros went: a breakeven beside a real revenue, and a zero revenue beside a real EPS."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row(rev_est=16.6e9)], _et(REPORT, 15))
+    svc.observe_rows(REPORT, [_pending_row(eps=0, rev=0, rev_est=16.6e9)], _et(REPORT, 16))
+    svc.observe_rows(REPORT, [_pending_row(eps=0, rev=16.9e9, rev_est=16.6e9)], _et(REPORT, 16, 1))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.revenue.actual) == (0.0, 16.9e9)
+
+    svc = els.EarningsLiveService()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _filing_step(svc, _et(REPORT, 15, 30), dict(eps_adjusted=-0.19))
+    _zeros_step(svc, _et(REPORT, 16))
+    svc.observe_rows(REPORT, [_pending_row(eps=-0.19, rev=0)], _et(REPORT, 16, 1))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.eps.source, snap.revenue.actual) == (-0.19, els.SOURCE_FMP, 0.0)
+
+
+def test_a_row_of_zeros_refused_as_unfilled_is_logged_once_with_its_report(caplog):
+    """The one line that explains every zero the fold refuses after it."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _filing_step(svc, _et(REPORT, 15, 30))
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        for minute in range(4):
+            svc.observe_rows(REPORT, [_pending_row(eps=0, rev=0)], _et(REPORT, 16, minute))
+            svc.observe_rows(REPORT, [_pending_row(eps=0)], _et(REPORT, 16, minute))
+    (line,) = [r.getMessage() for r in caplog.records if "refused as unfilled" in r.getMessage()]
+    assert "JOBY" in line and REPORT.isoformat() in line
+    assert "0.44" in line and "33000000.0" in line and "30000000.0" in line
+    assert not [r for r in caplog.records if "gave way" in r.getMessage()], (
+        "FMP alone would have stored that row as a pair, which the release would take off: the "
+        "refusal is the one line, not a second one for the pair")
+
+
+def test_a_real_figure_beside_a_zero_after_its_row_of_zeros_gave_way_still_stands():
+    """Only a zero FMP sends with nothing real beside it is the unfilled field. A breakeven beside
+    a real revenue on its own row, and a zero revenue beside a real EPS, are what they say."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _zeros_step(svc, _et(REPORT, 16))
+    _material_pending(svc, _et(REPORT, 16, 1))
+    svc.observe_rows(REPORT, [_pending_row(eps=0, rev=16.9e9, rev_est=16.6e9)], _et(REPORT, 16, 2))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.revenue.actual) == (0.0, 16.9e9)
+
+    svc = els.EarningsLiveService()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _zeros_step(svc, _et(REPORT, 16))
+    _filing_step(svc, _et(REPORT, 16, 1), dict(eps_adjusted=-0.19))
+    svc.observe_rows(REPORT, [_pending_row(eps=-0.19, rev=0)], _et(REPORT, 16, 2))
+    snap = svc.snapshot("JOBY", REPORT, _et(REPORT, 17))
+    assert (snap.eps.actual, snap.eps.source, snap.revenue.actual) == (-0.19, els.SOURCE_FMP, 0.0)
+
+
+#: A zero FMP repeats on its own, the release that takes its row of zeros off and leaves that
+#: field to FMP, and the words its refusal is logged with.
+_LONE_ZERO_REPEATS = {
+    "its_eps": (dict(eps=0), _FILED_FULL, "FMP EPS 0 refused"),
+    "its_revenue": (dict(rev=0), dict(eps_adjusted=0.44), "FMP revenue 0 refused"),
+}
+
+
+@pytest.mark.parametrize("again,filed,words", _LONE_ZERO_REPEATS.values(),
+                         ids=_LONE_ZERO_REPEATS.keys())
+def test_a_zero_fmp_repeats_after_its_row_of_zeros_gave_way_is_logged_once(caplog, again, filed,
+                                                                           words):
+    """The fold runs on every tick and feed build: each refusal is one line, never one a fold."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    _zeros_step(svc, _et(REPORT, 16))
+    _filing_step(svc, _et(REPORT, 16, 1), filed)
+    with caplog.at_level(logging.WARNING, logger=els.__name__):
+        for minute in range(2, 6):
+            svc.observe_rows(REPORT, [_pending_row(**again)], _et(REPORT, 16, minute))
+    lines = [r.getMessage() for r in caplog.records if "never filled" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert words in lines[0] and "JOBY" in lines[0] and REPORT.isoformat() in lines[0]
+
+
+def test_a_pair_of_zeros_two_answers_complete_gives_way_in_the_fold_that_completes_it():
+    """A zero revenue held under a $30M consensus, then an EPS of 0 with no revenue under $16.6B:
+    the pair reads as FMP's unfilled row the moment it is whole. Left for the next fold to take
+    off, the same answer read twice showed no EPS, then "missed consensus by 100%"."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 15))
+    svc.observe_rows(REPORT, [_pending_row(eps=0.44, rev=0)], _et(REPORT, 16))
+    answer = [_pending_row(eps=0, rev_est=16.6e9)]
+    outcomes = []
+    for minute in (1, 2):
+        svc.observe_rows(REPORT, answer, _et(REPORT, 16, minute))
+        outcomes.append(_outcome(svc, _et(REPORT, 17)))
+    assert outcomes[1] == outcomes[0]
+    assert outcomes[0][:2] == (els.LiveMetric(0.41), els.LiveMetric(16.6e9, due=True))
+
+
+_REPEAT_ROWS = [
+    {"eps": None, "rev": None}, {"eps": 0, "rev": 0}, {"eps": 0}, {"rev": 0},
+    {"eps": 0.44}, {"rev": 33.2e6}, {"eps": 0.44, "rev": 0}, {"eps": 0, "rev": 33.2e6},
+]
+_REPEAT_FILINGS = (dict(revenue=33e6, eps_adjusted=0.44), dict(eps_adjusted=0.44),
+                   dict(revenue=33e6), dict(eps_gaap=-0.19))
+
+
+def test_a_repeat_of_any_answer_decides_what_its_first_fold_did_after_any_history(caplog):
+    """Every tick and feed build folds the same answer again. A repeat that tells something the
+    first fold did not is a card that changes with nothing new, and a push nobody's answer gave."""
+    caplog.set_level(logging.ERROR, logger=els.__name__)
+    rng = random.Random(20261111)
+    answers = [[_pending_row(**shape, rev_est=consensus)]
+               for shape in _REPEAT_ROWS for consensus in (30e6, 16.6e9)]
+    filings = [efs.FilingFigures(accession="0001628280-26-000131", accepted_at=None, url=None,
+                                 **figures) for figures in _REPEAT_FILINGS]
+    now = _et(REPORT, 17)
+    for _ in range(4000):
+        svc = els.EarningsLiveService()
+        svc.observe_rows(REPORT, [_pending_row()], _et(REPORT, 9))
+        history = []
+        for _step in range(rng.randint(1, 4)):
+            if rng.random() < 0.25:
+                filing = rng.choice(filings)
+                history.append(filing)
+                svc.absorb_filing("JOBY", REPORT, filing, now)
+            else:
+                answer = rng.choice(answers)
+                history.append(answer)
+                svc.observe_rows(REPORT, answer, now)
+        last = rng.choice(answers)
+        svc.observe_rows(REPORT, last, now)
+        once = _outcome(svc, now)
+        svc.observe_rows(REPORT, last, now)
+        assert _outcome(svc, now) == once, (history, last)
 
 
 @pytest.mark.parametrize("twins,filed,estimate,surprise", [
@@ -1229,6 +2034,80 @@ def test_which_twin_fmp_touched_last_never_decides_a_filing_figure(
     snap = svc.snapshot("TINY", REPORT, now)
     assert snap.revenue == els.LiveMetric(estimate, filed, surprise, els.SOURCE_FILING)
     assert els.card_fields(snap, REPORT)["revenue_surprise_pct"] == surprise
+
+
+def _filing_beside_twins(twins: tuple, filed: float, *, touched: tuple, flip: bool,
+                         filing_first: bool) -> els.LiveSnapshot:
+    """TINY's two pending rows, each a consensus FMP touched at `touched`, and its own release
+    printing `filed` and an EPS of $0.44, folded in the order given."""
+    rows = [{**_row("TINY", REPORT, rev_est=rev_est), "lastUpdated": when}
+            for rev_est, when in zip(twins, touched)]
+    release = dataclasses.replace(_filed_revenue(filed), eps_adjusted=0.44)
+    svc = els.EarningsLiveService()
+    now = _et(REPORT, 17)
+    svc.observe_rows(REPORT, [_row("TINY", REPORT, rev_est=twins[0])], _et(REPORT, 9))
+    if filing_first:
+        svc.absorb_filing("TINY", REPORT, release, now)
+    svc.observe_rows(REPORT, rows[::-1] if flip else rows, now)
+    if not filing_first:
+        svc.absorb_filing("TINY", REPORT, release, now)
+    return svc.snapshot("TINY", REPORT, now)
+
+
+_WHICH_TOUCHED_LAST = [("2026-10-20", "2026-10-20"), ("2026-10-20", "2026-10-21"),
+                       ("2026-10-21", "2026-10-20")]
+
+
+@pytest.mark.parametrize("twins,filed,shown", [
+    ((99e6, 101e6), 48e6, els.LiveMetric(101e6, checking=True)),
+    ((60e6, 120e6), 25e6, els.LiveMetric(120e6, checking=True)),
+    ((60e6, 600e6), 150e6, els.LiveMetric(600e6, checking=True)),
+    ((60e6, 600e6), 2e9, els.LiveMetric(600e6, checking=True)),
+    ((30e6, 90e6), 10e6, els.LiveMetric(90e6, 10e6, -88.89, els.SOURCE_FILING)),
+    ((5e6, 20e6), 100e6, els.LiveMetric(20e6, 100e6, 400.0, els.SOURCE_FILING)),
+], ids=["across_the_floor_held", "a_tiny_one_and_a_material_one", "between_far_apart_twins",
+        "over_far_apart_twins", "under_two_tiny_ones", "over_two_tiny_ones"])
+@pytest.mark.parametrize("touched", _WHICH_TOUCHED_LAST,
+                         ids=["a_tie", "the_second_touched_last", "the_first_touched_last"])
+@pytest.mark.parametrize("flip", [False, True], ids=["as_listed", "listed_the_other_way"])
+@pytest.mark.parametrize("filing_first", [False, True], ids=["rows_first", "filing_first"])
+def test_a_filing_figure_on_neither_twin_reads_the_largest_consensus_stated(
+        twins, filed, shown, touched, flip, filing_first):
+    """No stated consensus bears the figure out, so none is the one it sits on, and the row FMP
+    touched last must not choose: -51.52% in one order and a hold in the other was that. The
+    largest stated one judges it, as the guard reads every response, and is the one printed."""
+    snap = _filing_beside_twins(twins, filed, touched=touched, flip=flip,
+                                filing_first=filing_first)
+    assert snap.revenue == shown
+    assert snap.status == (els.STATUS_LIVE if shown.checking else els.STATUS_REPORTED)
+
+
+_CONSENSUS_GRID = (2e6, 5e6, 9e6, 20e6, 30e6, 45e6, 60e6, 90e6, 99e6, 101e6, 120e6, 250e6,
+                   600e6, 1.66e9, 16.6e9)
+_FILED_GRID = (1e6, 4e6, 10e6, 25e6, 33e6, 48e6, 61e6, 70e6, 100e6, 150e6, 300e6, 590e6, 1.7e9,
+               16.9e9, 40e9)
+
+
+def test_no_pair_of_consensus_twins_lets_the_row_touched_last_decide_a_filing_figure():
+    """Over a grid of twin consensus figures and printed figures, every case the two rows read
+    alike in either touch order and either fold order, except a figure inside BOTH twins' bands:
+    two consensus figures that close are one consensus and a stale row, and only `lastUpdated`
+    can tell them apart (`test_twins_inside_each_others_band_stay_with_the_row_touched_last`)."""
+    differ = []
+    for low, high in itertools.combinations(_CONSENSUS_GRID, 2):
+        for filed in _FILED_GRID:
+            if els._near(filed, low) and els._near(filed, high):
+                continue
+            seen = {
+                (snap.revenue, snap.status)
+                for touched in _WHICH_TOUCHED_LAST[1:]
+                for filing_first in (False, True)
+                for snap in [_filing_beside_twins((low, high), filed, touched=touched,
+                                                  flip=False, filing_first=filing_first)]
+            }
+            if len(seen) > 1:
+                differ.append(((low, high), filed, seen))
+    assert differ == [], f"{len(differ)} cases, the first: {differ[:1]}"
 
 
 def test_a_filing_beside_fmps_figure_never_moves_that_rows_estimate():
@@ -1500,6 +2379,23 @@ def test_a_filing_reading_another_consensus_is_logged_once(caplog):
     assert "61000000.0" in line and "60000000.0" in line and "600000000.0" in line
 
 
+def test_a_filing_on_no_consensus_says_it_reads_the_largest(caplog):
+    """$10M sits on neither $30M nor $90M: the line must not say it sits on the one it reads."""
+    svc = _svc()
+    now = _et(REPORT, 17)
+    rows = [{**_row("TINY", REPORT, rev_est=90e6), "lastUpdated": "2026-10-20"},
+            {**_row("TINY", REPORT, rev_est=30e6), "lastUpdated": "2026-10-21"}]
+    with caplog.at_level(logging.WARNING, logger=els.logger.name):
+        for _ in range(3):
+            svc.observe_rows(REPORT, rows, now)
+            svc.absorb_filing("TINY", REPORT, _filed_revenue(10e6), now)
+    (line,) = _guard_lines(caplog)
+    assert "the filing reads the largest consensus held" in line and "sits on" not in line
+    assert "10000000.0" in line and "90000000.0" in line
+    assert svc.snapshot("TINY", REPORT, now).revenue == els.LiveMetric(
+        90e6, 10e6, -88.89, els.SOURCE_FILING)
+
+
 def test_a_stored_zero_is_not_reported_as_refused(caplog):
     with caplog.at_level(logging.WARNING, logger=els.logger.name):
         _svc().observe_rows(REPORT, [_row("JOBY", REPORT, rev=0, rev_est=30e6)], _et(REPORT, 17))
@@ -1597,14 +2493,18 @@ _PAST_ANY_PACE = _FIFTEEN_MIN + 1
 
 @pytest.fixture
 def windows(monkeypatch) -> Dict[str, frozenset]:
-    """Each company's release windows as `EarningsFilingWatcher.release_windows` answers them:
-    both, the answer for a company nothing is known about, until a test names its own."""
+    """Each company's release windows as the filing watcher knows them: both, the answer for a
+    company nothing is known about, until a test names its own. Both sides read the one answer, as
+    in production: the FMP cadence through `EarningsFilingWatcher.release_windows`, the SEC
+    cadence through `_windows_of`, which `release_windows` itself reads."""
     named: Dict[str, frozenset] = {}
 
     def _answer(self, symbol):
         return named.get(symbol.upper(), _BOTH)
 
     monkeypatch.setattr(efs.EarningsFilingWatcher, "release_windows", _answer)
+    monkeypatch.setattr(efs.EarningsFilingWatcher, "_windows_of",
+                        lambda self, symbol, mono: named.get(symbol.upper(), _BOTH))
     return named
 
 
@@ -2069,6 +2969,37 @@ async def test_records_outside_the_sheet_days_are_pruned_at_the_day_roll():
     after = NEXT + timedelta(days=4)    # Tuesday: back to Friday, so Wednesday's has gone
     await svc.refresh(_et(after, 9), fmp=_FMP({}), symbols=["INTC"])
     assert svc.snapshot("INTC", PREV, _et(after, 9)) is None
+
+
+def test_a_look_waiting_on_a_day_past_the_sheet_days_goes_with_the_day():
+    """A held push's look is bookkeeping on a day, and leaves when its day does, however far
+    ahead it was asked for."""
+    svc = _svc()
+    svc.read_before_look("INTC", PREV, _et(PREV, 9) + timedelta(days=30))
+    svc.read_before_look("INTC", REPORT, _et(REPORT, 9))
+    svc._prune(_et(NEXT + timedelta(days=4), 9))
+    assert set(svc._looks) == set()
+    svc.read_before_look("intc", NEXT, _et(NEXT, 9))
+    svc._prune(_et(NEXT, 9))
+    assert set(svc._looks) == {("INTC", NEXT)}
+
+
+@pytest.mark.parametrize("naive", ["the_look", "the_tick", "both"])
+def test_a_look_on_a_clock_with_no_zone_reads_as_utc_and_never_raises(monkeypatch, naive):
+    """The looks are compared on every tick, and a raise there would fail the tick every minute
+    and every push behind it. A time with no zone is UTC, the rule of `et_now`, either side."""
+    clock = SimpleNamespace(at=1_000_000.0)
+    monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=lambda: clock.at))
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.041, rev=17.1e9)], _et(REPORT, 22))
+    svc._fetched[REPORT] = clock.at - 7200
+    look = _et(NEXT, 8)
+    svc.read_before_look("INTC", REPORT,
+                         look.replace(tzinfo=None) if naive in ("the_look", "both") else look)
+    tick = look - timedelta(minutes=2)
+    if naive in ("the_tick", "both"):
+        tick = tick.astimezone(timezone.utc).replace(tzinfo=None)
+    assert svc._looks_due(tick) == [REPORT]
 
 
 @pytest.mark.asyncio
@@ -2586,6 +3517,7 @@ def test_the_sheets_poll_follows_the_report_it_reads_as():
                                url=None, revenue=17.1e9, eps_adjusted=0.44)
     svc.absorb_filing("INTC", PREV, filing, _et(PREV, 18, 6))
     svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
+    svc._fetched[PREV] = time.monotonic()      # the loop has read the day before, as it does
     assert svc.snapshot("INTC", REPORT, at).poll_seconds == els.EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS
     assert svc.snapshot("INTC", REPORT, _et(REPORT, 13)).poll_seconds == (
         els.EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS), "FMP is still asked about it all that day"
@@ -4270,30 +5202,30 @@ _WALK_FROM, _WALK_TO = _et(MONDAY, 12), _et(TUESDAY + timedelta(days=1), 0)
 
 
 @pytest.mark.asyncio
-async def test_an_after_close_report_day_costs_151_fmp_calls_and_304_sec_reads(both_loops,
-                                                                               windows):
+async def test_an_after_close_report_day_costs_151_fmp_calls_and_53_sec_reads(both_loops,
+                                                                              windows):
     """Today's watched company and the previous trading day's both release after the close,
     on SEC at 16:05, and FMP fills overnight results at 08:00 the next morning. FMP: 106 for
     today (15 min, then 3 min from 15:55 to 18:30, then 15 min to 22:00), 41 for the previous
     day (3 min in the morning window until its fill at 08:00) and 4 for the memo's two rounds.
-    SEC: today's company every minute in the morning window, every 5 min until 15:55, every
-    minute until its release at 16:05, and that release's two documents."""
+    SEC: today's company, known to release after the close, every 15 min from 06:00 and every
+    minute from 15:55 until its release at 16:05 (51 reads), and that release's two documents."""
     windows.update(INTC=_CLOSE, AAPL=_CLOSE)
     fmp = _FMP({**_market(FRIDAY), MONDAY: _on(MONDAY, "AAPL"), TUESDAY: _on(TUESDAY, "INTC")})
     edgar = _Edgar({"AAPL": _et(MONDAY, 16, 5), "INTC": _et(TUESDAY, 16, 5)})
     fmp_calls, sec_reads = await both_loops(fmp, edgar, _WALK_FROM, _WALK_TO, ["INTC", "AAPL"],
                                             _fills(fmp, {_et(TUESDAY, 8): ("AAPL", MONDAY)}))
-    assert (fmp_calls[_WALKED], sec_reads[_WALKED]) == (151, 304)
+    assert (fmp_calls[_WALKED], sec_reads[_WALKED]) == (151, 53)
 
 
 @pytest.mark.asyncio
-async def test_a_mixed_report_day_costs_199_fmp_calls_and_337_sec_reads(both_loops, windows):
+async def test_a_mixed_report_day_costs_199_fmp_calls_and_86_sec_reads(both_loops, windows):
     """A morning reporter (SEC at 06:30, FMP's figures at 09:00) and an after-close one (SEC at
     16:05, FMP the next morning) today, and an after-close report from the day before that FMP
     fills at 08:00. FMP: 154 for today (3 min until the morning reporter's fill, 15 min until
     15:55, 3 min to 18:30, 15 min to 22:00), 41 for the previous day and 4 for the memo. SEC: the
-    morning reporter's 31 reads to its release and the after-close one's 302, two documents
-    each."""
+    morning reporter's 31 reads to its release (every minute from 06:00) and the after-close
+    one's 51, two documents each."""
     windows.update(UNH=_MORNING, INTC=_CLOSE, AAPL=_CLOSE)
     fmp = _FMP({**_market(FRIDAY), MONDAY: _on(MONDAY, "AAPL"),
                 TUESDAY: _on(TUESDAY, "UNH", "INTC")})
@@ -4302,7 +5234,7 @@ async def test_a_mixed_report_day_costs_199_fmp_calls_and_337_sec_reads(both_loo
     fills = {_et(TUESDAY, 8): ("AAPL", MONDAY), _et(TUESDAY, 9): ("UNH", TUESDAY)}
     fmp_calls, sec_reads = await both_loops(fmp, edgar, _WALK_FROM, _WALK_TO,
                                             ["UNH", "INTC", "AAPL"], _fills(fmp, fills))
-    assert (fmp_calls[_WALKED], sec_reads[_WALKED]) == (199, 337)
+    assert (fmp_calls[_WALKED], sec_reads[_WALKED]) == (199, 86)
 
 
 @pytest.mark.asyncio
@@ -4311,7 +5243,8 @@ async def test_with_no_companys_window_known_either_day_costs_208_fmp_calls(both
                                                                             morning_reporter):
     """The two days above while nothing is known of any company's window, both counting
     (`EarningsFilingWatcher.release_windows`' answer then): today's after-close company is asked
-    every 3 min across the morning window too, until 09:35. SEC is read as before."""
+    every 3 min across the morning window too, until 09:35, and SEC reads it every minute in
+    both windows: 253 reads with the after-close company alone, 286 with the morning reporter."""
     today = ["UNH", "INTC"] if morning_reporter else ["INTC"]
     fmp = _FMP({**_market(FRIDAY), MONDAY: _on(MONDAY, "AAPL"), TUESDAY: _on(TUESDAY, *today)})
     releases = {"AAPL": _et(MONDAY, 16, 5), "INTC": _et(TUESDAY, 16, 5)}
@@ -4321,20 +5254,20 @@ async def test_with_no_companys_window_known_either_day_costs_208_fmp_calls(both
         fills[_et(TUESDAY, 9)] = ("UNH", TUESDAY)
     fmp_calls, sec_reads = await both_loops(fmp, _Edgar(releases), _WALK_FROM, _WALK_TO,
                                             [*today, "AAPL"], _fills(fmp, fills))
-    assert (fmp_calls[_WALKED], sec_reads[_WALKED]) == ((208, 337) if morning_reporter
-                                                        else (208, 304))
+    assert (fmp_calls[_WALKED], sec_reads[_WALKED]) == ((208, 286) if morning_reporter
+                                                        else (208, 253))
 
 
 @pytest.mark.asyncio
-async def test_the_worst_report_day_costs_288_fmp_calls_and_488_sec_reads(both_loops):
+async def test_the_worst_report_day_costs_288_fmp_calls_and_409_sec_reads(both_loops):
     """Today's and the previous trading day's watched reports wait all day: neither files on SEC
     and FMP fills neither, and nothing is known of either company's windows. FMP: 163 for today
     (3 min in both windows, 15 min between them), 121 for the previous day (3 min in the morning
     window, then 15 min to 22:00) and 4 for the memo. SEC: today's company all day, every minute
-    in the windows and every 5 min outside them."""
+    in both windows and every 15 min outside them."""
     fmp = _FMP({**_market(FRIDAY), MONDAY: _on(MONDAY, "AAPL"), TUESDAY: _on(TUESDAY, "INTC")})
     fmp_calls, sec_reads = await both_loops(fmp, _Edgar(), _WALK_FROM, _WALK_TO, ["INTC", "AAPL"])
-    assert (fmp_calls[_WALKED], sec_reads[_WALKED]) == (288, 488)
+    assert (fmp_calls[_WALKED], sec_reads[_WALKED]) == (288, 409)
 
 
 @pytest.mark.asyncio
@@ -7286,20 +8219,441 @@ async def test_the_switch_off_restores_nothing_and_so_still_removes_the_figures(
 
 
 @pytest.mark.asyncio
-async def test_the_restore_reads_every_live_day_not_just_the_last_trading_day(cache):
-    """The Tuesday after Labor Day: the live days run back to Friday, and a report can carry a
-    weekend date, so the two trading days alone would miss it."""
-    thursday, friday, sunday, tuesday = (date(2026, 9, 3), date(2026, 9, 4), date(2026, 9, 6),
-                                         date(2026, 9, 8))
-    for symbol, day in (("INTC", sunday), ("AAPL", friday), ("MSFT", thursday)):
+async def test_the_restore_reads_every_day_a_record_stays_readable_and_nothing_older(cache,
+                                                                                   caplog):
+    """The Tuesday after Labor Day: the live days run back to Friday, a report can carry a
+    weekend date, and Thursday is the sheet's day before them, which a held push can still open.
+    So the two trading days alone would miss a report, and the live days alone that push's. Only
+    Thursday takes a look of its own: each live day before today has its first look anyway, and
+    today is the memo's, which an own fetch outside the hot window would pay for again."""
+    wednesday, thursday, friday, sunday, tuesday = (date(2026, 9, 2), date(2026, 9, 3),
+                                                    date(2026, 9, 4), date(2026, 9, 6),
+                                                    date(2026, 9, 8))
+    for symbol, day in (("INTC", sunday), ("AAPL", friday), ("MSFT", thursday),
+                        ("NVDA", tuesday), ("ORCL", wednesday)):
         cache.hold(_kept(symbol, day))
     svc, at = _svc(), _et(tuesday, 9, 1)
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        await svc.restore_filings(at)
+    assert cache.reads == [[d.isoformat() for d in els.sheet_days(tuesday)]]
+    assert len(cache.reads[0]) == 6 and cache.reads[0][0] == thursday.isoformat()
+    for symbol, day in (("INTC", sunday), ("AAPL", friday), ("MSFT", thursday),
+                        ("NVDA", tuesday)):
+        assert svc.snapshot(symbol, day, at).eps.actual == 0.44, symbol
+    assert ("ORCL", wednesday) not in svc._records, "out of the window, so never read"
+    assert svc.landed_snapshots(at) == [], "a restored figure is never a landing"
+    assert svc.recent_snapshots(["MSFT"], at) == [], "the sheet's day draws no card"
+    (line,) = [r.getMessage() for r in caplog.records if "filing(s) for" in r.getMessage()]
+    assert line.endswith("FMP look due on: " + thursday.isoformat())
+    assert not svc.awaits_first_load(tuesday, tuesday), "today stays the memo's"
+
+
+#: The Saturday after INTC's Thursday report. Thursday has left the live days, and a result push
+#: held for a user's morning can still open it (`sheet_days`).
+_SAT = NEXT + timedelta(days=1)
+
+
+async def _thursday_filing_kept(monkeypatch, fmp: _FMP):
+    """INTC's 8-K is read at 16:03 ET on its report day and kept in the table."""
+    figures = efs.FilingFigures(accession="0000050863-26-000123", accepted_at=_et(REPORT, 16, 2),
+                                url="https://www.sec.gov/x", revenue=17.1e9, eps_adjusted=0.44,
+                                guidance=_OUTLOOK)
+    watcher = _Watcher({"INTC": figures})
+    await _read_one_filing(monkeypatch, REPORT, fmp, watcher)
+    watcher.calls.clear()
+    return figures, watcher
+
+
+def _restart_on_saturday(monkeypatch, fmp: _FMP) -> None:
+    """A new process on Saturday, the memo's window listing a row on every day, as a real
+    calendar does."""
+    _reset_all()
+    monkeypatch.setattr(ts, "_et_today", lambda: _SAT)
+    for day, rows in _market(_SAT, 15).items():
+        fmp.by_day.setdefault(day, rows)
+
+
+async def _deploy_on_saturday(monkeypatch, fmp: _FMP, at: datetime) -> List[str]:
+    """A new process, whose first FMP tick runs at `at`. What it handed the sender."""
+    _restart_on_saturday(monkeypatch, fmp)
+    sent: List[str] = []
+    await els.earnings_live_tick(at, fmp=fmp, watched=["INTC"], dispatch=_collect(sent))
+    return sent
+
+
+def _sheet_at(monkeypatch, fmp: _FMP, at: datetime) -> ts.TrackingService:
+    """The sheet route's own service, its clock at `at`, on the memo `fmp` fills."""
+    _no_history(monkeypatch)
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(at))
+    svc_obj = ts.TrackingService.__new__(ts.TrackingService)
+    svc_obj.fmp = fmp
+    return svc_obj
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("filled", [True, False], ids=["fmp_filled_friday", "fmp_still_empty"])
+async def test_a_restart_past_the_live_days_keeps_the_sheets_figures_outlook_and_link(
+        monkeypatch, cache, filled):
+    """A result push held for a user's morning opens Thursday's report on Saturday, a trading
+    day past the live days. A deploy that night must give back what the table holds for it: the
+    outlook and the link, which FMP never carries, and the verified figures while FMP has none,
+    never "not in yet"."""
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    figures, watcher = await _thursday_filing_kept(monkeypatch, fmp)
+    if filled:
+        fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.46, rev=17.2e9)]
+    fmp.by_day[NEXT] = [_row("ZZZZ", NEXT)]
+
+    sent = await _deploy_on_saturday(monkeypatch, fmp, _et(_SAT, 7))
+    await els.earnings_filing_tick(_et(_SAT, 7), watched=["INTC"])
+
+    sheet = await _sheet_at(monkeypatch, fmp, _et(_SAT, 8)).get_earnings_live("INTC", REPORT)
+    assert sheet.status == els.STATUS_REPORTED
+    assert sheet.guidance == _OUTLOOK and sheet.filing.url == figures.url
+    assert sheet.eps.estimate == 0.41, "the restart read FMP for that day: the consensus is back"
+    shown = (sheet.eps.actual, sheet.eps.source, sheet.preliminary)
+    assert shown == ((0.46, els.SOURCE_FMP, False) if filled
+                     else (0.44, els.SOURCE_FILING, True))
+    assert sheet.poll_seconds is None, "read already, and FMP's morning for it is over"
+    assert sent == [] and watcher.calls == [], "no landing, no SEC read and no Gemini call"
+
+
+@pytest.mark.asyncio
+async def test_a_sheet_open_before_the_loops_look_asks_again_until_the_look_answers(
+        monkeypatch, cache):
+    """The filing tick can take the table back first, and the look can fail. Until it answers,
+    the record holds the filing alone, with no consensus beside it, and only a poll brings the
+    look's answer to a sheet already open."""
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    await _thursday_filing_kept(monkeypatch, fmp)
+    fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.46, rev=17.2e9)]
+    fmp.by_day[NEXT] = [_row("ZZZZ", NEXT)]
+    _restart_on_saturday(monkeypatch, fmp)
+    await els.earnings_filing_tick(_et(_SAT, 7), watched=["INTC"])
+
+    first = await _sheet_at(monkeypatch, fmp, _et(_SAT, 7, 1)).get_earnings_live("INTC", REPORT)
+    assert (first.status, first.eps.actual, first.preliminary) == (els.STATUS_REPORTED, 0.44,
+                                                                  True)
+    assert first.eps.estimate is None and first.guidance == _OUTLOOK
+    assert first.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS
+
+    await els.earnings_live_tick(_et(_SAT, 7, 2), fmp=fmp, watched=["INTC"],
+                                 dispatch=_collect([]))
+    again = await _sheet_at(monkeypatch, fmp, _et(_SAT, 7, 3)).get_earnings_live("INTC", REPORT)
+    assert (again.eps.actual, again.eps.estimate, again.preliminary) == (0.46, 0.41, False)
+    assert again.guidance == _OUTLOOK and again.poll_seconds is None
+
+
+@pytest.mark.asyncio
+async def test_a_leftover_row_still_reads_as_the_report_before_it_after_a_restart(monkeypatch,
+                                                                                 cache):
+    """FMP leaves a pending INTC row dated Friday beside Thursday's report. After a deploy on
+    Saturday, Thursday has left the live days and only the table can give it back: without it the
+    Friday card says the results are not in, all weekend, about a report that is out."""
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    await _thursday_filing_kept(monkeypatch, fmp)
+    fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.46, rev=17.2e9)]
+    fmp.by_day[NEXT] = [_row("INTC", NEXT)]
+    await _deploy_on_saturday(monkeypatch, fmp, _et(_SAT, 7))
+
+    (card,) = _svc().recent_snapshots(["INTC"], _et(_SAT, 8))
+    assert (card.day, card.reads_as, card.status) == (NEXT, REPORT, els.STATUS_REPORTED)
+    assert (card.eps.actual, card.eps.source, card.preliminary) == (0.46, els.SOURCE_FMP, False)
+
+
+@pytest.mark.asyncio
+async def test_a_held_result_waking_after_a_restart_past_the_live_days_states_fmps_answer(
+        monkeypatch, cache):
+    """FMP fills Thursday's report late on Friday, and its result push is held for a Helsinki
+    morning: 07:00 there is 01:00 ET on Saturday, after a deploy at 00:30. That push may state
+    only FMP's own EPS. Given back the filing alone, with no FMP read of that day, the wake could
+    only send the words the row was given on Friday, never checked against what FMP says now."""
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    await _thursday_filing_kept(monkeypatch, fmp)
+    fmp.by_day[REPORT] = [_row("INTC", REPORT, eps=0.46, rev=17.2e9)]
+    fmp.by_day[NEXT] = [_row("ZZZZ", NEXT)]
+    await _deploy_on_saturday(monkeypatch, fmp, _et(_SAT, 0, 30))
+
+    route = {"ticker": "INTC", "report_date": REPORT.isoformat()}
+    wake = sender.copy_at_wake(KIND_EARNINGS_RESULT, route, _et(_SAT, 1))
+    assert wake == sender.WakeCopy("INTC earnings are out",
+                                   "EPS beat consensus by 12%. Tap for the full picture.",
+                                   send=True)
+
+
+class _FMPAfterTheRestore(_FMP):
+    """FMP that answers only once `answer` is set. The tick asks it only after its restore, so
+    from `asked` on, a reader sees the records the table gave back before FMP's first answer."""
+
+    def __init__(self, by_day: Dict[date, List[dict]]):
+        super().__init__(by_day)
+        self.asked, self.answer = asyncio.Event(), asyncio.Event()
+
+    async def get_earnings_calendar(self, from_date=None, to_date=None):
+        self.asked.set()
+        await self.answer.wait()
+        return await super().get_earnings_calendar(from_date, to_date)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boot", [_et(_SAT, 1), _et(NEXT, 1), _et(REPORT, 17)],
+                         ids=["the_sheets_day_past_the_live_days", "a_live_day", "today"])
+async def test_a_held_result_waking_before_fmps_first_answer_goes_out_in_its_own_words(
+        monkeypatch, cache, boot):
+    """The flush and the FMP tick both start 45 s after boot, so a held result row can wake
+    between the tick's restore and FMP's first answer, on any day the table gives back. Its
+    record is then the company's filing alone, which this kind may not state and which says
+    nothing against the FMP figure that wrote the row: the row goes out in its own words, as
+    with no record at all, never held an hour for an answer the round is about to read. The
+    live kind may state the filing, and does. Once FMP has answered, the wake reads that."""
+    fmp = _FMP({REPORT: [_row("INTC", REPORT)], PREV: []})
+    await _thursday_filing_kept(monkeypatch, fmp)
+    today = boot.astimezone(ET).date()
+    _reset_all()
+    monkeypatch.setattr(ts, "_et_today", lambda: today)
+    held = _FMPAfterTheRestore({**_market(PREV),
+                                REPORT: [_row("INTC", REPORT, eps=0.46, rev=17.2e9)]})
+    route = {"ticker": "INTC", "report_date": REPORT.isoformat()}
+
+    tick = asyncio.ensure_future(els.earnings_live_tick(boot, fmp=held, watched=["INTC"],
+                                                        dispatch=_collect([])))
+    try:
+        await asyncio.wait_for(held.asked.wait(), 5)
+        snap = _svc().snapshot("INTC", REPORT, boot)
+        assert (snap.eps.actual, snap.eps.source, snap.eps.estimate) == (0.44, els.SOURCE_FILING,
+                                                                         None)
+        assert sender.copy_at_wake(KIND_EARNINGS_RESULT, route, boot) is None
+        assert sender.copy_at_wake(KIND_EARNINGS_LIVE, route, boot) == sender.WakeCopy(
+            "INTC results are out", "Revenue $17.1B · EPS $0.44. From the company's release.",
+            send=True)
+    finally:
+        held.answer.set()
+        await asyncio.wait_for(tick, 5)
+
+    assert sender.copy_at_wake(KIND_EARNINGS_RESULT, route, boot) == sender.WakeCopy(
+        "INTC earnings are out", "EPS beat consensus by 12%. Tap for the full picture.",
+        send=True)
+
+
+class _FMPDown(_FMP):
+    async def get_earnings_calendar(self, from_date=None, to_date=None):
+        self.calls.append(from_date)
+        raise RuntimeError("FMP unreachable")
+
+
+_ASKS_AGAIN = (False, sender.WAKE_ASK_AGAIN)
+_NO_LONGER_SAYS_IT = (False, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kept,rows,wake", [
+    ({}, None, None),
+    ({}, [_row("INTC", REPORT)], _ASKS_AGAIN),
+    ({"eps_adjusted": None}, [_row("INTC", REPORT, rev_est=None),
+                              _row("INTC", REPORT, eps=0.041, eps_est=None, rev_est=None)],
+     _ASKS_AGAIN),
+    ({}, [_row("INTC", REPORT, eps=0.46, rev=17.2e9, eps_est=None, rev_est=None)],
+     _NO_LONGER_SAYS_IT),
+], ids=["a_failed_look_says_nothing", "a_listing_with_no_eps_is_no_answer_yet",
+        "an_eps_held_in_doubt_is_no_answer_yet", "an_eps_with_no_consensus_is_fmps_answer"])
+async def test_a_held_result_on_a_report_the_table_gave_back_waits_only_on_what_fmp_says(
+        monkeypatch, cache, kept, rows, wake):
+    """A look that fails leaves the record what the table gave back, so the row goes out in its
+    own words: FMP down at a deploy must not cost the buzz. Anything FMP does say is its answer,
+    read as on any other day (A REPORT WITH NO ANSWER YET in `earnings_live_sender`): the report
+    listed with its consensus and no EPS, or its EPS held in doubt against a twin's consensus,
+    waits for the EPS; an EPS with no consensus to beat is a figure that no longer says it."""
+    cache.hold(_kept("INTC", REPORT, **kept))
+    fmp = _FMPDown() if rows is None else _FMP({REPORT: rows, NEXT: [_row("ZZZZ", NEXT)]})
+    await _deploy_on_saturday(monkeypatch, fmp, _et(_SAT, 1))
+    assert REPORT.isoformat() in fmp.calls, "the restart asked FMP about the day it gave back"
+
+    route = {"ticker": "INTC", "report_date": REPORT.isoformat()}
+    answer = sender.copy_at_wake(KIND_EARNINGS_RESULT, route, _et(_SAT, 1))
+    if wake is None:
+        assert answer is None
+    else:
+        assert (answer.send, answer.ask_again_in) == wake
+        assert answer.title == "INTC results are out"
+
+
+#: A held result row in the words it lands with, and as a wake leaves it once it holds the row for
+#: FMP's answer (A REPORT WITH NO ANSWER YET in `earnings_live_sender`): what is known meanwhile,
+#: here the release's EPS beside FMP's consensus, words this kind never sends.
+_LANDED = ("INTC earnings are out", "EPS beat consensus by 46%. Tap for the full picture.")
+_LANDED_ON_A_MISS = ("INTC earnings are out",
+                     "EPS missed consensus by 27%. Tap for the full picture.")
+_LEFT_WAITING = ("INTC results are out", "Revenue beat consensus by 3% · EPS $0.44 (beat "
+                 "consensus by 7%). From the company's release.")
+
+
+async def _new_process_holds(monkeypatch, cache, record: str, at: datetime) -> None:
+    """Thursday's report in a new process at `at`, Friday morning: what its record is before
+    FMP's first answer reaches it, or once that answer has."""
+    if record in ("the_filing_alone", "fmps_answer"):
+        cache.hold(_kept("INTC", REPORT))
+    await _svc().restore_filings(at)
+    if record == "a_listing_with_no_figure":
+        _svc().observe_rows(REPORT, [_row("INTC", REPORT)], at, fetched=True)
+    elif record == "fmps_answer":
+        _svc().observe_rows(REPORT, [_row("INTC", REPORT, eps=0.60, rev=17.1e9)], at,
+                            fetched=True)
+    elif record == "one_it_cannot_read":
+        def _broken(self, symbol, day, now):
+            raise RuntimeError("record exploded")
+
+        monkeypatch.setattr(els.EarningsLiveService, "snapshot", _broken)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("record,meanwhile", [
+    ("nothing", _LEFT_WAITING),
+    ("a_listing_with_no_figure", _LEFT_WAITING),
+    ("the_filing_alone", ("INTC results are out",
+                          "Revenue $17.1B · EPS $0.44. From the company's release.")),
+    ("one_it_cannot_read", _LEFT_WAITING),
+], ids=["nothing", "a_listing_with_no_figure", "the_filing_alone", "one_it_cannot_read"])
+async def test_a_held_result_a_wake_left_waiting_for_fmp_waits_again_after_a_restart(
+        monkeypatch, cache, caplog, record, meanwhile):
+    """The 07:00 wake held a 46% beat for FMP's answer, its EPS in doubt, and left on the row what
+    was known meanwhile: words this kind never sends, the release's EPS among them. A deploy before
+    the 08:00 wake must not turn that wait into a buzz. Whatever the new process holds then, the
+    row asks again, as the old process would have had it, saying what the record says where it
+    says anything. A row still in its landing's words goes out in them on the same record."""
+    assert (_LANDED, _LANDED_ON_A_MISS) == (sender.result_copy("INTC", 0.4634),
+                                            sender.result_copy("INTC", -0.27)), "as a row lands"
+    at = _et(NEXT, 8)
+    await _new_process_holds(monkeypatch, cache, record, at)
+    route = {"ticker": "INTC", "report_date": REPORT.isoformat()}
+
+    with caplog.at_level(logging.WARNING, logger=sender.__name__):
+        wake = sender.copy_at_wake(KIND_EARNINGS_RESULT, route, at, text=_LEFT_WAITING)
+    assert wake == sender.WakeCopy(*meanwhile, send=False, ask_again_in=sender.WAKE_ASK_AGAIN)
+
+    for landed in (_LANDED, _LANDED_ON_A_MISS):
+        if record == "one_it_cannot_read":
+            with pytest.raises(RuntimeError):
+                sender.copy_at_wake(KIND_EARNINGS_RESULT, route, at, text=landed)
+        else:
+            assert sender.copy_at_wake(KIND_EARNINGS_RESULT, route, at, text=landed) is None
+    if record == "one_it_cannot_read":
+        (line,) = [r for r in caplog.records if "RuntimeError" in r.getMessage()]
+        assert "INTC 2026-10-29" in line.getMessage() and line.exc_info is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", [_LANDED, _LEFT_WAITING], ids=["as_it_landed", "left_waiting"])
+async def test_fmps_answer_after_a_restart_decides_a_held_result_whatever_its_words(
+        monkeypatch, cache, text):
+    """The wait ends where it would have in the old process: on FMP's own EPS, here a 46% beat."""
+    at = _et(NEXT, 8)
+    await _new_process_holds(monkeypatch, cache, "fmps_answer", at)
+    route = {"ticker": "INTC", "report_date": REPORT.isoformat()}
+    assert sender.copy_at_wake(KIND_EARNINGS_RESULT, route, at, text=text) == sender.WakeCopy(
+        *_LANDED, send=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kept,looks", [
+    (None, 0),
+    ({"verifier_version": efs.FILING_VERIFIER_VERSION + 1}, 0),
+    ({}, 1),
+], ids=["nothing_kept", "kept_by_another_verifier", "kept_by_this_verifier"])
+async def test_a_restart_reads_fmp_for_the_sheets_day_once_and_only_for_a_record_it_gave_back(
+        monkeypatch, cache, caplog, kept, looks):
+    """The table holds no consensus and no FMP figure, so a record it gives back past the live
+    days costs the restart one look at that day, and the log says so. With nothing given back
+    there, a row another verifier kept included, nobody pays."""
+    if kept is not None:
+        cache.hold(dict(_kept("INTC", REPORT), **kept))
+    fmp = _FMP({REPORT: [_row("INTC", REPORT, eps=0.46, rev=17.2e9)],
+                NEXT: [_row("ZZZZ", NEXT)]})
+    with caplog.at_level(logging.INFO, logger=els.__name__):
+        await _deploy_on_saturday(monkeypatch, fmp, _et(_SAT, 7))
+    for minute in (1, 2, 3):
+        await els.earnings_live_tick(_et(_SAT, 7, minute), fmp=fmp, watched=["INTC"],
+                                     dispatch=_collect([]))
+    assert fmp.calls.count(REPORT.isoformat()) == looks
+    (line,) = [r.getMessage() for r in caplog.records if "filing(s) for" in r.getMessage()]
+    assert line.endswith("FMP look due on: " + (REPORT.isoformat() if looks else "none"))
+
+
+@pytest.mark.asyncio
+# 23:00 ET is past the hours the loop asks FMP about the previous trading day (06:00-22:00,
+# `fmp_window_open`), so only the first-load recheck asks; at 09:00 the preliminary rule does.
+@pytest.mark.parametrize("hour,poll", [(23, els.EARNINGS_LIVE_POLL_SECONDS),
+                                       (9, els.EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS)],
+                         ids=["its_own_rule_asks_nothing", "its_own_rule_already_asks"])
+async def test_a_record_the_loop_has_yet_to_load_asks_again_until_the_load_answers(cache, hour,
+                                                                                   poll):
+    """A deploy on Friday: Thursday is a live day the loop has not loaded yet, and the record the
+    table gave back has the filing's figures with no consensus. Its load is on the loop's next
+    round, so a sheet open meanwhile asks again, at its own rule's pace where that rule asks at
+    all, and stops once the load has answered."""
+    cache.hold(_kept("INTC", REPORT))
+    svc, at = _svc(), _et(NEXT, hour)
     await svc.restore_filings(at)
-    assert cache.reads == [[d.isoformat() for d in els.live_days(tuesday)]]
-    assert len(cache.reads[0]) == 5 and cache.reads[0][0] == friday.isoformat()
-    assert svc.snapshot("INTC", sunday, at).eps.actual == 0.44
-    assert svc.snapshot("AAPL", friday, at).eps.actual == 0.44
-    assert svc.snapshot("MSFT", thursday, at) is None, "out of the window, so never read"
+    assert svc.awaits_first_load(REPORT, NEXT)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert (snap.status, snap.preliminary, snap.eps.estimate) == (els.STATUS_REPORTED, True, None)
+    assert snap.poll_seconds == poll
+
+    await svc.refresh(at, fmp=_FMP({REPORT: [_row("INTC", REPORT, eps=0.46, rev=17.2e9)]}),
+                      symbols=["INTC"])
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert (snap.eps.actual, snap.preliminary, snap.poll_seconds) == (0.46, False, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("today", [NEXT, _SAT], ids=["a_live_day", "the_sheets_day_past_them"])
+async def test_an_outlook_given_back_alone_asks_again_until_the_load_answers(cache, today):
+    """A release can verify with its outlook and no figure the card shows. The record the table
+    gives back then reads as awaiting, with nothing preliminary on show, and it wants FMP's answer
+    as much as one holding figures: a sheet open on it asks again until the load has answered."""
+    cache.hold(_kept("INTC", REPORT, revenue=None, eps_adjusted=None))
+    svc, at = _svc(), _et(today, 7)
+    await svc.restore_filings(at)
+    assert svc.awaits_first_load(REPORT, today)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert (snap.status, snap.preliminary, snap.filing.guidance) == (els.STATUS_AWAITING, False,
+                                                                     _OUTLOOK)
+    assert snap.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS
+
+    fmp = _FMP({REPORT: [_row("INTC", REPORT, eps=0.46, rev=17.2e9)], NEXT: [_row("ZZZZ", NEXT)]})
+    await svc.refresh(at, fmp=fmp, symbols=["INTC"])
+    assert not svc.awaits_first_load(REPORT, today)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert (snap.status, snap.eps.actual, snap.filing.guidance) == (els.STATUS_REPORTED, 0.46,
+                                                                    _OUTLOOK)
+    assert snap.poll_seconds is None
+
+
+def test_a_report_fmp_has_confirmed_never_polls_for_a_load_still_due():
+    """That load can only confirm what the sheet already shows."""
+    svc, at = _svc(), _et(NEXT, 13)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.46, rev=17.2e9)], at)
+    assert svc.awaits_first_load(REPORT, NEXT)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert (snap.status, snap.preliminary, snap.poll_seconds) == (els.STATUS_REPORTED, False, None)
+
+
+@pytest.mark.asyncio
+async def test_a_leftover_reading_as_a_report_the_loop_has_yet_to_load_asks_again(cache):
+    """The poll follows the record a row reads as. Here FMP answered blank for Thursday, so its
+    look stays due while Friday's leftover already reads as the filing the table gave back."""
+    cache.hold(_kept("INTC", REPORT))
+    svc, at = _svc(), _et(_SAT, 8)
+    await svc.restore_filings(at)
+    await svc.refresh(at, fmp=_FMP({NEXT: [_row("INTC", NEXT)]}), symbols=["INTC"])
+    assert svc.awaits_first_load(REPORT, _SAT) and not svc.awaits_first_load(NEXT, _SAT)
+    snap = svc.snapshot("INTC", NEXT, at)
+    assert (snap.reads_as, snap.status) == (REPORT, els.STATUS_REPORTED)
+    assert snap.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS
+
+    fmp = _FMP({REPORT: [_row("INTC", REPORT, eps=0.46, rev=17.2e9)], NEXT: [_row("INTC", NEXT)]})
+    await svc.refresh(at + timedelta(minutes=1), fmp=fmp, symbols=["INTC"])
+    snap = svc.snapshot("INTC", NEXT, at + timedelta(minutes=1))
+    assert (snap.reads_as, snap.eps.actual, snap.poll_seconds) == (REPORT, 0.46, None)
 
 
 @pytest.mark.asyncio
@@ -7324,7 +8678,7 @@ async def test_a_table_not_there_yet_leaves_the_old_behaviour_and_a_later_tick_r
         await _tick(0)
     (line,) = [r.getMessage() for r in caplog.records if "filing restore" in r.getMessage()]
     assert "PGRST205" in line and "RuntimeError" in line
-    assert PREV.isoformat() in line and REPORT.isoformat() in line
+    assert els.sheet_days(REPORT)[0].isoformat() in line and REPORT.isoformat() in line
     assert _svc().snapshot("INTC", PREV, at).status == els.STATUS_AWAITING
 
     clock.at += 60

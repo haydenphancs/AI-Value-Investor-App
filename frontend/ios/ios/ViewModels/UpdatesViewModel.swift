@@ -403,6 +403,21 @@ final class UpdatesViewModel: ObservableObject {
     private var stalledScopes: Set<String> = []
     /// Whether the Updates tab is on screen. Re-checks pause while it is not.
     private var isTabActive = false
+    /// The ET day (`SentimentTrendDayParser.etTodayKey()`) each `feedCache` entry's page 0 came
+    /// off the network (pre-commit review 2026-11-13). A web-only Insights card is shown only on
+    /// the ET day it was written, so `loadFeed` never serves a cached scope from another day —
+    /// the app left open on this tab across ET midnight included — and `reloadFeedIfDayRolledOver`
+    /// reloads the one on screen. Written ONLY by `loadFeed`'s network success: a page, an
+    /// enrichment or an insight re-poll keeps the entry's day, and an entry written back with no
+    /// day (a late writer after a drop) is never served from memory.
+    private var feedCacheDay: [String: String] = [:]
+    /// The ET day of the feed ON SCREEN: set when a network answer paints (the day its request
+    /// was sent) or a cached entry paints (that entry's day), cleared when the rows are cleared.
+    /// Only a network success moves it forward, so a failed day-rollover reload still reads as
+    /// the old day and the next foreground retries (`reloadFeedIfDayRolledOver`).
+    /// Readable so the sources sheet can record the day its card was shown on
+    /// (`UpdatesView.presentPendingChat`); never written outside this class.
+    private(set) var shownFeedDay: String?
 
     // MARK: - Initialization
 
@@ -507,6 +522,7 @@ final class UpdatesViewModel: ObservableObject {
     private func dropShownRows() {
         allNewsArticles = []
         insightSummary = nil
+        shownFeedDay = nil
         applyFiltersAndGroup()
     }
 
@@ -715,6 +731,8 @@ final class UpdatesViewModel: ObservableObject {
         isEnriching = false
         summarizingIDs.removeAll()
         feedCache.removeAll()
+        feedCacheDay.removeAll()
+        shownFeedDay = nil
         allNewsArticles = []
         newsArticles = []
         groupedNews = []
@@ -781,9 +799,9 @@ final class UpdatesViewModel: ObservableObject {
         }
     }
 
-    func selectTab(_ tab: NewsFilterTab) {
+    func selectTab(_ tab: NewsFilterTab, fresh: Bool = false) {
         selectedTab = tab
-        selectionLoad = (tab.scope, Task { await loadFeed(for: tab, force: false) })
+        selectionLoad = (tab.scope, Task { await loadFeed(for: tab, force: false, fresh: fresh) })
     }
 
     /// Waits for the selection's feed load while a load of the selected scope is still in
@@ -882,7 +900,21 @@ final class UpdatesViewModel: ObservableObject {
         if pendingScope != nil {
             pendingScope = tab.scope
         }
-        guard selectedTab?.scope != tab.scope else { return .focused }
+        // ALWAYS a fresh feed (pre-commit review 2026-11-13): the widget row exists because the
+        // ticker's Insights card backs its cause, and that card may have been written after this
+        // scope was cached (JOBY opened at 10:30 with no card; a web-only card at 13:00; the
+        // widget tap at 13:30). `feedCache` has no TTL, so the selection path below would paint
+        // the old feed with no card and no sources. Drop the scope's entry first: with no entry,
+        // `loadFeed` goes to the network. When the chip is already selected,
+        // `.onChange(of: selectedTab)` will not fire, so `selectTab` (the one place a selection
+        // load starts) runs the load here.
+        feedCache.removeValue(forKey: tab.scope)
+        feedCacheDay.removeValue(forKey: tab.scope)
+        if selectedTab?.scope == tab.scope {
+            Self.log.info("updates: widget focus \(wanted, privacy: .public) is the open chip — reloading its feed")
+            selectTab(tab, fresh: true)
+            return .focused
+        }
         selectedTab = tab
         return .focused
     }
@@ -1028,7 +1060,10 @@ final class UpdatesViewModel: ObservableObject {
 
     // MARK: - Feed
 
-    private func loadFeed(for tab: NewsFilterTab, force: Bool) async {
+    /// `fresh` (a widget focus on the open chip, a new ET day): never served from `feedCache`,
+    /// and — like a pull-to-refresh — the scope's rows stay on screen until the answer replaces
+    /// them. Unlike `force` it keeps the same-scope dedup and the news-tone chart's own cache.
+    private func loadFeed(for tab: NewsFilterTab, force: Bool, fresh: Bool = false) async {
         let scope = tab.scope
 
         // THREE outcomes, not two — decided in the `catch` below from the TYPED refusal, not
@@ -1091,6 +1126,15 @@ final class UpdatesViewModel: ObservableObject {
         // phantom spinner.
         summarizingIDs.removeAll()
 
+        // Never from memory: a `fresh` load, or an entry not dated today (another ET day, or
+        // written back with no day by a late page/enrichment after a drop). The network answer
+        // below writes the entry and its day again.
+        if fresh || (feedCache[scope] != nil && feedCacheDay[scope] != SentimentTrendDayParser.etTodayKey()) {
+            if feedCache.removeValue(forKey: scope) != nil, !fresh {
+                Self.log.info("updates: cached \(scope, privacy: .public) is from ET day \(self.feedCacheDay[scope] ?? "none", privacy: .public) — loading it from the network")
+            }
+            feedCacheDay.removeValue(forKey: scope)
+        }
         if !force, let cached = feedCache[scope] {
             // Clear any error left by a PREVIOUSLY-failed scope. Without this a
             // stale `error` survives onto this valid cached scope, and the view
@@ -1107,6 +1151,7 @@ final class UpdatesViewModel: ObservableObject {
             // never enters `feedCache`), so the label goes with it.
             snapshotSavedAt = nil
             shownFeedScope = scope
+            shownFeedDay = feedCacheDay[scope]
             hasShownFeed = true
             loadedOffset = cached.offset
             hasMorePages = cached.hasMore
@@ -1135,9 +1180,10 @@ final class UpdatesViewModel: ObservableObject {
         //     for the whole request, and a refresh that ended without an answer (cancelled)
         //     left "No recent stories" over a full feed. `shownFeedScope` was cleared above
         //     for any other scope, so a chip switch still clears.
-        let keepsShownRows = force && shownFeedScope == scope
+        let keepsShownRows = (force || fresh) && shownFeedScope == scope
         if !keepsShownRows && (snapshotSavedAt == nil || scope != UpdatesScope.market) {
             snapshotSavedAt = nil
+            shownFeedDay = nil
             allNewsArticles = []
             newsArticles = []
             groupedNews = []
@@ -1155,6 +1201,9 @@ final class UpdatesViewModel: ObservableObject {
         // Captured BEFORE the request: a store that changed hands while it was in flight
         // refuses the save, so one account's answer is never filed under the next.
         let snapshotEpoch = snapshotStore.epoch
+        // The ET day this request is FOR, taken before it leaves: an answer that lands after ET
+        // midnight was built on the old day and is dated so, which the next foreground reloads.
+        let requestDay = SentimentTrendDayParser.etTodayKey()
         do {
             // The exact response bytes come back too: the snapshot keeps them verbatim and
             // re-decodes them through this same DTO at the next launch.
@@ -1206,6 +1255,8 @@ final class UpdatesViewModel: ObservableObject {
             // on any tab returned to (incl. Market after a single tab excursion).
             // `loadMoreIfNeeded` already writes the cache in this order.
             feedCache[scope] = (articles, insightSummary, loadedOffset, hasMorePages)
+            feedCacheDay[scope] = requestDay
+            shownFeedDay = requestDay
             isLoading = false
             requiresSignIn = false
             isReconnecting = false
@@ -1271,6 +1322,19 @@ final class UpdatesViewModel: ObservableObject {
                 // still bounded by its display window. So do live rows a pull-to-refresh kept
                 // (`showsRefreshFailure`).
                 expireSnapshotIfStale()
+                // A failed reload of rows from an EARLIER ET day (a day-rollover reload, or a
+                // pull after midnight) keeps the rows but not their Insights card (pre-commit
+                // review 2026-11-13): it may be a web-only card, which the server shows only on
+                // the day it was written, and the client cannot tell one apart. The scope's
+                // cache entry goes with it, so no path paints that card again; `shownFeedDay`
+                // keeps the old day, so the next foreground retries. A same-day failure keeps
+                // its card.
+                if keepsShownRows, let shownDay = shownFeedDay, shownDay != requestDay {
+                    insightSummary = nil
+                    feedCache.removeValue(forKey: scope)
+                    feedCacheDay.removeValue(forKey: scope)
+                    Self.log.info("updates: reload of \(scope, privacy: .public) from ET day \(shownDay, privacy: .public) failed — rows kept, Insights card hidden")
+                }
             }
             isLoading = false
             // NO sample-data fallback. Fabricated headlines here would render as
@@ -1295,6 +1359,9 @@ final class UpdatesViewModel: ObservableObject {
             startTrendLoad(scope: trend.scope, force: true)
         } else {
             refreshTrendIfDayRolledOver()
+        }
+        if active {
+            reloadFeedIfDayRolledOver()
         }
         // A load that painted while the tab was hidden starts its post-paint work now — only if
         // it is still the load on screen (a newer load, or an identity change, owns the token).
@@ -1322,6 +1389,57 @@ final class UpdatesViewModel: ObservableObject {
         let scope = source.scope, fetchedDay = source.asOfDayKey
         Self.log.info("updates: news-tone trend \(scope, privacy: .public) is from ET day \(fetchedDay, privacy: .public) — refreshing for \(today, privacy: .public)")
         startTrendLoad(scope: scope, force: true)
+    }
+
+    /// The feed on screen came off the network on an earlier ET day (the app stayed open across
+    /// ET midnight, or a day-rollover reload has not landed yet). Its Insights card may be a
+    /// web-only card the server no longer shows, so "Ask Cay AI" must not open on it
+    /// (`UpdatesView.openUpdatesChat` reloads first, `reloadFeedBeforeAskCay`).
+    var feedIsFromEarlierETDay: Bool {
+        guard let day = shownFeedDay else { return false }
+        return day != SentimentTrendDayParser.etTodayKey()
+    }
+
+    /// "Ask Cay AI" was tapped on a feed from an earlier ET day (pre-commit review 2026-11-13:
+    /// the tap used to start a silent reload and open nothing). Reloads through `refresh()`, the
+    /// pull-to-refresh entry point: it joins a refresh already running, its forced load is never
+    /// skipped as a duplicate of a load still on the wire (a day-rollover reload started on
+    /// foreground may be one, and an answer to a request sent before midnight is still the old
+    /// day's), and a failure shows the refresh's own failure notice. True only when the feed ON
+    /// SCREEN is now a network feed of `scope`, dated today, for the same identity, on the
+    /// active tab — the caller opens the chat then, and nothing otherwise.
+    func reloadFeedBeforeAskCay(scope: String) async -> Bool {
+        let generation = identityGeneration
+        await refresh()
+        return generation == identityGeneration
+            && isTabActive
+            && selectedTab?.scope == scope
+            && shownFeedScope == scope
+            && snapshotSavedAt == nil
+            && shownFeedDay == SentimentTrendDayParser.etTodayKey()
+    }
+
+    /// A new ET day began since the last network feed (pre-commit review 2026-11-13). The
+    /// cached feeds — and the one on screen — hold the old day's Insights cards, and a web-only
+    /// card is shown only on the day it was written: left alone, a suspended app showed day D's
+    /// "24h" card on D+1 while Ask Cay AI, grounded on the server's view, called it off screen.
+    /// Every cached scope is dropped; the selected one is reloaded at once on the active tab (a
+    /// hidden tab reloads on its return, `setTabActive(true)`). Called on app foreground
+    /// (`UpdatesView`) and on a tab return. No-op before the first network feed.
+    func reloadFeedIfDayRolledOver() {
+        // The feed ON SCREEN is the selected scope's cache entry (a network or cached paint); a
+        // scope with no dated entry (nothing loaded yet, a failed load, the Market snapshot,
+        // which expires on its own) has nothing to reload. A hidden tab waits for its return.
+        guard isTabActive, let tab = selectedTab, let shownDay = shownFeedDay else { return }
+        let today = SentimentTrendDayParser.etTodayKey()
+        guard shownDay != today else { return }
+        feedCache.removeAll()
+        feedCacheDay.removeAll()
+        // The superseded load's post-paint work would only be cancelled by the reload.
+        deferredPostPaint = nil
+        Self.log.info("updates: feed is from ET day \(shownDay, privacy: .public) — reloading \(tab.scope, privacy: .public) for \(today, privacy: .public)")
+        // Through `selectTab`, the one place a selection load starts.
+        selectTab(tab, fresh: true)
     }
 
     func setTrendWindow(_ window: SentimentTrendWindow) {

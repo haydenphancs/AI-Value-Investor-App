@@ -3169,7 +3169,10 @@ decides what reads as "main").
   fraction of the turn's own). The gates: signed-in, charged, not already settled, not a cache hit, a
   starter-warm replay or a deep dive, a non-empty question and answer, both short enough to be read
   whole (`too_long`), **no web results delivered on the turn** — Brave's terms (§3(b)(xiii)) bar
-  evaluating an AI answer built on their results — and **no web search that spent a unit of the
+  using Search Results "to create, evaluate, train, re-train, fine-tune, benchmark … or otherwise
+  improve artificial intelligence models or services", so the refund judge never grades a web turn
+  (the one accepted-risk exception, the runtime grounding check of a web-only Insights card against
+  its own pages, is §9b.10a's and does not extend to chat) — and **no web search that spent a unit of the
   global daily cap** (`web_unit_spent`, the same `WebSearchTurn.spent_a_unit()` input that keeps a cut
   web answer charged, owner decision 2026-10-03; review 2026-10-09: refunding an empty search made
   "search the web for <nonsense>" free and repeatable, so ~18 accounts could drain everyone's 180-a-day
@@ -3629,7 +3632,14 @@ ORCL cards, none refused by the price guard, each leading with the Investor Day 
 cause-bearing fixture — production refusals are countable, below).
 
 **What still binds, and the switch.** Web results are never used to evaluate or tune the AI (Brave
-§3(b)(xiii)): a turn that read a web-sourced card — the Updates-scope grounding (resolver meta) or an
+§3(b)(xiii) bars using Search Results "to create, evaluate, train, re-train, fine-tune, benchmark …
+or otherwise improve artificial intelligence models or services"), with ONE narrow exception that is an
+ACCEPTED RISK, not a reading of the clause (owner, 2026-11-13: "Accept the risk"): the runtime grounding
+check of a web-only card against the pages it was written from, before it is shown — the word checks and
+the grounding judge below. The owner accepted the risk that this check falls within the clause, which
+names "evaluate" and "benchmark", not training alone. Nothing else is exempt (no offline grading,
+calibration, benchmark or prompt tuning on web results or on cards written from them), and chat stays
+as it was: a turn that read a web-sourced card — the Updates-scope grounding (resolver meta) or an
 `explain_price_move` reprint (`web_assisted` on the tool result) — is skipped by `CHAT_GROUNDING` and
 the refund judge, stored with `thinking.web_assisted_card` so the next turn is not judged either, and
 never cached as a deep dive (both doors) or stored as a starter-chip answer (the chip is parked for the
@@ -3664,13 +3674,79 @@ hid every card over an empty window. Now:
   attempt budget. The sweep log counts `web_only=`.
 - **Generation** (`news_insight_service.generate_and_store`): refuses before any model call when every
   page is price or trading talk, when no page comes from a publisher we name, or when no page has a
-  storable link (`web_only_no_content` / `web_only_no_source`); writes 1–2 points from a web-only prompt
-  ("the web pages below are the only source"); and checks every point, the headline and the conclusion
-  against the page titles and snippets — figures, bare numbers and years (a day after a month name
-  excepted), capitalised names as whole words, acronyms (generic role/region ones excepted), and for a
-  point 60% of its content words. A Title-Cased headline takes the one retry in sentence case. Mixed
-  cards are unchanged; the non-web prompt is byte-identical (golden test). Page text never reaches a log
-  or `last_error`.
+  storable link (`web_only_no_content` / `web_only_no_source`), and writes 1–2 points from a web-only
+  prompt ("the web pages below are the only source"; the takeaway restates the pages' most important
+  fact, with no forecast, "what to watch" or investor reaction). Then two layers:
+  - **Word checks — only what words can prove**, against the page titles and snippets with the
+    `price_claims` phrases removed (with a move size right before or after one, "an 8% | drop in the
+    stock"): figures, bare numbers and years, numbers written as words ("three
+    aircraft", exact whole counts; never a digit inside a page's percentage, money amount, Q/H label or
+    date), Q/H labels as labels, a day of the month only when it is the Now line's date or a month +
+    day a page states, capitalised names as whole words, acronyms, a point's 60% content-word share,
+    and move sizes. Words match on a crude stem that undoubles a final consonant ("cutting" = "cut")
+    and maps common irregular pasts ("rose", "grew", "fell"). The conclusion gets the same checks
+    except its DIGIT figures, which `_fabricated` reads against the points too — so a conclusion %
+    or number in WORDS ("cut eight percent of its staff") still needs a page. A percentage — in digits or words — whose only page occurrences state the stock's
+    MOVE supports a card figure only when its neighbouring words match BY POSITION (the left neighbour
+    must match; the right one too when both exist, and it never reads past a sentence end) and both
+    have the same owning company metric. A page % is the move when a hard shape states it
+    (`_move_spans`, run on the RAW title + snippet before the strip, which can remove the words that
+    made it hard: the stock or subject moving by it, "(8%)", "8% on the day", "worst day … : 8%",
+    "Joby, which fell 8%", "wiped 8% off …") or when it is within max(1, 25% of) the live move — pages
+    are kept all ET day while the move drifts — unless a company metric OWNS it by position
+    (`_metric_owner`). A metric on the LEFT owns it only through a closed allow-list of METRIC verbs
+    standing between them ("deliveries fell 15%", "revenue grew", "cut", "reported", "totaled"…), a
+    metric verb governing it ("lowered its revenue forecast by 10%") or a change-noun compound
+    ("revenue growth of 8%"); any other word — "drove", "caused", "led to", a noun like "miss" —
+    leaves the metric the CAUSE, with no list of those words, and never across a clause break. On the
+    RIGHT: "a 10% discount", "an 8% decline in revenue" — but not the stock's own "trades at an 8%
+    discount to yesterday's close"; a loss only as "net/operating/… loss". KNOWN LIMIT (owner 2026-11-13: "One
+    last round" — no more move phrasings are added): a move phrasing the word checks don't know, once
+    the live move drifts out of the slack, is caught only by the judge.
+  - **A grounding judge for meaning** (`_judge_web_only`, owner 2026-11-13: "Add a grounding judge";
+    model `INSIGHT_WEB_ONLY_JUDGE_MODEL`, default `gemini-2.5-flash`, temperature 0): one call per card
+    that passed the word checks, with the pages fenced as untrusted text and every line (H, P1…, C)
+    judged supported or not. An unsupported headline refuses the card; an unsupported point is dropped
+    (none left refuses); an unsupported takeaway gets ONE conclusion repair over the supported points
+    (never the refused ones), re-checked by the word checks and the judge. That repair — and a
+    web-only card's word-check conclusion repair — is written under the web-only takeaway rule the
+    writer and judge use, never the base "what the points add up to" synthesis rule. Line C may restate
+    a fact or say what it directly means, but a LINK it draws between two page facts (depends on,
+    delays, because, after, led to) must itself be stated on a page, or C is not supported. Fails
+    closed: an error, malformed JSON or a verdict that does not name every line exactly once refuses
+    the card (`web_only_judge: unavailable`). Every judge-path call (the judge, the judged repair, the
+    re-judge) starts only when it can end, at the per-call timeout (`GEMINI_REQUEST_TIMEOUT_SECONDS`),
+    within `_JUDGE_WINDOW_SECONDS` (110 s) of the generation's start (at the default 90 s timeout:
+    it must START within 20 s), to keep the judge path inside the sweeper's 120 s claim-steal. The
+    bound is approximate, not hard: the Gemini client's own retries (2 attempts, and 429 back-off)
+    can run past the per-call timeout, and the claim is stamped before generation starts, so a slow
+    run can still overlap a second instance's regeneration (a duplicate paid call, never a corrupt
+    card). The timeout is SHARED with reports and chat: at 110 s or more every web-only card is
+    refused as budget, with one WARNING per process. No room for
+    the first judge refuses the card (`web_only_judge: budget`), no room for the repair or re-judge
+    leaves the takeaway refused.
+    Events, causes, timing and contradictions are the judge's: three rounds of word lists (event lists,
+    idioms, cause clauses, a headline word share) refused about 33 of 72 honest test cards while still
+    missing inventions, and were removed.
+  - Live evidence, measured on the FINAL code of 2026-11-13 (after the last review round: the link
+    rule in the judge's rubric, the web-only repair rule, the structural owner rule and the judge
+    time window; gemini, hand-written and reviewer-written fixtures, never Brave results): the judge
+    refused 27 of 27 invented lines (12 tuned, 15 held out: invented causes and events, a reused move
+    size, "three aircraft", and both contradiction cases below); end to end, the real writer + checks
+    + judge wrote 38 of 40 honest page sets (the 2 refusals: takeaways the judge would not support,
+    even after the repair). Judged ALONE, the judge accepts only 21 of 73 REVIEWER-written cards and
+    some honest probe headlines ("…slides a year", "trims … as Dubai launch slips"): a link between
+    two page facts must now be stated by a page, and those hand-written lines draw links (or "what to
+    watch" framings) the writer rule forbids. Residual: a small invented detail can pass
+    ("voluntarily pulling" a drug), and some takeaways are mildly interpretive ("signals strong
+    support").
+  A Title-Cased headline takes the one retry in sentence case. Mixed cards are unchanged and never call
+  the judge; the non-web prompt is byte-identical (golden test). Page text never reaches a log or
+  `last_error`. Checking a card against its own search results (the word checks and this judge) is
+  the ACCEPTED-RISK exception to Brave §3(b)(xiii) recorded under "What still binds" above (owner,
+  2026-11-13: "Accept the risk") — the clause may cover it; the verdict only decides which of that
+  card's lines are shown, logs counts only (never page or card text), and is never used to grade,
+  calibrate or tune anything.
 - **Read side**: `_row_to_card` marks a stored card `web_only` (reason tag AND every titled source is a
   web page — the tag is the write-time mark, because `_web_first_sources` can make a mixed card look
   all-web). `web_only_card_visible` — the ONE rule for the feed, chat and the widget — shows it only on
@@ -3686,6 +3762,19 @@ hid every card over an empty window. Now:
   landed, owner: "keep all 1.03", so every 1.03 must be archived with it; a missing header is held, and
   the market tile's extension now sends `X-App-Version`). The payload caches are keyed by that answer.
   `attribute_ticker_move` (Ask Cay's "why did it move") applies the same-day rule too.
+- **iOS freshness** (2026-11-13): `UpdatesViewModel.feedCacheDay` dates each cached scope by the ET day
+  its page 0 came off the network; `loadFeed` never serves an entry from another day (an app left open
+  across ET midnight included), `reloadFeedIfDayRolledOver` reloads the feed on screen on foreground and
+  tab return, and a widget focus drops the chip's entry and reloads an already-open chip `fresh` (rows
+  kept on screen) — a card written after the scope was cached reaches the widget tap. `shownFeedDay`
+  (the day of the feed ON SCREEN, moved only by a network success, taken before the request) keeps a
+  failed rollover reload retryable; such a failure also hides the Insights card (a web-only card the
+  server stopped showing). "Ask Cay AI" on a feed from an earlier ET day shows "Updating the news for
+  today…", reloads, and opens the chat only if the feed is now today's for the same scope with a card
+  and nothing else is presented on top (from the sources sheet it opens when that sheet closes).
+- **Contradictions in page words** ("Joby keeps its Dubai launch on track for 2026", "The Dubai launch
+  still looks set for 2026" over a page that says it slipped to 2027) pass every word check; the
+  grounding judge refused both in the live probe. Reported OPEN on 2026-11-13 before the judge existed.
 - Accepted: a no-call refusal still spends a global budget unit (no decrement RPC; the reason text also
   follows real calls); zero-news jumpers compete for the same 40 searches a day; peer attribution
   ("Why Joby, Archer…") is left to the prompt's ATTRIBUTION rule; a ~6 h FMP refresh outage can turn an
@@ -6838,6 +6927,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-28 | Moat radar audit (`moat_scoring_service.SCORER_VERSION` = `moat_v1.2026-10-28`): revenue growth is a Network Effects reading only off a prior year of at least $10M (in dollars, through a rounded per-currency rate for non-USD filers; a currency without one is no reading) and inside the producer's ±500% clamp, paired exactly as the sector median, at 5pp per score point (+25pp = 10); Network Effects is measured only with a COMPANY input (growth or user count), never on the industry HHI + lifecycle alone; P/S counts toward Brand Power only with a positive gross margin; Intangible Assets is measured only when both sector-relative inputs resolve (patents / FDA then join the average); an exact-zero SG&A and a non-finite input are no reading. A pillar no tier scored is DROPPED (never the old fabricated 0.0 / peer 5.0); every pillar carries `peer_source` (industry / ai_estimate / baseline); the moat vital, persona scoring and the Insight's edges/gaps use measured pillars against industry peers only (never a pillar scored with a focal-only input — patents, FDA, transcript figures — the peer averages never fetch), and Cay AI's report grounding quotes "vs peers" only for an industry peer; a scorer exception is logged with its stack, never recorded as degraded (it repeats on every rebuild); the moat block is stamped with the scorer vintage and the paid reuse door never re-sells another one; a transient annual-statement fetch failure keeps the collection out of every shared cache | JOBY read Network Effects 6.3 ('Primary Driver') off 39,183% growth from a $136K year, Brand Power 5.0 off a 204× P/S at a −30% gross margin, and an Insight claiming those 'edges'; revenue growth pinned at 10/10 in 7 of the 10 reports cached 2026-10-15..28; Switching Costs is an AI estimate on every report (its transcript input is unlicensed) and 'Peer Avg' was a 5.0 placeholder in ~110-147 of 149 industries | An absolute revenue floor alone (misses $53M JOBY's P/S); capping P/S at 200 (P/S 10 vs 2.47 already scores 10); dropping AI pillars from the radar (owner chose to show them, labelled, and keep them out of the verdicts); iOS labels this round (owner: backend now, iOS later) |
 | 2026-10-28 | Updates Insights jump mode (§9b.10a): a ticker JUMPING in the current session (Unusual/Extreme, `jump_band`) gets 6 extra card refreshes in the gate AND the claim RPC, its `ticker_move` alert whatever happened to the card (equities; coins stay coupled), its FMP news every 5 minutes (≤12 extra pulls/day) and, for equities, a Brave web search for the reason whose pages feed the card (a fenced block, a one-shot gate trigger, never the fingerprint) and lead its Sources; the card — shared, and served until a newer card replaces it — may hold text and links from those pages (owner: "i pick option 2, i don't think we break any terms"; Sources: "i need to show the source link so users can click to read them"; cap: "Jump reserve only"; Ask Cay: "Yes, Ask Cay reads it", audits skipped); `UPDATES_JUMP_WEB_SEARCH_ENABLED` off also withholds stored web cards; Privacy §3/§4 and Terms §7 dated October 28, 2026 | TestFlight ORCL +12% (2026-10-28): the card had spent its 10/day cap at 13:24 ET, before the jump; FMP had the press release in `ticker_news_cache` 16 minutes after it went out, but the card could not refresh and the move alert never fired (it was sent only from inside a regeneration); 17 of 39 scopes were capped that day | Brave with a written storage licence first (Enterprise; owner declined to wait); Claude's web search tool (a new vendor); per-viewer read-time search (breaks the cache-only read path, needs consent v4 and an iOS release); raising the ordinary cap for everyone; web results in the fingerprint; reviving `price_move` / a "Why it moved" row (iOS release); chat's market-figure scrub on card inputs (drops the reason); SEC 8-K detection |
 | 2026-11-12 | Web-only Insights cards (§9b.10a): a LIVE equity jumper with no FMP news in its window gets the jump search and a card written from the pages alone, shown the same ET day with badge "24h"; the widget links a card-backed cause to the Updates card, and holds web-only causes from builds below 1.03 (owner: "Web search fills it"; badge "24h (Recommended)"; old builds "Hold for old builds (Recommended)"; version "keep all 1.03") | JOBY −8% on 2026-11-12 showed no card: newest FMP story 66 h old, past the 48 h midweek window, so `no_corpus` in the gate, the pre-check and the generator, and the feed hid the card | No change (no news, no card); a wider window for jumpers (stale stories as today's reason); showing the publisher on the widget tile (no link, no room) |
+| 2026-11-13 | Web-only cards get a grounding judge (§9b.10a): word checks keep only figures, numbers, names and move sizes; one Gemini call per web-only card judges every line against the pages, fails closed, and gets one conclusion repair (owner: "Add a grounding judge (Recommended)"); the check reads Brave results for this card only, an ACCEPTED RISK under Brave §3(b)(xiii) (owner: "Accept the risk") | Three review rounds of word lists either refused honest paraphrase (~33 of 72 honest cards) or missed invented causes, events and contradictions | Word checks loosened with no judge (inventions and contradictions pass); pausing web-only cards |
 | 2026-10-30 | Tracking → Assets shows the pre-market / after-hours move as a chip on the change line, left of the day change (`☾ +0.08%  ▲ +1.48%`; ☀ before the open), measured from the row's own regular-session price and read from the licensed `historical-chart/5min?extended=true` bars (`tracking_service._get_extended_prints`, the feed gather's last member: never in the regular session, never for a coin, an index or a licence-blocked symbol; a session-tagged per-ticker cache, 60 s live and 15 min closed). The last after-hours print stays overnight and at weekends until 04:00 ET pre-market (owner: "Keep last AH price"); 5-minute bars (owner: "5-minute bars"); the chip shows whole or not at all (`ViewThatFits`), so the card is no taller (owner: "i don't want to increase the height of the card") — on a 375pt phone it usually does not fit and only VoiceOver reads it | Owner, on the Assets tab at 4:56 PM ET: "do we have price after hours to show?" Nothing in the app showed one: the screener and the profile carry the regular-session price only, and FMP's `aftermarket-quote` is the unpurchased "Real-time Market Data" package (402) — but the Extended Hours toggle's bars already held every pre-market and after-hours trade | A third line under the price (taller cards); the after-hours price as the row's main number (Robinhood-style); the after-hours price in place of the company name (names hidden 4 PM-9:30 AM and all weekend); the after-hours PRICE in the chip (does not fit beside the day change on 375-393pt phones); 1-minute bars (about 5x the FMP data per call); buying "Real-time Market Data" for batch real-time after-hours quotes in one call (the switch if a real-time print is ever needed) |
 | 2026-10-30 | The Updates Insights card's headline is the FIRST answer for a move on the widget and in Ask Cay AI: `attribute` runs `detect_news_lean` before the dated detectors (earnings, analyst, classified news, group). Its gate is unchanged (agreeing sentiment, an Unusual move, no after-close card on a report day, a usable headline), so a card that fails it still falls through to them, and a dated win never carries the withheld lean (`web_assisted`). When the card wins, `cause.note` keeps the industry arithmetic, "moved with it" included. A new run reaches the tile while the app is open: storing a card drops the cached widget payloads that read its scope (`WidgetMoversService.forget_payloads_for`; a build that raced the write is served but not kept), and the app refreshes when the Updates screen fetches an AI card newer than the stored tile's `as_of` for the Holdings head mover or the market (`WidgetRefreshService.insightCardArrived`, a content change past the 60 s throttle) | Holdings tile, INTC −30.60% on 2026-10-30: it printed "INTC beat EPS estimates by 27.8%, reported after yesterday's close." while the Updates card read "Intel's weak PC outlook and guidance overshadows strong data center results" (Bearish, 15 min old). The earnings detector ran first, so the card that passed every gate was never consulted. Owner: "i need the widget to show it out. right after the Insight has new content or a new run" | Putting the card ahead of a CONTRADICTING dated cause only (a beat under a fall): a miss under a fall would still hide the card the owner asked to see. Relaxing the agreement or Unusual gate (the ACHR bug). A holdings-capable widget token or silent pushes so a CLOSED app updates the tile: the Holdings tile still changes only when the app runs |
 | 2026-10-31 | The report's Recent Price Movement section separates SIZE from CAUSE (`price_volatility.effective_tier`, `_build_price_action`, `_price_action_narrative_prompt`): a move of 20%+ over its window, or a 10%+ session in it, is at least Notable however volatile the stock (the "Normal range" sub-label is then hidden); the reason hunt also runs whenever an earnings report falls in or after the window; the prompt gets the report's EPS and revenue against estimates (the same FMP earnings-calendar call, `get_earning_calendar_full`), where it sits against the chart's last close, and the S&P 500 (SPY, the macro fetch's series) over the same days; a guard swaps an insight that says "routine / normal range / not a fundamental change" on such a card for a fact sentence. The σ estimator and the Updates tiers are unchanged | Intel −20.6% in 30 days into its Oct 29 report, σ ≈ 5%/day → z 0.87 "Typical"; no earnings or news scan ran below z 1 and the Typical prompt forced "routine trading … not a fundamental change in the business". Owner decisions: "Floor 20% / 10%", "AI context only", "Flag it in the insight", "Hide it when floored", "Report only" | A different σ (excluding the window: z 0.83; MAD: z 0.99 — neither fixes it, and both shift every stock); the floor in the Updates gate (re-bills cards, changes widget tiers); showing the S&P line on the card (needs an app release) |

@@ -56,6 +56,13 @@ class Settings(BaseSettings):
     # model id is part of every card's fingerprint: changing it re-keys every scope
     # (one controlled regeneration wave, bounded by the per-cycle and daily caps).
     INSIGHT_AI_MODEL: Optional[str] = None
+    # The grounding judge for WEB-ONLY Insights cards (news_insight_service, 2026-11-13, owner:
+    # "Add a grounding judge"): one call per web-only card (two with a conclusion repair's re-judge)
+    # checks every claim against the 1-3
+    # web pages it was written from, and the card is refused when the judge cannot answer. A
+    # different, stronger model than the card writer on purpose. Not in the fingerprint. A retired
+    # model fails EVERY web-only card closed (`web_only_judge: unavailable`) — documents/OWNER_TASKS.md.
+    INSIGHT_WEB_ONLY_JUDGE_MODEL: str = "gemini-2.5-flash"
 
     # ── News features' switchable model (app/services/news_llm.py) ──
     # ONLY per-article sentiment + summary bullets and the sentiment backfill. Chat,
@@ -963,7 +970,15 @@ class Settings(BaseSettings):
     # think we break any terms"): ON at deploy, and the card — which is SHARED by every watcher
     # and served until a newer card replaces it — may hold text written from those pages and
     # their titles and links.
-    # Still binding: web results are never used to evaluate or tune the AI (Brave §3(b)(xiii)).
+    # Still binding: web results are never used to evaluate or tune the AI (Brave §3(b)(xiii):
+    # "to create, evaluate, train, re-train, fine-tune, benchmark … or otherwise improve
+    # artificial intelligence models or services"); chat's number check and refund judge still
+    # skip web turns. ONE narrow exception, an ACCEPTED RISK (owner 2026-11-13:
+    # "Accept the risk"), not a reading of the clause: the runtime grounding check of a web-only
+    # Insights card against the pages it was written from (the word checks + `_judge_web_only`),
+    # before it is shown — the clause may cover it. Nothing else is exempt (no offline grading,
+    # calibration, benchmark or prompt tuning on web results or on cards written from them).
+    # SYSTEM_DESIGN_GUIDELINES §9b.10a "What still binds".
     # The query is only a company name, never anything about a user. Needs the Brave key too.
     #
     # The switch is read at call time on BOTH sides: OFF stops new searches AND withholds every

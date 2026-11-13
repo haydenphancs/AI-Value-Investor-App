@@ -790,7 +790,13 @@ _FOCUS_TICKER = """
     if pendingScope != nil {
         pendingScope = tab.scope
     }
-    guard selectedTab?.scope != tab.scope else { return .focused }
+    feedCache.removeValue(forKey: tab.scope)
+    feedCacheDay.removeValue(forKey: tab.scope)
+    if selectedTab?.scope == tab.scope {
+        Self.log.info("updates: widget focus \\(wanted, privacy: .public) is the open chip — reloading its feed")
+        selectTab(tab, fresh: true)
+        return .focused
+    }
     selectedTab = tab
     return .focused
 }
@@ -834,8 +840,9 @@ def test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail(
         "arrived, the wait outlasted tickerFocusPatience, or the selected chip's scope changed "
         "under it, (3) answers notAChip unless the symbol is an OPENABLE ticker chip from a LIVE "
         "/tabs answer (never the seeded Market chip, never a locked ticker), (4) re-points a "
-        "session-heal stash to that chip, and (5) selects it unless it already is, loading "
-        "nothing itself",
+        "session-heal stash to that chip, (5) drops that chip's cached feed (no TTL: a card written "
+        "since must reach the widget tap, 2026-11-13) and (6) selects it, or reloads it through "
+        "selectTab when it already is the open chip",
     )
     vm = _read(_UPDATES_VM)
     outcome = _block(vm, "enum TickerFocusOutcome: Equatable")
@@ -1081,7 +1088,7 @@ def test_focus_market_repoints_the_stash_then_selects():
 _SELECT_TAB = """
 {
     selectedTab = tab
-    selectionLoad = (tab.scope, Task { await loadFeed(for: tab, force: false) })
+    selectionLoad = (tab.scope, Task { await loadFeed(for: tab, force: false, fresh: fresh) })
 }
 """
 
@@ -1100,7 +1107,7 @@ def test_the_first_load_joins_a_selection_load_already_in_flight():
     so the first load's own is skipped as a duplicate. The latch must wait for that load."""
     vm = _read(_UPDATES_VM)
     _assert_pinned(
-        _block(vm, "func selectTab(_ tab: NewsFilterTab)"), _SELECT_TAB,
+        _block(vm, "func selectTab(_ tab: NewsFilterTab, fresh: Bool = false)"), _SELECT_TAB,
         "selectTab no longer records the load it starts, so the first load cannot join it",
     )
     _assert_pinned(
@@ -1867,7 +1874,7 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
      _replace("            await self.joinSelectionLoad()\n", ""),
      "test_the_first_load_joins_a_selection_load_already_in_flight", "latches hasLoadedOnce"),
     ("select-tab-unrecorded", _UPDATES_VM,
-     _replace("selectionLoad = (tab.scope, Task { await loadFeed(for: tab, force: false) })",
+     _replace("selectionLoad = (tab.scope, Task { await loadFeed(for: tab, force: false, fresh: fresh) })",
               "Task { await loadFeed(for: tab, force: false) }"),
      "test_the_first_load_joins_a_selection_load_already_in_flight", "no longer records"),
     ("join-any-scope", _UPDATES_VM,

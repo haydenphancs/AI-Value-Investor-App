@@ -51,7 +51,12 @@ from app.log_redaction import redact_secrets  # noqa: E402
 from app.config import settings  # noqa: E402
 
 # The Updates jump search's web results (2026-10-28) must never feed an evaluation of the card
-# (Brave terms §3(b)(xiii)), and this preview IS one — a human comparing model samples. OFF for
+# (Brave terms §3(b)(xiii)), and this preview IS one — a human comparing model samples. The one
+# narrow exception is an ACCEPTED RISK (owner 2026-11-13: "Accept the risk"), not a reading of the
+# clause: the runtime grounding check of a web-only Insights card against its own pages (the word
+# checks + `_judge_web_only`) before it is shown. It does not reach this script — no offline
+# grading, calibration, benchmark or prompt tuning on web results or on cards written from them
+# (SYSTEM_DESIGN_GUIDELINES §9b.10a "What still binds"). OFF for
 # the whole process, before anything reads it: no search can run, and a stored card written
 # from web pages is withheld (pinned by tests/test_brave_search_boundary.py). `--jump` replays
 # the jump prompt's MOVE rule from licensed FMP news; `--web-fixture` adds HAND-WRITTEN pages

@@ -1,7 +1,12 @@
 """Who may reach the Brave Search client — and the eval scripts may never reach it.
 
 Brave's Search API terms allow TRANSIENT storage only and forbid using results to evaluate or train
-an AI (§3(b)(xiii)). The code honours that by keeping the client behind TWO services:
+an AI (§3(b)(xiii)), with ONE narrow exception that is an ACCEPTED RISK (owner 2026-11-13: "Accept
+the risk"), not a reading of the clause: the runtime grounding check of a web-only Insights card
+against its own pages (the word checks + `news_insight_service._judge_web_only`) before it is shown;
+chat's number check and refund judge still skip web turns, and nothing offline (grading,
+calibration, benchmark, prompt tuning) may use web results or cards written from them
+(SYSTEM_DESIGN_GUIDELINES §9b.10a). The code honours that by keeping the client behind TWO services:
 `chat_web_search_service` (per-user transient cache, no Supabase tier) behind the chat doors, and,
 since 2026-10-28, `jump_web_search_service` behind the Updates Insights sweeper (its kept pages
 may live in the SHARED Insights card — the owner's decision, SYSTEM_DESIGN_GUIDELINES §9b.10a).
@@ -168,7 +173,10 @@ def test_the_eval_scripts_force_web_search_off_before_anything_runs(rel):
 
 #: Every script that evaluates model output — the chat evals and the Insights card preview —
 #: also forces the Updates jump search OFF (2026-10-28): OFF means no search AND every stored
-#: web-sourced card withheld, so no evaluation is ever built on web results (§3(b)(xiii)).
+#: web-sourced card withheld, so no offline evaluation is ever built on web results
+#: (§3(b)(xiii)). The one narrow exception, an ACCEPTED RISK (owner 2026-11-13: "Accept the
+#: risk"), is the runtime grounding check of a web-only Insights card against its own pages before
+#: it is shown — never a script like these (SYSTEM_DESIGN_GUIDELINES §9b.10a).
 _JUMP_OFF_SCRIPTS = (*_EVAL_SCRIPTS, "scripts/preview_insight_card.py")
 
 

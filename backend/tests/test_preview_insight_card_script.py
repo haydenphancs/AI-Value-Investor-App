@@ -169,8 +169,13 @@ class _CardGemini:
 
     async def generate_json(self, **kwargs):
         import json
+        import re
 
         self.calls += 1
+        if kwargs.get("usage_tag") == "insight_web_only_judge":
+            # The grounding judge (2026-11-13): every line supported.
+            ids = re.findall(r"^(H|P\d+|C): ", kwargs["prompt"].split("The brief", 1)[-1], re.M)
+            return {"text": json.dumps({"verdicts": [{"id": i, "supported": True} for i in ids]})}
         return {"text": json.dumps(self.card)}
 
 
@@ -220,7 +225,7 @@ async def test_a_web_only_day_is_replayed_from_the_fixture(tmp_path, monkeypatch
     web-only day could not be previewed at all."""
     code, gemini = await _preview_web_only(tmp_path, monkeypatch, [_DUBAI_PAGE])
     out = capsys.readouterr().out
-    assert code == 0 and gemini.calls == 1
+    assert code == 0 and gemini.calls == 2          # the card + the grounding judge
     assert "web only: the card is written from 1 page(s) alone" in out
     assert "no corpus" not in out and "REJECTED" not in out
     assert "Joby delays its Dubai launch to 2027" in out

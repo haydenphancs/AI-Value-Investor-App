@@ -37,6 +37,10 @@ struct UpdatesView: View {
     @State private var browserLink: BrowserLink?
     /// Set when the Insights card is tapped → presents the sources screen.
     @State private var insightSources: NewsInsightSummary?
+    /// True from the moment the sources sheet is opened until its `onDismiss` runs. The binding
+    /// (`insightSources`) is nil already while the sheet is still animating closed, so a chat
+    /// presented in that window could land on a sheet still on screen (round-6 verifier).
+    @State private var sourcesSheetUp = false
     /// "Ask Cay AI" from this tab — the Insights card and its detail sheet share ONE grounded
     /// chat, owned here so it never overwrites the general conversation `ContentView` owns.
     /// The news-tone chart has no Ask button of its own (owner, TestFlight 1.0 (11)): this chat
@@ -46,6 +50,21 @@ struct UpdatesView: View {
     /// Set by the detail sheet's "Ask Cay AI". A full-screen cover cannot present over the
     /// sheet, so the chat opens from the sheet's `onDismiss`.
     @State private var pendingChatFocus: UpdatesChatFocus?
+    /// An "Ask Cay AI" waiting for a feed from an earlier ET day to reload (`askAfterReloadingFeed`):
+    /// one at a time, shown as the "Updating the news for today…" notice, and dropped by a
+    /// presentation reset or an identity change (the chat then never opens).
+    @State private var dayRolloverAskID: UUID?
+    /// The feed a sources-sheet ask is valid for (2026-11-13): the scope and ET day on screen
+    /// when the sheet opened (`openInsightSources`), or the ones a pill ask's reload verified
+    /// while the sheet was up. `presentPendingChat` opens the chat only while the feed on screen
+    /// is still that day's and has a card: a rollover reload can replace or remove the card
+    /// behind the open sheet, and `NewsInsightSummary.id` is a fresh UUID per decode, so the
+    /// card itself cannot be compared. Cleared when the sheet closes and on an identity change.
+    @State private var sheetAskFeed: (scope: String, day: String?)?
+    /// "No Insights card for <scope> today yet." after an ask whose reload landed today's feed
+    /// with no card (2026-11-13): the tap's answer instead of silence. Shown only on its scope
+    /// while no card is on screen, and cleared after a few seconds (`showNoTodayCardNotice`).
+    @State private var noTodayCardNotice: (id: UUID, scope: String)?
 
     /// The feed's top anchor (see `marketFocusSeq`).
     private static let feedTopID = "updates.feed.top"
@@ -99,7 +118,30 @@ struct UpdatesView: View {
                     // beside them. Outside the LazyVStack (a non-section child there can resize
                     // in place). The gate flags live inside `showsSnapshotRefreshFailure`, so
                     // `body` never names them before the account-gate chain below.
-                    if viewModel.showsSnapshotRefreshFailure {
+                    //
+                    // First, while an "Ask Cay AI" waits for a feed from an earlier ET day to
+                    // reload (`askAfterReloadingFeed`): the tap's visible answer. No button — the
+                    // reload is already running; its failure shows the refresh notice below.
+                    if dayRolloverAskID != nil {
+                        InlineRetryNotice(
+                            message: "Updating the news for today…",
+                            systemImage: "arrow.clockwise",
+                            iconColor: AppColors.textMuted
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.bottom, AppSpacing.sm)
+                    } else if let notice = noTodayCardNotice,
+                              notice.scope == viewModel.selectedTab?.scope,
+                              viewModel.insightSummary == nil {
+                        // That ask's reload landed today's feed with no Insights card: say so.
+                        InlineRetryNotice(
+                            message: noTodayCardMessage(scope: notice.scope),
+                            systemImage: "info.circle",
+                            iconColor: AppColors.textMuted
+                        )
+                        .padding(.horizontal, AppSpacing.lg)
+                        .padding(.bottom, AppSpacing.sm)
+                    } else if viewModel.showsSnapshotRefreshFailure {
                         InlineRetryNotice(
                             message: snapshotRefreshFailureMessage,
                             onRetry: { Task { await viewModel.refresh() } }
@@ -163,7 +205,7 @@ struct UpdatesView: View {
                                     VStack(alignment: .leading, spacing: AppSpacing.md) {
                                         InsightsSummaryCard(
                                             summary: summary,
-                                            onOpenSources: { insightSources = summary },
+                                            onOpenSources: { openInsightSources(summary) },
                                             onAskCay: viewModel.snapshotSavedAt == nil ? { openUpdatesChat(focus: .card) } : nil
                                         )
                                         if viewModel.snapshotSavedAt != nil {
@@ -296,6 +338,9 @@ struct UpdatesView: View {
             ) { _ in
                 viewModel.expireSnapshotIfStale()
                 viewModel.refreshTrendIfDayRolledOver()
+                // A feed from an earlier ET day holds that day's Insights card (a web-only one
+                // is shown only on the day it was written): reload it (2026-11-13).
+                viewModel.reloadFeedIfDayRolledOver()
             }
             // `loadIfNeeded()` early-returns on `hasLoadedOnce`, which latches on the first
             // successful load and is never reset — and this screen is opacity-mounted, so the
@@ -306,7 +351,17 @@ struct UpdatesView: View {
             .reloadOnIdentityChange { isActive in
                 // This chat is a @StateObject on a permanently mounted tab: nothing else tears
                 // it down between accounts (auth.md §7).
-                await MainActor.run { updatesChat.resetForIdentityChange() }
+                await MainActor.run {
+                    // An ask waiting for a day-rollover reload belongs to the previous identity.
+                    dayRolloverAskID = nil
+                    noTodayCardNotice = nil
+                    // So does a sources-sheet ask, and the sheet itself (the previous account's
+                    // card). The focus goes BEFORE the sheet: its onDismiss must not open a chat.
+                    pendingChatFocus = nil
+                    sheetAskFeed = nil
+                    insightSources = nil
+                    updatesChat.resetForIdentityChange()
+                }
                 await viewModel.handleIdentityChange(isActiveTab: isActive)
             }
             // Heals a gate that latched during session restore.
@@ -428,6 +483,9 @@ struct UpdatesView: View {
                 // (`caydex://updates/market`) lands on THIS tab, and anything left up covers it.
                 browserLink = nil
                 viewModel.watchlistError = nil
+                // An ask still waiting for a day-rollover reload must not open the chat over
+                // whatever this reset is making room for.
+                dayRolloverAskID = nil
                 // Before `insightSources`: its onDismiss must not reopen the chat.
                 pendingChatFocus = nil
                 insightSources = nil
@@ -530,6 +588,13 @@ struct UpdatesView: View {
     /// screen is shipped as context text — only the chart's window, as a `window=N` token.
     private func openUpdatesChat(focus: UpdatesChatFocus) {
         guard let tab = viewModel.selectedTab else { return }
+        // A feed from an earlier ET day may show a web-only card the server has stopped showing
+        // (Ask Cay would call it off screen and still charge a credit): reload it first, then
+        // open (`askAfterReloadingFeed`).
+        guard !viewModel.feedIsFromEarlierETDay else {
+            askAfterReloadingFeed(focus: focus, scope: tab.scope)
+            return
+        }
         updatesChat.prepareGroundedConversation(
             stockId: tab.isMarketTab ? nil : tab.scope,
             // The window the chart is DRAWING, as a control token the backend parses: that
@@ -548,10 +613,105 @@ struct UpdatesView: View {
         showUpdatesChat = true
     }
 
+    /// Opens the sources sheet on `summary`, recording the feed its card belongs to
+    /// (`sheetAskFeed`) for an ask made from the sheet.
+    private func openInsightSources(_ summary: NewsInsightSummary) {
+        sheetAskFeed = viewModel.selectedTab.map { (scope: $0.scope, day: viewModel.shownFeedDay) }
+        sourcesSheetUp = true
+        insightSources = summary
+    }
+
+    /// The sources sheet's `onDismiss`. Its "Ask Cay AI" was tapped on the card the sheet opened
+    /// with; while the sheet was up the app may have crossed ET midnight and a rollover reload
+    /// replaced or removed that card (pre-commit review 2026-11-13: the chat then opened about a
+    /// card that was gone, and the first send costs a credit). So the chat opens directly only
+    /// when the feed on screen is still the one the ask was made against — the same scope and
+    /// ET day, not from an earlier day — and still has a card. Otherwise the ask takes the
+    /// earlier-day path (`askAfterReloadingFeed`: "Updating the news for today…", a reload, the
+    /// chat on today's card or "No Insights card … today yet."). An ask that is already waiting
+    /// on a reload opens the chat itself (one at a time), so this one is dropped.
     private func presentPendingChat() {
+        sourcesSheetUp = false
+        let askedFeed = sheetAskFeed
+        sheetAskFeed = nil
         guard let focus = pendingChatFocus else { return }
         pendingChatFocus = nil
+        guard dayRolloverAskID == nil else { return }
+        guard let tab = viewModel.selectedTab, let asked = askedFeed, asked.scope == tab.scope else { return }
+        guard viewModel.insightSummary != nil,
+              !viewModel.feedIsFromEarlierETDay,
+              let askedDay = asked.day,
+              viewModel.shownFeedDay == askedDay else {
+            askAfterReloadingFeed(focus: focus, scope: tab.scope)
+            return
+        }
         openUpdatesChat(focus: focus)
+    }
+
+    /// "No Insights card for <TICKER> today yet." — code-owned, never a backend string.
+    private func noTodayCardMessage(scope: String) -> String {
+        scope == UpdatesScope.market
+            ? "No Insights card for the market today yet."
+            : "No Insights card for \(scope) today yet."
+    }
+
+    /// Shows the no-card line for `scope`, and clears it after a few seconds unless a newer one
+    /// replaced it.
+    private func showNoTodayCardNotice(scope: String) {
+        let id = UUID()
+        noTodayCardNotice = (id: id, scope: scope)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if noTodayCardNotice?.id == id {
+                noTodayCardNotice = nil
+            }
+        }
+    }
+
+    /// "Ask Cay AI" on a feed from an earlier ET day (pre-commit review 2026-11-13): the tap used
+    /// to start a silent reload (the rows stay on screen, so no skeleton) and open nothing — from
+    /// the detail sheet it only closed the sheet. Now it shows "Updating the news for today…",
+    /// reloads, and opens the chat only once the feed on screen is today's for the SAME scope
+    /// and still has an Insights card (the card asked about may have been a web-only card the
+    /// server stopped showing). On a failed reload nothing opens; the refresh notice shows.
+    /// One ask at a time: a second tap while one waits does nothing.
+    private func askAfterReloadingFeed(focus: UpdatesChatFocus, scope: String) {
+        guard dayRolloverAskID == nil else { return }
+        let id = UUID()
+        dayRolloverAskID = id
+        noTodayCardNotice = nil
+        Task { @MainActor in
+            let isToday = await viewModel.reloadFeedBeforeAskCay(scope: scope)
+            // Dropped meanwhile (a presentation reset, an identity change): open nothing.
+            guard dayRolloverAskID == id else { return }
+            dayRolloverAskID = nil
+            // A failed reload shows the refresh's own failure notice.
+            guard isToday else { return }
+            // Today's feed landed with no Insights card (the one asked about was the old day's):
+            // say so instead of leaving the tap unanswered.
+            guard viewModel.insightSummary != nil else {
+                showNoTodayCardNotice(scope: scope)
+                return
+            }
+            // Something else opened while the feed reloaded (a story, the sources sheet, Search,
+            // Profile, the paywall, filters, Manage Assets): never present the chat over it — a
+            // second presentation is refused or queued behind the first. From the sources sheet,
+            // the chat opens when that sheet closes (`presentPendingChat`), against the feed this
+            // reload just verified.
+            if sourcesSheetUp {
+                pendingChatFocus = focus
+                sheetAskFeed = (scope: scope, day: viewModel.shownFeedDay)
+                return
+            }
+            guard !isPresentingSomething else { return }
+            openUpdatesChat(focus: focus)
+        }
+    }
+
+    /// Whether this screen has anything presented on top of it right now.
+    private var isPresentingSomething: Bool {
+        sourcesSheetUp || browserLink != nil || showSearch || showProfile || showManageAssetsSheet
+            || viewModel.showPaywall || viewModel.showFilterSheet || showUpdatesChat
     }
 
     // MARK: - News timeline (inlined for LazyVStack virtualization)

@@ -263,7 +263,7 @@ def test_the_chart_gate_is_per_scope():
     )
     vm = _code(VM)
     assert "@Published private(set) var shownFeedScope: String?" in vm
-    feed = _block(vm, "private func loadFeed(for tab: NewsFilterTab, force: Bool) async")
+    feed = _block(vm, "private func loadFeed(for tab: NewsFilterTab, force: Bool, fresh: Bool = false) async")
     cached = _block(feed, "if !force, let cached = feedCache[scope] {")
     assert "shownFeedScope = scope" in cached, "the cached paint"
     live = feed[feed.index("allNewsArticles = articles"):]

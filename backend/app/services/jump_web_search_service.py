@@ -13,7 +13,10 @@ may hold text written from these pages and their titles and links. That replaces
 CARDS ONLY, the 2026-10-09 rule "no cross-user cache of web results". What still binds: web
 results are never used to evaluate or tune the AI (Brave terms §3(b)(xiii)) — so the preview and
 eval scripts force the switch off, and chat's grounding audit and refund judge skip any turn that
-read a web-sourced card — and they are never kept anywhere else: `WebPage`'s repr carries no
+read a web-sourced card — with ONE narrow exception, an ACCEPTED RISK (owner 2026-11-13: "Accept the
+risk"; the clause may cover it): the runtime grounding check of a web-only Insights card against the
+pages it was written from (word checks + `_judge_web_only`), before it is shown (SYSTEM_DESIGN_
+GUIDELINES §9b.10a). They are never kept anywhere else: `WebPage`'s repr carries no
 title, snippet or link, and the Sentry scrubber drops the frame locals that hold them
 (`log_redaction`).
 

@@ -488,6 +488,8 @@ _CURATED_TABLES = {
     "subscription_transactions", "sec_concept_cache",
     # 2026-10-29: 205 applied and re-dumped; the document names its stake-finder ledger.
     "trillion_club_stake_findings",
+    # 2026-11-13: 209 applied and re-dumped; §11.8 names the live earnings filing cache.
+    "earnings_filing_cache",
 }
 
 

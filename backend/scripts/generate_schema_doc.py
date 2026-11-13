@@ -172,11 +172,16 @@ EXPECTED: dict[str, int] = {
     # 208's objects (no drift). Every delta accounted for:
     #   -2 tables / -2 public / -2 rls / -2 policies -> daily_briefings, market_insights, each with
     #                          one service_role policy (fk/functions/enums/views unchanged).
-    "tables": 156,
-    "public": 115,
+    # Refreshed 2026-11-13 after the owner applied 209 and re-dumping. Every delta accounted for:
+    #   +1 tables / +1 public / +1 rls / +1 policies -> earnings_filing_cache, with one
+    #                          service_role policy (no fk, function, enum or view).
+    #   The Supabase platform changed realtime.* (filters_hash, two realtime indexes) and the
+    #   storage lifecycle grants in the same window: not counted here.
+    "tables": 157,
+    "public": 116,
     "fk": 36,
-    "policies": 122,
-    "rls": 115,
+    "policies": 123,
+    "rls": 116,
     "functions": 58,
     "enums": 14,
     "views": 1,

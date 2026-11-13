@@ -3700,16 +3700,21 @@ hid every card over an empty window. Now:
     8%"), a metric verb governing it as its DIRECT object ("lowered its revenue forecast for 2026 by
     10%", "raised its stake in Joby Aviation to 15%" — never through a preposition: "dropped on
     earnings in heavy trading by 8%" is the stock's move) or a change-noun compound ("revenue growth
-    of 8%"). On the verbless up/down path, a metric after ANY preposition (after, on, ahead, into,
-    before, following, amid, post, despite, over — within three words, no punctuation between) is
-    never the owner, whatever stands before the preposition: "Joby stock after earnings down 8%",
-    "The eVTOL maker after earnings down 8%" and "The company on weak guidance down 8%" are the
-    stock's move. A narrower rule (only "stock"/"shares"/a name before the preposition) let those
-    through and was reverted (owner: "Yes, undo the low fix"). KNOWN LIMITS, failing closed (the
-    point is dropped, the card still written): an honest "Post-merger / Over the quarter / On
-    constant currency revenue up N%" on a day the stock moved about N%; and a metric reached through
-    a preposition after its verb — "Joby cut the number of jobs by 8%", "lowered its outlook on
-    revenue by 8%" — loses its owner to the direct-object rule near the move. Any other word — "drove", "caused", "led to", a noun like "miss" —
+    of 8%"). On the verbless up/down path, a metric is not the owner when one of those prepositions
+    (after, on, ahead, into, before, following, amid, post, despite, over) sits within the three words
+    before it, with no punctuation, metric verb or blocker word between them — whatever stands before
+    the preposition: "Joby stock after earnings down 8%", "The eVTOL maker after earnings down 8%" and
+    "The company on weak guidance down 8%" are the stock's move. A narrower rule (only "stock"/
+    "shares"/a name before the preposition) let those through and was reverted (owner: "Yes, undo
+    the low fix"). KNOWN LIMITS that fail closed (the point is dropped; the card is still written
+    only when another point survives, else it is refused): an honest "Post-merger / Over the quarter
+    / On constant currency revenue up N%" on a day the stock moved about N%; and a metric reached
+    through a preposition after its verb — "Joby cut the number of jobs by 8%", "lowered its outlook
+    on revenue by 8%" — loses its owner to the direct-object rule near the move. KNOWN LIMITS left
+    to the judge (the metric still gets the stock's move, because a metric verb or a blocker word
+    cancels the skip): "Joby stock after earnings were down 8%", "Joby stock because of earnings
+    down 8%", "Joby stock after reported earnings down 8%" (pinned as strict expected failures in
+    `tests/test_news_insight_web_only.py`). Any other word — "drove", "caused", "led to", a noun like "miss" —
     leaves the metric the CAUSE, with no list of those words, and never across a clause break. On the
     RIGHT: "a 10% discount", "an 8% decline in revenue" — but not the stock's own "trades at an 8%
     discount to yesterday's close"; a loss only as "net/operating/… loss". KNOWN LIMIT (owner 2026-11-13: "One

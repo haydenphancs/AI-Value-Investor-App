@@ -2664,3 +2664,44 @@ async def test_known_limit_an_honest_metric_after_a_phrase_fails_closed(title, p
                         [page], 8.0)
     assert card is not None, "the card must still be written"
     assert point not in card["bullets"] and HONEST_POINT in card["bullets"]
+
+
+# ── follow-ups to 28aeb06a (2026-11-13, owner: "Yes, do them") ──────────────
+
+IN_AT_OF_FOR_MOVES = [
+    "The air taxi maker slid in reaction to guidance in heavy trading by 8%",
+    "The air taxi maker fell in response to earnings in late trading by 8%",
+]
+
+
+@pytest.mark.parametrize("text", IN_AT_OF_FOR_MOVES)
+def test_an_in_at_of_for_phrase_stops_the_governing_verb_too(text):
+    """The `_OWNER_PREPS` half of `_verb_before_owner`'s stop: "in reaction to guidance" makes the
+    guidance the cause of the stock's move, never the figure's owner."""
+    i = text.index("8%")
+    assert nis._metric_owner(text, i, i + 2) is None, text
+
+
+@pytest.mark.parametrize("title", IN_AT_OF_FOR_MOVES)
+@pytest.mark.asyncio
+async def test_an_in_at_of_for_move_never_vouches_for_a_staff_cut(title):
+    page = {**SLIDE, "title": title,
+            "snippet": DELAY_SNIPPET + " Joby will cut staff after the Dubai delay."}
+    card = await _run_q(_Svc(_Gemini(_card(points=(STAFF_POINT, HONEST_POINT),
+                         conclusion="The Dubai launch now turns on certification work."))),
+                        [page], -8.0)
+    assert card is not None and STAFF_POINT not in card["bullets"], card and card["bullets"]
+
+
+# KNOWN LIMITS (SYSTEM_DESIGN_GUIDELINES §9b.10a): the verbless skip is cancelled by a metric verb or
+# a blocker near the metric, so these stock moves still give the metric the figure; the grounding
+# judge is the guard. Strict xfail: a check that starts catching one must move it to the refused set.
+@pytest.mark.xfail(strict=True, reason="KNOWN LIMIT: the judge guards these shapes")
+@pytest.mark.parametrize("text", [
+    "Joby stock after earnings were down 8%",
+    "Joby stock because of earnings down 8%",
+    "Joby stock after reported earnings down 8%",
+])
+def test_known_limit_shapes_that_still_give_the_metric_the_move(text):
+    i = text.index("8%")
+    assert nis._metric_owner(text, i, i + 2) is None

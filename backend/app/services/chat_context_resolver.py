@@ -2046,6 +2046,15 @@ class ChatContextResolver:
         the owner chose that Ask Cay sees what the card shows — but labelled as drawing on web
         search results, and ``meta["web_assisted_card"]`` is set so the turn is never audited
         or judged (Brave §3(b)(xiii)).
+
+        A card written from those pages ALONE (``web_only``, 2026-11-12) follows the feed's
+        own same-day rule through the SAME helper (`web_only_card_visible`): on screen only
+        on the ET day it was written — over an empty window too, and never on a later day,
+        even when the window has news (the feed then shows the headline list instead). It is
+        labelled as coming from web search results, not "partly". On a later day the model
+        gets ONE line saying such a card exists and is not on screen — never its headline,
+        sentiment or bullets, so chat cannot restate an earlier day's web-derived cause the
+        app no longer shows.
         """
         scope = _updates_scope(reference_id)
         if scope is None:
@@ -2058,6 +2067,7 @@ class ChatContextResolver:
         from app.services.news_insight_service import (
             get_news_insight_service,
             select_recent_corpus,
+            web_only_card_visible,
         )
         from app.services.news_sentiment_trend_service import (
             TREND_DAYS,
@@ -2138,27 +2148,51 @@ class ChatContextResolver:
             f"The user is on the Updates tab, looking at the news feed for {subject}"
             + (" (general market news)." if is_market else ".")
         ]
+        web_only_hidden = False
         if card:
             written = _et_stamp(card.get("generated_at"), now)
-            on_screen = bool(feed_recent)
-            web_card = bool(card.get("web_assisted"))
+            web_only = card.get("web_only") is True
+            # The feed's rule, through the same helper: a web-only card is on screen on its
+            # ET day only, whatever the window holds.
+            web_only_hidden = web_only and not web_only_card_visible(card, now)
+            web_card = web_only or bool(card.get("web_assisted"))
             if web_card and meta is not None:
+                # Kept even when the card's text is withheld below: the turn still knows a
+                # web-derived card exists, and the audits stay skipped (fail closed).
                 meta["web_assisted_card"] = True
+        if card and web_only_hidden:
+            # Owner rule (2026-11-12): a web-only card is visible the same ET day only. The
+            # model gets its existence and age — never its headline, sentiment or bullets.
+            lines.append(
+                "A Cay AI Insights card for this feed"
+                + (f", written {written}," if written else "")
+                + " came from web search results and is not on screen: such cards show "
+                "only on the day they are written. Its content is not available here; do "
+                "not describe or restate it."
+            )
+        elif card:
+            on_screen = web_only or bool(feed_recent)
+            hidden_why = "the feed has no news in its window right now"
             lines.append(
                 ("Cay AI Insights card on screen" if on_screen
-                 else "The most recent Cay AI Insights card (not on screen: the feed has no "
-                      "news in its window right now)")
+                 else f"The most recent Cay AI Insights card (not on screen: {hidden_why})")
                 + (f", written {written}" if written else "")
-                + (" partly from web search results (third-party pages, not Caydex data)"
+                + (" from web search results (third-party pages, not Caydex data)"
+                   if web_only
+                   else " partly from web search results (third-party pages, not Caydex data)"
                    if web_card else "")
                 + f" — sentiment {card.get('sentiment') or 'Neutral'}: "
                 + _cap(str(card.get("headline") or ""), _UPDATES_HEADLINE_CAP)
             )
             for bullet in card.get("bullets") or []:
                 lines.append("• " + _cap(str(bullet), _UPDATES_BULLET_CAP))
-        elif headline_lines:
+        if (not card or web_only_hidden) and headline_lines:
+            # No card, or a web-only card from an earlier day the feed hides: either way
+            # the feed shows its plain headline list.
             lines.append(
-                "There is no Cay AI summary for this feed yet: the card on screen is the plain "
+                ("No Cay AI summary is on screen today" if web_only_hidden
+                 else "There is no Cay AI summary for this feed yet")
+                + ": the card on screen is the plain "
                 "\"Latest headlines\" list, i.e. the newest headlines below, verbatim."
             )
 

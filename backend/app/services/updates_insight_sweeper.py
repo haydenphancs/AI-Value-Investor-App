@@ -100,6 +100,7 @@ from app.services.updates_materiality import (
     ACTION_GENERATE,
     ACTION_TOUCH,
     JUMP_TIERS,
+    WEB_ONLY_REASON,
     Decision,
     attempt_cap_for,
     daily_cap_for,
@@ -212,10 +213,41 @@ _ALERT_MEMO_SECONDS = 1800
 # Gate verdicts after which a web search could not reach a card today, so none is bought.
 # The rest (GENERATE, fingerprint_unchanged, cycle_touch, cooldown, failure_cooldown) can:
 # a NEW set of pages is the gate's one-shot trigger once the cooldown has passed.
+#
+# Since 2026-11-12 (JOBY) the pre-check asks with `web_only_ok=True`, so an EMPTY corpus
+# no longer answers `no_corpus` there: a live equity jumper with no FMP news is searched
+# and may get a web-only card. `no_corpus` stays listed for the scopes the gate still
+# refuses that way (no page input, or the market). `web_only_failure_cap` joins it: the
+# web-only path has spent its failures for the ET day, so pages could not reach a card.
+# `web_only_retried` is deliberately ABSENT: it means "this page set already had its
+# try", and a NEW set is exactly what a search buys (the pre-check's `web_refreshed_at=now`
+# never trips it anyway). Neither web-only reason is in `_VERIFIED_CURRENT_REASONS`: like
+# `no_corpus` they are not verdicts about the card, and a real FMP story can still
+# regenerate the scope the same day.
 _WEB_NOT_ELIGIBLE = frozenset({
     "daily_cap", "attempt_cap", "premarket_reserved", "earnings_reserved",
-    "mwcb_market_only", "gate_error", "no_corpus",
+    "mwcb_market_only", "gate_error", "no_corpus", "web_only_failure_cap",
 })
+
+
+class _MarkedRead(dict):
+    """A Supabase read's answer as a plain dict plus ``complete``: False when the read
+    FAILED (an empty answer from a good read is complete). `_company_names` and
+    `_load_state` return it; same protocol as `news_cache_service.BulkCorpus`; read
+    through `_read_is_complete`."""
+
+    __slots__ = ("complete",)
+
+    def __init__(self, *args: Any, complete: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.complete = complete is True
+
+
+def _read_is_complete(answer: Any) -> bool:
+    """True only when a read says, strictly, that it is complete. A missing flag (a plain
+    dict, a rebuilt mapping) is INCOMPLETE: this vouches for an empty corpus being "no
+    news", and a failed read must never pass for that (2026-11-12)."""
+    return getattr(answer, "complete", False) is True
 
 
 def _move_direction(quote: Optional[Dict[str, Any]], now: datetime) -> Optional[str]:
@@ -290,7 +322,7 @@ class InsightSweeper:
         """
         symbols = [s for s in scopes if s != MARKET_SCOPE]
         if not symbols:
-            return {}
+            return _MarkedRead(complete=True)
         try:
             result = (
                 self.supabase.table("watchlist_items")
@@ -304,7 +336,9 @@ class InsightSweeper:
                 "filter falls back to symbol + tag order for this sweep",
                 type(e).__name__, e,
             )
-            return {}
+            # Marked incomplete: without names the subject filter may thin a corpus to
+            # empty, so the sweep must not read that as "no news" (web-only cards).
+            return _MarkedRead(complete=False)
         names: Dict[str, str] = {}
         for row in (result.data or []):
             ticker = str(row.get("ticker") or "").strip().upper()
@@ -324,7 +358,7 @@ class InsightSweeper:
             if not name or name.upper() in {ticker, crypto_base_symbol(ticker)}:
                 continue
             names.setdefault(ticker, name)
-        return names
+        return _MarkedRead(names, complete=True)
 
     # ── State ─────────────────────────────────────────────────────────
 
@@ -336,12 +370,17 @@ class InsightSweeper:
                 .in_("scope", scopes)
                 .execute()
             )
-            return {r["scope"]: r for r in (result.data or []) if r.get("scope")}
+            return _MarkedRead(
+                {r["scope"]: r for r in (result.data or []) if r.get("scope")},
+                complete=True,
+            )
         except Exception as e:
             logger.warning(
                 "Insight state load failed: %s: %s", type(e).__name__, e
             )
-            return {}
+            # Marked incomplete: an unread state hides the web-only bounds (the day's
+            # failures, the last failure time), so no web-only card this sweep.
+            return _MarkedRead(complete=False)
 
     def _record_skips(
         self, skips: List[Tuple[str, Decision]], now: datetime
@@ -763,6 +802,8 @@ class InsightSweeper:
         phase: str,
         earnings_scopes: frozenset,
         gate_inputs: Dict[str, Tuple[bool, bool, Optional[datetime]]],
+        *,
+        web_only_ok: bool,
     ) -> List[JumpCandidate]:
         """The jumpers worth a web search this tick, biggest move first.
 
@@ -770,16 +811,18 @@ class InsightSweeper:
         commodity or index moves on macro news the market card already carries. And
         only a scope that can still REGENERATE today — the gate is asked first, as if a
         new page set had just arrived (so an unchanged fingerprint cannot hide the caps);
-        a cap, a reserve, an MWCB day or an empty corpus means a search could never reach
-        a card. The company name is the FMP screener's (the quote row), never the
+        a cap, a reserve, an MWCB day or a spent web-only failure allowance means a search
+        could never reach a card. An EMPTY corpus is searched since 2026-11-12 (JOBY: a
+        −8% mover whose newest FMP story was 66 h old never got its search): the gate is
+        asked with `web_only_ok` — every scope here is a LIVE equity jumper, which is what
+        that flag vouches for, and the caller passes False when a read behind the corpus
+        failed this sweep (then an empty corpus is `no_corpus` and buys no search). The company name is the FMP screener's (the quote row), never the
         client-writable watchlist name: it becomes the search query.
         """
         out: List[JumpCandidate] = []
         for scope, band in jumpers.items():
             quote = quotes_by_symbol.get(scope) or {}
-            if is_crypto_scope(scope) or quote.get("isEtf") or quote.get("isFund"):
-                continue
-            if resolve_asset_class(scope) != "stock":
+            if not self._searchable_equity(scope, quote):
                 continue
             change = session_change_percent(quote, now)
             if change is None:
@@ -801,6 +844,9 @@ class InsightSweeper:
                 # (review 2026-10-29).
                 web_refreshed_at=now,
                 web_result_count=1,
+                # A live equity jumper (the filters above): an empty corpus may be filled
+                # by the web pages alone (2026-11-12) — unless a read failed this sweep.
+                web_only_ok=web_only_ok is True,
             )
             if pre.reason in _WEB_NOT_ELIGIBLE:
                 continue
@@ -809,6 +855,19 @@ class InsightSweeper:
                 score=move_score(band, change),
             ))
         return out
+
+    @staticmethod
+    def _searchable_equity(scope: str, quote: Any) -> bool:
+        """An equity whose jump may be web-searched — and, since 2026-11-12, written as a
+        web-only card: never a coin (a rolling 24 h change), an ETF, a fund, a commodity or
+        an index (they move on the macro news the market card carries). One definition for
+        the search's candidates AND the gate's `web_only_ok`, so the two cannot drift.
+        Never raises: a malformed quote row is not searchable."""
+        if scope == MARKET_SCOPE or is_crypto_scope(scope):
+            return False
+        if isinstance(quote, dict) and (quote.get("isEtf") or quote.get("isFund")):
+            return False
+        return resolve_asset_class(scope) == "stock"
 
     @staticmethod
     def _jump_set(
@@ -1126,6 +1185,8 @@ class InsightSweeper:
 
         # 3. Corpora — ONE Supabase query for every scope.
         corpora = await asyncio.to_thread(self.news.get_cached_bulk, scopes, 25)
+        # Read BEFORE the windowing below rebuilds the dict (which drops the flag).
+        corpus_read_complete = _read_is_complete(corpora)
         # Bound every scope's corpus to its DYNAMIC window (24h when it holds at
         # least MIN_CORPUS_ARTICLES stories about the scope, else widened to 48h —
         # and across a closed market to 72/96h — whenever widening adds articles)
@@ -1136,7 +1197,9 @@ class InsightSweeper:
         # just the 24h corpus and is badged "24h"; a thin one is badged with the
         # span it was really summarised over. A scope with no news in the widest
         # window yields an empty corpus → `no_corpus` → the deterministic "Latest
-        # headlines" fallback, not an over-claiming AI card.
+        # headlines" fallback, not an over-claiming AI card — EXCEPT a live equity
+        # jumper holding kept web pages (2026-11-12, JOBY): the gate lets it through as
+        # a web-only card (`WEB_ONLY_REASON`, see 4a and `web_only_ok` below).
         #
         # `scope=` opts each TICKER corpus into the subject filter, so a sector wrap led
         # by two peers can no longer be the sole input for this ticker's card. MARKET
@@ -1165,6 +1228,28 @@ class InsightSweeper:
         states = await asyncio.to_thread(self._load_state, scopes)
         cycle_start = current_close_cycle_start(now)
 
+        # Web-only cards (2026-11-12) turn an EMPTY corpus into a card, so they are
+        # vouched for only when every read behind that emptiness succeeded: the bulk
+        # corpus read (a failed or partial read drops scopes, and an article card would
+        # be overwritten by a web-only one), the company names (without them the subject
+        # filter can thin a corpus to empty) and the state rows (the web-only bounds read
+        # the day's failures there). Any failed → no web-only card and no search for an
+        # empty corpus this sweep, pre-check included; the article path is untouched.
+        degraded = [
+            label for label, ok in (
+                ("corpus read incomplete", corpus_read_complete),
+                ("company names unread", _read_is_complete(names)),
+                ("state rows unread", _read_is_complete(states)),
+            ) if not ok
+        ]
+        web_only_vouched = not degraded
+        if degraded and jumpers and not crypto_only:
+            logger.warning(
+                "Insight sweep: web-only cards OFF this sweep (%s) — an empty corpus may "
+                "be a failed read, not an absence of news; jumpers=%d",
+                ", ".join(degraded), len(jumpers),
+            )
+
         # 4a. The jump search (2026-10-28): for every EQUITY jumper that can still
         #     regenerate today, ask the web WHY it is moving. Its kept pages are a gate input
         #     (a new set is a one-shot trigger, never a fingerprint input) and a generation
@@ -1178,6 +1263,7 @@ class InsightSweeper:
             candidates = self._jump_candidates(
                 jumpers, quotes_by_symbol, corpora, states, sigmas, market_change,
                 cycle_start, now, market_active, phase, earnings_scopes, gate_inputs,
+                web_only_ok=web_only_vouched,
             )
             if candidates:
                 web_counts = await web.refresh(candidates, now)
@@ -1227,6 +1313,15 @@ class InsightSweeper:
                 jumping=scope in reserve_jumpers,
                 web_refreshed_at=web_refreshed.get(scope),
                 web_result_count=len(web_context.get(scope, ())),
+                # The LIVE jump set, never `reserve_jumpers`: a move that faded keeps its
+                # reserve for the day but no longer earns a card from web pages alone. And
+                # only an equity the search may cover (`_searchable_equity`) — pages for a
+                # coin or a fund never exist today, so this is the belt to that brace.
+                web_only_ok=(
+                    web_only_vouched
+                    and scope in jumpers
+                    and self._searchable_equity(scope, quotes_by_symbol.get(scope))
+                ),
             )
             reasons[decision.reason] += 1
             if decision.action == ACTION_GENERATE:
@@ -1273,6 +1368,8 @@ class InsightSweeper:
             # yesterday used to be ranked urgent all morning.
             return bool(hot.get(scope)) or scope in jumpers
 
+        # Web-only decisions this sweep (counted before admission, like `reasons`).
+        web_only = sum(1 for _, d in pending if WEB_ONLY_REASON in (d.reason or ""))
         pending.sort(key=lambda p: (p[0] != MARKET_SCOPE, not _urgent(*p), -p[1].score))
         admitted = pending[:_PER_CYCLE_REGEN_CAP]
         dropped = len(pending) - len(admitted)
@@ -1302,6 +1399,15 @@ class InsightSweeper:
                     scope in reserve_jumpers,
                 ):
                     return False
+                # ACCEPTED (2026-11-12): a web-only decision whose pages are refused
+                # before any model call (`web_only_no_source` / `web_only_no_content`)
+                # still spends this unit. No refund: the budget has no decrement RPC (a
+                # read-then-write would race another instance's increment and could only
+                # LOOSEN the spend ceiling), and the same `web_only_no_source` text is also
+                # written after a real model call (the source belt in `generate_and_store`),
+                # so a refund keyed on the reason would give back a unit that was spent.
+                # Bounded: one try per page set (`web_only_retried`) and
+                # `WEB_ONLY_FAILURE_CAP` per scope per ET day, against `_GLOBAL_DAILY_CAP`.
                 if not await asyncio.to_thread(self._consume_global_budget, now):
                     # Budget exhausted after we took the claim: release it so the
                     # scope isn't parked for the full stale window, and re-trip
@@ -1441,12 +1547,13 @@ class InsightSweeper:
             "Insight sweep (%s) scopes=%d generated=%d touched=%d deferred=%d "
             "enriched=%d enrich_deferred=%d prior_session=%d earnings_boosted=%d "
             "earnings_status=%d earnings_hot=%d jumpers=%d jump_alerts=%d "
-            "extra_news=%d web=%s mwcb=%s market=%s active=%s phase=%s reasons=%s",
+            "extra_news=%d web=%s web_only=%d mwcb=%s market=%s active=%s phase=%s "
+            "reasons=%s",
             ("crypto " if crypto_only else "") + ("news+price" if refresh_news else "price"),
             len(scopes), generated, len(touches), dropped,
             enriched_rows, enrich_deferred, prior_session, boosted,
             len(statuses), sum(1 for v in hot.values() if v),
-            len(jumpers), jump_alerts, extra_news, web_counts or "-", mwcb,
+            len(jumpers), jump_alerts, extra_news, web_counts or "-", web_only, mwcb,
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
             market_active, phase, dict(reasons.most_common(8)),
         )

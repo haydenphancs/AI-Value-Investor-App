@@ -24,6 +24,10 @@ struct PendingDeepLink: Equatable {
         case ticker(symbol: String, assetType: MarketTickerType)
         /// A Market tap: the Updates tab on its Market chip, the Market Insight card first.
         case updatesMarket
+        /// A Holdings row whose cause came from its Insights card: the Updates tab on that
+        /// ticker's chip, where the card's sources are. `assetType` is for the fallback only —
+        /// the ticker's detail screen, when the ticker is not one of the user's chips.
+        case updatesTicker(symbol: String, assetType: MarketTickerType)
     }
 
     /// So a second tap on the same destination is still a CHANGE that `onChange` observes.
@@ -36,6 +40,7 @@ struct PendingDeepLink: Equatable {
         switch destination {
         case .ticker(let symbol, _): return "ticker=\(symbol)"
         case .updatesMarket: return "updates/market"
+        case .updatesTicker(let symbol, _): return "updates/\(symbol)"
         }
     }
 
@@ -49,12 +54,23 @@ struct PendingDeepLink: Equatable {
     }
 }
 
+/// A request for the Updates tab to select one ticker's chip (`caydex://updates/<SYMBOL>`),
+/// handed from `ContentView` to `UpdatesView`. A fresh `id` per tap, so a repeat tap on the same
+/// ticker is still a change the tab observes (the `updatesMarketFocusSeq` rule).
+struct UpdatesTickerFocus: Equatable {
+    let id = UUID()
+    let symbol: String
+    /// The fallback detail screen's class, when the ticker is not one of the user's chips.
+    let assetType: MarketTickerType
+}
+
 enum DeepLinkRouter {
     private static let log = Logger(subsystem: "com.phan.caydex", category: "deeplink")
 
     /// `.onOpenURL` → the link to park, or nil (always logged) for anything that is not one.
     ///
-    /// Only ever opens a ticker DETAIL screen or the Updates tab's Market chip. No link can
+    /// Only ever opens a ticker DETAIL screen or the Updates tab (its Market chip, or one
+    /// ticker's chip with the detail screen as the fallback). No link can
     /// generate a report, start a chat or spend a credit, because the grammar has nowhere to
     /// say so.
     static func pendingLink(for url: URL, now: Date = Date()) -> PendingDeepLink? {
@@ -74,6 +90,15 @@ enum DeepLinkRouter {
             // Behind the same gates as a ticker: every Updates request is `.signInRequired`.
             log.info("deep link parked: updates/market")
             return PendingDeepLink(destination: .updatesMarket, receivedAt: now)
+        case .updatesTicker(let symbol, let assetClass):
+            // The fallback screen, resolved exactly as the ticker arm does: the link's class when
+            // it carries one (an ETF holding must not fall back to the equity screen), otherwise
+            // the symbol (so `BTCUSD` still falls back to the crypto screen).
+            let assetType = MarketTickerType.resolve(assetClass?.rawValue, symbol: symbol)
+            log.info("deep link parked: updates/\(symbol, privacy: .public) fallback=\(assetType.rawValue, privacy: .public)")
+            return PendingDeepLink(
+                destination: .updatesTicker(symbol: symbol, assetType: assetType), receivedAt: now
+            )
         case .notOurLink:
             // Another scheme, or another `caydex` host such as the OAuth `auth-callback`.
             // Not ours: left for whoever owns it, and never navigated on.

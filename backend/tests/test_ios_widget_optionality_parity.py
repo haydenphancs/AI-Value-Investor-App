@@ -162,11 +162,18 @@ _ADDITIVE_2026_10_14: frozenset[tuple[str, str]] = frozenset({
     ("WidgetCause", "note"),
 })
 
+# (Swift struct, wire key) — 2026-11-12: the mover's cause came from its Insights card, so a new
+# build links the row to the Updates card. No snapshot or backend from before carries it.
+_ADDITIVE_2026_11_12: frozenset[tuple[str, str]] = frozenset({
+    ("WidgetMover", "cause_card"),
+})
+
 # Every dated set, by the day its keys first went on the wire. The messages print the date,
 # so a key belongs in the set of the day IT was added — never appended to an older one.
 _ADDITIVE_SETS: dict[str, frozenset[tuple[str, str]]] = {
     "2026-09-30": _ADDITIVE_2026_09_30,
     "2026-10-14": _ADDITIVE_2026_10_14,
+    "2026-11-12": _ADDITIVE_2026_11_12,
 }
 
 

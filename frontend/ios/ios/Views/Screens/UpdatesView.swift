@@ -22,6 +22,12 @@ struct UpdatesView: View {
     /// `ContentView.updatesMarketFocusSeq`: bumped on every Market widget tap. A change selects
     /// the Market chip and scrolls back to the top, where the Market Insight card leads.
     var marketFocusSeq: Int = 0
+    /// `ContentView.updatesTickerFocus`: set on every card-backed Holdings widget tap
+    /// (`caydex://updates/<SYMBOL>`). A change selects that ticker's chip and scrolls to the top,
+    /// where its Insights card leads; a ticker that is not an openable chip goes back through
+    /// `onTickerFocusMissed` (the link's fallback, its detail screen).
+    var tickerFocus: UpdatesTickerFocus? = nil
+    var onTickerFocusMissed: ((UpdatesTickerFocus) -> Void)? = nil
     @State private var showManageAssetsSheet = false
     @State private var showProfile = false
     @State private var showSearch = false
@@ -242,6 +248,24 @@ struct UpdatesView: View {
                         .onChange(of: marketFocusSeq) { _, _ in
                             viewModel.focusMarket()
                             scrollProxy.scrollTo(Self.feedTopID, anchor: .top)
+                        }
+                        // A card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`): that
+                        // ticker's chip, from the top, where its Insights card and sources are.
+                        // The chip list may still be loading (a cold launch), so `focusTicker`
+                        // waits for it; a ticker that is not an openable chip falls back, and a
+                        // focus the user moved on from meanwhile does nothing at all.
+                        .onChange(of: tickerFocus) { _, focus in
+                            guard let focus else { return }
+                            Task { @MainActor in
+                                switch await viewModel.focusTicker(focus.symbol) {
+                                case .focused:
+                                    scrollProxy.scrollTo(Self.feedTopID, anchor: .top)
+                                case .notAChip:
+                                    onTickerFocusMissed?(focus)
+                                case .dropped:
+                                    break
+                                }
+                            }
                         }
                     }
 

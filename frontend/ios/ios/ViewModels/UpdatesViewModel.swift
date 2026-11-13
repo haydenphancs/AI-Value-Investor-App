@@ -821,6 +821,72 @@ final class UpdatesViewModel: ObservableObject {
         selectedTab = market
     }
 
+    /// What a widget ticker focus (`focusTicker`) did.
+    enum TickerFocusOutcome: Equatable {
+        /// The ticker's chip is selected (or already was).
+        case focused
+        /// Not a chip this plan can OPEN: the caller falls back to the ticker's detail screen.
+        case notAChip
+        /// The user moved on while the chips were loading — picked another chip, tapped the
+        /// widget again, or the load outlasted `tickerFocusPatience`. Do NOTHING: neither the
+        /// chip nor the fallback may land over what the user did meanwhile.
+        case dropped
+    }
+
+    /// The longest a widget focus may wait for the first chip load and still act. A focus that
+    /// lands later than this would move the screen seconds after the tap, over whatever the user
+    /// has done since, so it is dropped instead (the user is already on Updates).
+    static let tickerFocusPatience: Duration = .seconds(6)
+
+    /// Bumped by every `focusTicker`, so an older focus still waiting never lands after a newer one.
+    private var tickerFocusGeneration = 0
+
+    /// One ticker's chip — a card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`,
+    /// 2026-11-12), where that ticker's Insights card and its sources are.
+    ///
+    /// Waits for the tab's first load (`loadIfNeeded` joins one in flight), because a cold launch
+    /// from the widget delivers the tap before /tabs has answered — but the result is DROPPED when
+    /// the wait outlasted `tickerFocusPatience`, a newer focus arrived meanwhile, or the selected
+    /// chip changed under it (by scope, as `loadTabs` keeps it, so the load's own re-selection of
+    /// the same chip is not a change). Only LIVE chips count: the seeded Market fallback says
+    /// nothing about the user's tickers, so a failed /tabs falls back rather than guessing. The
+    /// selection then loads through the view's `.onChange(of: selectedTab)` → `selectTab`, the
+    /// path a chip tap takes, as `focusMarket`.
+    func focusTicker(_ symbol: String) async -> TickerFocusOutcome {
+        tickerFocusGeneration &+= 1
+        let generation = tickerFocusGeneration
+        let scopeBefore = selectedTab?.scope ?? pendingScope
+        let clock = ContinuousClock()
+        let started = clock.now
+        await loadIfNeeded()
+        let wanted = symbol.uppercased()
+        guard generation == tickerFocusGeneration else {
+            Self.log.info("updates: widget focus \(wanted, privacy: .public) superseded by a newer one — dropped")
+            return .dropped
+        }
+        let waited = clock.now - started
+        guard waited <= Self.tickerFocusPatience else {
+            Self.log.info("updates: widget focus \(wanted, privacy: .public) waited \(String(describing: waited), privacy: .public) for the chips — dropped")
+            return .dropped
+        }
+        if let scopeBefore, (selectedTab?.scope ?? pendingScope) != scopeBefore {
+            Self.log.info("updates: widget focus \(wanted, privacy: .public) dropped — the chip changed while the chips loaded")
+            return .dropped
+        }
+        guard tabsAreLive,
+              let tab = openableTabs.first(where: { !$0.isMarketTab && $0.scope.uppercased() == wanted })
+        else {
+            Self.log.info("updates: widget focus \(wanted, privacy: .public) is not an openable chip (live tabs: \(self.tabsAreLive, privacy: .public)) — falling back to its detail")
+            return .notAChip
+        }
+        if pendingScope != nil {
+            pendingScope = tab.scope
+        }
+        guard selectedTab?.scope != tab.scope else { return .focused }
+        selectedTab = tab
+        return .focused
+    }
+
     func openFilterOptions() {
         showFilterSheet = true
     }

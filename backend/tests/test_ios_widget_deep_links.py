@@ -1,14 +1,18 @@
 """Source-scan guards for the widget → app deep links: `caydex://ticker/<SYMBOL>[?type=…]` (a
-Holdings tap → that asset's detail) and `caydex://updates/market` (a Market tap → the Updates tab
-on its Market chip; owner, 2026-10-22).
+Holdings tap → that asset's detail), `caydex://updates/market` (a Market tap → the Updates tab
+on its Market chip; owner, 2026-10-22) and `caydex://updates/<SYMBOL>` (a Holdings row whose cause
+came from the ticker's Insights card, the payload's `cause_card` → the Updates tab on that ticker's
+chip, where the card's sources are, falling back to the detail on the screen its optional `type`
+names; only while the Holdings snapshot is from today's ET day; 2026-11-12).
 
 There is no XCTest target, so these read the Swift source. They pin five things:
 
 1. ONE GRAMMAR. `Shared/CaydexDeepLink.swift` compiles into both targets. The widget builds
-   links only through `CaydexDeepLink.tickerURL` and `CaydexDeepLink.updatesMarketURL`, and the
+   links only through `CaydexDeepLink.tickerURL`, `.updatesMarketURL` and `.updatesTickerURL`, and the
    app parses them only through `CaydexDeepLink.parse`, so the two sides cannot drift. The parser
-   is exact: an ASCII symbol grammar, a `type` allow-list, no unknown query keys, and one updates
-   path. Any app or web page can open a `caydex://` URL, so this is untrusted input.
+   is exact: an ASCII symbol grammar, a `type` allow-list read by ONE `typeQuery` for both
+   symbol links, no unknown query keys, and an updates path that is `/market` (no query at all)
+   or one CANONICAL symbol (never `MARKET`). Any app or web page can open a `caydex://` URL, so this is untrusted input.
 2. THE OAUTH CALLBACK IS LEFT ALONE. `caydex` is also `APIConfig.oauthCallbackScheme`
    (`caydex://auth-callback`). The parser recognises only the `ticker` and `updates` hosts, and
    the scheme is one value in all three places that name it.
@@ -223,10 +227,15 @@ def test_the_parser_recognises_only_its_two_hosts():
     assert _string_constant(src, "tickerHost") == "ticker"
     assert _string_constant(src, "updatesHost") == "updates"
     assert _string_constant(src, "updatesMarketPath") == "/market"
+    assert _string_constant(src, "reservedUpdatesSymbol") == "MARKET", (
+        "the reserved updates symbol is no longer MARKET: `caydex://updates/MARKET` would read as a "
+        "ticker in a reader that case-folds the Market chip's path"
+    )
     results = _enum_cases(_block(src, "public enum ParseResult: Equatable, Sendable"))
-    assert sorted(results) == ["malformed", "notOurLink", "ticker", "updatesMarket"], (
-        f"ParseResult is {results}: the grammar can name a ticker, the Updates Market chip, "
-        "'not ours' and 'malformed', nothing else (a new case is a new door — a report, a chat)"
+    assert sorted(results) == ["malformed", "notOurLink", "ticker", "updatesMarket", "updatesTicker"], (
+        f"ParseResult is {results}: the grammar can name a ticker, the Updates Market chip, one "
+        "ticker's Updates chip, 'not ours' and 'malformed', nothing else (a new case is a new door "
+        "— a report, a chat)"
     )
     parse = _block(src, "public static func parse(_ url: URL) -> ParseResult")
     # The condition must END there: `… || host == updatesHost || true` would still hold the pin.
@@ -241,7 +250,8 @@ def test_the_parser_recognises_only_its_two_hosts():
     )
     guard = parse[parse.index("host == tickerHost || host == updatesHost"):]
     not_ours = guard.index("else { return .notOurLink }")
-    assert not_ours < guard.index("return .ticker(") and not_ours < guard.index("return .updatesMarket"), (
+    assert not_ours < guard.index("return .ticker(") and not_ours < guard.index("return .updatesMarket") \
+        and not_ours < guard.index("return .updatesTicker("), (
         "a foreign host no longer short-circuits to .notOurLink before any destination is built"
     )
     assert "auth-callback" not in src, (
@@ -261,11 +271,23 @@ _PARSE_UPDATES = '''
         else { return .malformed(reason: "unexpected_component") }
 
         if host == updatesHost {
-            guard components.query == nil else { return .malformed(reason: "unknown_query_key") }
-            guard components.path == updatesMarketPath else {
+            if components.path == updatesMarketPath {
+                guard components.query == nil else { return .malformed(reason: "unknown_query_key") }
+                return .updatesMarket
+            }
+            guard components.path.hasPrefix("/") else {
                 return .malformed(reason: "unknown_updates_path")
             }
-            return .updatesMarket
+            let rawUpdatesSymbol = String(components.path.dropFirst())
+            guard !rawUpdatesSymbol.contains("/"),
+                  let symbol = normalizedSymbol(rawUpdatesSymbol),
+                  symbol == rawUpdatesSymbol,
+                  symbol != reservedUpdatesSymbol
+            else { return .malformed(reason: "unknown_updates_path") }
+            switch typeQuery(components.queryItems) {
+            case .refused(let reason): return .malformed(reason: reason)
+            case .accepted(let assetClass): return .updatesTicker(symbol: symbol, assetClass: assetClass)
+            }
         }
 
         let path = components.path
@@ -273,14 +295,23 @@ _PARSE_UPDATES = '''
 
 
 def test_an_updates_link_is_exactly_the_market_chip():
-    """`caydex://updates/market` and nothing near it: any app can open a caydex:// URL."""
+    """`caydex://updates/market` or `caydex://updates/<SYMBOL>` and nothing near either: any app
+    can open a caydex:// URL."""
     parse = _block(_read(_GRAMMAR), "public static func parse(_ url: URL) -> ParseResult")
     assert _squash(_PARSE_UPDATES) in _squash(parse), (
-        "the updates link is no longer exactly `caydex://updates/market`. Pinned in order: the "
-        "credentials/port/fragment check straight after the host check, for both hosts "
-        "(`caydex://u:p@updates/market#x`); no query at all, not even a bare `?`; the one path, "
-        "compared exactly (`/MARKET`, `/market/`, `/research` refused); and the branch answers "
-        ".updatesMarket only after both checks, then hands every other host to the ticker path"
+        "the updates link is no longer exactly `caydex://updates/market` or one canonical symbol. "
+        "Pinned in order: the credentials/port/fragment check straight after the host check, for "
+        "both hosts (`caydex://u:p@updates/market#x`); the Market path compared exactly and with "
+        "no query at all, not even a bare `?`; otherwise ONE path segment that is already a "
+        "canonical symbol (`/research`, `/aapl`, `/ AAPL` refused — never repaired) and never the "
+        "reserved MARKET (`/MARKET` refused), every path refusal `unknown_updates_path`; then the "
+        "ticker link's optional `type`, read by the SAME `typeQuery` (an ETF holding's fallback "
+        "keeps the ETF screen); then every other host goes to the ticker path"
+    )
+    hits = re.findall(r"\bupdatesTicker\b", parse)
+    assert len(hits) == 1, (
+        f"parse names .updatesTicker {len(hits)} times: a second answer (e.g. in the ticker path) "
+        "would open Updates for a link outside the grammar"
     )
     hits = re.findall(r"\bupdatesMarket\b", parse)
     assert len(hits) == 1, (
@@ -307,6 +338,24 @@ def test_the_symbol_grammar_checks_ascii_before_uppercasing():
     )
 
 
+_TYPE_QUERY = """
+{
+    var assetClass: AssetClass?
+    var sawType = false
+    for item in items ?? [] {
+        guard item.name == typeKey else { return .refused("unknown_query_key") }
+        guard !sawType else { return .refused("duplicate_type") }
+        sawType = true
+        guard let parsed = AssetClass(wire: item.value) else {
+            return .refused("unknown_type")
+        }
+        assetClass = parsed
+    }
+    return .accepted(assetClass)
+}
+"""
+
+
 def test_the_query_is_an_allow_list():
     src = _read(_GRAMMAR)
     asset_class = _block(src, "public enum AssetClass: String, CaseIterable, Sendable")
@@ -315,13 +364,32 @@ def test_the_query_is_an_allow_list():
         f"AssetClass cases {sorted(cases)} no longer match MarketTickerType's five screens"
     )
     parse = _block(src, "public static func parse(_ url: URL) -> ParseResult")
-    for reason in ("unknown_query_key", "duplicate_type", "unknown_type", "extra_path",
-                   "invalid_symbol", "unexpected_component", "url_too_long",
-                   "unknown_updates_path"):
+    for reason in ("unknown_query_key", "extra_path", "invalid_symbol", "unexpected_component",
+                   "url_too_long", "unknown_updates_path"):
         assert f'.malformed(reason: "{reason}")' in parse, (
             f"parse no longer refuses `{reason}`: a link outside the grammar would be coerced "
             "into the nearest valid one"
         )
+    _assert_pinned(
+        _block(src, "static func typeQuery(_ items: [URLQueryItem]?) -> TypeQuery"), _TYPE_QUERY,
+        "typeQuery no longer allows ONLY one known `type` (an unknown key, a second `type` or an "
+        "unknown class is refused, with its own reason) — the ticker and updates/<SYMBOL> links "
+        "share it, so a looser reader opens both",
+    )
+    # Both symbol links read the type through it, and each refusal surfaces as `.malformed`.
+    readers = re.findall(
+        r"switch typeQuery\(components\.queryItems\) \{\s*"
+        r"case \.refused\(let reason\): return \.malformed\(reason: reason\)\s*"
+        r"case \.accepted\(let assetClass\): return \.(ticker|updatesTicker)\(",
+        parse,
+    )
+    assert sorted(readers) == ["ticker", "updatesTicker"], (
+        f"parse reads `type` through typeQuery for {readers}, not exactly the ticker and "
+        "updates/<SYMBOL> links: the two would accept different queries"
+    )
+    assert "queryItems ?? []" not in parse and "item.name" not in parse, (
+        "parse reads the query itself again, beside typeQuery"
+    )
     assert "maxURLLength" in parse.split("URLComponents(url:")[0], (
         "the length cap no longer runs before parsing"
     )
@@ -333,6 +401,25 @@ _UPDATES_MARKET_URL = """
     components.scheme = scheme
     components.host = updatesHost
     components.path = updatesMarketPath
+    return components.url
+}
+"""
+
+# Exactly what the updates branch of `parse` accepts: a canonical symbol (`normalizedSymbol`
+# uppercases and trims, so the built path IS canonical), never the reserved MARKET, and only the
+# optional `type` query of the fallback screen.
+_UPDATES_TICKER_URL = """
+{
+    guard let normalized = normalizedSymbol(symbol), normalized != reservedUpdatesSymbol else {
+        return nil
+    }
+    var components = URLComponents()
+    components.scheme = scheme
+    components.host = updatesHost
+    components.path = "/" + normalized
+    if let assetClass {
+        components.queryItems = [URLQueryItem(name: typeKey, value: assetClass.rawValue)]
+    }
     return components.url
 }
 """
@@ -353,6 +440,14 @@ def test_links_are_built_only_by_the_grammar():
         "updatesMarketURL no longer builds exactly the URL parse accepts (scheme, updates host, "
         "the one path, no query)",
     )
+    _assert_pinned(
+        _block(_read(_GRAMMAR),
+               "public static func updatesTickerURL(symbol: String, assetClass: AssetClass? = nil) -> URL?"),
+        _UPDATES_TICKER_URL,
+        "updatesTickerURL no longer builds exactly the URL parse accepts: the canonical symbol "
+        "(validated, uppercased), never the reserved MARKET, on the updates host, with only the "
+        "optional `type` of the fallback screen",
+    )
     offenders = []
     for root in (_APP, _SHARED, _WIDGETS):
         for path in _swift_files(root):
@@ -362,7 +457,8 @@ def test_links_are_built_only_by_the_grammar():
             if re.search(r'"caydex://(?:ticker|updates)', code) or re.search(r'URL\(string:\s*"caydex://', code):
                 offenders.append(str(path.relative_to(_ROOT)))
     assert not offenders, (
-        f"hand-built caydex:// URLs (use CaydexDeepLink.tickerURL / .updatesMarketURL): {offenders}"
+        f"hand-built caydex:// URLs (use CaydexDeepLink.tickerURL / .updatesMarketURL / "
+        f".updatesTickerURL): {offenders}"
     )
 
 
@@ -392,16 +488,17 @@ def test_there_is_exactly_one_open_url_handler():
     assert hits == ["ios/iosApp.swift"], f"expected one .onOpenURL in iosApp.swift, found {hits}"
 
 
-_ROUTER_ARMS = ("case .ticker(let ticker):", "case .updatesMarket:", "case .notOurLink:",
-                "case .malformed(let reason):")
+_ROUTER_ARMS = ("case .ticker(let ticker):", "case .updatesMarket:",
+                "case .updatesTicker(let symbol, let assetClass):",
+                "case .notOurLink:", "case .malformed(let reason):")
 
 
 def test_the_router_parks_only_its_two_destinations():
     router = _read(_ROUTER)
     cases = _enum_cases(_block(router, "enum Destination: Equatable"))
-    assert cases == ["ticker", "updatesMarket"], (
-        f"PendingDeepLink.Destination is {cases}: a link may open a ticker detail or the Updates "
-        "Market chip, nothing else (never a report, a chat or a credit)"
+    assert cases == ["ticker", "updatesMarket", "updatesTicker"], (
+        f"PendingDeepLink.Destination is {cases}: a link may open a ticker detail, the Updates "
+        "Market chip or one ticker's Updates chip, nothing else (never a report, a chat or a credit)"
     )
     body = _block(router, "static func pendingLink(for url: URL")
     switch = _block(body, "switch CaydexDeepLink.parse(url)")
@@ -409,8 +506,8 @@ def test_the_router_parks_only_its_two_destinations():
     assert sorted(labels) == sorted(_ROUTER_ARMS), (
         f"pendingLink's switch arms are {labels}: one arm per ParseResult, no `default:`"
     )
-    assert _squash(body).count("PendingDeepLink(") == 2, (
-        "pendingLink builds a parked link outside its ticker and updates/market arms"
+    assert _squash(body).count("PendingDeepLink(") == 3, (
+        "pendingLink builds a parked link outside its ticker, updates/market and updates/<SYMBOL> arms"
     )
 
     ticker = _arm(switch, "case .ticker(let ticker):")
@@ -434,6 +531,23 @@ def test_the_router_parks_only_its_two_destinations():
         "an updates/market link is no longer parked (and logged) like a ticker link"
     )
     assert ".ticker(" not in market, "the updates/market arm parks a ticker"
+
+    chip = _arm(switch, "case .updatesTicker(let symbol, let assetClass):")
+    assert _squash("let assetType = MarketTickerType.resolve(assetClass?.rawValue, symbol: symbol)") \
+            in _squash(chip), (
+        "an updates/<SYMBOL> link no longer resolves its FALLBACK screen the way the ticker arm "
+        "does: the link's class (an ETF holding must not fall back to the equity screen), through "
+        "the search results' resolver (`BTCUSD` must fall back to crypto)"
+    )
+    assert _squash(
+        "return PendingDeepLink(destination: .updatesTicker(symbol: symbol, assetType: assetType), receivedAt: now)"
+    ) in _squash(chip) and len(re.findall(r"\breturn\b", chip)) == 1 and "log.info(" in chip, (
+        "an updates/<SYMBOL> link no longer parks (and logs) THAT ticker's Updates chip: a "
+        "card-backed Holdings tap would open something else"
+    )
+    assert ".ticker(" not in chip and ".updatesMarket" not in chip, (
+        "the updates/<SYMBOL> arm parks a detail screen or the Market chip"
+    )
 
     for label, level in (("case .notOurLink:", "log."), ("case .malformed(let reason):", "log.warning(")):
         arm = _arm(switch, label)
@@ -513,6 +627,8 @@ _PRESENT_DEEP_LINK = """
         presentTickerLink(symbol: symbol, assetType: assetType)
     case .updatesMarket:
         openUpdatesMarket()
+    case .updatesTicker(let symbol, let assetType):
+        openUpdatesTicker(symbol: symbol, assetType: assetType)
     }
 }
 """
@@ -587,10 +703,151 @@ def test_a_market_link_tears_down_then_opens_updates_on_the_market_chip():
         "else only after the teardown and the wait, so Updates never changes UNDER an open cover",
     )
     tabs = _block(content, "var body: some View")
-    assert tabs.count("UpdatesView(") == 1 and \
-        "UpdatesView(selectedTab: $selectedTab, marketFocusSeq: updatesMarketFocusSeq)" in tabs, (
-        "ContentView no longer hands the focus request to its one Updates tab"
+    assert tabs.count("UpdatesView(") == 1, "ContentView no longer draws ONE Updates tab"
+    _assert_pinned(
+        _call_args(tabs, tabs.index("UpdatesView(") + len("UpdatesView")), _UPDATES_VIEW_ARGS,
+        "ContentView no longer hands its one Updates tab both focus requests (the Market chip's "
+        "sequence and the ticker chip's request) and the ticker request's fallback, the detail "
+        "screen through presentTickerLink",
     )
+
+
+_UPDATES_VIEW_ARGS = """
+selectedTab: $selectedTab,
+marketFocusSeq: updatesMarketFocusSeq,
+tickerFocus: updatesTickerFocus,
+onTickerFocusMissed: { missed in
+    presentTickerLink(symbol: missed.symbol, assetType: missed.assetType)
+}
+"""
+
+# `OPEN` stands for the local closure's name, whatever it is.
+_OPEN_UPDATES_TICKER = """
+{
+    if AudioManager.shared.showFullScreenPlayer {
+        AudioManager.shared.collapsePlayer()
+    }
+    let OPEN = {
+        selectedTab = .updates
+        updatesTickerFocus = UpdatesTickerFocus(symbol: symbol, assetType: assetType)
+    }
+    guard ModalPresentationProbe.isAnythingPresented else {
+        OPEN()
+        return
+    }
+    appState.dismissAllPresentations()
+    Task { @MainActor in
+        _ = await ModalPresentationProbe.waitUntilNothingPresented()
+        OPEN()
+    }
+}
+"""
+
+_TICKER_FOCUS_HANDLER = """
+{ _, focus in
+    guard let focus else { return }
+    Task { @MainActor in
+        switch await viewModel.focusTicker(focus.symbol) {
+        case .focused:
+            scrollProxy.scrollTo(Self.feedTopID, anchor: .top)
+        case .notAChip:
+            onTickerFocusMissed?(focus)
+        case .dropped:
+            break
+        }
+    }
+}
+"""
+
+_FOCUS_TICKER = """
+{
+    tickerFocusGeneration &+= 1
+    let generation = tickerFocusGeneration
+    let scopeBefore = selectedTab?.scope ?? pendingScope
+    let clock = ContinuousClock()
+    let started = clock.now
+    await loadIfNeeded()
+    let wanted = symbol.uppercased()
+    guard generation == tickerFocusGeneration else {
+        Self.log.info("updates: widget focus \\(wanted, privacy: .public) superseded by a newer one — dropped")
+        return .dropped
+    }
+    let waited = clock.now - started
+    guard waited <= Self.tickerFocusPatience else {
+        Self.log.info("updates: widget focus \\(wanted, privacy: .public) waited \\(String(describing: waited), privacy: .public) for the chips — dropped")
+        return .dropped
+    }
+    if let scopeBefore, (selectedTab?.scope ?? pendingScope) != scopeBefore {
+        Self.log.info("updates: widget focus \\(wanted, privacy: .public) dropped — the chip changed while the chips loaded")
+        return .dropped
+    }
+    guard tabsAreLive,
+          let tab = openableTabs.first(where: { !$0.isMarketTab && $0.scope.uppercased() == wanted })
+    else {
+        Self.log.info("updates: widget focus \\(wanted, privacy: .public) is not an openable chip (live tabs: \\(self.tabsAreLive, privacy: .public)) — falling back to its detail")
+        return .notAChip
+    }
+    if pendingScope != nil {
+        pendingScope = tab.scope
+    }
+    guard selectedTab?.scope != tab.scope else { return .focused }
+    selectedTab = tab
+    return .focused
+}
+"""
+
+
+def test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail():
+    """`caydex://updates/<SYMBOL>` (2026-11-12): the Market tap's teardown, then the Updates tab
+    with a fresh request for THAT chip; the tab selects it once its chips have loaded, or hands it
+    back for the detail screen."""
+    content = _read(_CONTENT)
+    body = _block(content, "private func openUpdatesTicker(symbol: String, assetType: MarketTickerType)")
+    name = re.search(r"\blet (\w+) = \{", body)
+    assert name, "openUpdatesTicker no longer opens through one local closure"
+    _assert_pinned(
+        re.sub(rf"\b{re.escape(name.group(1))}\b", "OPEN", body), _OPEN_UPDATES_TICKER,
+        "a card-backed Holdings tap no longer runs, in order and unconditionally: collapse the "
+        "expanded player first; then open — the Updates tab AND a fresh request for that ticker's "
+        "chip, every time; straight away when nothing is presented, else only after the teardown "
+        "and the wait, so Updates never changes UNDER an open cover",
+    )
+    view = _read(_UPDATES_VIEW)
+    reader = _block(view, "ScrollViewReader { scrollProxy in")
+    feed = _block(reader, "ScrollView(showsIndicators: false)")
+    after_feed = reader[reader.index(feed) + len(feed):]
+    assert "tickerFocus" not in feed and ".onChange(of: tickerFocus)" in after_feed, (
+        "the ticker focus handler no longer sits on the feed's ScrollView (a LazyVStack child is "
+        "released once the user scrolls deep)"
+    )
+    _assert_pinned(
+        _block(after_feed, ".onChange(of: tickerFocus)"), _TICKER_FOCUS_HANDLER,
+        "a ticker focus request no longer: selects the chip through focusTicker (which waits for "
+        "the chips) and scrolls to the top where its Insights card leads; when the ticker is not "
+        "an openable chip, hands the request back for the detail screen; and when the user moved "
+        "on meanwhile (`.dropped`), does nothing at all",
+    )
+    _assert_pinned(
+        _block(_read(_UPDATES_VM), "func focusTicker(_ symbol: String) async -> TickerFocusOutcome"),
+        _FOCUS_TICKER,
+        "focusTicker no longer (1) waits for the first load, (2) DROPS the focus when a newer one "
+        "arrived, the wait outlasted tickerFocusPatience, or the selected chip's scope changed "
+        "under it, (3) answers notAChip unless the symbol is an OPENABLE ticker chip from a LIVE "
+        "/tabs answer (never the seeded Market chip, never a locked ticker), (4) re-points a "
+        "session-heal stash to that chip, and (5) selects it unless it already is, loading "
+        "nothing itself",
+    )
+    vm = _read(_UPDATES_VM)
+    outcome = _block(vm, "enum TickerFocusOutcome: Equatable")
+    assert _enum_cases(outcome) == ["focused", "notAChip", "dropped"], (
+        "TickerFocusOutcome is no longer exactly focused / notAChip / dropped"
+    )
+    patience = re.search(r"static let tickerFocusPatience: Duration = \.seconds\((\d+)\)", vm)
+    assert patience and 2 <= int(patience.group(1)) <= 10, (
+        "tickerFocusPatience is gone or outside 2-10 s: too short drops every cold launch's focus, "
+        "too long moves the screen long after the tap"
+    )
+    assert "private var tickerFocusGeneration = 0" in vm
 
 
 # The selection handler, in each spelling of "bind the new tab, then selectTab it".
@@ -1166,7 +1423,7 @@ _TILE_URL = """
           let snap = entry.snapshot, snap.mode == "portfolio",
           let headline = snap.headlineMover
     else { return nil }
-    return headline.deepLink
+    return headline.deepLink(cardLinksLive: snap.cardLinksLive(now: entry.date))
 }
 """
 
@@ -1224,11 +1481,11 @@ def test_holdings_rows_link_and_market_rows_do_not():
     src = _read(_WIDGET)
     side = _block(src, "private struct SidePanel: View")
     for who in ("riser", "faller"):
-        assert side.count(f".tapThrough({who}.deepLink)") == 2, (
+        assert side.count(f".tapThrough({who}.deepLink(cardLinksLive: cardLinksLive))") == 2, (
             f"a Medium {who} row no longer links in BOTH layouts (captioned and glyph). "
             "ViewThatFits picks either one, so a tap would open the app root half the time"
         )
-    assert ".tapThrough($0.deepLink)" in _block(src, "private struct MoverColumn: View"), (
+    assert ".tapThrough($0.deepLink(cardLinksLive: cardLinksLive))" in _block(src, "private struct MoverColumn: View"), (
         "a Large rising/falling row no longer links to its ticker"
     )
     holdings = side.count(".tapThrough(") + _block(src, "private struct MoverColumn: View").count(".tapThrough(")
@@ -1289,7 +1546,7 @@ def test_asset_classes_come_from_the_server():
             "a row needs). If market rows ever link, the old rule returns with them: ONLY with a "
             "server-named class — an unclassified SPY resolves to the STOCK screen"
         )
-    mover_link = _block(_block(src, "private extension WidgetMover"), "var deepLink: URL?")
+    mover_link = _block(_block(src, "private extension WidgetMover {"), "func deepLink(cardLinksLive: Bool) -> URL?")
     assert "CaydexDeepLink.tickerURL(symbol: ticker, assetClass: CaydexDeepLink.AssetClass(wire: assetType))" in mover_link
 
     shared = _read(_SNAPSHOT)
@@ -1307,6 +1564,113 @@ def test_asset_classes_come_from_the_server():
         assert _optional_none_field(classes[model], "asset_type"), (
             f"{model} no longer declares `asset_type: Optional[...] = None` for the widget's links"
         )
+
+
+_CARD_ROW_LINK = """
+{
+    if cardLinksLive, linksToInsightCard,
+       let updates = CaydexDeepLink.updatesTickerURL(
+           symbol: ticker, assetClass: CaydexDeepLink.AssetClass(wire: assetType)
+       ) {
+        return updates
+    }
+    return CaydexDeepLink.tickerURL(symbol: ticker, assetClass: CaydexDeepLink.AssetClass(wire: assetType))
+}
+"""
+
+_CARD_LINKS_LIVE = "{ !WidgetSessionLabel.isPriorETDay(asOf: asOf, now: now) }"
+
+
+def _bool_false_field(cls: ast.ClassDef, name: str) -> bool:
+    """`name: bool = False` declared in `cls`'s own body."""
+    for node in cls.body:
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == name:
+            return (isinstance(node.annotation, ast.Name) and node.annotation.id == "bool"
+                    and isinstance(node.value, ast.Constant) and node.value.value is False)
+    return False
+
+
+def test_a_card_backed_row_links_to_its_updates_card():
+    """A Holdings row whose cause came from the ticker's Insights card (`cause_card`, 2026-11-12)
+    opens that card on Updates — where its sources and "Ask Cay AI" are — and every other row its
+    detail. The ONE `deepLink` feeds every Holdings row and the tile's `tileURL` headline (both
+    pinned above), so the headline and its row can never disagree."""
+    widget = _read(_WIDGET)
+    _assert_pinned(
+        _block(_block(widget, "private extension WidgetMover {"), "func deepLink(cardLinksLive: Bool) -> URL?"),
+        _CARD_ROW_LINK,
+        "a WidgetMover no longer links to `caydex://updates/<SYMBOL>[?type=]` exactly when its "
+        "cause came from its Insights card AND its snapshot is from today's ET day (and to its "
+        "detail otherwise, or when the symbol cannot be linked); the class rides on both links",
+    )
+    _assert_pinned(
+        _block(_block(widget, "private extension WidgetMoverSnapshot"), "func cardLinksLive(now: Date) -> Bool"),
+        _CARD_LINKS_LIVE,
+        "an aged Holdings snapshot (built on an earlier ET day) no longer sends its card-backed "
+        "rows to their detail: a web-only card is shown on Updates only on the ET day it was "
+        "written, so the tap would land on a chip with no card and no sources",
+    )
+    assert "return headline.deepLink(cardLinksLive: snap.cardLinksLive(now: entry.date))" in \
+        _block(widget, "private var tileURL: URL?"), (
+        "the Holdings headline no longer links through the row's deepLink, judged on the entry's date"
+    )
+    layout = _block(widget, "private func layout(_ snap: WidgetMoverSnapshot, headline m: WidgetMover) -> some View")
+    assert "let cardLinksLive = snap.cardLinksLive(now: entry.date)" in layout, (
+        "the Holdings rows no longer judge card links on the snapshot's ET day against the entry's date"
+    )
+    for view in ("HoldingsLarge(", "HoldingsMedium("):
+        call = layout[layout.index(view):layout.index(")", layout.index(view)) + 1]
+        assert "cardLinksLive: cardLinksLive" in call, f"{view} no longer receives cardLinksLive"
+    assert len(re.findall(r"cardLinksLive: true", _without_previews(widget))) == 0, (
+        "a literal `cardLinksLive: true` bypasses the aged-snapshot rule"
+    )
+    mover = _block(_read(_SNAPSHOT), "public struct WidgetMover:")
+    assert "public let causeCard: Bool?" in mover, (
+        "WidgetMover.causeCard is no longer an Optional Bool: a snapshot or payload from before "
+        "2026-11-12 has no `cause_card`, and a strict decode would blank the tile"
+    )
+    assert 'case causeCard = "cause_card"' in mover, "WidgetMover no longer decodes `cause_card`"
+    _assert_pinned(
+        _block(mover, "public var linksToInsightCard: Bool"), "{ causeCard == true }",
+        "an absent or false `cause_card` no longer links the detail: only an explicit true may "
+        "send a tap to the Updates card",
+    )
+    classes = {
+        node.name: node
+        for node in ast.parse(_WIDGET_SCHEMA.read_text(encoding="utf-8")).body
+        if isinstance(node, ast.ClassDef)
+    }
+    assert _bool_false_field(classes["WidgetMoverResponse"], "cause_card"), (
+        "WidgetMoverResponse no longer declares `cause_card: bool = False`"
+    )
+
+
+_FETCHER = _SHARED / "WidgetMarketFetcher.swift"
+
+_FETCHER_APP_VERSION = """
+{
+    let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return trimmed.isEmpty ? nil : trimmed
+}
+"""
+
+
+def test_the_extension_fetch_sends_its_app_version():
+    """The Market route holds a web-only cause from any caller that does not prove it can link it
+    (`X-App-Version` >= `WEB_ONLY_CAUSE_MIN_APP_VERSION`, fail closed). The extension's fetch must
+    therefore send the bundle's version, and send nothing — never an empty string — without one."""
+    src = _read(_FETCHER)
+    fetch = _block(src, "public static func fetchMarket() async -> WidgetMoverSnapshot?")
+    sends = _squash('if let version = Self.appVersion { request.setValue(version, forHTTPHeaderField: "X-App-Version") }')
+    assert sends in _squash(fetch), "the extension's market fetch no longer sends X-App-Version"
+    assert _squash(fetch).index(sends) < _squash(fetch).index("URLSession.shared.data(for:request)"), (
+        "X-App-Version is set after the request goes out"
+    )
+    _assert_pinned(
+        _block(src, "static var appVersion: String?"), _FETCHER_APP_VERSION,
+        "appVersion no longer reads this bundle's CFBundleShortVersionString, trimmed, nil when blank",
+    )
 
 
 def test_the_oauth_web_flow_still_owns_its_callback():
@@ -1367,9 +1731,9 @@ _REACH = "test_every_view_a_tab_root_reaches_resets_what_it_presents"
 _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
     # ── the grammar ──
     ("parse-second-answer", _GRAMMAR,
-     _replace("            guard components.path == updatesMarketPath else {",
+     _replace("            if components.path == updatesMarketPath {\n",
               "            if components.path.lowercased().hasPrefix(updatesMarketPath) { return ParseResult.updatesMarket }\n"
-              "            guard components.path == updatesMarketPath else {"),
+              "            if components.path == updatesMarketPath {\n"),
      "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
     ("parse-credentials-only-for-tickers", _GRAMMAR,
      _resub(r"(        guard components\.user == nil.*?unexpected_component\"\) \}\n)",
@@ -1379,8 +1743,8 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
      _replace('            guard components.query == nil else { return .malformed(reason: "unknown_query_key") }\n', ""),
      "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
     ("parse-path-case-folded", _GRAMMAR,
-     _replace("guard components.path == updatesMarketPath else {",
-              "guard components.path.lowercased() == updatesMarketPath else {"),
+     _replace("if components.path == updatesMarketPath {",
+              "if components.path.lowercased() == updatesMarketPath {"),
      "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
     ("parse-result-comma-case", _GRAMMAR,
      _replace("        case updatesMarket\n", "        case updatesMarket, report(id: String)\n"),
@@ -1570,9 +1934,187 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
               '        if path.lowercased() == "/market" { return .updatesMarket }\n'),
      "test_an_updates_link_is_exactly_the_market_chip", "names .updatesMarket"),
     ("updates-tab-loses-the-focus-seq", _CONTENT,
-     _replace("UpdatesView(selectedTab: $selectedTab, marketFocusSeq: updatesMarketFocusSeq)",
-              "UpdatesView(selectedTab: $selectedTab)"),
+     _drop_line("                marketFocusSeq: updatesMarketFocusSeq,"),
      "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip", "its one Updates tab"),
+    ("updates-tab-loses-the-ticker-fallback", _CONTENT,
+     _replace("presentTickerLink(symbol: missed.symbol, assetType: missed.assetType)", "_ = missed"),
+     "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip", "its one Updates tab"),
+    # ── the updates/<SYMBOL> link (2026-11-12) ──
+    ("parse-updates-symbol-repaired", _GRAMMAR,
+     _drop_line("                  symbol == rawUpdatesSymbol,"),
+     "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
+    ("parse-updates-market-symbol", _GRAMMAR,
+     _drop_line("                  symbol != reservedUpdatesSymbol"),
+     "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
+    ("parse-updates-extra-segments", _GRAMMAR,
+     _replace("            guard !rawUpdatesSymbol.contains(\"/\"),\n                  let symbol",
+              "            guard let symbol"),
+     "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
+    ("parse-updates-ticker-in-the-ticker-path", _GRAMMAR,
+     _replace("        let path = components.path\n",
+              "        let path = components.path\n"
+              '        if path.hasPrefix("/u/") { return .updatesTicker(symbol: "X", assetClass: nil) }\n'),
+     "test_an_updates_link_is_exactly_the_market_chip", "names .updatesTicker"),
+    ("builder-updates-ticker-unvalidated", _GRAMMAR,
+     _replace("guard let normalized = normalizedSymbol(symbol), normalized != reservedUpdatesSymbol else {",
+              "guard let normalized = Optional(symbol) else {"),
+     "test_links_are_built_only_by_the_grammar", "updatesTickerURL no longer builds"),
+    ("router-updates-ticker-parks-the-detail", _ROUTER,
+     _replace("destination: .updatesTicker(symbol: symbol, assetType: assetType), receivedAt: now",
+              "destination: .ticker(symbol: symbol, assetType: assetType), receivedAt: now"),
+     "test_the_router_parks_only_its_two_destinations", "no longer parks (and logs) THAT ticker's"),
+    ("router-updates-ticker-fallback-stock", _ROUTER,
+     _replace("let assetType = MarketTickerType.resolve(assetClass?.rawValue, symbol: symbol)",
+              "let assetType = MarketTickerType.stock"),
+     "test_the_router_parks_only_its_two_destinations", "FALLBACK screen"),
+    # The ETF regression: the link's class dropped, so an ETF holding falls back to the equity screen.
+    ("router-updates-ticker-drops-the-class", _ROUTER,
+     _replace("let assetType = MarketTickerType.resolve(assetClass?.rawValue, symbol: symbol)",
+              "let assetType = MarketTickerType.resolve(nil, symbol: symbol)"),
+     "test_the_router_parks_only_its_two_destinations", "FALLBACK screen"),
+    ("updates-market-takes-a-query", _GRAMMAR,
+     _replace("            if components.path == updatesMarketPath {\n"
+              "                // `query` (not `queryItems`) so a bare trailing `?` is refused too.\n"
+              "                guard components.query == nil else { return .malformed(reason: \"unknown_query_key\") }\n",
+              "            if components.path == updatesMarketPath {\n"),
+     "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
+    ("updates-ticker-drops-its-type", _GRAMMAR,
+     _replace("case .accepted(let assetClass): return .updatesTicker(symbol: symbol, assetClass: assetClass)",
+              "case .accepted: return .updatesTicker(symbol: symbol, assetClass: nil)"),
+     "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
+    ("updates-ticker-reads-its-own-query", _GRAMMAR,
+     _replace("            switch typeQuery(components.queryItems) {\n"
+              "            case .refused(let reason): return .malformed(reason: reason)\n"
+              "            case .accepted(let assetClass): return .updatesTicker(symbol: symbol, assetClass: assetClass)\n"
+              "            }\n",
+              "            let assetClass = AssetClass(wire: components.queryItems?.first?.value)\n"
+              "            return .updatesTicker(symbol: symbol, assetClass: assetClass)\n"),
+     "test_an_updates_link_is_exactly_the_market_chip", "no longer exactly"),
+    ("type-query-ignores-unknown-keys", _GRAMMAR,
+     _replace('guard item.name == typeKey else { return .refused("unknown_query_key") }',
+              "guard item.name == typeKey else { continue }"),
+     "test_the_query_is_an_allow_list", "typeQuery no longer allows"),
+    ("type-query-takes-two-types", _GRAMMAR,
+     _replace('            guard !sawType else { return .refused("duplicate_type") }\n', ""),
+     "test_the_query_is_an_allow_list", "typeQuery no longer allows"),
+    ("ticker-reads-its-own-query", _GRAMMAR,
+     _replace("        switch typeQuery(components.queryItems) {\n"
+              "        case .refused(let reason): return .malformed(reason: reason)\n"
+              "        case .accepted(let assetClass): return .ticker(Ticker(symbol: symbol, assetClass: assetClass))\n"
+              "        }\n",
+              "        let assetClass = AssetClass(wire: components.queryItems?.first?.value)\n"
+              "        return .ticker(Ticker(symbol: symbol, assetClass: assetClass))\n"),
+     "test_the_query_is_an_allow_list", "not exactly the ticker and updates/<SYMBOL> links"),
+    ("builder-updates-ticker-drops-the-class", _GRAMMAR,
+     _replace("        components.host = updatesHost\n"
+              "        components.path = \"/\" + normalized\n"
+              "        if let assetClass {\n"
+              "            components.queryItems = [URLQueryItem(name: typeKey, value: assetClass.rawValue)]\n"
+              "        }\n",
+              "        components.host = updatesHost\n"
+              "        components.path = \"/\" + normalized\n"),
+     "test_links_are_built_only_by_the_grammar", "updatesTickerURL no longer builds"),
+    ("present-updates-ticker-opens-market", _CONTENT,
+     _resub(r"(case \.updatesTicker\(let symbol, let assetType\):\s*)openUpdatesTicker\(symbol: symbol, assetType: assetType\)",
+            r"\1openUpdatesMarket()"),
+     "test_present_dispatches_every_destination_exhaustively", "presentDeepLink no longer"),
+    ("ticker-open-without-the-wait", _CONTENT,
+     _resub(r"(private func openUpdatesTicker\(symbol: String, assetType: MarketTickerType\).*?)"
+            r"            _ = await ModalPresentationProbe\.waitUntilNothingPresented\(\)\n", r"\1"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "no longer runs"),
+    ("ticker-focus-reused", _CONTENT,
+     _replace("            updatesTickerFocus = UpdatesTickerFocus(symbol: symbol, assetType: assetType)\n",
+              "            if updatesTickerFocus?.symbol != symbol {\n"
+              "                updatesTickerFocus = UpdatesTickerFocus(symbol: symbol, assetType: assetType)\n"
+              "            }\n"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "no longer runs"),
+    ("ticker-focus-never-falls-back", _UPDATES_VIEW,
+     _replace("                                    onTickerFocusMissed?(focus)\n", ""),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "no longer: selects"),
+    ("focus-ticker-without-the-load", _UPDATES_VM,
+     _replace("        await loadIfNeeded()\n        let wanted = symbol.uppercased()\n",
+              "        let wanted = symbol.uppercased()\n"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
+    ("focus-ticker-accepts-a-locked-chip", _UPDATES_VM,
+     _replace("let tab = openableTabs.first(where: { !$0.isMarketTab && $0.scope.uppercased() == wanted })",
+              "let tab = filterTabs.first(where: { !$0.isMarketTab && $0.scope.uppercased() == wanted })"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
+    ("focus-ticker-on-seeded-tabs", _UPDATES_VM,
+     _replace("        guard tabsAreLive,\n              let tab = openableTabs",
+              "        guard let tab = openableTabs"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
+    ("focus-ticker-older-lands-after-newer", _UPDATES_VM,
+     _resub(r"        guard generation == tickerFocusGeneration else \{\n.*?\n        \}\n", ""),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
+    ("focus-ticker-waits-forever", _UPDATES_VM,
+     _replace("guard waited <= Self.tickerFocusPatience else {", "guard waited <= .seconds(3600) else {"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
+    ("focus-ticker-overrides-the-users-chip", _UPDATES_VM,
+     _replace("if let scopeBefore, (selectedTab?.scope ?? pendingScope) != scopeBefore {",
+              "if false, let scopeBefore, (selectedTab?.scope ?? pendingScope) != scopeBefore {"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
+    ("focus-ticker-patience-a-minute", _UPDATES_VM,
+     _replace("static let tickerFocusPatience: Duration = .seconds(6)",
+              "static let tickerFocusPatience: Duration = .seconds(60)"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "tickerFocusPatience"),
+    ("focus-dropped-opens-the-detail", _UPDATES_VIEW,
+     _resub(r"(case \.dropped:\s*)break", r"\1onTickerFocusMissed?(focus)"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "a ticker focus request no longer"),
+    ("card-row-links-the-detail", _WIDGET,
+     _replace("if cardLinksLive, linksToInsightCard,", "if false, linksToInsightCard,"),
+     "test_a_card_backed_row_links_to_its_updates_card", "no longer links"),
+    ("card-row-links-updates-market", _WIDGET,
+     _resub(r"let updates = CaydexDeepLink\.updatesTickerURL\(\s*symbol: ticker, assetClass: "
+            r"CaydexDeepLink\.AssetClass\(wire: assetType\)\s*\) \{",
+            "let updates = CaydexDeepLink.updatesMarketURL {"),
+     "test_a_card_backed_row_links_to_its_updates_card", "no longer links"),
+    ("card-row-ignores-an-aged-snapshot", _WIDGET,
+     _replace("if cardLinksLive, linksToInsightCard,", "if linksToInsightCard,"),
+     "test_a_card_backed_row_links_to_its_updates_card", "no longer links"),
+    ("card-row-drops-the-class", _WIDGET,
+     _resub(r"(updatesTickerURL\(\s*symbol: ticker), assetClass: CaydexDeepLink\.AssetClass\(wire: assetType\)",
+            r"\1"),
+     "test_a_card_backed_row_links_to_its_updates_card", "no longer links"),
+    ("card-links-live-always", _WIDGET,
+     _replace("!WidgetSessionLabel.isPriorETDay(asOf: asOf, now: now)", "true"),
+     "test_a_card_backed_row_links_to_its_updates_card", "an aged Holdings snapshot"),
+    ("card-links-live-judged-on-the-build", _WIDGET,
+     _replace("!WidgetSessionLabel.isPriorETDay(asOf: asOf, now: now)",
+              "!WidgetSessionLabel.isPriorETDay(asOf: asOf, now: asOf)"),
+     "test_a_card_backed_row_links_to_its_updates_card", "an aged Holdings snapshot"),
+    ("card-rows-skip-the-aged-check", _WIDGET,
+     _replace("let cardLinksLive = snap.cardLinksLive(now: entry.date)", "let cardLinksLive = true"),
+     "test_a_card_backed_row_links_to_its_updates_card", "no longer judge card links"),
+    ("card-headline-skips-the-aged-check", _WIDGET,
+     _replace("return headline.deepLink(cardLinksLive: snap.cardLinksLive(now: entry.date))",
+              "return headline.deepLink(cardLinksLive: true)"),
+     "test_a_card_backed_row_links_to_its_updates_card", "the Holdings headline no longer links"),
+    ("card-large-rows-always-live", _WIDGET,
+     _replace("HoldingsLarge(snapshot: snap, headline: m, aged: aged, cardLinksLive: cardLinksLive)",
+              "HoldingsLarge(snapshot: snap, headline: m, aged: aged, cardLinksLive: true)"),
+     "test_a_card_backed_row_links_to_its_updates_card", "HoldingsLarge( no longer receives"),
+    ("card-column-always-live", _WIDGET,
+     _replace("MoverColumn(title: \"Rising\", movers: snapshot.risers, limit: rowLimit,\n"
+              "                            cardLinksLive: cardLinksLive)",
+              "MoverColumn(title: \"Rising\", movers: snapshot.risers, limit: rowLimit,\n"
+              "                            cardLinksLive: true)"),
+     "test_a_card_backed_row_links_to_its_updates_card", "bypasses the aged-snapshot rule"),
+    ("card-flag-defaults-true", _SNAPSHOT,
+     _replace("public var linksToInsightCard: Bool { causeCard == true }",
+              "public var linksToInsightCard: Bool { causeCard != false }"),
+     "test_a_card_backed_row_links_to_its_updates_card", "absent"),
+    ("card-key-renamed", _SNAPSHOT,
+     _replace('case causeCard = "cause_card"', 'case causeCard = "causeCard"'),
+     "test_a_card_backed_row_links_to_its_updates_card", "cause_card"),
+    ("fetch-without-the-version", _FETCHER,
+     _resub(r"        if let version = Self\.appVersion \{\n.*?\n        \}\n", ""),
+     "test_the_extension_fetch_sends_its_app_version", "no longer sends X-App-Version"),
+    ("fetch-sends-an-empty-version", _FETCHER,
+     _replace("return trimmed.isEmpty ? nil : trimmed", "return trimmed"),
+     "test_the_extension_fetch_sends_its_app_version", "appVersion no longer"),
+    ("schema-cause-card-dropped", _WIDGET_SCHEMA,
+     _replace("    cause_card: bool = False\n", "    cause_card_v2: bool = False\n"),
+     "test_a_card_backed_row_links_to_its_updates_card", "cause_card"),
     ("focus-handler-on-the-anchor", _UPDATES_VIEW,
      _chain(_resub(r"\n\s*\.onChange\(of: marketFocusSeq\) \{ _, _ in\n\s*viewModel\.focusMarket\(\)\n"
                    r"\s*scrollProxy\.scrollTo\(Self\.feedTopID, anchor: \.top\)\n\s*\}", ""),
@@ -1762,6 +2304,10 @@ _MUTATION_COVERED = {
     "test_every_view_a_tab_root_reaches_resets_what_it_presents",
     "test_the_walk_reaches_every_view_it_must_guard",
     "test_the_journey_story_refreshes_its_grid_however_it_closes",
+    "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail",
+    "test_a_card_backed_row_links_to_its_updates_card",
+    "test_the_extension_fetch_sends_its_app_version",
+    "test_the_query_is_an_allow_list",
 }
 
 

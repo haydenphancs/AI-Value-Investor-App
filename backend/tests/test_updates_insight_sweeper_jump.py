@@ -22,7 +22,7 @@ import pytest
 
 import app.services.updates_insight_sweeper as mod
 from app.services.earnings_window_service import get_earnings_window_service
-from app.services.news_cache_service import MARKET_SCOPE
+from app.services.news_cache_service import MARKET_SCOPE, BulkCorpus
 from app.services.updates_insight_sweeper import InsightSweeper
 from app.services.updates_materiality import (
     ACTION_GENERATE,
@@ -97,11 +97,13 @@ class _Stub(InsightSweeper):
     async def _universe(self):
         return list(self._universe_value)
 
+    # Complete reads (2026-11-12): the sweeper vouches for a web-only card only when the
+    # corpus, the names and the state were all read; a plain dict reads as INCOMPLETE.
     def _company_names(self, scopes):
-        return {}
+        return mod._MarkedRead(complete=True)
 
     def _load_state(self, scopes):
-        return {}
+        return mod._MarkedRead(complete=True)
 
     def _record_skips(self, skips, now):
         pass
@@ -111,8 +113,8 @@ class _Stub(InsightSweeper):
 
     def get_cached_bulk(self, scopes, limit):
         fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        return {s: [{"external_id": f"{s}-1", "headline": f"{s} news",
-                     "published_at": fresh}] for s in scopes}
+        return BulkCorpus({s: [{"external_id": f"{s}-1", "headline": f"{s} news",
+                                "published_at": fresh}] for s in scopes}, complete=True)
 
     async def mark_verified_current(self, scopes, market_active):
         pass
@@ -599,3 +601,356 @@ async def test_on_a_broad_move_the_biggest_movers_alert_first(monkeypatch):
                                                          price_band=TIER_EXTREME))
     await stub.run_sweep(refresh_news=False)
     assert [scope for scope, _, _ in stub.notified] == ["ORCL", "NVDA", "MSFT", "AAPL"]
+
+
+# ── web-only cards (2026-11-12, JOBY) ─────────────────────────────────────
+# JOBY fell 8% on Wed 2026-11-12 with its newest FMP story 66 h old: the empty window made
+# the pre-check answer `no_corpus`, so the jump's search was never bought and no card was
+# written. A LIVE equity jumper with zero FMP news is now searched, and the gate may write
+# its card from the pages alone. Coins, funds, a faded move (the reserve latch) and a
+# reversed move never are.
+
+import logging  # noqa: E402
+
+from app.services.updates_materiality import WEB_ONLY_REASON  # noqa: E402
+
+
+def _no_news(scopes, limit):
+    return BulkCorpus({s: [] for s in scopes}, complete=True)
+
+
+def _spy_decide(monkeypatch):
+    """The REAL gate, with every call recorded per scope (the pre-check first, then the
+    main loop's verdict)."""
+    real = mod.decide
+    calls = {}
+
+    def _spy(**kw):
+        d = real(**kw)
+        calls.setdefault(kw["scope"], []).append((kw, d))
+        return d
+
+    monkeypatch.setattr(mod, "decide", _spy)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_zero_news_stock_jumper_is_searched_and_gets_a_web_only_card(monkeypatch, caplog):
+    seen_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    web = _FakeWeb(pages={"JOBY": ("p1", "p2")}, refreshed_at=seen_at, pages_direction="down")
+    stub = _web_stub([_row("JOBY", -9.0), _row("SPY", 0.2)], [MARKET_SCOPE, "JOBY"], web)
+    stub.get_cached_bulk = _no_news
+    calls = _spy_decide(monkeypatch)
+    caplog.set_level(logging.INFO, logger=mod.__name__)
+    await stub.run_sweep(refresh_news=False)
+
+    assert [c.scope for c in web.asked[0]] == ["JOBY"]           # the search was bought
+    pre_kw, pre = calls["JOBY"][0]
+    assert pre_kw["web_only_ok"] is True and pre.reason != "no_corpus"
+    gate_kw, verdict = calls["JOBY"][-1]
+    assert gate_kw["web_only_ok"] is True and gate_kw["web_result_count"] == 2
+    assert verdict.action == ACTION_GENERATE and WEB_ONLY_REASON in verdict.reason
+    gen = stub.generated["JOBY"]
+    assert gen["corpus"] == [] and gen["web_context"] == ("p1", "p2")
+    assert WEB_ONLY_REASON in gen["trigger_reason"]
+    assert "new_articles" not in gen["trigger_reason"]
+    assert gen["trigger_reason"].count("web (") == 1             # never "web (2) + web (2)"
+    # The market card never vouches for itself.
+    assert all(kw["web_only_ok"] is False for kw, _ in calls[MARKET_SCOPE])
+    assert MARKET_SCOPE not in stub.generated
+    sweep_lines = [r.getMessage() for r in caplog.records
+                   if r.getMessage().startswith("Insight sweep (")]
+    assert sweep_lines and "web_only=1" in sweep_lines[-1]
+    # Counts only: no page text in the sweep's log.
+    assert "p1" not in caplog.text and "p2" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_with_no_web_only_card_logs_zero(monkeypatch, caplog):
+    stub = _Stub([_row("ORCL", 0.4)], ["ORCL"])
+    caplog.set_level(logging.INFO, logger=mod.__name__)
+    await stub.run_sweep(refresh_news=False)
+    sweep_lines = [r.getMessage() for r in caplog.records
+                   if r.getMessage().startswith("Insight sweep (")]
+    assert sweep_lines and "web_only=0" in sweep_lines[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_coin_or_fund_jumper_with_no_news_gets_no_web_only_card(monkeypatch):
+    """Pages for a coin or an ETF never exist in production (they are never searched); the
+    gate's `web_only_ok` refuses them anyway, from the same `_searchable_equity` rule."""
+    web = _FakeWeb(pages={"ETHUSD": ("p1",), "SPYX": ("p1",), "GCUSD": ("p1",)},
+                   refreshed_at=datetime.now(timezone.utc), pages_direction="up")
+    stub = _web_stub(
+        [_row("ETHUSD", 12.0), _row("SPYX", 9.0, isEtf=True), _row("GCUSD", 9.0)],
+        ["ETHUSD", "SPYX", "GCUSD"], web,
+    )
+    stub.get_cached_bulk = _no_news
+    calls = _spy_decide(monkeypatch)
+    await stub.run_sweep(refresh_news=False)
+    assert all(not batch for batch in web.asked)
+    for scope in ("ETHUSD", "SPYX", "GCUSD"):
+        kw, d = calls[scope][-1]
+        assert kw["web_only_ok"] is False
+        assert d.reason == "no_corpus"
+    assert stub.generated == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state, why", [
+    ({"regen_count_today": 16, "attempts_today": 16}, "daily_cap"),
+    ({"regen_count_today": 1, "attempts_today": 3}, "web_only_failure_cap"),
+])
+async def test_a_capped_zero_news_jumper_is_neither_searched_nor_carded(monkeypatch, state, why):
+    web = _FakeWeb(pages={"JOBY": ("p1",)}, refreshed_at=datetime.now(timezone.utc),
+                   pages_direction="down")
+    stub = _web_stub([_row("JOBY", -9.0)], ["JOBY"], web)
+    stub.get_cached_bulk = _no_news
+    today = mod.et_date(datetime.now(timezone.utc)).isoformat()
+    stub._load_state = lambda scopes: mod._MarkedRead(
+        {"JOBY": {"regen_day": today, **state}}, complete=True,
+    )
+    calls = _spy_decide(monkeypatch)
+    await stub.run_sweep(refresh_news=False)
+    assert all(not batch for batch in web.asked)
+    assert calls["JOBY"][0][1].reason == why
+    assert calls["JOBY"][-1][1].reason == why
+    assert "JOBY" not in stub.generated
+
+
+def test_the_web_only_failure_cap_buys_no_search_but_a_retried_set_may():
+    assert "web_only_failure_cap" in mod._WEB_NOT_ELIGIBLE
+    assert "no_corpus" in mod._WEB_NOT_ELIGIBLE
+    assert "web_only_retried" not in mod._WEB_NOT_ELIGIBLE
+    for reason in ("web_only_failure_cap", "web_only_retried"):
+        assert reason not in mod._VERIFIED_CURRENT_REASONS
+
+
+@pytest.mark.asyncio
+async def test_a_reversed_zero_news_jumper_gets_no_card(monkeypatch):
+    """The kept pages explained a rise; the stock now falls. Pages are withheld, so the
+    empty corpus stays `no_corpus`."""
+    web = _FakeWeb(pages={"JOBY": ("p1",)}, refreshed_at=datetime.now(timezone.utc),
+                   pages_direction="up")
+    stub = _web_stub([_row("JOBY", -9.0)], ["JOBY"], web)
+    stub.get_cached_bulk = _no_news
+    calls = _spy_decide(monkeypatch)
+    await stub.run_sweep(refresh_news=False)
+    kw, d = calls["JOBY"][-1]
+    assert kw["web_result_count"] == 0 and d.reason == "no_corpus"
+    assert "JOBY" not in stub.generated
+
+
+@pytest.mark.asyncio
+async def test_a_faded_jumper_keeps_its_reserve_but_gets_no_web_only_card(monkeypatch):
+    web = _FakeWeb(pages={"JOBY": ("p1",)},
+                   refreshed_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+                   pages_direction="down")
+    stub = _web_stub([_row("JOBY", -9.0)], ["JOBY"], web)
+    stub.get_cached_bulk = _no_news
+    calls = _spy_decide(monkeypatch)
+    await stub.run_sweep(refresh_news=False)
+    assert WEB_ONLY_REASON in stub.generated["JOBY"]["trigger_reason"]
+
+    stub.price = PriceFromFMPFake(_QuoteFMP([_row("JOBY", -0.6)]))   # the move faded
+    stub.generated.clear()
+    calls.clear()
+    await stub.run_sweep(refresh_news=False)
+    kw, d = calls["JOBY"][-1]
+    assert kw["jumping"] is True                 # the per-day reserve latch
+    assert kw["web_only_ok"] is False            # but not the LIVE move
+    assert d.reason == "no_corpus"
+    assert "JOBY" not in stub.generated
+
+
+def test_searchable_equity_never_raises_on_a_malformed_quote():
+    assert InsightSweeper._searchable_equity("JOBY", None) is True
+    assert InsightSweeper._searchable_equity("JOBY", "junk") is True
+    assert InsightSweeper._searchable_equity("JOBY", {"isFund": True}) is False
+    assert InsightSweeper._searchable_equity(MARKET_SCOPE, {}) is False
+    assert InsightSweeper._searchable_equity("BTCUSD", {}) is False
+
+
+# ── a failed read is not "no news" (review 2026-11-12, MED) ──────────────────
+# `get_cached_bulk` stops on a Supabase error and keeps only the pages read so far, so a
+# jumper with a good ARTICLE card can come back with an empty corpus. Before web-only
+# cards that was a harmless `no_corpus`; now it would re-key the card to the empty
+# fingerprint and overwrite it with a web-only one (then back on the next good read).
+# The sweeper vouches for `web_only_ok` only when every read behind the emptiness
+# succeeded — the corpus, the company names and the state rows.
+
+def _carded_state(today, *, hours_ago=3):
+    """A scope that holds an ARTICLE card written long enough ago to be past every
+    cooldown: a GENERATE now would overwrite it."""
+    at = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+    return {"JOBY": {"regen_day": today, "regen_count_today": 1, "attempts_today": 1,
+                     "last_inputset_id": "an-article-card-fingerprint",
+                     "last_generated_at": at, "last_price_band": None}}
+
+
+def _failed_bulk(scopes, limit):
+    return BulkCorpus(complete=False)            # an error on the first page: nothing read
+
+
+def _plain_empty_bulk(scopes, limit):
+    return {}                                    # no completeness flag at all
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken, label", [
+    ("bulk_failed", "corpus read incomplete"),
+    ("bulk_unflagged", "corpus read incomplete"),
+    ("names_failed", "company names unread"),
+    ("state_failed", "state rows unread"),
+])
+async def test_a_failed_read_never_turns_an_article_card_into_a_web_only_card(
+    monkeypatch, caplog, broken, label,
+):
+    seen_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    web = _FakeWeb(pages={"JOBY": ("p1", "p2")}, refreshed_at=seen_at,
+                   pages_direction="down")
+    stub = _web_stub([_row("JOBY", -9.0)], [MARKET_SCOPE, "JOBY"], web)
+    today = mod.et_date(datetime.now(timezone.utc)).isoformat()
+    stub.get_cached_bulk = _no_news
+    stub._load_state = lambda scopes: mod._MarkedRead(_carded_state(today), complete=True)
+    if broken == "bulk_failed":
+        stub.get_cached_bulk = _failed_bulk
+    elif broken == "bulk_unflagged":
+        stub.get_cached_bulk = _plain_empty_bulk
+    elif broken == "names_failed":
+        stub._company_names = lambda scopes: mod._MarkedRead(complete=False)
+    else:
+        # An unread state is an EMPTY state (the article fingerprint is not seen): the
+        # web-only bounds would be blind, so the vouch is withdrawn too.
+        stub._load_state = lambda scopes: mod._MarkedRead(complete=False)
+    calls = _spy_decide(monkeypatch)
+    caplog.set_level(logging.INFO, logger=mod.__name__)
+    await stub.run_sweep(refresh_news=False)
+
+    assert all(not batch for batch in web.asked)                 # no search bought
+    assert all(kw["web_only_ok"] is False for kw, _ in calls["JOBY"])
+    assert all(d.action != ACTION_GENERATE for _, d in calls["JOBY"])
+    assert calls["JOBY"][-1][1].reason == "no_corpus"
+    assert "JOBY" not in stub.generated
+    degrade = [r for r in caplog.records
+               if r.levelno == logging.WARNING and "web-only cards OFF" in r.getMessage()]
+    assert len(degrade) == 1 and label in degrade[0].getMessage()
+    assert "p1" not in caplog.text and "p2" not in caplog.text
+    sweep_lines = [r.getMessage() for r in caplog.records
+                   if r.getMessage().startswith("Insight sweep (")]
+    assert sweep_lines and "web_only=0" in sweep_lines[-1]
+
+
+@pytest.mark.asyncio
+async def test_the_same_jumper_after_a_complete_read_does_get_its_web_only_card(
+    monkeypatch, caplog,
+):
+    """The control for the test above: identical inputs with every read complete — so the
+    refusals there come from the degrade, not from the setup."""
+    seen_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    web = _FakeWeb(pages={"JOBY": ("p1", "p2")}, refreshed_at=seen_at,
+                   pages_direction="down")
+    stub = _web_stub([_row("JOBY", -9.0)], [MARKET_SCOPE, "JOBY"], web)
+    today = mod.et_date(datetime.now(timezone.utc)).isoformat()
+    stub.get_cached_bulk = _no_news
+    stub._load_state = lambda scopes: mod._MarkedRead(_carded_state(today), complete=True)
+    calls = _spy_decide(monkeypatch)
+    caplog.set_level(logging.INFO, logger=mod.__name__)
+    await stub.run_sweep(refresh_news=False)
+
+    assert [c.scope for c in web.asked[0]] == ["JOBY"]
+    kw, d = calls["JOBY"][-1]
+    assert kw["web_only_ok"] is True
+    assert d.action == ACTION_GENERATE and WEB_ONLY_REASON in d.reason
+    assert "web-only cards OFF" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_leaves_the_article_path_untouched(monkeypatch):
+    """A partial read that still holds a scope's articles writes its card as before: only
+    an EMPTY corpus needed the vouch."""
+    stub = _Stub([_row("ORCL", 12.04)], ["ORCL"])
+    fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    stub.get_cached_bulk = lambda scopes, limit: BulkCorpus(
+        {"ORCL": [{"external_id": "ORCL-1", "headline": "ORCL news",
+                   "published_at": fresh}]},
+        complete=False,
+    )
+    calls = _spy_decide(monkeypatch)
+    await stub.run_sweep(refresh_news=False)
+    kw, d = calls["ORCL"][-1]
+    assert kw["web_only_ok"] is False
+    assert d.action == ACTION_GENERATE and WEB_ONLY_REASON not in d.reason
+    assert "ORCL" in stub.generated
+
+
+@pytest.mark.asyncio
+async def test_a_degraded_sweep_with_no_jumper_logs_no_web_only_warning(monkeypatch, caplog):
+    stub = _Stub([_row("ORCL", 0.4)], ["ORCL"])
+    stub.get_cached_bulk = _failed_bulk
+    caplog.set_level(logging.INFO, logger=mod.__name__)
+    await stub.run_sweep(refresh_news=False)
+    assert "web-only cards OFF" not in caplog.text
+
+
+@pytest.mark.parametrize("answer, complete", [
+    (BulkCorpus(complete=True), True),
+    (BulkCorpus(complete=False), False),
+    (BulkCorpus(complete="yes"), False),          # strictly True, never a truthy stand-in
+    (BulkCorpus(complete=1), False),
+    ({}, False),                                  # a plain dict carries no flag → closed
+    ({"JOBY": []}, False),
+    (None, False),
+    (mod._MarkedRead(complete=True), True),
+    (mod._MarkedRead({"A": 1}, complete=False), False),
+])
+def test_only_a_strictly_complete_read_is_complete(answer, complete):
+    assert mod._read_is_complete(answer) is complete
+
+
+def test_the_real_reads_mark_a_failure_incomplete():
+    class _Boom:
+        def table(self, name):
+            raise RuntimeError("connection reset")
+
+    stub = _Stub([], [])
+    stub.supabase = _Boom()
+    names = InsightSweeper._company_names(stub, ["JOBY"])
+    state = InsightSweeper._load_state(stub, ["JOBY"])
+    assert names == {} and mod._read_is_complete(names) is False
+    assert state == {} and mod._read_is_complete(state) is False
+    # No symbol to look up is a complete (empty) answer, not a failure.
+    assert mod._read_is_complete(InsightSweeper._company_names(stub, [MARKET_SCOPE])) is True
+
+
+def test_the_real_reads_mark_a_success_complete():
+    class _Result:
+        def __init__(self, data):
+            self.data = data
+
+    class _Query:
+        def __init__(self, data):
+            self._data = data
+
+        def select(self, *a):
+            return self
+
+        def in_(self, *a):
+            return self
+
+        def execute(self):
+            return _Result(self._data)
+
+    class _Ok:
+        def table(self, name):
+            if name == "watchlist_items":
+                return _Query([{"ticker": "JOBY", "company_name": "Joby Aviation"}])
+            return _Query([{"scope": "JOBY", "attempts_today": 1}])
+
+    stub = _Stub([], [])
+    stub.supabase = _Ok()
+    names = InsightSweeper._company_names(stub, ["JOBY"])
+    state = InsightSweeper._load_state(stub, ["JOBY"])
+    assert names == {"JOBY": "Joby Aviation"} and mod._read_is_complete(names) is True
+    assert state == {"JOBY": {"scope": "JOBY", "attempts_today": 1}}
+    assert mod._read_is_complete(state) is True

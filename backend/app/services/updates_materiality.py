@@ -261,6 +261,33 @@ REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS = 1800
 # the first wire stories. Same `daily_cap_for` feeds the gate AND the claim RPC.
 JUMP_RESERVE = 6
 
+# ── Web-only cards (2026-11-12) ──
+# JOBY, Wed 2026-11-12: −8% as an Unusual mover, but its newest FMP story was 66 h old,
+# so the 48 h corpus window was empty, the gate said `no_corpus`, the jump's web search
+# was never bought and the Updates screen showed no Insight card. Owner: "web search
+# fills it". A LIVE equity jumper (the sweeper decides who — `web_only_ok`) whose window
+# is empty may now be written from the jump's web pages alone.
+#
+# The reason tag every such decision carries — ALWAYS, cold start and band change
+# included, never `new_articles (0)`. It is the write-time mark the read side keys on
+# (`news_insight_service.is_web_only_row`), so it must equal
+# `news_insight_service.WEB_ONLY_REASON`. Defined here, not imported:
+# `news_insight_service` imports this module (a test pins the two equal).
+WEB_ONLY_REASON = "web_only"
+# Web-only failures (any failure, conservatively: the state row has no per-kind
+# failure counter, so `attempts_today - regen_count_today` is read) a scope may absorb
+# in one ET day before the web-only path stops for that day. Well under the
+# `PER_SCOPE_FAILURE_ALLOWANCE` (4), so a real FMP story that lands later the same
+# day still has attempts left for the article path, which this bound never gates.
+# That difference counts every claimed attempt that did not end in a card, not only
+# real generation failures: an article-path failure, a claim given back because the
+# global budget was spent (`_release_claim` records no outcome but the claim already
+# counted the attempt), a deploy's cancellation (`error="cancelled"`) and a web-only
+# refusal that made no model call all count. Conservative by design — it can only
+# close the web-only path sooner, never open it — and two such non-failures on one
+# day therefore end that scope's web-only cards for the day.
+WEB_ONLY_FAILURE_CAP = 2
+
 
 def daily_cap_for(
     is_market_scope: bool,
@@ -735,6 +762,7 @@ def decide(
     jumping: bool = False,
     web_refreshed_at: Optional[datetime] = None,
     web_result_count: int = 0,
+    web_only_ok: bool = False,
 ) -> Decision:
     """Decide whether ``scope``'s Insights card should be regenerated.
 
@@ -768,6 +796,14 @@ def decide(
       ``earnings_reported_at`` and for the same reason never via the fingerprint:
       the web results live in one process, and two instances holding different
       sets would re-key the shared state row against each other.
+    * ``web_only_ok`` (2026-11-12) — the caller vouches that this scope is a LIVE
+      equity jumper (never the reserve latch, never a coin/ETF/the market). Only then
+      may an EMPTY corpus continue past `no_corpus`, and only with a kept page set
+      (``web_result_count`` > 0 and a parseable ``web_refreshed_at``). Such a decision
+      is always tagged `WEB_ONLY_REASON`; each page set is tried once (a failure at or
+      after ``web_refreshed_at`` → `web_only_retried`) and at most
+      `WEB_ONLY_FAILURE_CAP` failures a day are spent on it (`web_only_failure_cap`).
+      The fingerprint stays `compute_inputset_id([], band, model)`: no web data in it.
     """
     try:
         return _decide_inner(
@@ -783,6 +819,7 @@ def decide(
             jumping=jumping,
             web_refreshed_at=web_refreshed_at,
             web_result_count=web_result_count,
+            web_only_ok=web_only_ok,
         )
     except Exception as e:  # pragma: no cover - defensive
         logger.exception(
@@ -813,6 +850,7 @@ def _decide_inner(
     jumping: bool = False,
     web_refreshed_at: Optional[datetime] = None,
     web_result_count: int = 0,
+    web_only_ok: bool = False,
 ) -> Decision:
     state = state or {}
     # A ticker-only concept: the market scope has no earnings date and never jumps.
@@ -821,12 +859,30 @@ def _decide_inner(
         earnings_reported_at = None
         jumping = False
         web_refreshed_at = None
+        web_only_ok = False
+
+    # The jump's kept web pages: when this process last found a NEW set, and how many.
+    # Read BEFORE step 0, because a page set is what lets an empty corpus continue.
+    web_at = _parse_ts(web_refreshed_at)
+    web_count = int(finite(web_result_count) or 0)
 
     # ── 0. Empty corpus: never hand Gemini nothing ──
     # With no articles the model has no grounding and will confabulate a
     # plausible-sounding market summary. Silence beats a fabricated card.
+    # The one exception (2026-11-12, JOBY): a LIVE equity jumper the caller vouches for
+    # (`web_only_ok` — strictly True, never a truthy stand-in) that holds a kept page set.
+    # Its card is written from those pages alone and tagged `WEB_ONLY_REASON`.
+    web_only = False
     if not corpus:
-        return Decision(action=ACTION_SKIP, reason="no_corpus")
+        if not (
+            web_only_ok is True
+            and not is_market_scope
+            and web_at is not None
+            and web_count > 0
+        ):
+            return Decision(action=ACTION_SKIP, reason="no_corpus")
+        web_only = True
+        corpus = []
 
     quote = quote or {}
     change_pct = quote.get("changePercentage")
@@ -867,9 +923,8 @@ def _decide_inner(
 
     # A jump's web search found a NEW set of pages after this card was written: the
     # other change the fingerprint cannot see (the web block is a generation input
-    # held in one process, never part of the digest — see `decide`).
-    web_at = _parse_ts(web_refreshed_at)
-    web_count = int(finite(web_result_count) or 0)
+    # held in one process, never part of the digest — see `decide`). A web-only card's
+    # fingerprint is therefore `compute_inputset_id([], band, model)` above, unchanged.
     web_trigger = web_at is not None and web_count > 0 and (
         last_gen is None or last_gen < web_at
     )
@@ -978,6 +1033,29 @@ def _decide_inner(
             action=ACTION_SKIP, reason="earnings_reserved",
             inputset_id=inputset_id, price_band=band,
         )
+    # Web-only bounds (2026-11-12). Neither ever gates a decision with articles.
+    if web_only:
+        # At most `WEB_ONLY_FAILURE_CAP` failures a day go to the web-only path, so a real
+        # FMP story that lands later still has attempts for the article path. Failures are
+        # read as attempts minus successes: the state row keeps no per-kind counter, so
+        # this counts every failure of the day — conservative, it can only stop sooner.
+        # The clamp is cosmetic (a negative count is never >= the cap); it only keeps
+        # a counter skew (successes > attempts) from reading as a negative number.
+        failures = max(0, attempts - successes)
+        if failures >= WEB_ONLY_FAILURE_CAP:
+            return Decision(
+                action=ACTION_SKIP, reason="web_only_failure_cap",
+                inputset_id=inputset_id, price_band=band,
+            )
+        # One try per page set: a failure at or after the set was found means this set
+        # has had its turn (the failing attempt held the same pages). A NEW set — a later
+        # `web_refreshed_at` — gets one try of its own.
+        failed_at = _parse_ts(state.get("last_failure_at"))
+        if failed_at is not None and web_at <= failed_at:
+            return Decision(
+                action=ACTION_SKIP, reason="web_only_retried",
+                inputset_id=inputset_id, price_band=band,
+            )
 
     # ── 4. Cooldown ──
     cooldown = _cooldown_seconds(
@@ -1028,8 +1106,12 @@ def _decide_inner(
         reasons.append("earnings_reported")
     # With the web trigger alone (an unchanged corpus), the new pages ARE the
     # reason; "new_articles" would claim a corpus change that did not happen.
+    # A web-only card ALWAYS carries `WEB_ONLY_REASON` (cold start and band change
+    # included): it is the mark the read side keys on. Never "new_articles (0)".
     fingerprint_moved = inputset_id != state.get("last_inputset_id")
-    if not reasons and (fingerprint_moved or not web_trigger):
+    if web_only:
+        reasons.append(WEB_ONLY_REASON)
+    elif not reasons and (fingerprint_moved or not web_trigger):
         reasons.append(f"new_articles ({len(corpus)})")
     if web_trigger:
         reasons.append(f"web ({web_count})")
@@ -1057,6 +1139,8 @@ __all__ = [
     "REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS",
     "JUMP_RESERVE",
     "JUMP_TIERS",
+    "WEB_ONLY_REASON",
+    "WEB_ONLY_FAILURE_CAP",
     "jump_band",
     "mwcb_in_force",
     "daily_cap_for",

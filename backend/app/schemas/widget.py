@@ -129,6 +129,14 @@ class WidgetMoverResponse(BaseModel):
     # "etf" | "crypto" | "stock", from the batch quote's own `isEtf` flag (no extra call).
     # None when the quote carried no class — the client then resolves by symbol.
     asset_type: Optional[str] = None
+    # True when `cause` came from this ticker's Insights card: its headline as the cause
+    # (`company_news`, classified or the news lean) or its lean on the NONE path. A build from
+    # 2026-11-12 on links such a row to the Updates card (`caydex://updates/<SYMBOL>`), where the
+    # card's sources and "Ask Cay AI" are; older builds ignore the key and link the detail. A
+    # WEB-ONLY card (sources all web pages) backs a cause only for a caller that sent
+    # `X-App-Version` >= `WEB_ONLY_CAUSE_MIN_APP_VERSION` — anyone else is served as if the
+    # ticker had no card (`widget_movers_service.cards_for_caller`).
+    cause_card: bool = False
 
 
 class WidgetBasketResponse(BaseModel):

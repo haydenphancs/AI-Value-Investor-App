@@ -143,3 +143,104 @@ def test_a_hand_written_web_fixture_is_loaded_and_checked(tmp_path):
         path.write_text(json.dumps(bad))
         with pytest.raises(ValueError):
             preview.load_web_fixture(str(path))
+
+
+# ── web only (2026-11-12) ─────────────────────────────────────────────────────
+
+class _NoNewsFMP:
+    """FMP with no story in the window and an empty earnings calendar."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def get_stock_news(self, *args, **kwargs):
+        self.calls.append("news")
+        return []
+
+    async def get_earnings_calendar(self, **kwargs):
+        self.calls.append("calendar")
+        return []
+
+
+class _CardGemini:
+    def __init__(self, card):
+        self.card = card
+        self.calls = 0
+
+    async def generate_json(self, **kwargs):
+        import json
+
+        self.calls += 1
+        return {"text": json.dumps(self.card)}
+
+
+_DUBAI_PAGE = {
+    "title": "Joby delays its Dubai air taxi launch to 2027",
+    "snippet": "Joby said certification work pushed its commercial launch in Dubai to 2027.",
+    "url": "https://www.reuters.com/business/aerospace/joby-dubai-delay/",
+    "publisher": "Reuters", "published_at": "2026-11-12T16:52:00Z",
+}
+_PRICE_PAGE = {
+    "title": "Why Joby Aviation Stock Is Sinking Today",
+    "snippet": "Joby Aviation (JOBY) shares are trading lower Wednesday.",
+    "url": "https://www.cnbc.com/2026/11/12/why-joby-is-sinking.html",
+    "publisher": "CNBC", "published_at": "2026-11-12T16:52:00Z",
+}
+_DUBAI_CARD = {
+    "headline": "Joby delays its Dubai launch to 2027",
+    "points": ["Joby said certification work pushed its Dubai launch to 2027."],
+    "conclusion": "The Dubai launch now turns on certification work.",
+    "sentiment": "bearish",
+}
+
+
+async def _preview_web_only(tmp_path, monkeypatch, pages):
+    import json
+
+    import app.database as database
+
+    # Read-only: any Supabase use during the replay raises.
+    monkeypatch.setattr(database, "_supabase_client", None)
+    preview.install_supabase_tripwire()
+    argv = ["--scope", "JOBY", "--as-of", "2026-11-12T18:45:00Z", "--jump",
+            "--name", "Joby Aviation, Inc."]
+    if pages is not None:
+        path = tmp_path / "pages.json"
+        path.write_text(json.dumps(pages))
+        argv += ["--web-fixture", str(path)]
+    gemini = _CardGemini(_DUBAI_CARD)
+    code = await preview.run_preview(preview.parse_args(argv), fmp=_NoNewsFMP(), gemini=gemini,
+                                     stored=None, secrets=())
+    return code, gemini
+
+
+@pytest.mark.asyncio
+async def test_a_web_only_day_is_replayed_from_the_fixture(tmp_path, monkeypatch, capsys):
+    """Review 2026-11-12: the replay stopped at "no corpus" before any generation, so a
+    web-only day could not be previewed at all."""
+    code, gemini = await _preview_web_only(tmp_path, monkeypatch, [_DUBAI_PAGE])
+    out = capsys.readouterr().out
+    assert code == 0 and gemini.calls == 1
+    assert "web only: the card is written from 1 page(s) alone" in out
+    assert "no corpus" not in out and "REJECTED" not in out
+    assert "Joby delays its Dubai launch to 2027" in out
+
+
+@pytest.mark.asyncio
+async def test_a_web_only_day_with_only_price_talk_makes_no_model_call(
+    tmp_path, monkeypatch, capsys,
+):
+    """The same no-model-call gate production runs (`_web_only_pages`)."""
+    code, gemini = await _preview_web_only(tmp_path, monkeypatch, [_PRICE_PAGE])
+    out = capsys.readouterr().out
+    assert code == 0 and gemini.calls == 0
+    assert ("REJECTED — no model call, nothing would be written: "
+            "web_only_no_content: price talk only (pages=1)") in out
+
+
+@pytest.mark.asyncio
+async def test_no_story_and_no_fixture_is_still_no_corpus(tmp_path, monkeypatch, capsys):
+    code, gemini = await _preview_web_only(tmp_path, monkeypatch, None)
+    out = capsys.readouterr().out
+    assert code == 0 and gemini.calls == 0
+    assert "no corpus — the sweeper would skip this scope (no_corpus)" in out

@@ -28,6 +28,10 @@ day (a "$5,000 dividend" as the conclusion) — can be replayed exactly:
 
 ``--earnings-actuals absent`` masks the actuals on rows dated the as-of ET day — the
 calendar as it looked before FMP filled them in (status ``due_today``, not ``reported``).
+
+A web-only day (no FMP story in the window, 2026-11-12) replays with ``--jump --web-fixture``:
+the hand-written pages go through the same no-model-call gate as production
+(``_web_only_pages``) before ``_generate_card`` writes the card from them alone.
 """
 from __future__ import annotations
 
@@ -221,6 +225,9 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
     from app.services.news_insight_service import (
         MAX_CORPUS_ARTICLES,
         NewsInsightService,
+        _web_only_pages,
+        _web_rows,
+        price_rule_applies,
         select_recent_corpus,
     )
 
@@ -246,9 +253,22 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
         if stored.get("bullets"):
             print(f"  ↳ {stored['bullets'][-1]}")
         print(f"  (prompt_version {stored.get('prompt_version')}, generated {stored.get('generated_at')})")
-    if not corpus:
+    # The pages go through `_web_rows` exactly as `generate_and_store` passes them on.
+    web = _web_rows(load_web_fixture(args.web_fixture)) if args.web_fixture else []
+    if web:
+        print(f"web fixture: {len(web)} hand-written page(s)")
+    # Web only (2026-11-12): no FMP story but pages → the card is written from the pages alone,
+    # after the same no-model-call gate production runs (`generate_and_store`).
+    web_only = not corpus and bool(web) and price_rule_applies(scope)
+    if not corpus and not web_only:
         print("\nno corpus — the sweeper would skip this scope (no_corpus)")
         return 0
+    if web_only:
+        web, problem = _web_only_pages(scope, web, args.name)
+        if problem:
+            print(f"\nREJECTED — no model call, nothing would be written: {problem}")
+            return 0
+        print(f"web only: the card is written from {len(web)} page(s) alone")
 
     svc = object.__new__(NewsInsightService)
     svc.supabase = None
@@ -260,15 +280,12 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
     # The sweeper hands the card the sweep's quote; replaying a big-move day needs it (the
     # MARKET prompt's "Price context" line, and the ticker guard's figure rules).
     quote = {"changePercentage": args.quote_pct} if args.quote_pct is not None else None
-    web_pages = load_web_fixture(args.web_fixture) if args.web_fixture else None
-    if web_pages:
-        print(f"web fixture: {len(web_pages)} hand-written page(s)")
     for i in range(args.samples):
         before = len(counting.tags)
         card, reason = await svc._generate_card(
             scope, corpus, f"preview-{scope}-{as_of.isoformat()}-{i}", args.price_band, quote,
             now=as_of, earnings=status, company_name=args.name, jumping=args.jump,
-            web_context=web_pages,
+            web_context=web or None,
         )
         tags = counting.tags[before:]
         if i == 0 and args.show_prompt and counting.prompts:

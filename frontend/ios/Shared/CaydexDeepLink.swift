@@ -7,10 +7,15 @@
 
 import Foundation
 
-/// The `caydex://` links a Home Screen widget tap opens. Exactly two shapes:
+/// The `caydex://` links a Home Screen widget tap opens. Exactly three shapes:
 /// - `caydex://ticker/<SYMBOL>[?type=<class>]` → that asset's detail screen (a Holdings tap);
 /// - `caydex://updates/market` → the Updates tab on its Market chip, where the Market Insight
-///   card leads (a Market tap; owner, 2026-10-22).
+///   card leads (a Market tap; owner, 2026-10-22);
+/// - `caydex://updates/<SYMBOL>[?type=<class>]` → the Updates tab on that ticker's chip, where its
+///   Insights card and the card's sources are (a Holdings row whose cause came from that card, the
+///   payload's `cause_card`; 2026-11-12). The app falls back to the ticker's detail screen when the
+///   ticker is not one of the user's chips; `type` picks that fallback screen, as on a ticker link
+///   (an ETF holding must not fall back to the equity screen).
 ///
 /// Lives in `Shared/`, so it compiles into BOTH targets. The widget that BUILDS a link and the
 /// app that PARSES it share one grammar, and neither side can drift from the other.
@@ -27,20 +32,28 @@ import Foundation
 /// nearest valid link:
 /// - the symbol is ASCII `[A-Z0-9]` segments joined by `.` or `-`, with an optional leading
 ///   `^`, at most `maxSymbolLength` characters;
-/// - `type` is one of `AssetClass`, given at most once, and is the only query key allowed;
-/// - an `updates` link is exactly the path `/market`, with no query at all;
+/// - `type` is one of `AssetClass`, given at most once, and is the only query key allowed
+///   (`typeQuery`, ONE reader shared by the ticker and `updates/<SYMBOL>` links);
+/// - an `updates` link's path is exactly `/market`, with no query at all, or ONE symbol in its
+///   canonical form (already uppercased and trimmed, as `updatesTickerURL` builds it) with the
+///   ticker link's optional `type`, never `MARKET` (reserved: that is the chip, not a ticker) — so
+///   `/research`, `/MARKET` and `/market?type=etf` are refused;
 /// - there are no credentials, port, fragment or extra path segments.
 ///
 /// What a link may do is decided by the app (`DeepLinkRouter`), not here. That is: open a
-/// detail screen or the Updates tab, behind the sign-in wall, and nothing that spends credits.
+/// detail screen or the Updates tab (its Market chip or one ticker's chip), behind the sign-in
+/// wall, and nothing that spends credits.
 nonisolated public enum CaydexDeepLink {
 
     /// Pinned equal to `APIConfig.oauthCallbackScheme` and Info.plist's `CFBundleURLSchemes`.
     public static let scheme = "caydex"
     static let tickerHost = "ticker"
     static let updatesHost = "updates"
-    /// The one path the `updates` host accepts. Lower-case and exact: no other chip is a link.
+    /// The Market chip's path on the `updates` host. Lower-case and exact.
     static let updatesMarketPath = "/market"
+    /// The one symbol an `updates/<SYMBOL>` link may never name: in any case-folding reader its
+    /// path is the Market chip's. Neither built nor parsed as a ticker.
+    static let reservedUpdatesSymbol = "MARKET"
     static let typeKey = "type"
     /// Longer than any listed symbol (`SHOP.TO`, `BRK-B`, `^GSPC`, `BTCUSD`) with headroom.
     static let maxSymbolLength = 20
@@ -72,6 +85,10 @@ nonisolated public enum CaydexDeepLink {
         case ticker(Ticker)
         /// `caydex://updates/market`: the Updates tab on its Market chip.
         case updatesMarket
+        /// `caydex://updates/<SYMBOL>[?type=<class>]`: the Updates tab on that ticker's chip
+        /// (canonical symbol). `assetClass` is for the fallback detail screen only; nil means
+        /// "resolve from the symbol", as on a ticker link.
+        case updatesTicker(symbol: String, assetClass: AssetClass?)
         /// Not a link of ours at all: another scheme, or another `caydex` host such as the
         /// OAuth `auth-callback`. The caller must leave it alone.
         case notOurLink
@@ -108,6 +125,24 @@ nonisolated public enum CaydexDeepLink {
         return components.url
     }
 
+    /// A Holdings row whose cause came from the ticker's Insights card (`cause_card`): the
+    /// Updates tab on that ticker's chip, where the card's sources are. nil for a symbol outside
+    /// the grammar, and for the reserved `MARKET`. Built like `tickerURL`: `URLComponents`
+    /// percent-encodes `^`, and the only query is the optional `type` of the fallback screen.
+    public static func updatesTickerURL(symbol: String, assetClass: AssetClass? = nil) -> URL? {
+        guard let normalized = normalizedSymbol(symbol), normalized != reservedUpdatesSymbol else {
+            return nil
+        }
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = updatesHost
+        components.path = "/" + normalized
+        if let assetClass {
+            components.queryItems = [URLQueryItem(name: typeKey, value: assetClass.rawValue)]
+        }
+        return components.url
+    }
+
     // MARK: - Parse (app)
 
     public static func parse(_ url: URL) -> ParseResult {
@@ -126,12 +161,29 @@ nonisolated public enum CaydexDeepLink {
         else { return .malformed(reason: "unexpected_component") }
 
         if host == updatesHost {
-            // `query` (not `queryItems`) so a bare trailing `?` is refused too.
-            guard components.query == nil else { return .malformed(reason: "unknown_query_key") }
-            guard components.path == updatesMarketPath else {
+            if components.path == updatesMarketPath {
+                // `query` (not `queryItems`) so a bare trailing `?` is refused too.
+                guard components.query == nil else { return .malformed(reason: "unknown_query_key") }
+                return .updatesMarket
+            }
+            // `caydex://updates/<SYMBOL>`: one symbol, exactly as `updatesTickerURL` builds it.
+            // The canonical-form check refuses a lowercase, padded or otherwise repaired
+            // spelling, so `/research` can never become RESEARCH.
+            guard components.path.hasPrefix("/") else {
                 return .malformed(reason: "unknown_updates_path")
             }
-            return .updatesMarket
+            let rawUpdatesSymbol = String(components.path.dropFirst())
+            guard !rawUpdatesSymbol.contains("/"),
+                  let symbol = normalizedSymbol(rawUpdatesSymbol),
+                  symbol == rawUpdatesSymbol,
+                  symbol != reservedUpdatesSymbol
+            else { return .malformed(reason: "unknown_updates_path") }
+            // The ticker link's optional `type`, read by the SAME reader: it only picks the
+            // fallback detail screen.
+            switch typeQuery(components.queryItems) {
+            case .refused(let reason): return .malformed(reason: reason)
+            case .accepted(let assetClass): return .updatesTicker(symbol: symbol, assetClass: assetClass)
+            }
         }
 
         // `path` is percent-DECODED, so an encoded `%2F` shows up here as `/` and is refused.
@@ -143,18 +195,36 @@ nonisolated public enum CaydexDeepLink {
             return .malformed(reason: "invalid_symbol")
         }
 
+        switch typeQuery(components.queryItems) {
+        case .refused(let reason): return .malformed(reason: reason)
+        case .accepted(let assetClass): return .ticker(Ticker(symbol: symbol, assetClass: assetClass))
+        }
+    }
+
+    /// What `typeQuery` decided about a link's query.
+    enum TypeQuery: Equatable {
+        /// No query, or exactly one known `type`. nil means "resolve from the symbol".
+        case accepted(AssetClass?)
+        /// Outside the grammar, with the reason `parse` reports.
+        case refused(String)
+    }
+
+    /// The ONE reader of the optional `type=<class>` query, shared by `ticker/<SYMBOL>` and
+    /// `updates/<SYMBOL>` so the two can never accept different queries: `type` is the only key,
+    /// given at most once, and one of `AssetClass`.
+    static func typeQuery(_ items: [URLQueryItem]?) -> TypeQuery {
         var assetClass: AssetClass?
         var sawType = false
-        for item in components.queryItems ?? [] {
-            guard item.name == typeKey else { return .malformed(reason: "unknown_query_key") }
-            guard !sawType else { return .malformed(reason: "duplicate_type") }
+        for item in items ?? [] {
+            guard item.name == typeKey else { return .refused("unknown_query_key") }
+            guard !sawType else { return .refused("duplicate_type") }
             sawType = true
             guard let parsed = AssetClass(wire: item.value) else {
-                return .malformed(reason: "unknown_type")
+                return .refused("unknown_type")
             }
             assetClass = parsed
         }
-        return .ticker(Ticker(symbol: symbol, assetClass: assetClass))
+        return .accepted(assetClass)
     }
 
     // MARK: - Symbol grammar

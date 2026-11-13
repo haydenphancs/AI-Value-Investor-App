@@ -42,6 +42,11 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
+from app.core.client_app_version import (
+    WEB_ONLY_CAUSE_MIN_APP_VERSION,
+    capture_client_app_version,
+    client_is_at_least,
+)
 from app.core.security import create_widget_token, widget_token_expires_at
 from app.dependencies import (
     UserIdRateLimitChecker,
@@ -151,7 +156,12 @@ def _empty(mode: str) -> WidgetMoverPayload:
 
 
 @widget_client_router.get("/market-mover", response_model=WidgetMoverPayload)
-async def get_market_mover(_rate_limit=WidgetRateLimit) -> WidgetMoverPayload:
+async def get_market_mover(
+    _rate_limit=WidgetRateLimit,
+    # Records X-App-Version for the web-only cause gate (`WEB_ONLY_CAUSE_MIN_APP_VERSION`). The
+    # extension's fetcher sends it from 1.03 on; an older extension sends none and is held.
+    _app_version: None = Depends(capture_client_app_version),
+) -> WidgetMoverPayload:
     """The most unusual move among the tickers Caydex tracks, and why.
 
     ⚠️ This docstring used to open "Public on purpose". It was, and that is exactly why the
@@ -172,7 +182,9 @@ async def get_market_mover(_rate_limit=WidgetRateLimit) -> WidgetMoverPayload:
     on one that moves that much routinely.
     """
     try:
-        return await get_widget_movers_service().get_market_mover()
+        return await get_widget_movers_service().get_market_mover(
+            links_web_only=client_is_at_least(WEB_ONLY_CAUSE_MIN_APP_VERSION),
+        )
     except Exception as e:
         logger.error(
             "widget market-mover failed: %s: %s", type(e).__name__, e, exc_info=True
@@ -225,6 +237,9 @@ async def get_portfolio_mover(
     # (`.signInRequired`).
     user: dict = Depends(get_watchlist_identity),
     _rate_limit=WidgetPortfolioRateLimit,
+    # Records X-App-Version (the app's `APIClient` sends it on every request) for the web-only
+    # cause gate: a web-only card backs a cause only for a build that links it (fail closed).
+    _app_version: None = Depends(capture_client_app_version),
 ) -> WidgetMoverPayload:
     """The caller's biggest movers — ranked by absolute % move — plus a combined reason when
     holdings moved together.
@@ -282,7 +297,8 @@ async def get_portfolio_mover(
             )
 
         payload = await get_widget_movers_service().get_portfolio_mover(
-            user_id, tickers[:_MAX_HOLDINGS]
+            user_id, tickers[:_MAX_HOLDINGS],
+            links_web_only=client_is_at_least(WEB_ONLY_CAUSE_MIN_APP_VERSION),
         )
         # A COPY. `payload` may be the cached object every caller in the TTL shares.
         return payload.model_copy(

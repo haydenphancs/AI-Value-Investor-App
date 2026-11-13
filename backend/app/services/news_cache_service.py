@@ -604,6 +604,29 @@ def _has_waiters(fut: asyncio.Future) -> bool:
         return True
 
 
+class BulkCorpus(dict):
+    """`get_cached_bulk`'s answer: the ordinary ``{scope: rows}`` dict, plus ``complete``.
+
+    ``complete`` is True only when every page the read needed was read — a short page,
+    or every scope already full. A Supabase error mid-read (the loop stops and keeps the
+    pages read so far) or the runaway page guard leaves it False: a scope missing from a
+    partial answer may hold news on a page that was never fetched, so its empty corpus
+    is NOT "no news". The sweeper reads it before letting an empty corpus become a
+    web-only Insight card (2026-11-12). Per call, never per instance: the service is a
+    process singleton that the sweeper and chat read from different threads at once.
+
+    A dict subclass so every existing caller (``.get``, ``.items``, ``==`` against a plain
+    dict) keeps working unchanged; a reader that rebuilds the dict drops the flag, and a
+    missing flag must be read as INCOMPLETE (fail closed).
+    """
+
+    __slots__ = ("complete",)
+
+    def __init__(self, *args: Any, complete: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.complete = complete is True
+
+
 class NewsCacheService:
     """Service for fetching and caching news per ticker with lazy AI enrichment."""
 
@@ -2723,18 +2746,21 @@ class NewsCacheService:
 
     def get_cached_bulk(
         self, scopes: List[str], per_scope_limit: int = 25
-    ) -> Dict[str, List[Dict[str, Any]]]:
+    ) -> BulkCorpus:
         """Fresh cached rows for MANY scopes in ONE Supabase query.
 
         The insight sweeper evaluates every watchlisted scope on each pass; doing
         that with one `_get_cached` call per scope would be N round-trips per
         sweep. Rows come back newest-first and are truncated per scope in Python.
 
+        Returns a `BulkCorpus` (a plain dict to every caller) whose ``complete`` says
+        whether every needed page was read; a failed or runaway read is ``False``.
+
         Blocking — call via ``asyncio.to_thread`` from async code.
         """
         scopes = [s for s in dict.fromkeys(scopes) if s]
         if not scopes:
-            return {}
+            return BulkCorpus(complete=True)
 
         now_iso = datetime.now(timezone.utc).isoformat()
         # `source_name` is load-bearing, not cosmetic: it is the ONLY place the
@@ -2782,6 +2808,9 @@ class NewsCacheService:
         # while a sparse scope's rows sit on a later page that is never fetched —
         # and a scope that comes back empty reads as `no_corpus`, so its Insights
         # card is never generated. `_MAX_BULK_PAGES` is only a runaway guard.
+        # `complete` turns True only on a natural end (a short page, or every scope
+        # full); an error or the runaway guard leaves it False (`BulkCorpus`).
+        complete = False
         while offset < page_size * self._MAX_BULK_PAGES:
             try:
                 result = (
@@ -2831,13 +2860,22 @@ class NewsCacheService:
                     bucket.append(row)
 
             if len(rows) < page_size:
+                complete = True
                 break  # short read => last page, every scope has been seen
             # Every scope already full → nothing more to learn from later pages.
             if len(grouped) == len(scopes) and all(
                 len(v) >= per_scope_limit for v in grouped.values()
             ):
+                complete = True
                 break
             offset += page_size
+        else:
+            # The runaway guard, not a natural end: later pages were never read.
+            logger.warning(
+                "Bulk cache lookup for %d scopes stopped at the %d-page guard — "
+                "the answer is incomplete",
+                len(scopes), self._MAX_BULK_PAGES,
+            )
 
         if market_rows:
             # The final pass applies the floor: a market cache that holds fewer than
@@ -2846,7 +2884,7 @@ class NewsCacheService:
             grouped[MARKET_SCOPE] = select_market_stories(
                 market_rows, label="market corpus"
             )[:per_scope_limit]
-        return grouped
+        return BulkCorpus(grouped, complete=complete)
 
     async def refresh_scope_news(
         self, scope: str, limit: int = 50, lookback_hours: int = REFRESH_LOOKBACK_HOURS,

@@ -317,3 +317,197 @@ def test_a_naive_web_timestamp_is_read_as_utc():
     naive_after = (NOW - timedelta(minutes=2)).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
     d = _decide(state=st, web_refreshed_at=naive_after, web_result_count=1)
     assert d.reason == "web (1)"
+
+
+# ── web-only cards (2026-11-12, JOBY) ─────────────────────────────────────
+# JOBY, Wed 2026-11-12: −8% as an Unusual mover, newest FMP story 66 h old, so the 48 h
+# window was empty, the gate said `no_corpus` and the jump's web search was never bought.
+# A LIVE equity jumper (`web_only_ok`, the sweeper's call) holding kept pages may now get a
+# card from those pages alone — always tagged `web_only`, once per page set, and at most
+# `WEB_ONLY_FAILURE_CAP` failures a day so the article path keeps its attempts.
+
+from app.services.updates_materiality import (  # noqa: E402
+    WEB_ONLY_FAILURE_CAP,
+    WEB_ONLY_REASON,
+)
+
+PAGES_AT = NOW - timedelta(minutes=2)
+
+
+def _web_only(**over):
+    kw = dict(corpus=[], quote=JUMP_QUOTE, jumping=True, web_only_ok=True,
+              web_refreshed_at=PAGES_AT, web_result_count=3)
+    kw.update(over)
+    return _decide(**kw)
+
+
+def _empty_fp(quote=JUMP_QUOTE, sigma=0.03):
+    live = classify_move(quote["changePercentage"], sigma, market_cap=quote["marketCap"])
+    return compute_inputset_id([], canonical_band(live), MODEL, PROMPT_VERSION)
+
+
+def test_the_web_only_reason_matches_the_read_sides_mark():
+    from app.services import news_insight_service as nis
+    assert WEB_ONLY_REASON == nis.WEB_ONLY_REASON == "web_only"
+    d = _web_only()
+    row = {"trigger_reason": d.reason,
+           "sources": [{"title": "Joby falls", "origin": "web", "url": "https://x.example/a"}]}
+    assert nis.is_web_only_row(row)
+
+
+def test_an_empty_corpus_with_pages_generates_a_web_only_card_on_a_cold_start():
+    d = _web_only()
+    assert d.action == ACTION_GENERATE
+    assert d.reason == "cold_start + web_only + web (3)"
+    assert "new_articles" not in d.reason
+    assert d.score > 0
+
+
+def test_a_band_change_still_carries_the_web_only_tag():
+    st = _state(successes=1, last_generated_at=NOW - timedelta(hours=2))
+    st["last_inputset_id"] = "an-older-corpus"
+    st["last_price_band"] = "Notable"
+    d = _web_only(state=st)
+    assert d.action == ACTION_GENERATE
+    assert d.reason.startswith("band Notable->")
+    assert WEB_ONLY_REASON in d.reason and "new_articles" not in d.reason
+
+
+def test_web_only_without_a_web_trigger_is_tagged_web_only_never_new_articles_0():
+    """The articles aged out after a card that already used these pages: the fingerprint
+    moves (the corpus emptied) but the pages are not new. Still never "new_articles (0)"."""
+    st = _state(successes=1, last_generated_at=NOW - timedelta(minutes=30))
+    st["last_inputset_id"] = "a-corpus-with-articles"
+    d = _web_only(state=st, web_refreshed_at=NOW - timedelta(hours=1))
+    assert (d.action, d.reason) == (ACTION_GENERATE, WEB_ONLY_REASON)
+
+
+def test_the_web_only_fingerprint_holds_no_web_data():
+    a = _web_only()
+    b = _web_only(web_result_count=7, web_refreshed_at=NOW - timedelta(minutes=9))
+    assert a.inputset_id == b.inputset_id == _empty_fp()
+
+
+def test_a_written_web_only_card_is_not_rewritten_from_the_same_pages():
+    st = _state(successes=1, last_generated_at=PAGES_AT + timedelta(seconds=30))
+    st["last_inputset_id"] = _empty_fp()
+    d = _web_only(state=st)
+    assert (d.action, d.reason) == (ACTION_SKIP, "fingerprint_unchanged")
+
+
+@pytest.mark.parametrize("count", [0, None, -1, float("nan"), float("inf"), "x", True])
+def test_no_kept_pages_is_still_no_corpus(count):
+    d = _web_only(web_result_count=count)
+    assert (d.action, d.reason) == (ACTION_SKIP, "no_corpus")
+
+
+@pytest.mark.parametrize("at", [None, "not-a-time", 12345, ""])
+def test_an_unparseable_page_time_is_still_no_corpus(at):
+    d = _web_only(web_refreshed_at=at)
+    assert (d.action, d.reason) == (ACTION_SKIP, "no_corpus")
+
+
+@pytest.mark.parametrize("ok", [False, None, 1, "yes", "True"])
+def test_only_a_strict_true_web_only_ok_lets_an_empty_corpus_through(ok):
+    d = _web_only(web_only_ok=ok)
+    assert (d.action, d.reason) == (ACTION_SKIP, "no_corpus")
+
+
+def test_the_market_scope_never_gets_a_web_only_card():
+    d = _web_only(scope="__MARKET__", is_market_scope=True,
+                  quote={"changePercentage": -3.0}, sigma=0.008)
+    assert (d.action, d.reason) == (ACTION_SKIP, "no_corpus")
+
+
+def test_a_none_corpus_is_read_as_empty():
+    assert _web_only(corpus=None).action == ACTION_GENERATE
+    assert _decide(corpus=None).reason == "no_corpus"
+
+
+def test_web_only_ok_never_changes_a_decision_with_articles():
+    st = _state(successes=4, last_generated_at=NOW - timedelta(minutes=20))
+    st["last_inputset_id"] = "an-older-corpus"
+    with_flag = _decide(state=st, web_only_ok=True, web_refreshed_at=PAGES_AT,
+                        web_result_count=2)
+    without = _decide(state=st, web_refreshed_at=PAGES_AT, web_result_count=2)
+    assert with_flag == without
+    assert with_flag.reason == "new_articles (2) + web (2)"
+
+
+def test_a_page_set_that_failed_is_not_retried():
+    failed = PAGES_AT + timedelta(minutes=1)
+    st = _state(successes=0, attempts=1)
+    st["last_failure_at"] = failed.isoformat()
+    # Twenty minutes on: past the failure cooldown, so only the one-shot rule holds it.
+    d = _web_only(state=st, now=failed + timedelta(minutes=20))
+    assert (d.action, d.reason) == (ACTION_SKIP, "web_only_retried")
+    # A failure at the very instant the pages were found counts as their try too.
+    st["last_failure_at"] = PAGES_AT.isoformat()
+    assert _web_only(state=st, now=NOW + timedelta(minutes=20)).reason == "web_only_retried"
+
+
+def test_a_new_page_set_after_a_failure_gets_its_own_try():
+    failed_at = NOW - timedelta(minutes=30)
+    st = _state(successes=0, attempts=1)
+    st["last_failure_at"] = failed_at.isoformat()
+    d = _web_only(state=st, web_refreshed_at=failed_at + timedelta(minutes=10))
+    assert d.action == ACTION_GENERATE and WEB_ONLY_REASON in d.reason
+
+
+def test_a_failure_before_the_pages_were_found_does_not_block_them():
+    st = _state(successes=0, attempts=1)
+    st["last_failure_at"] = (PAGES_AT - timedelta(hours=1)).isoformat()
+    assert _web_only(state=st).action == ACTION_GENERATE
+
+
+@pytest.mark.parametrize("bad", ["garbage", None, ""])
+def test_an_unreadable_failure_time_does_not_block_the_pages(bad):
+    st = _state(successes=0, attempts=1)
+    st["last_failure_at"] = bad
+    assert _web_only(state=st).action == ACTION_GENERATE
+
+
+def test_two_failures_a_day_stop_the_web_only_path_but_not_the_articles():
+    assert WEB_ONLY_FAILURE_CAP == 2
+    assert WEB_ONLY_FAILURE_CAP < PER_SCOPE_FAILURE_ALLOWANCE
+    st = _state(successes=1, attempts=1 + WEB_ONLY_FAILURE_CAP)
+    st["last_failure_at"] = (PAGES_AT - timedelta(hours=1)).isoformat()   # an older set
+    d = _web_only(state=st)
+    assert (d.action, d.reason) == (ACTION_SKIP, "web_only_failure_cap")
+    # The same state with a real FMP story later that day: the article path still has
+    # its attempt budget.
+    later = _decide(state=st, quote=JUMP_QUOTE, jumping=True, web_only_ok=True,
+                    web_refreshed_at=PAGES_AT, web_result_count=3)
+    assert later.action == ACTION_GENERATE
+    assert WEB_ONLY_REASON not in later.reason
+
+
+def test_one_failure_leaves_the_web_only_path_open():
+    st = _state(successes=2, attempts=3)
+    assert _web_only(state=st).action == ACTION_GENERATE
+
+
+def test_yesterdays_failures_do_not_count_today():
+    st = _state(successes=0, attempts=4)
+    st["regen_day"] = "2026-10-27"
+    assert _web_only(state=st).action == ACTION_GENERATE
+
+
+def test_a_counter_skew_with_more_successes_than_attempts_leaves_the_path_open():
+    """Successes above attempts (a counter skew) must not close the web-only path. This
+    pins the OUTCOME only: the `max(0, …)` clamp in the gate is cosmetic (a negative count
+    is never >= the cap), and removing it changes nothing here — by design."""
+    st = _state(successes=5, attempts=1)
+    assert _web_only(state=st).action == ACTION_GENERATE
+
+
+def test_the_cap_and_the_cooldown_still_bind_a_web_only_card():
+    capped = _state(successes=PER_SCOPE_DAILY_CAP + JUMP_RESERVE)
+    assert _web_only(state=capped).reason == "daily_cap"
+    recent = _state(successes=1, last_generated_at=NOW - timedelta(minutes=5))
+    recent["last_inputset_id"] = "an-older-corpus"
+    assert _web_only(state=recent).reason == "cooldown"
+
+
+def test_an_mwcb_day_still_suspends_a_web_only_card():
+    assert _web_only(market_change_percent=-8.0).reason == "mwcb_market_only"

@@ -251,3 +251,57 @@ async def test_the_stock_details_fallback_drops_an_inactive_profiles_change(monk
             assert resp[key] is not None
         else:
             assert resp.get(key) is None, f"{key} must be unknown for an inactive listing"
+
+
+# ── the flag a quote carries (2026-11-13): condition (a) of the "Delisted" label ──
+
+from app.services.price_service import profile_says_inactive  # noqa: E402
+
+
+@pytest.mark.parametrize("profile, inactive", [
+    ({"isActivelyTrading": False}, True),
+    ({"isActivelyTrading": "false"}, True),
+    ({"isActivelyTrading": " FALSE "}, True),
+    ({"isActivelyTrading": True}, False),
+    ({"isActivelyTrading": "true"}, False),
+    ({"isActivelyTrading": None}, False),
+    ({"isActivelyTrading": 0}, False),          # only an explicit false counts
+    ({"isActivelyTrading": ""}, False),
+    ({}, False), (None, False), ([], False), ("ET", False),
+])
+def test_profile_says_inactive(profile, inactive):
+    assert profile_says_inactive(profile) is inactive
+    # The day-change rule is its exact complement on a cold registry.
+    assert profile_change_is_current(profile) is (not inactive)
+
+
+@pytest.mark.parametrize("row", [ET_PROFILE, DDS_PROFILE, {**DDS_PROFILE, "isActivelyTrading": "false"},
+                                 {**DDS_PROFILE, "price": 0, "change": 0}])
+def test_an_inactive_profile_quote_carries_the_flag(row):
+    q = PriceService._from_profile(dict(row))
+    assert q["isActivelyTrading"] is False, "a bool, whatever spelling FMP sent"
+
+
+@pytest.mark.parametrize("row", [
+    OBK_PROFILE,
+    {k: v for k, v in OBK_PROFILE.items() if k != "isActivelyTrading"},
+    {**OBK_PROFILE, "isActivelyTrading": None},
+    {**OBK_PROFILE, "isActivelyTrading": 0},
+    {**OBK_PROFILE, "isActivelyTrading": "true"},
+])
+def test_an_active_or_unknown_profile_quote_has_no_flag_key(row):
+    """Absent, not True: the fixed key set of every live quote is unchanged."""
+    assert "isActivelyTrading" not in PriceService._from_profile(dict(row))
+
+
+@pytest.mark.asyncio
+async def test_the_batch_fallback_carries_the_flag_and_the_screener_never_does(monkeypatch):
+    aapl = {"symbol": "AAPL", "companyName": "Apple Inc.", "price": 340.42, "volume": 1.0,
+            "avgVolume": 2.0, "marketCap": 5e12, "exchangeShortName": "NASDAQ",
+            "isEtf": False, "isFund": False, "isActivelyTrading": True}
+    _install(monkeypatch, _FakeFMP([aapl], {"DDS": DDS_PROFILE}))
+    out = await PriceService().get_quotes(["DDS", "AAPL"])
+    assert out["DDS"]["isActivelyTrading"] is False
+    assert "isActivelyTrading" not in out["AAPL"], "the screener universe is active-only"
+    # Even a screener row that SAID inactive would not carry it: only `_from_profile` emits.
+    assert "isActivelyTrading" not in PriceService._from_screener({**aapl, "isActivelyTrading": False}, None)

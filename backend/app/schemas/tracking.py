@@ -10,7 +10,7 @@ Endpoints:
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import List, Literal, Optional
 
 
 # ── Tracked Assets Feed ─────────────────────────────────────────────
@@ -91,6 +91,13 @@ class TrackedAssetResponse(BaseModel):
     # row has none or it is unreadable; iOS sorts that as unknown, last. Older clients
     # ignore it.
     added_at: Optional[str] = None
+    # The "Delisted" label (`app/schemas/listing_status.py`): all four set together for a
+    # CONFIRMED delisting (`listing_status_service`), else all None — trading or unknown.
+    # `price` is then the LAST close and `change_known` False. Older clients ignore them.
+    listing_status: Optional[Literal["delisted"]] = None
+    delisted_date: Optional[str] = None       # "YYYY-MM-DD" (US Eastern calendar)
+    delisted_exchange: Optional[str] = None   # "NASDAQ"; None when FMP's row names none
+    last_trade_date: Optional[str] = None     # "YYYY-MM-DD", newest session with volume > 0
 
 
 class WhaleTradeItemResponse(BaseModel):

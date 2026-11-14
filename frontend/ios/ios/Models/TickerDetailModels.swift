@@ -693,6 +693,12 @@ struct TickerDetailData: Identifiable {
     let companyProfile: CompanyProfile
     let relatedTickers: [RelatedTicker]
     let benchmarkSummary: PerformanceBenchmarkSummary?
+    /// Set only when the backend confirmed this listing is delisted (`DelistedListing`):
+    /// `currentPrice` is then its LAST CLOSE, labelled as such, and the screen neither polls
+    /// nor refreshes the chart. `var` so a 15 s poll whose quote reports the delisting can set
+    /// it on a screen that opened before the backend knew. Trailing + defaulted so every
+    /// existing memberwise call (the samples, the store screenshots) still compiles.
+    var delisting: DelistedListing? = nil
 
     var chartData: [Double] {
         chartPricePoints.map { $0.close }

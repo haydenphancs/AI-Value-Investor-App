@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from app.log_redaction import redact_secrets
 
+from datetime import date
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
@@ -51,6 +52,15 @@ class ErrorCode(str, Enum):
     # company left the club, was unpublished, or the section is off / hidden for stale
     # membership (GET /home/trillion-club/{slug}).
     TRILLION_CLUB_COMPANY_NOT_FOUND = "TRILLION_CLUB_COMPANY_NOT_FOUND"
+    # The ticker is a CONFIRMED delisting (`listing_status_service`: FMP's inactive flag, no
+    # trade in the latest session, FMP's delisted-companies row dated on or before today ET,
+    # no traded day after it), so a NEW AI report or a NEW price alert is refused — BEFORE any
+    # charge on both report doors (owner, 2026-11-13: "approve phase 2 too"). Reports already
+    # generated stay free to open; an unknown answer never refuses (fail open). Built with
+    # `ticker_delisted_error`, whose per-request `user_message` names the ticker, the exchange
+    # and the date. Distinct from TICKER_NOT_FOUND: the symbol exists and its history is real,
+    # so "check the spelling" would be false.
+    TICKER_DELISTED = "TICKER_DELISTED"
 
     # ── Upstream services ────────────────────────────────────────────
     FMP_RATE_LIMITED = "FMP_RATE_LIMITED"
@@ -414,6 +424,12 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.TRILLION_CLUB_COMPANY_NOT_FOUND: (
         "That company is no longer in the Trillion-Dollar Club section."
     ),
+    # The fallback only: `ticker_delisted_error` always sends a per-request message naming the
+    # ticker, exchange and date (and, for a price alert, alert copy instead of report copy).
+    ErrorCode.TICKER_DELISTED: (
+        "This company is no longer listed, so a new AI report can't be generated. "
+        "You haven't been charged."
+    ),
     ErrorCode.FMP_RATE_LIMITED: (
         "Market data is rate-limited right now. Please try again in a minute."
     ),
@@ -630,8 +646,8 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.ACCOUNT_DELETE_INCOMPLETE: "retry_later",
     # NOT retry_later: retrying changes nothing until the user deletes an alert.
     ErrorCode.PRICE_ALERT_LIMIT_REACHED: "fix_input",
-    # PRICE_ALERT_NOT_FOUND deliberately has NO action, matching THEME_NOT_FOUND and
-    # TRILLION_CLUB_COMPANY_NOT_FOUND: there
+    # PRICE_ALERT_NOT_FOUND and TICKER_DELISTED deliberately have NO action, matching
+    # THEME_NOT_FOUND and TRILLION_CLUB_COMPANY_NOT_FOUND: there
     # is nothing for the user to do, and "none" is not one of the iOS `ErrorAction`
     # cases — it would decode as an unknown action rather than as no action.
     # `sign_in` maps to iOS `ErrorAction.signIn`, whose button opens SignInView.
@@ -658,6 +674,11 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.INVALID_INPUT: 400,
     ErrorCode.THEME_NOT_FOUND: 404,
     ErrorCode.TRILLION_CLUB_COMPANY_NOT_FOUND: 404,
+    # 409, not 404/410: the symbol exists and its stored history is real — it is the STATE of
+    # the listing that conflicts with the request. A 4xx terminal for the client (never
+    # auto-retried, §6.4), and iOS decodes the structured 409 body, so the per-request copy
+    # reaches the user. Not 429 (iOS swallows 429 bodies), not 402 (nothing to buy).
+    ErrorCode.TICKER_DELISTED: 409,
     ErrorCode.FMP_RATE_LIMITED: 502,
     ErrorCode.FMP_UNAVAILABLE: 502,
     ErrorCode.FMP_NOT_ENTITLED: 409,
@@ -845,6 +866,72 @@ def make_error_body(
         "action": action if action is not None else _DEFAULT_ACTIONS.get(code),
         "details": details or {},
     }
+
+
+# ── TICKER_DELISTED ───────────────────────────────────────────────────
+
+# Locale-free on purpose: `strftime("%b")` follows the process locale, and this copy reaches users.
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+# The two doors that refuse a confirmed delisting, and what each tells the user after
+# "{T} was delisted from {EXCH} on {date}, ". Closed: a third door gets its own reviewed copy.
+_DELISTED_COPY: Dict[str, str] = {
+    # Both report doors (POST /research/generate, GET /stocks/{t}/report): refused BEFORE any
+    # charge, and a report the user already has stays free to open.
+    "report": (
+        "so a new AI report can't be generated. You haven't been charged. "
+        "Reports you already have stay available."
+    ),
+    # POST /alerts/price: nothing is created and nothing is charged.
+    "price_alert": "so it has no live price to watch.",
+}
+
+
+def format_listing_day(day: date) -> str:
+    """'Nov 9, 2026' — FMP's delistedDate is a US Eastern CALENDAR date, printed as it is: no
+    time-zone conversion (it is a date, not an instant) and no locale."""
+    return f"{_MONTH_ABBR[day.month - 1]} {day.day}, {day.year}"
+
+
+def ticker_delisted_error(
+    *,
+    ticker: str,
+    delisted_date: date,
+    exchange: Optional[str],
+    purpose: str,
+) -> JSONResponse:
+    """The 409 `TICKER_DELISTED` body for a CONFIRMED delisting (`purpose`: "report" or
+    "price_alert"), with the per-request copy the owner approved on 2026-11-13:
+
+        "ROKU was delisted from NASDAQ on Nov 9, 2026, so a new AI report can't be generated.
+         You haven't been charged. Reports you already have stay available."
+        "ROKU was delisted from NASDAQ on Nov 9, 2026, so it has no live price to watch."
+
+    `details` are flat scalars (iOS `AnyCodable` reads String/Int/Double/Bool only): the
+    exchange is "" when FMP's row names none, and the copy then drops "from …".
+    """
+    tail = _DELISTED_COPY.get(purpose)
+    if tail is None:
+        raise ValueError(f"ticker_delisted_error: unknown purpose {purpose!r}")
+    exch = (exchange or "").strip()
+    where = f" from {exch}" if exch else ""
+    day = format_listing_day(delisted_date)
+    refused = "no report generated, nothing charged" if purpose == "report" else "no alert created"
+    return make_error_response(
+        ErrorCode.TICKER_DELISTED,
+        message=(
+            f"{ticker} is a confirmed delisting ({exch or 'exchange not named'}, "
+            f"{delisted_date.isoformat()}) — {refused}"
+        ),
+        user_message=f"{ticker} was delisted{where} on {day}, {tail}",
+        details={
+            "ticker": ticker,
+            "delisted_date": delisted_date.isoformat(),
+            "delisted_exchange": exch,
+            "step": "delisted",
+        },
+    )
 
 
 def auth_error(

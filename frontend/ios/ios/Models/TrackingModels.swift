@@ -107,6 +107,12 @@ struct TrackedAsset: Identifiable {
     var extendedSparkline: [Double] = []
     var extendedRegularShare: Double? = nil
     var extendedSpanTo: Double? = nil
+    /// Set only when the backend confirmed this listing is delisted (`DelistedListing`). The
+    /// row then shows a "Delisted" pill in place of its price and change (owner decision
+    /// 2026-11-13, D1), and the sort treats its price, change and market cap as unknown.
+    var delisting: DelistedListing? = nil
+
+    var isDelisted: Bool { delisting != nil }
 
     /// The gray tail, when all three parts are usable: a non-empty finite series and an axis
     /// on which the session ends before the tail does (0 < share < spanTo <= 1). Anything
@@ -752,6 +758,13 @@ struct TrackedAssetDTO: Codable, Identifiable {
     /// When the ticker joined the watchlist, as the backend's UTC-milliseconds ISO string.
     /// Optional: an older backend sends no key, and saved snapshots predate it.
     let addedAt: String?
+    /// The delisting label's four keys (`DelistedListing`). All null unless the backend
+    /// confirmed a delisting. Optional: an older backend and a saved snapshot send no keys,
+    /// which reads as "not delisted" — the live feed replaces the snapshot.
+    let listingStatus: String?
+    let delistedDate: String?
+    let delistedExchange: String?
+    let lastTradeDate: String?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -776,6 +789,10 @@ struct TrackedAssetDTO: Codable, Identifiable {
         case extendedRegularShare = "extended_regular_share"
         case extendedSpanTo = "extended_span_to"
         case addedAt = "added_at"
+        case listingStatus = "listing_status"
+        case delistedDate = "delisted_date"
+        case delistedExchange = "delisted_exchange"
+        case lastTradeDate = "last_trade_date"
     }
 
     /// Hand-written so ONE malformed row cannot destroy the entire watchlist.
@@ -830,6 +847,10 @@ struct TrackedAssetDTO: Codable, Identifiable {
         extendedRegularShare = lenient(Double.self, .extendedRegularShare).finiteOrNil
         extendedSpanTo = lenient(Double.self, .extendedSpanTo).finiteOrNil
         addedAt = lenient(String.self, .addedAt)
+        listingStatus = lenient(String.self, .listingStatus)
+        delistedDate = lenient(String.self, .delistedDate)
+        delistedExchange = lenient(String.self, .delistedExchange)
+        lastTradeDate = lenient(String.self, .lastTradeDate)
     }
 
     /// Map to the view-layer model used by AssetsListSection
@@ -865,7 +886,9 @@ struct TrackedAssetDTO: Codable, Identifiable {
             addedAt: HoldingsSort.parseAddedAt(addedAt),
             extendedSparkline: extendedSparkline,
             extendedRegularShare: extendedRegularShare,
-            extendedSpanTo: extendedSpanTo
+            extendedSpanTo: extendedSpanTo,
+            delisting: DelistedListing.from(status: listingStatus, delistedDate: delistedDate,
+                                            exchange: delistedExchange, lastTradeDate: lastTradeDate)
         )
     }
 }

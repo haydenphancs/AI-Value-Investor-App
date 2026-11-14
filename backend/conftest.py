@@ -266,3 +266,26 @@ def _isolate_stock_search_directory():
     _reset_stock_search_directory()
     yield
     _reset_stock_search_directory()
+
+
+def _reset_listing_status() -> None:
+    from app.services import listing_status_service, session_pricing
+
+    listing_status_service._reset_for_tests()
+    session_pricing._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_listing_status():
+    """Reset `listing_status_service` (the "Delisted" label) AND the `session_pricing`
+    registry between tests.
+
+    The registry is condition (b) of the label: a warm one leaked from an earlier test would
+    turn every later test's inactive quote into a candidate, and the candidate's list load is
+    a real FMP call — blocked by the guard above, which then fails the run. The service also
+    keeps Tasks in `_inflight` (each test has its own loop), the same leak as the search
+    directory above: a task left pending reads as "a load already in flight" forever.
+    """
+    _reset_listing_status()
+    yield
+    _reset_listing_status()

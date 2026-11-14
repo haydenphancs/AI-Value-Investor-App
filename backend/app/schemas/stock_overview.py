@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel
 
 from app.schemas.dcf_fair_value import DcfFairValueResponse
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Literal, Optional, List
 
 from app.schemas.etf import (
     KeyStatisticItem,
@@ -204,6 +204,14 @@ class StockOverviewCoreResponse(BaseModel):
     change_known: bool = True
     market_status: MarketStatusResponse
     chart_data: List[Dict[str, Any]]
+    # The "Delisted" label (`app/schemas/listing_status.py`): all four set together for a
+    # CONFIRMED delisting (`listing_status_service`), else all None — trading or unknown.
+    # Appended last and Optional, so shipped builds ignore them. `current_price` is then the
+    # LAST close, `change_known` is False and `market_status` is still the clock's.
+    listing_status: Optional[Literal["delisted"]] = None
+    delisted_date: Optional[str] = None       # "YYYY-MM-DD", FMP's date (US Eastern calendar)
+    delisted_exchange: Optional[str] = None   # "NASDAQ"; None when FMP's row names none
+    last_trade_date: Optional[str] = None     # "YYYY-MM-DD", newest session with volume > 0
 
 
 class StockOverviewResponse(BaseModel):
@@ -225,3 +233,9 @@ class StockOverviewResponse(BaseModel):
     company_profile: CompanyProfileResponse
     related_tickers: List[RelatedTickerResponse]
     benchmark_summary: Optional[BenchmarkSummaryResponse] = None
+    # Twins of `StockOverviewCoreResponse`'s four listing fields — same rule, read from the
+    # FRESH quote only (never the bundle profile).
+    listing_status: Optional[Literal["delisted"]] = None
+    delisted_date: Optional[str] = None
+    delisted_exchange: Optional[str] = None
+    last_trade_date: Optional[str] = None

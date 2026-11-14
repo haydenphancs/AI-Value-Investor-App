@@ -45,6 +45,10 @@ _CORE_KEYS = {
     "change_known",
     "market_status",
     "chart_data",
+    # The "Delisted" label (2026-11-13, `app/schemas/listing_status.py`): four Optional keys,
+    # all null unless `listing_status_service` confirms a delisting. iOS decodes them as
+    # `String?` on StockOverviewCoreResponseDTO.
+    "listing_status", "delisted_date", "delisted_exchange", "last_trade_date",
 }
 
 

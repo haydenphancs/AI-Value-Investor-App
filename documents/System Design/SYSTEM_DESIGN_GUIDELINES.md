@@ -524,6 +524,18 @@ skeleton shows until then; the back button is never blocked), then the full resp
 supersedes it with every Overview section. The core endpoint is additive — the shared
 `/overview` contract is unchanged, so blast radius is ~zero.
 
+**The "Delisted" fields (2026-11-13).** Both overviews carry four trailing Optional keys —
+`listing_status` ("delisted"), `delisted_date`, `delisted_exchange`, `last_trade_date` — all
+null unless `listing_status_service` confirms a delisting, then all set together
+(`app/schemas/listing_status.py`). So do `GET /stocks/{ticker}` and
+`GET /stocks/{ticker}/quote` (the detail screen's fallback and its 15 s poll), the Tracking
+feed's assets, the Home watchlist tiles and the chat stock card. Each surface computes them
+from the quote it already holds — the core from the fresh quote (the fresh profile only when
+the quote leg is empty), the full overview from the fresh quote ONLY, never the bundle profile
+— so a ticker that traded in the latest session costs nothing. Existing fields keep their
+meaning: the price is the last close, `change_known` is false (forced on both overview builders
+for a confirmed delisting) and `market_status` stays the clock's.
+
 ### 3.6 Home Screen widget — two modes, two fetch paths (reworked 2026-09-30)
 
 The `CaydexWidgets` extension answers two different questions, and each has its own data path:
@@ -771,6 +783,39 @@ turns a capacity blip into an outage on already-generated reports), **before** t
 (a rejected request must never burn credits), and released in a `finally` that also runs on
 `CancelledError` (a leaked slot is permanent). Pinned by `tests/test_ticker_report_admission.py`.
 
+**A confirmed delisting is refused before any charge, on both doors (2026-11-13, owner: "approve
+phase 2 too").** FMP keeps a delisted company's last price for months, so a new report on it
+would be built on a frozen quote. `GET /stocks/{ticker}/report` checks **after** both free cache
+paths (a report already generated stays free to read) and after the free JOIN of the same user's
+running generation (a leader whose check failed open was already charged, so its retry gets the
+leader's report, never a 409 saying "You haven't been charged"), re-reads the single-flight map
+after the check's await, and checks **before** registering a new leader, the admission gate and
+the precharge; `POST /research/generate` checks after the persona check
+and **before** the per-user cap read and the precharge — which also covers its reuse hits, since
+that door charges on a reuse. Both answer `409 TICKER_DELISTED` with a per-request
+`user_message` ("ROKU was delisted from NASDAQ on Nov 9, 2026, so a new AI report can't be
+generated. You haven't been charged. Reports you already have stay available.") built by
+`error_response.ticker_delisted_error`. Stored reports open through `/research/reports/{id}` and
+are never checked. The check is `listing_status_service.get_delisted_for_symbols` with
+`PAID_DOOR_WAIT` (8 s): nothing for a ticker that traded in the latest session (the price
+registry answers True), a delisting already held in memory answers at once, and only a ticker
+the registry says did NOT trade costs one memoised `get_quote` before the §10 rule runs.
+Anything undecided — a cold or stale registry, no quote, a list or EOD read past the 8 s —
+logs a WARNING naming the ticker and the door and **proceeds exactly as before** (fail open).
+The two report pre-warms stop spending on it too: `POST /stocks/{ticker}/prewarm-report` answers
+202 `"delisted"` for a delisting `peek_delisted` holds and otherwise checks at the head of its
+background task (the route still answers at once); the hourly top-N pre-warmer
+(`main._run_report_pre_warmer` → `_without_delistings`) drops held delistings from memory, then
+runs one `get_delisted_for_symbols` call (`PAID_DOOR_WAIT`) for the rest — free for every ticker
+that traded, one memoised quote for one that did not — so a delisting no screen confirmed in the
+last 6 h (or since a restart) is not warmed; an undecided ticker is warmed, as before.
+A held confirmation is FORGOTTEN as soon as any caller passes a fresh quote (or, with no quote, a
+profile) that reads actively trading (`listing_status_service._retire_if_active`): the registry
+holds day D-1 for all of day D, so without it a relisted or reused symbol stayed refused by both
+doors and paused for alerts for up to 6 h while the alert create door, deciding from its seed
+quote, accepted new rules. No row in hand, or a profile with no flag, is not evidence.
+Pinned by `tests/test_delisted_phase2.py`.
+
 ### 5.1 The challenge
 
 A report is a long job: the server tells the client to expect **90 seconds**
@@ -983,6 +1028,7 @@ that matters: two errors with the same HTTP status can need opposite handling (s
 | Capacity | `SYSTEM_BUSY` (409) | no | show Retry — transient by construction and never burns credits (§5), but there is no automatic backoff loop |
 | Per-user cap | `TOO_MANY_CONCURRENT_REPORTS` (409) | no | show the server's `user_message` verbatim (it names the cap); pre-charge, so nothing to refund. Normally unreachable — the client disables Generate at its own mirrored cap (§5.4) — so seeing it means the runs were started elsewhere |
 | Not found | `TICKER_NOT_FOUND` | no | go back |
+| Delisted | `TICKER_DELISTED` (409) | no | show the server's `user_message` verbatim (it names the ticker, exchange and date), no Retry — go back. Refused before any charge, so nothing to refund (§5) |
 | Validation | 422 | no | inline field error |
 | Rate limited | 429 + `Retry-After` | after the header's delay | show the wait |
 
@@ -1192,6 +1238,25 @@ a cold or failed directory skips the liveness rule instead (fail open). There is
 tier: a restart costs one call, reloading ~27k rows over PostgREST is slower than that call,
 and persisting a bulk FMP symbol list is the redistribution surface migration 157 avoids.
 Parsing it stalls the single worker ~50 ms per refresh (measured 2026-09-25).
+
+**Tier 1 with no Tier 2, on purpose: the delisted-companies window behind the "Delisted"
+label (2026-11-13).** `app/services/listing_status_service.py` holds FMP's
+`delisted-companies` list (newest first, 100 rows a page) to confirm a delisting before any
+screen says so. It is loaded LAZILY: only when the first candidate appears — a ticker whose
+quote carries FMP's inactive flag and that did not trade in the latest US session
+(`session_pricing`). The common case therefore makes zero FMP calls. A load is 24 pages
+(~8 months of delistings), fetched concurrently under a semaphore of 4, with one `_inflight`
+task shared by every caller. The head pages (0-2) are refreshed every 6 h and merged in, the
+whole window is reloaded every 24 h, and a held window is served stale for up to 3 days. A
+failed page 0 writes a 10-minute degraded memo and a WARNING naming the ticker that asked; a
+later lost page installs the rest and reloads after 10 minutes. Each confirmed candidate also
+costs one daily-EOD price read (its delisted date − 45 days to today), memoised
+for 6 h. With candidates on screen that is about 40-50 calls a day. Screens wait at most
+`REQUEST_WAIT` (1.5 s), the doors that refuse a delisting (§5, §11.4) `PAID_DOOR_WAIT` (8 s); the
+wait never cancels the load. There is no Supabase tier, for the
+active-listing directory's reasons: persisting a bulk FMP symbol list is the ToS 2.6.1
+redistribution surface, the useful part (the head) changes daily, a restart costs one lazy
+load, and the answer is only used in-process. The rule itself is in §10.
 
 **Tier 1 with no Tier 2, on purpose: the search-screen chips.** `search_trending_service`
 serves `GET /search/trending` ("Trending searches" / "Most added" / the curated "Well-known names"
@@ -3295,6 +3360,20 @@ a card warmed at 15:55 and replayed at 16:05 used to carry it into a closed sess
 (`is_tape_bound`, pinned against the generators by `test_chat_starters_tape_bound.py`) because
 the row carries no `kind`.
 
+**A delisted listing's price is never "live" (2026-11-13).** Cay AI called ROKU's $160.52 —
+the last close before Fox Corp's acquisition closed — "(live)", because the card's LIVE QUOTE
+line read FMP's months-stale profile price. For a CONFIRMED delisting
+(`listing_status_service`, §10), `ChatService._fetch_stock_widget_data` adds the four
+listing fields to the card and forces `is_market_open` false (every build then shows "Closed"),
+and `ChatService._widget_grounding_line` emits a DELISTED LISTING line INSTEAD of the LIVE
+QUOTE line: the ticker is delisted from its exchange on a given ET date, the price is its LAST
+CLOSE (with that session's date when known), there is no day change, never call it live or
+imply it still trades there, and give no reason (an acquisition, a move to another exchange
+and a regulatory delisting look the same in the data). The line never names the data vendor.
+Mid-stream the model reads the quote tool's result instead, so `get_stock_chart_data` adds the
+same instruction as a `note` on a copy of a delisted card. The prompt rules that make the LIVE
+QUOTE line the only sanctioned price source accept the DELISTED LISTING line too.
+
 ### 9b.10 Ask Cay AI web search: three tiers, the code-authored caveat and web source pills
 
 *(Added 2026-10-02 for report chat; every chat and the automatic fallback 2026-10-08/09.)* In a
@@ -5135,6 +5214,7 @@ What follows is the set with no other home.
 | Sentry received the FMP key in every event's breadcrumbs | The httpx integration records `http.query` (no leading `?`) on every outbound call, and `redact_secrets` anchored only on `[?&]`; on an FMP `HTTPStatusError` the frame locals additionally carried `e=…apikey=<key>` and `params={'apikey': …}`. `scrub_sentry_event` now drops `http.query`/`http.fragment` from breadcrumb data, walks every breadcrumb `data`, `extra` and stack-frame `vars` tree (key-aware: a credential-named key is blanked, every string is regex-redacted), and `sentry_sdk.init` carries `EventScrubber(recursive=True)` as the client-side belt. | Value-based regexes are the robust layer; the key denylist is defence in depth. `include_local_variables` stays on — the locals are what make a report diagnosable from Sentry alone. |
 | The marketing engine publishes text to X and Bluesky only | Phases 1-4 are built (§12.2-§12.9), and Phase 5's first stage (§12.10): the publisher sends approved X and Bluesky text posts, reconciles unknown outcomes, and deletes on a confirmed Retract. TikTok, YouTube, Instagram, Facebook, LinkedIn and Threads have adapters (Upload-Post, Stage 2; its credentials were set on 2026-10-01) but none is listed in `MARKETING_PUBLISH_PLATFORMS`, so their posts reach Telegram as read-only previews and expire until the owner's Free-tier checks pass. The judge misses its calibration gate (present-tense restatements of a past deal price), so `MARKETING_AUTO_PUBLISH` stays off, and the publisher refuses an auto-approved row: a human approves every post. The server cannot read a video's pixels: it checks what the worker declares it drew (§12.8), so every media post is born `pending_review`. X takes no idempotency key: an unknown X outcome is never retried automatically, it goes to the owner | Deliberate sequencing (Phases 5-8 of the approved plan). Every switch defaults OFF / dry-run, and no platform is listed by default. Migrations 170, 173 and 176 are applied; Phase 5 needs none. The worker's first production tick ran on 2026-10-01 (46 s; production cgroup peak 2,587 MB of the 3,814 MiB limit, against 1,563 MB on 09-29 — the cgroup figure includes page cache; the run-health alert reports any stage peak above 3,200 MB, §12.11). |
 | Old app builds still project the Moat card's market size | iOS 1.0 / 1.01 / 1.1 re-anchor `current_tam` / `future_tam` to the device year by `cagr_5yr` (and read the year from `Calendar.current`, so a Buddhist-calendar phone shows "(2569)"); persisted `research_reports`, stored PDFs and chat transcripts keep the pre-2026-10-22 prose (RKLB: "fragmented, declining industry, −0.2% CAGR") | The measured-only contract (§7.3) is additive Optional fields; no report route reads the app version, and a non-numeric `current_year` hack was rejected. Builds from 2026-10-22 show the measured figure, and the next build the public-path projection (§7.3, additive keys: old builds are unchanged); `CACHE_SCHEMA_FLOOR` rebuilds only the shared caches. |
+| A delisted listing is labelled from evidence, never from FMP's flag alone (2026-11-13) | FMP keeps a delisted company's last price in its profile for months (SEE, AL, APGE; ROKU at $160.52 after Fox Corp's acquisition closed), and its `isActivelyTrading: false` alone also marks listings that still trade. `listing_status_service` says "delisted" only when ALL hold: (a) the quote's (else the profile's) flag is inactive; (b) `session_pricing` says it did not trade in the latest US session (checked first, so a trading ticker costs nothing); (c) FMP's delisted-companies list has it dated on or before today, ET calendar (a future, scheduled row never matches); (d) its EOD history shows no traded day after that row, which also gives the last-trade date. Exchange moves FMP no longer prices are labelled too (owner D4: DDS and USAC read "Delisted from NYSE"); the copy never claims the company stopped trading and never gives a reason. Fail-open cases, all showing no label (the pre-2026-11-13 behaviour): ~2 min after a restart (cold registry) and a registry more than a session old; the delisting day itself until that session's close is ingested (~19:00-20:00 ET); delistings older than the ~8-month window; a list or EOD read that fails or outlasts the 1.5 s wait (a first view can be cached unlabelled for the overviews' 120 s); a moved or reused symbol that trades again; a profile price of 0 (the overviews still refuse it as no usable price). Not labelled at all: the Key Statistics volume figures and the Updates chip strip. | Owner decisions D1-D4 (2026-11-13): a wrong "Delisted" on a listing that trades is worse than a missing one, so every unknown fails open. Phase 2 (owner, same day: "approve phase 2 too") uses the same rule: both report doors refuse a new report before any charge, the report pre-warms skip it, new price alerts are refused and existing ones paused (`TICKER_DELISTED`, 409; §5, §11.4) — each with the same fail-open cases, the paid doors waiting up to `PAID_DOOR_WAIT` (8 s) instead of 1.5 s. |
 
 Note on what is deliberately **not** a gap: there is no Core Data / SwiftData / local database, and
 none is planned (§7.1, §9.2). Earlier revisions of this document listed it as a pending task, which
@@ -5201,13 +5281,32 @@ Migration 089 exists because two of these were mixed once already.
 | earnings (upcoming + result) | hourly wake, acts after 16:00 ET | **1 call/day** (one market-wide window serves both passes) | `claim_notification_job` |
 | insider Form 4 | hourly wake, acts after 18:00 ET | ~200/day (top-200 watchlist) | same job |
 | whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
-| price alerts | 60s — every rule while the market is active (04:00–20:00 ET), crypto-only rules while it is closed | 1 batch-quote/cycle | none — the dedup key is the lock |
+| price alerts | 60s — every rule while the market is active (04:00–20:00 ET), crypto-only rules while it is closed; a confirmed delisting's rules are PAUSED (below) | 1 batch-quote/cycle, over the tickers that are not paused | none — the dedup key is the lock |
 | profile match | daily, `PROFILE_MATCH_NOTIFY_HOUR_ET` | 0 (reads the shared signals cache) | `claim_notification_job` (a failed profile or tier read leaves the day open) + dedup key `profile_match:{day}:{user_id}` |
 | ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`) — and, for coins only, its crypto-only off-hours pass every 30 min while the market is closed — when the σ-scored move lands in a jump tier and the quote is usable — for an equity whatever happened to its card (capped, refused, claimed elsewhere; §9b.10a, 2026-10-28), for a coin only after its card regenerates; body = the move plus a pointer to the ticker (the grounded catalyst body was retired 2026-10-02; the card headline never was a body) | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
 | research failed (`research_failed`) | inline, once the failure claim is won — the pipeline failed, or the sweeper refunds a dead run | 0 | dedup key `reportfail:{report_id}`; fires after the refund is attempted — after a refund LEAK it still fires with the credits line omitted (`refunded=False`) — so a paid-silent failure is impossible either way |
 
 Report-ready is placed AFTER the conditional completion write and AFTER the
 `DegradedReportError` raise, so a refunded report can never notify.
+
+**Price alerts on a delisted ticker (2026-11-13, owner: "approve phase 2 too").** A rule whose
+ticker is a CONFIRMED delisting (§10) has no live price to watch. `POST /alerts/price` refuses a
+new one with `409 TICKER_DELISTED` ("ROKU was delisted from NASDAQ on Nov 9, 2026, so it has no
+live price to watch."), decided from the seed quote it already fetches (or, with no quote, only
+from a delisting already held in memory), within `PAID_DOOR_WAIT`, failing open. Existing rules
+are PAUSED, never deleted: `price_alert_service.evaluate_once` leaves every ticker
+`listing_status_service.peek_delisted` holds out of its batch quote and skips its rules with no
+decision and no `_persist` (baseline and latch stay exactly as they were; `stats["paused"]`
+counts them), then feeds the quotes it did fetch to `get_delisted_many(..., wait=0)`, so a new
+delisting is learned in the background and paused from the next cycle. `peek_delisted` re-reads
+the price registry, so a ticker that trades again resumes by itself — at once when any screen,
+feed or the create door passes a fresh quote that reads active (§5); the 6 h confirmation memo
+means a delisted ticker is quoted about four times a day instead of every cycle (each such cycle
+evaluates against the frozen close, exactly as before). Pause and resume log one INFO line per
+transition, scoped to the tickers that cycle evaluated. `GET /alerts/price` fills the four
+listing fields and `paused_reason: "delisted"` on each such row (`REQUEST_WAIT`, nothing
+persisted, no migration); PATCH answers from memory only. iOS shows "Paused: delisted" with the
+toggle disabled.
 
 The whale phase reads `whale_trades` by `created_at`, so neither whale writer may ever
 RE-CREATE a row that survives a re-derivation: a 13F quarter is upserted in place and only

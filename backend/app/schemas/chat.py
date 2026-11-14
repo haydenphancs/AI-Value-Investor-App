@@ -2,7 +2,7 @@
 
 from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Literal
 
 from app.config import settings
 
@@ -159,6 +159,13 @@ class StockChartWidget(BaseModel):
     # Additive and Optional: iOS ignores unknown keys.
     currency: Optional[str] = None
     historical_data: List[HistoricalDataPoint] = []
+    # The "Delisted" label (`app/schemas/listing_status.py`): all four set together for a
+    # CONFIRMED delisting, else all None. `current_price` is then the LAST close and
+    # `is_market_open` False. Optional, so shipped builds ignore them (subset parity holds).
+    listing_status: Optional[Literal["delisted"]] = None
+    delisted_date: Optional[str] = None
+    delisted_exchange: Optional[str] = None
+    last_trade_date: Optional[str] = None
 
 
 class MarketOverviewSector(BaseModel):

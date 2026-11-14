@@ -18,7 +18,10 @@ Three reasons it is not:
      budget. Coupling the two makes both harder to reason about.
 
 Cost is one `batch-quote` call per cycle over the DISTINCT alerted tickers, which is a
-short list. `PRICE_ALERT_INTERVAL_SECONDS` is the single knob.
+short list. `PRICE_ALERT_INTERVAL_SECONDS` is the single knob. A ticker that is a CONFIRMED
+delisting (`listing_status_service.peek_delisted`) is left out of that call and its rules are
+PAUSED — skipped with no state write, nothing deleted — until it trades again (Phase 2,
+owner 2026-11-13); the alert list says so per row (`paused_reason`).
 
 NO CROSS-INSTANCE CLAIM, deliberately. Two instances both evaluating is harmless: the
 dedup key in `notification_events` is the lock, so the second instance's claim conflicts
@@ -52,6 +55,7 @@ from app.services.push_dispatch_service import TABLE as NOTIFICATION_LEDGER
 from app.services.push_dispatch_service import get_push_dispatch_service, trading_date_et
 from app.utils.market_hours import session_phase
 from app.services.asset_class import uses_coingecko_price
+from app.services.listing_status_service import get_delisted_many, peek_delisted
 from app.services.price_service import price_source, session_change_percent
 
 logger = logging.getLogger(__name__)
@@ -456,6 +460,32 @@ class PriceAlertService:
             )
             return None
 
+    def _note_paused(self, evaluated: List[str], paused: Dict[str, Any]) -> None:
+        """INFO on each pause/resume TRANSITION only (a 60 s loop must not log every cycle).
+
+        Scoped to the tickers evaluated this cycle, so a crypto-only overnight cycle or the
+        universe cap's rotating window never reads as "resumed". A confirmed delisting is
+        re-checked every ~6 h (the `peek_delisted` memo), which shows as one resume + pause
+        pair per ticker — the rules are evaluated against the frozen close for that cycle,
+        exactly as before Phase 2."""
+        before = getattr(self, "_paused_tickers", frozenset())
+        scope = set(evaluated)
+        now_paused = set(paused) & scope
+        for sym in sorted(now_paused - before):
+            hit = paused[sym]
+            logger.info(
+                "price alerts: pausing the rules on %s — a confirmed delisting (%s, %s); no "
+                "quote and no state write until it trades again",
+                sym, getattr(hit, "exchange", None), getattr(hit, "delisted_date", None),
+            )
+        for sym in sorted((before & scope) - now_paused):
+            logger.info(
+                "price alerts: %s no longer reads as a confirmed delisting this cycle (it "
+                "trades again, or the 6 h confirmation is being re-checked) — its rules are "
+                "evaluated", sym,
+            )
+        self._paused_tickers = frozenset((before - scope) | now_paused)
+
     async def evaluate_once(self, *, only_round_the_clock: bool = False) -> Dict[str, int]:
         """One evaluation cycle. Never raises.
 
@@ -465,7 +495,8 @@ class PriceAlertService:
         asset actually moves. It defaults to False so every existing caller (and test)
         keeps its exact previous behaviour and stays independent of wall-clock time.
         """
-        stats = {"tickers": 0, "rules": 0, "fired": 0, "sent": 0}
+        # `paused`: rules skipped because their ticker is a CONFIRMED delisting (below).
+        stats = {"tickers": 0, "rules": 0, "fired": 0, "sent": 0, "paused": 0}
 
         tickers = await asyncio.to_thread(self._active_universe, only_round_the_clock)
         if only_round_the_clock:
@@ -479,21 +510,39 @@ class PriceAlertService:
             return stats
         stats["tickers"] = len(tickers)
 
-        try:
-            quotes = await price_source(self).get_quotes_list(tickers)
-        except Exception as e:
-            logger.warning(
-                "price alerts: batch quote failed for %d ticker(s) (%s: %s) — "
-                "skipping this cycle",
-                len(tickers), type(e).__name__, e,
-            )
-            return stats
+        # ── PAUSED: a CONFIRMED delisting (Phase 2, owner 2026-11-13). FMP keeps a delisted
+        #    company's last price for months, so polling it buys nothing — and nothing about
+        #    the rule may change while it is frozen. `peek_delisted` is sync and free (memory
+        #    only) and re-reads the price registry, so a ticker that trades again (registry
+        #    True) is quoted and evaluated again on the next cycle with no other step. Paused
+        #    rules are neither quoted nor persisted: their baseline and latch stay as they were.
+        paused = {t: hit for t in tickers if (hit := peek_delisted(t)) is not None}
+        quoted = [t for t in tickers if t not in paused]
 
-        by_symbol = {
-            str(q.get("symbol") or "").upper(): q
-            for q in (quotes or [])
-            if isinstance(q, dict) and q.get("symbol")
-        }
+        by_symbol: Dict[str, Dict[str, Any]] = {}
+        if quoted:
+            try:
+                quotes = await price_source(self).get_quotes_list(quoted)
+            except Exception as e:
+                logger.warning(
+                    "price alerts: batch quote failed for %d ticker(s) (%s: %s) — "
+                    "skipping this cycle",
+                    len(quoted), type(e).__name__, e,
+                )
+                return stats
+
+            by_symbol = {
+                str(q.get("symbol") or "").upper(): q
+                for q in (quotes or [])
+                if isinstance(q, dict) and q.get("symbol")
+            }
+            # Learn delistings from the quotes already in hand, WITHOUT waiting (`wait=0`):
+            # free for every ticker that traded in the latest session; for a candidate the
+            # lookup runs in the background and `peek_delisted` pauses it from the next cycle.
+            # One already known in memory pauses this cycle. (A dict merge, not `.update(`:
+            # the off-the-loop scanner reads that name as the sync Supabase `update` helper.)
+            paused = {**paused, **(await get_delisted_many(by_symbol, wait=0))}
+        self._note_paused(tickers, paused)
 
         rules = await asyncio.to_thread(self._active_rules, tickers)
         stats["rules"] = len(rules)
@@ -501,6 +550,9 @@ class PriceAlertService:
 
         for rule in rules:
             symbol = str(rule.get("ticker") or "").upper()
+            if symbol in paused:
+                stats["paused"] += 1
+                continue                  # no quote, no decision, no state write
             quote = by_symbol.get(symbol)
             # A ticker missing from the bulk response (delisted mid-session, halted, or
             # simply not returned) yields no observation. `evaluate_alert` holds the

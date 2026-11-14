@@ -86,11 +86,51 @@ struct TickerDetailView: View {
         guard let tickerData = viewModel.tickerData else {
             return ShareContent.items(tickerSymbol)
         }
+        let priceLine: String = Self.sharePriceLine(for: tickerData)
         let body = """
         \(tickerData.companyName) (\(tickerData.symbol))
-        \(tickerData.formattedPrice) \(tickerData.formattedChange) \(tickerData.formattedChangePercent)
+        \(priceLine)
         """
         return ShareContent.items(body)
+    }
+
+    /// The share text's price line. A delisted listing shares "Delisted from NASDAQ · Nov 9,
+    /// 2026" and its labelled last close, never "$160.52 —" as if it were a live quote.
+    private static func sharePriceLine(for data: TickerDetailData) -> String {
+        if let delisting = data.delisting {
+            return delisting.shareLine(lastClose: data.formattedPrice)
+        }
+        return "\(data.formattedPrice) \(data.formattedChange) \(data.formattedChangePercent)"
+    }
+
+    /// The price beside the symbol in the pinned nav bar. Compact surfaces say "Delisted"
+    /// for a delisted listing (the row, the tile, this bar); only the full header shows the
+    /// last close, with its label.
+    private var pinnedPriceLabel: String? {
+        guard let data = viewModel.tickerData else { return nil }
+        if data.delisting != nil { return DelistedListing.pillText }
+        return data.formattedPrice
+    }
+
+    /// The symbol the delisted notice names: the loaded model's, else the route's.
+    private var displaySymbol: String {
+        viewModel.tickerData?.symbol ?? viewModel.coreData?.symbol ?? tickerSymbol
+    }
+
+    /// Says why the price no longer moves, between the header and the chart, for a listing
+    /// the backend confirmed is delisted. An existing atom with no action and a muted icon:
+    /// it is information, not a failure. The copy never gives a reason.
+    @ViewBuilder
+    private var delistedNotice: some View {
+        if let delisting = viewModel.delisting {
+            InlineRetryNotice(
+                message: delisting.notice(symbol: displaySymbol),
+                systemImage: "info.circle",
+                iconColor: AppColors.textMuted
+            )
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.top, AppSpacing.md)
+        }
     }
 
     // MARK: - Chart (one view for both models)
@@ -135,7 +175,7 @@ struct TickerDetailView: View {
                     isFavorite: viewModel.isFavorite,
                     hasActiveAlerts: priceAlerts.hasActiveAlerts(ticker: tickerSymbol, assetType: "stock"),
                     tickerSymbol: tickerSymbol,
-                    tickerPrice: isTabBarPinned ? viewModel.tickerData?.formattedPrice : nil
+                    tickerPrice: isTabBarPinned ? pinnedPriceLabel : nil
                 )
 
                 // Eager container + an overlay-pinned tab bar. The LazyVStack that used
@@ -160,7 +200,8 @@ struct TickerDetailView: View {
                             priceChangePercent: tickerData.formattedChangePercent,
                             isPositive: tickerData.isPositive,
                             marketStatus: tickerData.marketStatus,
-                            changeKnown: tickerData.changeKnown
+                            changeKnown: tickerData.changeKnown,
+                            delisting: tickerData.delisting
                         )
                         .padding(.top, AppSpacing.sm)
                     } else if let core = viewModel.coreData {
@@ -173,7 +214,8 @@ struct TickerDetailView: View {
                             priceChangePercent: core.formattedChangePercent,
                             isPositive: core.isPositive,
                             marketStatus: core.marketStatus,
-                            changeKnown: core.changeKnown
+                            changeKnown: core.changeKnown,
+                            delisting: core.delisting
                         )
                         .padding(.top, AppSpacing.sm)
                     } else if let errorMessage = viewModel.errorMessage {
@@ -186,6 +228,10 @@ struct TickerDetailView: View {
                         DetailHeaderChartSkeleton(symbol: tickerSymbol)
                             .padding(.top, AppSpacing.sm)
                     }
+
+                    // Delisted: why the price no longer moves. Outside the header branches,
+                    // so it shows for the fast core and the full model alike.
+                    delistedNotice
 
                     // Chart — outside the header branches on purpose, so it is the SAME view
                     // before and after the core→full swap (see `chartPricePoints`).
@@ -233,7 +279,9 @@ struct TickerDetailView: View {
         }
         .navigationBarHidden(true)
         .sheet(isPresented: $showPriceAlerts) {
-            PriceAlertsSheet(ticker: tickerSymbol, assetType: "stock")
+            // A delisted listing gets no add form: its price no longer moves (Phase 2).
+            PriceAlertsSheet(ticker: tickerSymbol, assetType: "stock",
+                             isDelisted: viewModel.delisting != nil)
         }
         // The player is the square beside "Ask Cay AI" (`ChatBarAudioControl`) while this stock
         // screen is open; forceCompact stands the root's floating player down so it never lands on

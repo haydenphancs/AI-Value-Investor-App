@@ -1774,6 +1774,34 @@ class FMPClient:
             )
         return data
 
+    async def get_delisted_companies(self, page: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+        """One page of FMP's delisted-companies list:
+        ``[{"symbol", "companyName", "exchange", "ipoDate", "delistedDate"}]``.
+
+        Newest ``delistedDate`` first, FUTURE-dated (scheduled) rows included, and it holds
+        exchange MOVES as well as delistings (ET / DDS / USAC / TCBI, NYSE → TXSE on
+        2026-10-05). FMP caps a page at 100 rows, so ``limit`` is clamped to 1..100.
+
+        Thin by design: paging, parsing and every rule live in
+        ``services/listing_status_service.py``. Raises ``ValueError`` on a negative or
+        non-int page (no call is made), typed FMP exceptions on failure, and
+        ``FMPUnavailableException`` on a non-list body — a failure must never read as an
+        empty page ("not delisted").
+        """
+        if isinstance(page, bool) or not isinstance(page, int) or page < 0:
+            raise ValueError(f"page must be a non-negative int, got {page!r}")
+        try:
+            size = int(limit)
+        except (TypeError, ValueError):
+            size = 100
+        params = {"page": page, "limit": max(1, min(size, 100))}
+        data = await self._make_request("delisted-companies", params=params)
+        if not isinstance(data, list):
+            raise FMPUnavailableException(
+                f"delisted-companies page {page} returned {type(data).__name__}, not a list"
+            )
+        return data
+
     async def search_isin(self, isin: str) -> List[Dict[str, Any]]:
         """Securities for an ISIN (``search-isin``): ``[{"symbol", "name", "isin", ...}]``.
 

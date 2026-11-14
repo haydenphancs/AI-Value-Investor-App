@@ -86,6 +86,8 @@ from app.services.chat_numeric_grounding import (
     audit_answer_bounded,
 )
 from app.services.price_service import price_source
+from app.services.listing_status_service import DelistedListing, get_delisted
+from app.schemas.listing_status import LISTING_STATUS_DELISTED
 from app.utils.currency import currency_code
 from app.utils.market_hours import ET, session_trading_date
 
@@ -1939,6 +1941,15 @@ class ChatService:
             sym, tail = "", f" {ccy}"
         else:
             sym, tail = "", ""
+        if widget.get("listing_status") == LISTING_STATUS_DELISTED:
+            # A CONFIRMED delisting (`listing_status_service`): the card's price is the LAST
+            # close, frozen, and must never be narrated as live (ROKU's $160.52 was "(live)"
+            # for days after Fox Corp's acquisition closed). This line REPLACES the LIVE QUOTE
+            # line. No reason is given: the data cannot tell an acquisition, a move to another
+            # exchange and a regulatory delisting apart (owner decision D4, 2026-11-13).
+            return ChatService._delisted_grounding_line(
+                widget, ticker, f"{sym}{_usd(price)}{tail}",
+            )
         parts = [f"{ticker} {sym}{_usd(price)}{tail}".strip()]
         chg, chg_pct = _fin(widget.get("change")), _fin(widget.get("change_percent"))
         if widget.get("change_known") is False:
@@ -1961,6 +1972,38 @@ class ChatService:
             f"at right now: {', '.join(parts)}{status}. "
             "These are the current numbers — prefer them over any older figures above, and "
             "never say a chart is unavailable: it is already on screen."
+        )
+
+    @staticmethod
+    def _delisted_grounding_line(widget: Dict[str, Any], ticker: str, price_text: str) -> str:
+        """The DELISTED LISTING line that replaces the LIVE QUOTE line for a confirmed
+        delisting. Every date is a plain ISO day, and a missing exchange or last-trade date
+        drops its clause rather than inventing one. Never names the data vendor."""
+        def _day(raw: Any) -> Optional[str]:
+            try:
+                return datetime.strptime(str(raw)[:10], "%Y-%m-%d").date().isoformat() if raw else None
+            except ValueError:
+                return None
+
+        exchange = widget.get("delisted_exchange")
+        exchange = " ".join(exchange.split()) if isinstance(exchange, str) and exchange.strip() else None
+        delisted = _day(widget.get("delisted_date"))
+        last = _day(widget.get("last_trade_date"))
+        where = f"from {exchange}" if exchange else ""
+        when = f"on {delisted} (a US Eastern calendar date)" if delisted else ""
+        listed = " ".join(p for p in ("is delisted", where, when) if p)
+        close = f"its LAST CLOSE (the {last} session)" if last else "its last stored close"
+        venue = f"on {exchange}" if exchange else "on its former exchange"
+        return (
+            f"\n\nDELISTED LISTING shown on the price-chart card the user is looking at: "
+            f"{ticker} {listed}, per Caydex's market data. {price_text} is {close}, NOT a "
+            "live or current price, and there is no day change. Call it the last close with "
+            "its date; never call it live, current or today's price, never describe a day "
+            f"move, and never imply it can still be traded {venue}. The data does not say why "
+            "it was delisted (an acquisition, a move to another exchange and a regulatory "
+            "delisting look the same), so give no reason unless a source cited in this "
+            "conversation does, and never claim the company itself stopped operating. The "
+            "chart card is already on screen; never say a chart is unavailable."
         )
 
     # ── FMP data fetching for the stock widget ──────────────────────
@@ -2089,8 +2132,17 @@ class ChatService:
             currency = currency_code(quote.get("currency"))
             if currency is None and uses_coingecko_price(ticker):
                 currency = "USD"
+            # A CONFIRMED delisting (zero I/O for anything that traded in the latest session;
+            # bounded and never raising otherwise): the card carries the four listing fields,
+            # and its dot reads "Closed" on every build — a green "Live" beside a frozen last
+            # close is the claim this exists to stop. The streamed context line then says
+            # DELISTED LISTING instead of LIVE QUOTE (`_widget_grounding_line`).
+            listing = await get_delisted(ticker, quote=quote)
+            if listing is not None:
+                is_market_open = False
             return self._build_stock_widget(
                 ticker, quote, historical_data, avg_volume, is_market_open, currency=currency,
+                listing=listing,
             )
 
         except Exception as e:
@@ -2168,6 +2220,7 @@ class ChatService:
         avg_volume: int,
         is_market_open: Optional[bool],
         currency: Optional[str] = None,
+        listing: Optional[DelistedListing] = None,
     ) -> Dict[str, Any]:
         """Build the StockChartWidget payload from a raw FMP quote + normalized history. Null-coerces
         the REQUIRED numeric fields (`or 0`) so a null price/change/volume degrades to 0 instead of
@@ -2207,9 +2260,11 @@ class ChatService:
             pe_ratio=quote.get("pe"),
             year_high=quote.get("yearHigh"),
             year_low=quote.get("yearLow"),
-            is_market_open=is_market_open,
+            # A delisted listing is never "Live" (belt and braces: the fetcher forces it too).
+            is_market_open=False if listing is not None else is_market_open,
             currency=currency_code(currency),
             historical_data=[HistoricalDataPoint(**d) for d in historical_data],
+            **(listing.wire() if listing is not None else {}),
         )
         return widget.model_dump()
 
@@ -3679,8 +3734,9 @@ class ChatService:
         "for what Caydex's data does not cover and for "
         "dated events after it, each attributed to its publisher and date. Never take a price, "
         "quote, price change, volume, market capitalisation, index level, exchange rate or other "
-        "market data from a web result; those come only from the LIVE QUOTE line or a market-data "
-        "tool result. A web search names only the company, its ticker, the topic and the period — "
+        "market data from a web result; those come only from the LIVE QUOTE line, a DELISTED "
+        "LISTING line or a market-data tool result. A web search names only the company, its "
+        "ticker, the topic and the period — "
         "never a figure from the report or from the data you were given. Never name or describe "
         "the search engine or service behind the results: say 'a web search' or name the "
         "publisher. Never write a URL or a link; the sources are attached separately. Never say "
@@ -3708,8 +3764,9 @@ class ChatService:
         "or as a second view. Use web results only for what Caydex's data does not cover and for "
         "dated events after it, each attributed to its publisher and date. Never take a price, "
         "quote, price change, volume, market capitalisation, index level, exchange rate or other "
-        "market data from a web result; those come only from the LIVE QUOTE line or a market-data "
-        "tool result. A web search names only the company, its ticker, the topic and the period — "
+        "market data from a web result; those come only from the LIVE QUOTE line, a DELISTED "
+        "LISTING line or a market-data tool result. A web search names only the company, its "
+        "ticker, the topic and the period — "
         "never a figure from the data you were given. Never name or describe the search engine or "
         "service behind the results: say 'a web search' or name the publisher. Never write a URL "
         "or a link; the sources are attached separately. Never say you searched or checked the web "
@@ -4142,12 +4199,14 @@ class ChatService:
                     "Use it for background, but for time-sensitive figures (prices, analyst targets, "
                     "technical levels) "
                     + (
-                        "rely on your live tools or the LIVE QUOTE line below rather than "
+                        "rely on your live tools or the LIVE QUOTE line below (or the DELISTED "
+                        "LISTING line) rather than "
                         if tools_granted else
                         # The tool-less variant (the synthesis merge, the no-tools fallback):
                         # telling a model with no tools to "rely on your live tools" invites
                         # it to supply a tool's output from memory (F06-9).
-                        "rely on the LIVE QUOTE line below if one is present, and otherwise "
+                        "rely on the LIVE QUOTE line below (or the DELISTED LISTING line) if one is "
+                        "present, and otherwise "
                         "present them as a point-in-time snapshot, not as current — never as "
                     )
                     + "these possibly-stale numbers."

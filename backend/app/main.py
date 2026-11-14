@@ -19,7 +19,7 @@ import time
 import asyncio
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, List, Mapping, Optional
 
 from app.config import settings
 from app.database import check_supabase_health, close_health_client, get_supabase
@@ -1111,6 +1111,63 @@ async def _run_scheduled_notification_senders():
         await asyncio.sleep(3600)
 
 
+def _without_confirmed_delistings(tickers: List[str], what: str) -> List[str]:
+    """`tickers` minus every CONFIRMED delisting `listing_status_service.peek_delisted` holds
+    (sync, in memory: no FMP call to decide; a delisting nothing has confirmed yet is warmed,
+    exactly as before). Order kept. Logs the skipped symbols at INFO."""
+    from app.services.listing_status_service import peek_delisted
+
+    kept: List[str] = []
+    skipped: List[str] = []
+    for t in tickers:
+        (skipped if peek_delisted(t) is not None else kept).append(t)
+    if skipped:
+        logger.info(
+            "%s: skipping %d confirmed delisting(s) %s — no new report can be generated for them",
+            what, len(skipped), ", ".join(skipped[:10]),
+        )
+    return kept
+
+
+async def _without_delistings(tickers: List[str], what: str) -> List[str]:
+    """`tickers` minus every CONFIRMED delisting, decided the way the on-view pre-warm decides
+    (`stocks._warm_unless_delisted`), so a delisted top-watchlist ticker nothing on screen
+    confirmed in the last 6 h is not sent to a ~20-call warm.
+
+    Two passes, cheapest first: `_without_confirmed_delistings` (memory, no I/O), then ONE
+    bounded `get_delisted_for_symbols` call for the rest — free for every ticker that traded
+    in the latest session, one memoised quote read for a ticker that did not. Anything it
+    cannot decide within `PAID_DOOR_WAIT` (a cold registry right after boot included) is
+    warmed, exactly as before (fail open). Order kept. Never raises."""
+    from app.services.listing_status_service import PAID_DOOR_WAIT, get_delisted_for_symbols
+
+    kept = _without_confirmed_delistings(tickers, what)
+    if not kept:
+        return kept
+    try:
+        found = await get_delisted_for_symbols(
+            kept, wait=PAID_DOOR_WAIT, purpose=f"the {what}", unknown_level=logging.DEBUG,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — get_delisted_for_symbols never raises; belt
+        logger.warning("%s: delisted check failed (%s: %s) — warming all %d ticker(s)",
+                       what, type(e).__name__, e, len(kept))
+        return kept
+    if not found:
+        return kept
+
+    def _is_found(t: Any) -> bool:
+        return isinstance(t, str) and t.strip().upper() in found
+
+    skipped = [t for t in kept if _is_found(t)]
+    logger.info(
+        "%s: skipping %d delisting(s) confirmed by this pass %s — no new report can be "
+        "generated for them", what, len(skipped), ", ".join(skipped[:10]),
+    )
+    return [t for t in kept if not _is_found(t)]
+
+
 async def _run_report_pre_warmer():
     """Background task: pre-warm the persona-NEUTRAL ticker_data_cache for the
     most popular watchlist tickers.
@@ -1141,6 +1198,10 @@ async def _run_report_pre_warmer():
             rows = (await sb_exec(sb.rpc("get_top_watchlist_tickers", {"n": top_n})))
             tickers = [r["ticker"] for r in (rows.data or []) if r.get("ticker")]
 
+            # A confirmed delisting is never warmed (Phase 2, owner 2026-11-13): no new report
+            # can be generated for it. Memory first, then one bounded check for the rest (free
+            # for every ticker that traded in the latest session); an undecided one is warmed.
+            tickers = await _without_delistings(tickers, "Report pre-warm")
             if not tickers:
                 logger.info("Report pre-warm: no watchlist tickers to warm")
             else:

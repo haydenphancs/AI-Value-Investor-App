@@ -437,13 +437,24 @@ def profile_change_is_current(profile: Any, now: Optional[datetime] = None) -> b
     evidence (no trade, or a registry still cold after a restart) the change stays
     unknown; the price is never withheld.
     """
-    if not isinstance(profile, dict):
-        return True
-    flag = profile.get("isActivelyTrading")
-    inactive = flag is False or (isinstance(flag, str) and flag.strip().lower() == "false")
-    if not inactive:
+    if not profile_says_inactive(profile):
         return True
     return change_is_current(profile.get("symbol"), profile.get("price"), now) is True
+
+
+def profile_says_inactive(profile: Any) -> bool:
+    """Does this row carry FMP's EXPLICIT "not actively trading" flag?
+
+    Only an explicit ``False`` (or the string "false", any case or padding) counts; a missing,
+    ``None``, ``0`` or unreadable flag is NOT inactive — unknown keeps today's behaviour. Reads a
+    raw `/stable/profile` row or a quote shaped by `PriceService._from_profile`, which carries
+    ``isActivelyTrading: False`` for exactly these rows. One predicate for both readers: the
+    day-change rule above and `listing_status_service` (the "Delisted" label's condition (a)).
+    """
+    if not isinstance(profile, dict):
+        return False
+    flag = profile.get("isActivelyTrading")
+    return flag is False or (isinstance(flag, str) and flag.strip().lower() == "false")
 
 
 def current_session_quote(
@@ -570,6 +581,13 @@ class PriceService:
         code = currency_code(row.get("currency"))
         if code is not None:
             out["currency"] = code
+        # FMP's "not actively trading" flag, carried ONLY for a profile that says so (absent
+        # otherwise, so the fixed key set of every live quote is unchanged, like `currency`).
+        # `listing_status_service` reads it from the quote a surface already holds: the
+        # "Delisted" label's condition (a). Never emitted by the screener path — that universe
+        # is actively-trading rows only.
+        if profile_says_inactive(row):
+            out["isActivelyTrading"] = False
         return out
 
     @staticmethod

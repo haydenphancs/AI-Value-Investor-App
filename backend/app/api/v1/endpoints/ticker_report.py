@@ -37,6 +37,7 @@ from app.api.error_response import (
     degraded_error_code,
     error_response_from_exception,
     make_error_response,
+    ticker_delisted_error,
 )
 from app.config import settings
 from app.database import get_supabase
@@ -67,6 +68,7 @@ from app.services.ticker_report_cache import (
     patch_legacy_price_action,
 )
 from app.services.ticker_report_service import TickerReportService
+from app.services.listing_status_service import PAID_DOOR_WAIT, get_delisted_for_symbols
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +112,8 @@ async def get_ticker_report(
     `CreditService.DEEP_RESEARCH_COST` credits, charged upfront and refunded on ANY
     non-delivery (generation error, a degraded report, schema drift, or a deploy cancelling
     the request). A same-user request for a generation that is still running joins it and is
-    never charged a second time.
+    never charged a second time. A CONFIRMED delisting answers 409 `TICKER_DELISTED` before
+    any charge (a cached report for it is still served free; an undecided check proceeds).
 
     ACCOUNT-ONLY. This used to accept guests, metered per install against
     `GUEST_REPORT_MONTHLY_LIMIT` (migration 106) keyed off the `X-Guest-Id`-derived
@@ -220,14 +223,31 @@ async def get_ticker_report(
     #    under ONE uvicorn worker, which `tests/test_deploy_command_parity.py` pins. Accepted
     #    residual: a retry whose cache read started before the leader's cache write, and
     #    whose map check runs after the leader popped, becomes a new leader and charges.
+    #
+    #    The map is read TWICE: here, BEFORE the delisted check (joining is free, and a leader
+    #    that already started was admitted and charged — its follower gets the leader's answer,
+    #    never a 409 that says "You haven't been charged" while the leader's charge stands),
+    #    and again after the check's await, right before registering, so the get and the set
+    #    stay atomic.
     key = (str(user["id"]), ticker, persona)
     leader = _USER_GENERATIONS.get(key)
     if leader is not None:
-        logger.info(
-            "Report %s/%s already generating for user=%s — joining it (no second charge)",
-            ticker, persona, user["id"],
-        )
-        return await _join_user_generation(leader, ticker, persona)
+        return await _join_logged(leader, ticker, persona, user)
+
+    # ── DELISTED: a NEW report on a confirmed delisting is refused, BEFORE the admission gate
+    #    and the precharge (owner, 2026-11-13: "approve phase 2 too"). AFTER both free paths
+    #    and the free join on purpose: a report already generated (or already being generated
+    #    for this user) stays free to read. A ticker that traded in the latest session costs
+    #    nothing here; anything the check cannot decide within PAID_DOOR_WAIT is logged and
+    #    proceeds exactly as before (fail open).
+    refusal = await _refuse_if_delisted(ticker, persona, user)
+    if refusal is not None:
+        return refusal
+
+    # Re-read after the await above: a leader may have registered while the check ran.
+    leader = _USER_GENERATIONS.get(key)
+    if leader is not None:
+        return await _join_logged(leader, ticker, persona, user)
     fut: "asyncio.Future[Any]" = asyncio.get_running_loop().create_future()
     _USER_GENERATIONS[key] = fut
     result: Any = _LEADER_DIED
@@ -239,6 +259,33 @@ async def get_ticker_report(
             _USER_GENERATIONS.pop(key, None)
         if not fut.done():
             fut.set_result(result)
+
+
+async def _refuse_if_delisted(ticker: str, persona: str, user: dict):
+    """The 409 `TICKER_DELISTED` response for a CONFIRMED delisting, else None (trading OR
+    unknown — the caller proceeds as before). Never raises; never charges."""
+    listing = (await get_delisted_for_symbols(
+        [ticker], wait=PAID_DOOR_WAIT, purpose=f"GET /stocks/{ticker}/report",
+    )).get(ticker)
+    if listing is None:
+        return None
+    logger.info(
+        "Report %s/%s refused before any charge for user=%s — a confirmed delisting (%s, %s)",
+        ticker, persona, user.get("id"), listing.exchange, listing.delisted_date.isoformat(),
+    )
+    return ticker_delisted_error(
+        ticker=ticker, delisted_date=listing.delisted_date, exchange=listing.exchange,
+        purpose="report",
+    )
+
+
+async def _join_logged(leader: "asyncio.Future[Any]", ticker: str, persona: str, user: dict):
+    """`_join_user_generation` with the one INFO line every join writes."""
+    logger.info(
+        "Report %s/%s already generating for user=%s — joining it (no second charge)",
+        ticker, persona, user["id"],
+    )
+    return await _join_user_generation(leader, ticker, persona)
 
 
 async def _join_user_generation(leader: "asyncio.Future[Any]", ticker: str, persona: str):

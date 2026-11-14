@@ -36,7 +36,14 @@ struct PriceAlertsSheet: View {
     /// 16 production users had a device token.
     @State private var permission: UNAuthorizationStatus = .notDetermined
 
-    init(ticker: String, assetType: String = "stock") {
+    /// The ticker is CONFIRMED delisted (delisting Phase 2, owner 2026-11-13): its price no
+    /// longer moves, so a new alert could never fire and the server refuses one. The add form
+    /// gives way to a notice saying so; existing rules stay listed, shown paused by their rows.
+    /// Only the stock detail screen knows this today; every other caller keeps the default.
+    private let isDelisted: Bool
+
+    init(ticker: String, assetType: String = "stock", isDelisted: Bool = false) {
+        self.isDelisted = isDelisted
         _viewModel = StateObject(
             wrappedValue: PriceAlertsViewModel(ticker: ticker, assetType: assetType)
         )
@@ -56,7 +63,7 @@ struct PriceAlertsSheet: View {
                         if permission == .denied {
                             NotificationPermissionBanner(status: permission) {}
                         }
-                        createCard
+                        createSection
                         existingSection
                     }
                     .padding(.horizontal, AppSpacing.lg)
@@ -107,6 +114,27 @@ struct PriceAlertsSheet: View {
         // `.notDetermined` and the denial warning never appeared. Caught on the simulator.
         await PushNotificationManager.shared.requestAuthorizationResult()
         await refreshPermission()
+    }
+
+    /// The add form, or — for a delisted ticker — the notice that takes its place.
+    @ViewBuilder
+    private var createSection: some View {
+        if isDelisted {
+            delistedNotice
+        } else {
+            createCard
+        }
+    }
+
+    /// Information, not a failure: a muted icon and no action. The server refuses a new rule
+    /// on a delisted ticker anyway; this says why before the user types a number.
+    private var delistedNotice: some View {
+        InlineRetryNotice(
+            message: "Price alerts are paused — \(viewModel.ticker) is delisted, "
+                + "so its price no longer moves.",
+            systemImage: "bell.slash",
+            iconColor: AppColors.textMuted
+        )
     }
 
     private var createCard: some View {
@@ -261,4 +289,8 @@ struct PriceAlertsSheet: View {
 
 #Preview {
     PriceAlertsSheet(ticker: "AAPL")
+}
+
+#Preview("Delisted") {
+    PriceAlertsSheet(ticker: "ROKU", isDelisted: true)
 }

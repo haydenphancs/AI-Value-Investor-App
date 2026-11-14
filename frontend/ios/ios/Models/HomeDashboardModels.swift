@@ -51,6 +51,12 @@ struct MarketPulseItem: Identifiable, Hashable {
     /// a span — so mock fixtures and any degraded row render exactly as before.
     var sparkFrom: Double = 0
     var sparkTo: Double = 1
+    /// Set only when the backend confirmed this listing is delisted (`DelistedListing`). The
+    /// tile then shows a "Delisted" pill in place of its price, and no sparkline or change
+    /// (owner decision 2026-11-13, D1). Only the Your Watchlist strip can hold one.
+    let delisting: DelistedListing?
+
+    var isDelisted: Bool { delisting != nil }
 
     // Explicit init with defaults for the trailing fields so existing call sites
     // (the mock fixtures) keep compiling while the live repository supplies them.
@@ -58,7 +64,9 @@ struct MarketPulseItem: Identifiable, Hashable {
          priceText: String, changeText: String, isPositive: Bool,
          spark: [Double], previousClose: Double? = nil,
          sparkFrom: Double = 0, sparkTo: Double = 1,
-         changeKnown: Bool = true) {
+         changeKnown: Bool = true,
+         delisting: DelistedListing? = nil) {
+        self.delisting = delisting
         self.changeKnown = changeKnown
         self.name = name
         self.symbol = symbol
@@ -476,6 +484,14 @@ struct MarketPulseItemDTO: Decodable {
     /// full-width default.
     let sparkFrom: Double?
     let sparkTo: Double?
+    /// The delisting label's four keys (`DelistedListing`). All null unless the backend
+    /// confirmed a delisting. ⚠️ Optional for the same reason as `sparkFrom`: a non-Optional
+    /// key would blank the WHOLE Home dashboard against a backend (or a saved snapshot) that
+    /// predates it. `HomeRepository.mapPulse` turns them into the model's `delisting`.
+    let listingStatus: String?
+    let delistedDate: String?
+    let delistedExchange: String?
+    let lastTradeDate: String?
 
     enum CodingKeys: String, CodingKey {
         case symbol, name, type, price, spark
@@ -484,6 +500,10 @@ struct MarketPulseItemDTO: Decodable {
         case previousClose = "previous_close"
         case sparkFrom = "spark_from"
         case sparkTo = "spark_to"
+        case listingStatus = "listing_status"
+        case delistedDate = "delisted_date"
+        case delistedExchange = "delisted_exchange"
+        case lastTradeDate = "last_trade_date"
     }
 }
 

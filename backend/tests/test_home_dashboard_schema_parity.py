@@ -68,6 +68,10 @@ _ITEM_KEYS = {
     # session, as fractions of the tile width. Without these iOS spread N points
     # edge-to-edge and a 10:15 tile was pixel-identical to a closed day.
     "spark_from", "spark_to",
+    # The "Delisted" label (2026-11-13, `app/schemas/listing_status.py`): four Optional keys,
+    # all null unless a Your Watchlist tile's delisting is confirmed. `MarketPulseItemDTO`
+    # MUST decode them as Optional — a required key here blanks the whole dashboard.
+    "listing_status", "delisted_date", "delisted_exchange", "last_trade_date",
 }
 # The exact snake_case keys the iOS `HomeDashboardResponseDTO.CodingKeys` expects.
 _RESPONSE_KEYS = {

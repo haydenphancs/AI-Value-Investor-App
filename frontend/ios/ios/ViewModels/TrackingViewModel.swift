@@ -615,12 +615,14 @@ class TrackingViewModel: ObservableObject {
         let sort = HoldingsSort(option: sortOption, ascending: sortAscending)
         return sort.ordered(assets) { (asset: TrackedAsset) -> HoldingsSort.Key in
             // A placeholder price / change (the "—" rows) is UNKNOWN, never its 0.0 wire
-            // value: unknown values sort last in both directions.
+            // value: unknown values sort last in both directions. A delisted row's price is a
+            // stale last close and it has no change or live market cap, so it is unknown on
+            // all three and sorts last too (it shows a "Delisted" pill, not those numbers).
             HoldingsSort.Key(
                 ticker: asset.ticker,
-                price: asset.priceKnown ? asset.price : nil,
-                changePercent: asset.changeKnown ? asset.changePercent : nil,
-                marketCap: asset.marketCap,
+                price: asset.priceKnown && !asset.isDelisted ? asset.price : nil,
+                changePercent: asset.changeKnown && !asset.isDelisted ? asset.changePercent : nil,
+                marketCap: asset.isDelisted ? nil : asset.marketCap,
                 addedAt: asset.addedAt,
                 position: positions[asset.ticker.uppercased()]
             )

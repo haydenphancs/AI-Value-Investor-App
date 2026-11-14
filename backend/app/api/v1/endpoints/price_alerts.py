@@ -17,7 +17,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends
 
-from app.api.error_response import ErrorCode, make_error_response
+from app.api.error_response import ErrorCode, make_error_response, ticker_delisted_error
 from app.config import settings
 from app.dependencies import get_current_user
 from app.integrations.fmp import get_fmp_client
@@ -37,6 +37,13 @@ from app.services.price_alert_service import (
     get_price_alert_service,
 )
 from app.services.asset_class import canonical_stored_symbol
+from app.services.listing_status_service import (
+    PAID_DOOR_WAIT,
+    REQUEST_WAIT,
+    get_delisted,
+    get_delisted_for_symbols,
+    peek_delisted,
+)
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -65,11 +72,24 @@ async def list_price_alerts(
         )
     except PriceAlertUnavailable as e:
         return _unavailable(e)
+    # A rule on a CONFIRMED delisting is paused by the evaluation loop (no quote, no state
+    # write); say so on the row, so the sheet can show "Paused: delisted" (Phase 2, owner
+    # 2026-11-13). Free for every ticker that traded in the latest session; bounded by the
+    # screens' REQUEST_WAIT otherwise. Unknown → the row reads as before. Nothing persisted.
+    listings = await get_delisted_for_symbols(
+        [str(r.get("ticker") or "") for r in rows if isinstance(r, dict)],
+        wait=REQUEST_WAIT, purpose="the price-alert list", unknown_level=logging.DEBUG,
+    )
     return PriceAlertListResponse(
-        items=[price_alert_from_row(r) for r in rows],
+        items=[price_alert_from_row(r, listing=_wire_for(r, listings)) for r in rows],
         max_per_user=settings.PRICE_ALERT_MAX_PER_USER,
         max_per_ticker=settings.PRICE_ALERT_MAX_PER_TICKER_PER_USER,
     )
+
+
+def _wire_for(row: dict, listings: dict):
+    listing = listings.get(str((row or {}).get("ticker") or "").strip().upper())
+    return listing.wire() if listing is not None else None
 
 
 @router.post("", response_model=PriceAlertResponse)
@@ -102,17 +122,38 @@ async def create_price_alert(
             _raw_ticker, request.ticker, request.asset_type,
         )
     seed = None
+    seed_quote = None
     try:
         quotes = await price_source().get_quotes_list([request.ticker.upper()])
         for q in quotes or []:
             if str(q.get("symbol") or "").upper() == request.ticker.upper():
                 seed = finite_price(q.get("price"))
+                seed_quote = q
                 break
     except Exception as e:
         logger.warning(
             "price alerts: seed quote for %s failed (%s: %s) — creating with no "
             "baseline; the engine will seed on its next cycle",
             request.ticker, type(e).__name__, e,
+        )
+
+    # A CONFIRMED delisting has no live price to watch: refuse the new rule (Phase 2, owner
+    # 2026-11-13). Decided from the seed quote already in hand (its inactive flag), so a ticker
+    # that traded in the latest session costs nothing; with no quote, only a delisting already
+    # held in memory refuses. Unknown, or not decided within PAID_DOOR_WAIT → created as before.
+    ticker_key = request.ticker.strip().upper()
+    if seed_quote is not None:
+        listing = await get_delisted(ticker_key, quote=seed_quote, wait=PAID_DOOR_WAIT)
+    else:
+        listing = peek_delisted(ticker_key)
+    if listing is not None:
+        logger.info(
+            "price alerts: create refused for user=%s — %s is a confirmed delisting (%s, %s)",
+            user.get("id"), ticker_key, listing.exchange, listing.delisted_date.isoformat(),
+        )
+        return ticker_delisted_error(
+            ticker=ticker_key, delisted_date=listing.delisted_date,
+            exchange=listing.exchange, purpose="price_alert",
         )
 
     try:
@@ -170,7 +211,10 @@ async def update_price_alert(
             message=f"price alert {alert_id} not found for this user",
             user_message="That alert no longer exists.",
         )
-    return price_alert_from_row(row)
+    # Keep the "Paused: delisted" caption on an edited row (memory only, no I/O): the sheet
+    # replaces the row with this answer.
+    held = peek_delisted(str(row.get("ticker") or ""))
+    return price_alert_from_row(row, listing=held.wire() if held is not None else None)
 
 
 @router.delete("/{alert_id}", response_model=DeletePriceAlertResponse)

@@ -68,6 +68,7 @@ from app.services._earnings_common import (
 from app.config import settings
 from app.services.asset_class import uses_coingecko_price
 from app.services.price_service import price_source
+from app.services.listing_status_service import get_delisted_many
 from app.utils.market_hours import (
     ET,
     SESSION_CLOSED,
@@ -1132,6 +1133,11 @@ class TrackingService:
             earnings_alerts + whale_alerts + analyst_alerts + insider_alerts
         )
 
+        # The "Delisted" label, from the quotes already in hand: zero I/O unless a quote
+        # carries FMP's inactive flag AND the symbol did not trade in the latest session;
+        # one shared bounded wait otherwise. Never raises. Keys are UPPERCASE.
+        listing_map = await get_delisted_many(quotes_map)
+
         # 3. Merge watchlist + quotes + sparklines into TrackedAssetResponse
         assets: List[TrackedAssetResponse] = []
         for item in watchlist:
@@ -1170,7 +1176,15 @@ class TrackingService:
                 prev_close_f = _finite_or_none(quote.get("previousClose"))
                 market_cap_f = _finite_or_none(quote.get("marketCap"))
 
-                if quote and (price_f is None or change_pct is None):
+                listing = listing_map.get(str(ticker).strip().upper())
+                if quote and listing is not None and price_f is not None and change_pct is None:
+                    # A CONFIRMED delisting has no day change by design: its price is the
+                    # last close. Not a data problem, so not a per-build WARNING.
+                    logger.debug(
+                        "[Tracking] %s: delisted %s — last close %r, no day change by design",
+                        ticker, listing.delisted_date, quote.get("price"),
+                    )
+                elif quote and (price_f is None or change_pct is None):
                     # Never silent: a quote that arrived but carried an unusable
                     # number is exactly the case that used to take the tab down.
                     logger.warning(
@@ -1258,6 +1272,8 @@ class TrackingService:
                         # Holdings "Date Added" sort key. Never raises: an unreadable value
                         # is None + a WARNING, never this row's `except` below.
                         added_at=iso_utc_millis(item.get("added_at"), ticker=ticker),
+                        # All four or none (`app/schemas/listing_status.py`).
+                        **(listing.wire() if listing is not None else {}),
                     )
                 )
             except Exception as exc:

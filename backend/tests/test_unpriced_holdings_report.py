@@ -388,3 +388,51 @@ def test_the_close_snapshot_loop_runs_the_report_in_its_own_try():
     assert any(isinstance(h.type, ast.Name) and h.type.id == "Exception" for h in t.handlers)
     src = inspect.getsource(main_module._run_close_snapshot_loop)
     assert src.index("refresh_close_snapshot()") < src.index("report_unpriced_holdings()")
+
+
+# ── the "Delisted" pre-warm (2026-11-13) ──────────────────────────────────────
+
+class _ListedFMP(_FMP):
+    """`_FMP` plus FMP's delisted-companies list (one page; the rest empty)."""
+
+    def __init__(self, *args, rows=(), **kwargs):
+        super().__init__(*args, **kwargs)
+        self.rows, self.page_calls = list(rows), []
+
+    async def get_delisted_companies(self, page, limit=100):
+        self.page_calls.append(page)
+        return list(self.rows) if page == 0 else []
+
+
+@pytest.mark.asyncio
+async def test_the_error_names_fmps_delisting_row_and_warms_the_label(monkeypatch, caplog):
+    from app.services import listing_status_service as ls
+
+    sp.publish_priced_session(SESSION, _session_rows(["AAPL"]))
+    fmp = _ListedFMP(PROFILES, CIKS, rows=[
+        {"symbol": "ET", "exchange": "NYSE", "delistedDate": "2026-10-05"},
+        {"symbol": "LATER", "exchange": "NYSE", "delistedDate": "2026-12-30"},
+    ])
+    _install(monkeypatch, held={"ET": {"watchlist_items": 1}, "DDS": {"watchlist_items": 1}},
+             directory=DIRECTORY, stored={"AAPL": "2026-10-08", "ET": "2026-10-06",
+                                          "DDS": "2026-09-28"}, fmp=fmp)
+    with caplog.at_level(logging.WARNING):
+        report = await uh.report_unpriced_holdings(NOW)
+    assert report["newly"]["ET"]["delisted"] == "FMP lists it delisted from NYSE on 2026-10-05"
+    assert "delisted" not in report["still"]["DDS"], "not on the list: no hint"
+    [error] = _levels(caplog, logging.ERROR)
+    assert "; FMP lists it delisted from NYSE on 2026-10-05)" in error
+    assert sorted(fmp.page_calls) == list(range(ls._WINDOW_PAGES)), "ONE shared window load"
+    assert ls._window is not None, "the app's label finds the window in memory"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_delisted_list_only_drops_the_hint(monkeypatch, caplog):
+    sp.publish_priced_session(SESSION, _session_rows(["AAPL"]))
+    _install(monkeypatch, held={"ET": {"watchlist_items": 1}}, directory=DIRECTORY,
+             stored={"AAPL": "2026-10-08", "ET": "2026-10-06"}, fmp=_FMP(PROFILES, CIKS))
+    with caplog.at_level(logging.WARNING):
+        report = await uh.report_unpriced_holdings(NOW)
+    assert list(report["newly"]) == ["ET"] and "delisted" not in report["newly"]["ET"]
+    [error] = _levels(caplog, logging.ERROR)
+    assert "FMP lists it delisted" not in error

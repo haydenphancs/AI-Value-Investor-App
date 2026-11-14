@@ -59,6 +59,7 @@ from app.utils.market_hours import (
 from app.integrations.fmp_entitlements import is_blocked_symbol
 from app.services.asset_class import profile_is_fund, uses_coingecko_price
 from app.services.price_service import price_source, profile_change_is_current
+from app.services.listing_status_service import DelistedListing, get_delisted
 from app.services.market_movers_service import get_market_movers_service
 # The close-cycle boundary every close-aligned cache in the app shares (weekday 18:00 ET).
 # Bound at MODULE level, like index/etf/commodity, so a test can freeze this module's clock.
@@ -1189,6 +1190,11 @@ class StockOverviewService:
             except Exception as e:
                 logger.warning(f"IPO price fetch failed for {ticker}: {e}")
 
+        # The "Delisted" label, from the FRESH quote only (`_get_volatile`'s 30 s quote) —
+        # never `fundamentals["profile"]`, which follows the daily close cycle. An empty quote
+        # leg reads as "not inactive": no label (fail open).
+        listing = await get_delisted(ticker, quote=volatile.get("quote") or {})
+
         # ── Build response from both data sources ─────────────────
         response = self._build_full_response(
             ticker, fundamentals, volatile, chart_range, interval, extended_hours,
@@ -1198,6 +1204,7 @@ class StockOverviewService:
             health_snapshot=health_snapshot,
             ownership_snapshot=ownership_snapshot,
             ipo_price_data=ipo_price_data,
+            listing=listing,
         )
 
         # Cache the formatted profile for chat AI context: a read-merge-write of the shared
@@ -1965,6 +1972,15 @@ class StockOverviewService:
         # NEVER slice from stock_historical here — that requires the slow bundle.
         chart_data = (vol.get("chart_data") if isinstance(vol, dict) else None) or []
 
+        # The "Delisted" label: the quote's own flag first, the fresh profile only when the
+        # quote leg came back empty. Zero I/O for a ticker that traded in the latest session;
+        # bounded by `listing_status_service.REQUEST_WAIT` otherwise, and never raises.
+        listing = await get_delisted(ticker, quote=quote, profile=profile)
+        if listing is not None:
+            # The wire contract: a confirmed delisting's price is its last close, with no
+            # day change (already unknown in practice — the profile it came from is inactive).
+            change_known, change, change_pct = False, 0.0, 0.0
+
         response = StockOverviewCoreResponse(
             symbol=ticker,
             company_name=company_name,
@@ -1974,6 +1990,7 @@ class StockOverviewService:
             change_known=change_known,
             market_status=_get_market_status(),
             chart_data=chart_data,
+            **(listing.wire() if listing is not None else {}),
         )
         _cache_set(core_key, response)
         return response
@@ -2071,6 +2088,7 @@ class StockOverviewService:
         profitability_snapshot=None, growth_snapshot=None, valuation_snapshot=None,
         health_snapshot=None, ownership_snapshot=None,
         ipo_price_data=None,
+        listing: Optional[DelistedListing] = None,
     ) -> StockOverviewResponse:
         """Combine fundamentals + volatile into one response.
 
@@ -2117,6 +2135,10 @@ class StockOverviewService:
         change_known = raw_change is not None or raw_pct is not None
         change = raw_change if raw_change is not None else 0.0
         change_pct = raw_pct if raw_pct is not None else 0.0
+        if listing is not None:
+            # A CONFIRMED delisting has no day change (the wire contract): never let a bundle
+            # profile that still reads active hand its last session's move to the header.
+            change_known, change, change_pct = False, 0.0, 0.0
         # The same refusal the fast-core path makes above (`get_overview_core`): a missing
         # price is an upstream FAILURE, never a price of zero. `_fetch_fundamentals` folds
         # every slice to `{}`/`[]` and `_get_volatile` folds a failed quote to `{}`, so a
@@ -2210,6 +2232,8 @@ class StockOverviewService:
             company_profile=company_profile,
             related_tickers=[],  # Populated below
             benchmark_summary=benchmark_summary,
+            # Computed by the caller (async, from the fresh quote); this builder stays sync.
+            **(listing.wire() if listing is not None else {}),
         )
 
     # ── Key Statistics ────────────────────────────────────────────

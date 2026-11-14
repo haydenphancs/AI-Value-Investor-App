@@ -1186,6 +1186,14 @@ struct StockDetail: Codable, Identifiable {
     var floatShares: Double? = nil
     var percentInsiders: Double? = nil
     var percentInstitutional: Double? = nil
+    /// The delisting label's four keys (`DelistedListing`), on `GET /stocks/{t}` too, so the
+    /// detail screen's fallback path (the overview failed) still says "Delisted". All null
+    /// unless the backend confirmed a delisting. `var` with a default, never `let`: a `let`
+    /// with an inline default is skipped by synthesized Decodable (see `StockNewsArticle`).
+    var listingStatus: String? = nil
+    var delistedDate: String? = nil
+    var delistedExchange: String? = nil
+    var lastTradeDate: String? = nil
 
     /// Explicit init so call sites keep passing a plain `Int?`. The lenient wrapper on
     /// `fullTimeEmployeesRaw` is a decode-boundary concern, not part of this type's API,
@@ -1261,6 +1269,16 @@ struct StockDetail: Codable, Identifiable {
         case floatShares = "float_shares"
         case percentInsiders = "percent_insiders"
         case percentInstitutional = "percent_institutional"
+        case listingStatus = "listing_status"
+        case delistedDate = "delisted_date"
+        case delistedExchange = "delisted_exchange"
+        case lastTradeDate = "last_trade_date"
+    }
+
+    /// Non-nil only for a confirmed delisting — the one wire rule, `DelistedListing.from`.
+    var delisting: DelistedListing? {
+        DelistedListing.from(status: listingStatus, delistedDate: delistedDate,
+                             exchange: delistedExchange, lastTradeDate: lastTradeDate)
     }
 
     var isPositive: Bool {
@@ -1316,6 +1334,14 @@ struct StockQuote: Codable {
     let marketCap: Double?
     let yearHigh: Double?
     let yearLow: Double?
+    /// The delisting label's four keys (`DelistedListing`), on `GET /stocks/{t}/quote` too:
+    /// the detail screen's 15 s poll reads them, so a screen that opened before the backend
+    /// confirmed the delisting picks it up and stops polling. `var` with a default (a `let`
+    /// with one is never decoded); trailing, so the memberwise init still compiles.
+    var listingStatus: String? = nil
+    var delistedDate: String? = nil
+    var delistedExchange: String? = nil
+    var lastTradeDate: String? = nil
 
     // Backend (FMP quote) returns: symbol, changes_percentage, day_high, day_low, timestamp (unix int),
     // eps, pe, shares_outstanding, avg_volume, market_cap, year_high, year_low
@@ -1337,6 +1363,16 @@ struct StockQuote: Codable {
         case marketCap = "market_cap"
         case yearHigh = "year_high"
         case yearLow = "year_low"
+        case listingStatus = "listing_status"
+        case delistedDate = "delisted_date"
+        case delistedExchange = "delisted_exchange"
+        case lastTradeDate = "last_trade_date"
+    }
+
+    /// Non-nil only for a confirmed delisting — the one wire rule, `DelistedListing.from`.
+    var delisting: DelistedListing? {
+        DelistedListing.from(status: listingStatus, delistedDate: delistedDate,
+                             exchange: delistedExchange, lastTradeDate: lastTradeDate)
     }
 }
 

@@ -14,6 +14,7 @@ import asyncio
 import logging
 import math
 import re
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
@@ -113,7 +114,13 @@ _CACHE_TTL = 300  # 5 minutes
 #     the bank-dominated Financial Services sector median (owner decision 2026-10-20). A v9
 #     row of MCO read its P/E "Richly valued vs peers" against banks' 12.35, and one of RKT
 #     its D/E red against 0.46.
-_HC_PAYLOAD_VERSION = 10
+# 11 (2026-11-14, owner-approved parity fixes): the Quick Ratio insight uses the Current
+#     Ratio's band edges and direction words (>75 / >30 / >10 / ±10 / −25 / −40), so two
+#     equal gaps read alike — ORCL's CR and QR, both 1.17 vs 1.53 (−23.5%), read "a little
+#     below … Adequate but tight" and "below … Thin near-cash cushion". It also stops QR
+#     saying "above … Solid" at +5..+10%, where its status (+10 / −25) is neutral. The
+#     insight text is stored in the row, so a v10 row is rebuilt.
+_HC_PAYLOAD_VERSION = 11
 _HC_VERSION_KEY = "payload_version"
 
 # ── Fund-shaped empty builds (2026-10-01) ─────────────────────────────────────────
@@ -183,6 +190,72 @@ def _cache_set(key: str, value: Any) -> None:
     if len(_cache) > _CACHE_MAX_ENTRIES:
         for _old in list(_cache.keys())[: len(_cache) - _CACHE_MAX_ENTRIES]:
             _cache.pop(_old, None)
+
+
+# ── Earnings stamp of the build each key serves (2026-11-14) ──────
+# The Financial Health snapshot (health_snapshot_service) copies this card into its own
+# 24h `snapshot_cache` row. That row used to check only its age, so on report day this
+# card's row dropped (`earnings_stamp_passed`) and rebuilt while the Overview card and new
+# reports kept the pre-earnings copy for up to 24h. The snapshot now stores the stamp of
+# the build it copied and drops its row on the same day, so it must know that stamp: every
+# value this getter hands out has it noted here — a fresh build's `next_earnings`
+# (CALENDAR_UNKNOWN included), a Tier-2 row's `next_earnings_date` — and
+# `HealthCheckService.next_earnings_for` reads it back for EXACTLY that object (identity,
+# like health_snapshot's `_degraded_by_key`). No entry, or another object, is
+# CALENDAR_UNKNOWN: the snapshot then serves its build but never writes it.
+# Written from the loop (a build) AND from the Tier-2 read's worker thread, so a lock.
+_stamp_by_key: Dict[str, Tuple[Any, EarningsStamp]] = {}
+_stamp_lock = threading.Lock()
+# Larger than the Tier-1 cap: entries are written in lockstep with `_cache_set`, so the
+# memo can only lose an entry Tier 1 still holds after twice as many writes.
+_STAMP_MAX_ENTRIES = 2 * _CACHE_MAX_ENTRIES
+
+
+def _note_stamp(key: str, value: Any, next_earnings: EarningsStamp) -> None:
+    """Record the earnings stamp of ``value``, the object now served under ``key``."""
+    with _stamp_lock:
+        _stamp_by_key.pop(key, None)
+        _stamp_by_key[key] = (value, next_earnings)
+        if len(_stamp_by_key) > _STAMP_MAX_ENTRIES:
+            for _old in list(_stamp_by_key.keys())[: len(_stamp_by_key) - _STAMP_MAX_ENTRIES]:
+                _stamp_by_key.pop(_old, None)
+
+
+def _stamp_of(key: str, value: Any) -> EarningsStamp:
+    """The stamp noted for exactly ``value`` under ``key``; CALENDAR_UNKNOWN when unknown."""
+    with _stamp_lock:
+        entry = _stamp_by_key.get(key)
+    if entry is None or entry[0] is not value:
+        return CALENDAR_UNKNOWN
+    return entry[1]
+
+
+_STAMP_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def earnings_stamp_passed(next_earnings: Any, today: Optional[str] = None) -> bool:
+    """True once a 24h cache row stamped ``next_earnings`` has reached its report day —
+    ``today`` (UTC ``yyyy-MM-dd``) on or after the stamp — so the reader drops the row and
+    the card rebuilds with the just-reported quarter.
+
+    The ONE rule for this card's `health_check_cache` row and the Financial Health
+    `snapshot_cache` row that copies it, so the two drop on the same day. None / "" is "no
+    pending announcement": the row keeps its plain 24h TTL. A stamp that is not a
+    ``yyyy-MM-dd…`` string cannot be compared, so it counts as passed (rebuild, never
+    serve an unbounded row); only the date part is compared, so a timestamp-shaped stamp
+    still drops on its day (a plain string compare kept "2026-11-20T…" alive on the 20th).
+    """
+    if next_earnings is None or next_earnings == "":
+        return False
+    if not isinstance(next_earnings, str) or not _STAMP_DATE_RE.match(next_earnings):
+        logger.warning(
+            "earnings stamp %r is not a yyyy-MM-dd date — treating the cache row as past "
+            "its report day (rebuild)", next_earnings,
+        )
+        return True
+    if today is None:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return today >= next_earnings[:10]
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -661,35 +734,47 @@ def _generate_ic_insight(
 def _generate_qr_insight(
     pct_diff: float, value: float, sector: float, peer: str = "sector",
 ) -> Tuple[str, Optional[str], Optional[str]]:
-    """Generate insight text for Quick Ratio (higher is better)."""
+    """Generate insight text for Quick Ratio (higher is better).
+
+    The band edges and direction words are `_generate_cr_insight`'s (2026-11-14): the two
+    ratios sit side by side on the card with the same status thresholds (+10 / −25), and
+    their own bands (>50 / >20 / >5 / ±10 / −25) made one gap read two ways — ORCL's CR
+    and QR, both 1.17 vs 1.53 (−23.5%), read "a little below … Adequate but tight" and
+    "below … Thin near-cash cushion", and +5..+10% read "above … Solid" on a NEUTRAL row.
+    Only the nouns differ (quick assets, not all current assets)."""
     label = _format_diff_label(pct_diff)
 
-    if pct_diff > 50:
+    if pct_diff > 75:
         return (
             f"{peer} average. Strong cash-equivalent liquidity.",
             label,
             "well above",
         )
-    elif pct_diff > 20:
+    elif pct_diff > 30:
         return (
             f"{peer} average. Healthy near-cash coverage.",
             label,
             "above",
         )
-    elif pct_diff > 5:
+    elif pct_diff > 10:
         return (
             f"{peer} average. Solid quick-asset cushion.",
             label,
             "above",
         )
     elif pct_diff >= -10:
-        direction = "above" if pct_diff >= 0 else "below"
         return (
-            f"{peer} average. Quick-asset coverage in line with peers.",
+            f"Quick-asset coverage roughly in line with {peer} peers.",
             label,
-            direction,
+            f"near {peer} average.",
         )
     elif pct_diff >= -25:
+        return (
+            f"{peer} average. Adequate but tight quick-asset cushion.",
+            label,
+            "a little below",
+        )
+    elif pct_diff >= -40:
         return (
             f"{peer} average. Thin near-cash cushion.",
             label,
@@ -1293,8 +1378,18 @@ class HealthCheckService:
         self.fmp = get_fmp_client()
         self.supabase = get_supabase()
 
+    def next_earnings_for(self, ticker: str, *, served: Any) -> EarningsStamp:
+        """The next-earnings stamp of ``served``, a response `get_health_check(ticker)`
+        handed out: a ``yyyy-MM-dd`` string, None ("no pending announcement"), or
+        CALENDAR_UNKNOWN — the calendar failed, or ``served`` is not the object this getter
+        last served for the ticker (evicted, replaced, or never built here). The Financial
+        Health snapshot stores it in its own row and drops that row on the same day this
+        card's does; it never persists a build whose stamp is CALENDAR_UNKNOWN."""
+        return _stamp_of(f"health_check:{_validate_ticker(ticker)}", served)
+
     async def get_health_check(self, ticker: str) -> HealthCheckResponse:
-        """Public entry point with two-tier caching and in-flight dedup."""
+        """Public entry point with two-tier caching and in-flight dedup. Every value it
+        hands out has its earnings stamp noted (`next_earnings_for`)."""
         ticker = _validate_ticker(ticker)
         cache_key = f"health_check:{ticker}"
 
@@ -1308,6 +1403,7 @@ class HealthCheckService:
         db_cached = await asyncio.to_thread(self._check_supabase_cache, ticker)
         if db_cached is not None:
             logger.info(f"Health check Supabase HIT for {ticker}")
+            # `_check_supabase_cache` noted the row's earnings stamp for this very object.
             _cache_set(cache_key, db_cached)
             return db_cached
 
@@ -1372,6 +1468,9 @@ class HealthCheckService:
                 )
 
             _cache_set(cache_key, result)
+            # Noted BEFORE set_result: an in-flight joiner resumes after it, and the
+            # snapshot reads the stamp of the object it received (`next_earnings_for`).
+            _note_stamp(cache_key, result, next_earnings)
             if not future.done():
                 future.set_result(result)
             return result
@@ -1416,11 +1515,9 @@ class HealthCheckService:
                 return None
 
             next_earnings = entry.get("next_earnings_date")
-            if next_earnings:
-                today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                if today_str >= next_earnings:
-                    logger.info(f"Supabase cache STALE (past earnings {next_earnings}) for {ticker}")
-                    return None
+            if earnings_stamp_passed(next_earnings):
+                logger.info(f"Supabase cache STALE (past earnings {next_earnings}) for {ticker}")
+                return None
 
             json_data = dict(entry.get("response_json") or {})
             # A VERSION, not a key probe: rows written under the old rules (a bank's
@@ -1448,6 +1545,9 @@ class HealthCheckService:
                     )
                     return None
                 logger.info("[fund-shape] ticker=%s step=%s", ticker, "health_check_read")
+            # The row's stamp travels with the object served (a passed one returned above;
+            # NULL / "" is "no pending announcement").
+            _note_stamp(f"health_check:{ticker}", resp, next_earnings or None)
             return resp
 
         except Exception as e:

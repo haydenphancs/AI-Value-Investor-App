@@ -132,7 +132,7 @@ enum HealthCheckMetricType: String, CaseIterable, Identifiable {
         case .interestCoverage:
             return "EBIT divided by interest expense. Higher means the company can comfortably service its debt; a ratio under 2 signals vulnerability to earnings pressure."
         case .quickRatio:
-            return "Near-cash assets divided by current liabilities. Excludes inventory and prepaid items. Above 1.0 indicates the company can cover short-term debts without selling stock."
+            return "Current assets minus inventory, divided by current liabilities. Prepaid and other current assets still count, so a company with no inventory shows the same figure as its current ratio. Above 1.0 means short-term debts are covered without selling inventory."
         }
     }
 }

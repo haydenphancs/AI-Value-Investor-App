@@ -844,3 +844,146 @@ def test_sector_series_survives_card_validation():
     m = card.metrics[0]
     assert m.sector_annual_history is not None
     assert [p.value for p in m.sector_annual_history] == [36.0, 37.0, 38.0]
+
+
+# ── Quarterly Altman Z on TRAILING-FOUR-QUARTER flows (2026-11-14) ──────
+# Altman's EBIT/TA (weight 3.3) and Sales/TA (1.0) are annual flows. The quarterly series fed
+# ONE quarter's EBIT and revenue beside a full balance sheet, so every bar read ~0.4 low:
+# ORCL Q4 '26 2.11 vs FY2026 2.48 on the same balance sheet, Q1 '27 1.29 under the card's
+# 1.48. Owner: "TTM flows". A quarter now sums the four calendar quarters ending there.
+
+_Z_BAL = {"totalAssets": 1000.0, "totalLiabilities": 600.0, "totalCurrentAssets": 300.0,
+          "totalCurrentLiabilities": 200.0, "retainedEarnings": 100.0}
+_Z_QTRS = [  # (period, date, EBIT, revenue) — calendar-year filer, deliberately uneven
+    ("Q1", "2025-03-31", 30.0, 200.0), ("Q2", "2025-06-30", 45.0, 240.0),
+    ("Q3", "2025-09-30", 25.0, 210.0), ("Q4", "2025-12-31", 50.0, 250.0),
+]
+
+
+def _z_quarterly_inputs(qtrs=_Z_QTRS, *, mcap=900.0, drop_ebit_in=None):
+    income, balance, km = [], [], []
+    for period, date, ebit, rev in qtrs:
+        row = {"calendarYear": date[:4], "fiscalYear": date[:4], "period": period,
+               "date": date, "revenue": rev}
+        if period != drop_ebit_in:
+            row["operatingIncome"] = ebit
+        income.append(row)
+        balance.append({"calendarYear": date[:4], "fiscalYear": date[:4], "period": period,
+                        "date": date, **_Z_BAL})
+        km.append({"calendarYear": date[:4], "fiscalYear": date[:4], "period": period,
+                   "date": date, "marketCap": mcap})
+    return income, balance, km
+
+
+def test_quarterly_altman_z_q4_equals_the_annual_z_on_the_same_balance_sheet():
+    """The fiscal-Q4 point and the fiscal-year point share a balance sheet and a market cap;
+    with TTM flows they are the same Z. Mutation caught: passing the single quarter's row
+    (the old code) puts Q4 far below the annual bar."""
+    income, balance, km = _z_quarterly_inputs()
+    q = _fundamentals_history_for_period(income, balance, [], km, [], {}, quarterly=True)
+    annual_income = [{"calendarYear": "2025", "fiscalYear": "2025", "date": "2025-12-31",
+                      "operatingIncome": sum(x[2] for x in _Z_QTRS),
+                      "revenue": sum(x[3] for x in _Z_QTRS)}]
+    annual_balance = [{"calendarYear": "2025", "fiscalYear": "2025", "date": "2025-12-31",
+                       **_Z_BAL}]
+    annual_km = [{"calendarYear": "2025", "fiscalYear": "2025", "date": "2025-12-31",
+                  "marketCap": 900.0}]
+    a = _fundamentals_history_for_period(
+        annual_income, annual_balance, [], annual_km, [], {}, quarterly=False)
+    q_z = dict(_series(q, "altman_z"))
+    a_z = dict(_series(a, "altman_z"))
+    assert a_z["2025"] is not None
+    assert q_z["Q4 '25"] == a_z["2025"]
+    # The one-quarter version would have been 3.3*(50-150)/1000 + (250-900)/1000 = 0.98 lower.
+    one_quarter = _altman_z([_Z_BAL], [{"operatingIncome": 50.0, "revenue": 250.0}],
+                            {}, mkt_cap_override=900.0)
+    assert q_z["Q4 '25"] - one_quarter > 0.9
+
+
+def test_quarterly_altman_z_needs_four_contiguous_quarters():
+    """Q1-Q3 have fewer than four quarters behind them: no point, never a partial-year sum
+    (a low number would draw a Distress bar). Mutation caught: summing whatever is there."""
+    income, balance, km = _z_quarterly_inputs()
+    z = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    assert z["Q1 '25"] is None and z["Q2 '25"] is None and z["Q3 '25"] is None
+    assert z["Q4 '25"] is not None
+
+
+def test_quarterly_altman_z_a_gap_quarter_blanks_every_point_that_spans_it():
+    """Five quarters with the second one missing: the quarters whose trailing year would
+    cross the gap have no point. Mutation caught: walking the sorted list positionally
+    (it would pair Q1 '25 with Q3 '25 and sum a 15-month span)."""
+    qtrs = [("Q4", "2024-12-31", 40.0, 230.0)] + _Z_QTRS
+    income, balance, km = _z_quarterly_inputs(qtrs)
+    income = [r for r in income if r["date"] != "2025-03-31"]
+    z = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    assert z["Q4 '25"] is None  # needs Q1 '25, which is missing
+    assert z["Q3 '25"] is None and z["Q2 '25"] is None
+
+
+def test_quarterly_altman_z_a_missing_ebit_in_any_of_the_four_is_no_point():
+    """`_sum_ttm_income` drops a field missing in any quarter; the Z then has no EBIT and is
+    omitted — never scored with a 3-quarter EBIT. Mutation caught: summing the quarters
+    that do carry the field."""
+    income, balance, km = _z_quarterly_inputs(drop_ebit_in="Q2")
+    z = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    assert z["Q4 '25"] is None
+
+
+def test_quarterly_altman_z_semiannual_filer_gets_no_quarterly_point():
+    """A half-year filer's rows end in Jun and Dec only — every other calendar quarter — so
+    no four contiguous quarters exist and no quarterly Z is drawn (FMP labels these rows
+    Q2/Q4; summing four of them would be two years of flows)."""
+    halves = [("Q2", "2024-06-30", 60.0, 400.0), ("Q4", "2024-12-31", 70.0, 420.0),
+              ("Q2", "2025-06-30", 65.0, 410.0), ("Q4", "2025-12-31", 80.0, 450.0)]
+    income, balance, km = _z_quarterly_inputs(halves)
+    z = _series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z")
+    assert z and all(v is None for _, v in z)
+
+
+def test_quarterly_altman_z_unsorted_and_restated_rows_pick_the_right_four():
+    """FMP order is newest-first and a restatement repeats a period (keep-first = the
+    restatement wins). Shuffled input with a stale duplicate of Q3 still sums the four
+    newest real quarters. Mutation caught: summing the stale Q3."""
+    income, balance, km = _z_quarterly_inputs()
+    stale_q3 = dict(income[2], operatingIncome=999.0)
+    shuffled = [income[3], income[1], income[2], stale_q3, income[0]]  # newest copy of Q3 first
+    z_ok = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    z_shuf = dict(_series(_fundamentals_history_for_period(
+        shuffled, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    assert z_shuf["Q4 '25"] == z_ok["Q4 '25"]
+
+
+def test_quarterly_altman_z_sums_an_operating_loss_quarter():
+    """A loss quarter is a real reading: it is summed (lowering the Z), not skipped."""
+    loss = [("Q1", "2025-03-31", -80.0, 200.0)] + _Z_QTRS[1:]
+    inc_l, bal_l, km_l = _z_quarterly_inputs(loss)
+    inc_p, bal_p, km_p = _z_quarterly_inputs()
+    z_loss = dict(_series(_fundamentals_history_for_period(
+        inc_l, bal_l, [], km_l, [], {}, quarterly=True), "altman_z"))["Q4 '25"]
+    z_profit = dict(_series(_fundamentals_history_for_period(
+        inc_p, bal_p, [], km_p, [], {}, quarterly=True), "altman_z"))["Q4 '25"]
+    assert z_loss is not None
+    assert round(z_profit - z_loss, 2) == round(3.3 * 110.0 / 1000.0, 2)
+
+
+def test_quarterly_altman_z_crosses_the_calendar_year():
+    """An off-calendar filer (ORCL: quarters end Aug, Nov, Feb, May) — the trailing year of
+    the Feb quarter reaches back across January into the prior calendar year."""
+    orcl = [("Q2", "2025-11-30", 30.0, 200.0), ("Q3", "2026-02-28", 45.0, 240.0),
+            ("Q4", "2026-05-31", 25.0, 210.0), ("Q1", "2026-08-31", 50.0, 250.0)]
+    income, balance, km = _z_quarterly_inputs(orcl)
+    for row in income + balance + km:  # fiscal year differs from the calendar year
+        row["fiscalYear"] = "2027" if row["date"] == "2026-08-31" else "2026"
+    z = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    newest = [v for p, v in z.items() if v is not None]
+    assert len(newest) == 1  # only the Aug quarter has four contiguous quarters behind it
+    expected = _altman_z([_Z_BAL], [{"operatingIncome": 150.0, "revenue": 900.0}],
+                         {}, mkt_cap_override=900.0)
+    assert newest[0] == expected

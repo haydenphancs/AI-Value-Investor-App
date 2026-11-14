@@ -552,7 +552,7 @@ async def test_vs_health_check_judges_pe_and_roe_on_absolute_bands(monkeypatch, 
         assert row.peer_level is None and row.comparison_value is None, row.type
         text = hcd._rendered(row)
         assert "industry" not in text and "sector" not in text, text
-    assert hc._HC_PAYLOAD_VERSION == 10
+    assert hc._HC_PAYLOAD_VERSION == 11    # 11 (2026-11-14): QR insight bands
 
 
 @pytest.mark.asyncio

@@ -830,7 +830,8 @@ def test_the_snapshot_cache_round_trips_the_row_numbers_and_rebuilds_an_older_ve
     cls = vss.ValuationSnapshotService if which == "valuation" else hs.HealthSnapshotService
     svc = cls.__new__(cls)
     svc.supabase = _SnapshotCacheTable()
-    svc._upsert_supabase_cache("ORCL", snap)
+    # The health row also stores the Health Check's earnings stamp (2026-11-14).
+    svc._upsert_supabase_cache("ORCL", snap, *(() if which == "valuation" else (None,)))
     (written,) = svc.supabase.upserts
     stored = json.loads(json.dumps(written["response_json"], allow_nan=False))
     assert stored[mod._VERSION_KEY] == mod._SNAPSHOT_PAYLOAD_VERSION

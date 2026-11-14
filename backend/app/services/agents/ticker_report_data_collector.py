@@ -2604,7 +2604,14 @@ class TickerReportDataCollector:
         c["price_close_date"] = close_date.isoformat() if close_date else None
 
         # ── Altman Z-Score (manufacturing formula) ────────────────────
-        c["altman_z"] = _altman_z(balance, income, profile)
+        # ONE Z per report: the Financial Health card's own (the Health Check's latest-quarter
+        # balance sheet + trailing-four-quarter income + market cap). This used to be the
+        # ANNUAL statements with today's market cap — ORCL 1.56 beside the card's 1.48
+        # (2026-11-14) — and it reached the model's EVIDENCE ("Altman Z-Score: 1.56"), which
+        # the thesis and critical-factor syntheses may quote verbatim. The annual computation
+        # stands in only when the card carries no Z (no snapshot, or the row was omitted).
+        card_z = _card_altman_z(out.snap_health)
+        c["altman_z"] = card_z if card_z is not None else _altman_z(balance, income, profile)
 
         # ── Revenue growth YoY ────────────────────────────────────────
         if len(income) >= 2:
@@ -4017,6 +4024,28 @@ def _coerce_score(v: Any, default: float = 50.0) -> float:
     if f != f:
         return default
     return max(0.0, min(100.0, f))
+
+
+def _card_altman_z(snap: Any) -> Optional[float]:
+    """The Financial Health card's own Altman Z, or None.
+
+    Read from the card's `altman_z` row: its `numeric_value` (the Health Check's value), else
+    its printed `value` when that is a plain number ("1.48"; "—" is no value). Works on the
+    response model and on a plain dict (a collection read back from cache). A non-finite or
+    unparseable figure is None, so the caller's annual fallback applies.
+    """
+    metrics = snap.get("metrics") if isinstance(snap, dict) else getattr(snap, "metrics", None)
+    if not isinstance(metrics, (list, tuple)):
+        return None
+    for m in metrics:
+        get = m.get if isinstance(m, dict) else (lambda k, _m=m: getattr(_m, k, None))
+        if get("metric_key") != "altman_z":
+            continue
+        z = _finite_or_none(get("numeric_value"))
+        if z is None and isinstance(get("value"), str):
+            z = _finite_or_none(get("value").strip())
+        return z
+    return None
 
 
 def _altman_z(
@@ -5580,6 +5609,39 @@ def _hist_ev_ebitda(
     return ratio if ratio <= _RECON_RATIO_CEIL else None
 
 
+def _prev_calendar_quarter(year: int, quarter: int) -> Tuple[int, int]:
+    """The calendar quarter before (year, quarter): Q1 2026 → Q4 2025."""
+    return (year, quarter - 1) if quarter > 1 else (year - 1, 4)
+
+
+def _ttm_income_at(
+    idx_inc: Dict[str, Dict[str, Any]], year: int, quarter: Optional[int],
+) -> Optional[Dict[str, float]]:
+    """Trailing-four-quarter income totals ending at calendar quarter (year, quarter), or None.
+
+    The four quarters are found by their calendar JOIN keys (`"{year}-Q{n}"`, the keys
+    `_history_period_id` gives quarterly rows), so they are contiguous by construction: a
+    missing quarter, a semi-annual filer (its halves land on every other calendar quarter)
+    or a fiscal-year-end change that skips a key yields None instead of a sum over the
+    wrong span. The sum itself is the Health Check's (`_sum_ttm_income`: four rows
+    required, a field missing in any of them dropped), so the drill-down's quarterly Altman
+    Z and the card's Z read the same flows.
+    """
+    if quarter is None or not 1 <= quarter <= 4:
+        return None
+    rows: List[Dict[str, Any]] = []
+    y, q = year, quarter
+    for _ in range(4):
+        rec = idx_inc.get(f"{y}-Q{q}")
+        if not isinstance(rec, dict):
+            return None
+        rows.append(rec)
+        y, q = _prev_calendar_quarter(y, q)
+    from app.services.health_check_service import _sum_ttm_income
+
+    return _sum_ttm_income(rows) or None
+
+
 def _fundamentals_history_for_period(
     income: List[Dict[str, Any]],
     balance: List[Dict[str, Any]],
@@ -5706,7 +5768,17 @@ def _fundamentals_history_for_period(
             # period — not today's. Falls back to the current profile mktCap
             # when the period has no key_metrics row.
             _km_mcap = _num_or_none(km.get("marketCap")) if isinstance(km, dict) else None
-            add("altman_z", label, _altman_z([bal], [inc], profile, mkt_cap_override=_km_mcap))
+            # Altman's EBIT/TA (weight 3.3) and Sales/TA (1.0) are ANNUAL flows. A quarter's
+            # point used that ONE quarter's EBIT and revenue beside a full balance sheet, so
+            # every quarterly bar read ~0.4 low: ORCL Q4 '26 2.11 vs FY2026 2.48 on the same
+            # 2026-05-31 balance sheet, Q1 '27 1.29 under the card's 1.48 (2026-11-14, owner:
+            # "TTM flows"). A quarter now sums the four quarters ending there, as the card's
+            # Z does; fewer than four contiguous quarters is no point, never a low one.
+            z_inc = _ttm_income_at(idx_inc, year, quarter) if quarterly else inc
+            add("altman_z", label, (
+                _altman_z([bal], [z_inc], profile, mkt_cap_override=_km_mcap)
+                if z_inc else None
+            ))
 
         # YoY vs the SAME period one year earlier (direct key lookup).
         pk = prior_key(year, quarter)

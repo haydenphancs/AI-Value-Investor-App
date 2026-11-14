@@ -540,6 +540,9 @@ def _snapshot_service(monkeypatch, health: Any):
                 raise health
             return health
 
+        def next_earnings_for(self, ticker, *, served):
+            return None     # a build with no pending report: the plain 24h row
+
     # Function-local import inside `_compute_with_status`: patch the SOURCE module.
     monkeypatch.setattr(health_check_service, "get_health_check_service", lambda: _HealthCheck())
     hs._cache.clear()
@@ -606,8 +609,10 @@ def test_snapshot_cache_rows_are_versioned():
     svc = hs.HealthSnapshotService.__new__(hs.HealthSnapshotService)
     svc.supabase = _FakeSupabase([_row(dict(good))])
     assert svc._check_supabase_cache("TEST") is None, "a pre-change row (old pass_rating) served"
-    svc.supabase = _FakeSupabase([_row({**good, "_schema_v": hs._SNAPSHOT_PAYLOAD_VERSION})])
+    # A current row also carries the Health Check's earnings stamp (v11, 2026-11-14).
+    svc.supabase = _FakeSupabase([_row({**good, "_schema_v": hs._SNAPSHOT_PAYLOAD_VERSION,
+                                        hs._NEXT_EARNINGS_KEY: None})])
     assert svc._check_supabase_cache("TEST") is not None
     svc.supabase = _FakeSupabase([])
-    svc._upsert_supabase_cache("TEST", SnapshotItemResponse(**good))
+    svc._upsert_supabase_cache("TEST", SnapshotItemResponse(**good), None)
     assert svc.supabase.tbl.upserts[0]["response_json"]["_schema_v"] == hs._SNAPSHOT_PAYLOAD_VERSION

@@ -160,7 +160,8 @@ def test_price_multiples_drop_nonpositive_but_keep_period():
     # Non-positive (negative AND zero) → None; positive → kept. Periods preserved.
     assert [v for _, v in _series(hist, "pe")] == [None, None, 20.0]
     assert [v for _, v in _series(hist, "pb")] == [None, 5.0, 6.0]
-    assert [v for _, v in _series(hist, "ps")] == [None, 4.0, 5.0]
+    # A quarter's P/S is price over ONE quarter's sales, put on a yearly scale (÷4, 2026-11-14).
+    assert [v for _, v in _series(hist, "ps")] == [None, 1.0, 1.25]
     # D/E keeps its negative (negative shareholders' equity is real, e.g. ORCL).
     assert [v for _, v in _series(hist, "debt_to_equity")] == [-12.0, 2.0, 1.5]
 
@@ -987,3 +988,127 @@ def test_quarterly_altman_z_crosses_the_calendar_year():
     expected = _altman_z([_Z_BAL], [{"operatingIncome": 150.0, "revenue": 900.0}],
                          {}, mkt_cap_override=900.0)
     assert newest[0] == expected
+
+
+# ── Quarterly ROE / ROA / P/S / P/FCF / EV/EBITDA on a YEARLY scale (2026-11-14) ──
+# Each divides ONE quarter's flow by a balance or a price, so the Quarterly tab read about a
+# quarter (ROE/ROA) or ~4× (multiples) of the card: ORCL Q4 '26 ROE 10.1% vs FY2026 40.2% on
+# the same balance sheet, P/S 37.2 vs 10.6. Owner: "Annualize ×4". The quarterly peer line is
+# built from the same FMP quarterly fields, so it gets the same factor.
+
+def _one_quarter_inputs():
+    d, cy = "2024-09-30", "2024"
+    income = [{"calendarYear": cy, "period": "Q3", "date": d, "revenue": 100.0,
+               "operatingIncome": 30.0, "ebitda": 40.0}]
+    ratios = [{"calendarYear": cy, "period": "Q3", "date": d,
+               "priceToSalesRatio": 20.0, "priceToEarningsRatio": 24.0,
+               "priceToBookRatio": 6.0, "grossProfitMargin": 0.5,
+               "interestCoverageRatio": 8.0, "debtToEquityRatio": 1.2,
+               "currentRatio": 1.3, "quickRatio": 1.1}]
+    km = [{"calendarYear": cy, "period": "Q3", "date": d, "returnOnEquity": 0.05,
+           "returnOnAssets": 0.015, "marketCap": 2000.0, "enterpriseValue": 2400.0}]
+    cf = [{"calendarYear": cy, "period": "Q3", "date": d, "freeCashFlow": 25.0}]
+    return income, cf, km, ratios
+
+
+def _only(hist, key):
+    pts = _series(hist, key)
+    assert len(pts) == 1, (key, pts)
+    return pts[0][1]
+
+
+def test_quarterly_flow_rows_are_annualized_and_annual_rows_are_not():
+    """Mutation caught: dropping the factor (ROE 5.0 / ROA 1.5 / P/S 20 / P/FCF 80 /
+    EV/EBITDA 60 come back), or applying it to annual rows."""
+    income, cf, km, ratios = _one_quarter_inputs()
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "roe") == 20.0          # 5% a quarter → 20% a year
+    assert _only(q, "roa") == 6.0
+    assert _only(q, "ps") == 5.0            # 20 ÷ 4
+    assert _only(q, "pfcf") == 20.0         # 2000 ÷ (25 × 4)
+    assert _only(q, "ev_ebitda") == 15.0    # 2400 ÷ (40 × 4)
+    a = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=False)
+    assert _only(a, "roe") == 5.0 and _only(a, "roa") == 1.5 and _only(a, "ps") == 20.0
+    assert _only(a, "pfcf") == 80.0 and _only(a, "ev_ebitda") == 60.0
+
+
+def test_quarterly_rows_already_on_a_yearly_or_neutral_basis_are_untouched():
+    """P/E (FMP annualizes quarterly EPS), earnings yield (100 / that P/E), P/B, margins,
+    interest coverage, D/E, current and quick ratio keep FMP's quarterly value. Mutation
+    caught: scaling every quarterly row."""
+    income, cf, km, ratios = _one_quarter_inputs()
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "pe") == 24.0 and _only(q, "pb") == 6.0
+    assert _only(q, "earnings_yield") == round(100 / 24.0, 2)
+    assert _only(q, "gross_margin") == 50.0 and _only(q, "interest_coverage") == 8.0
+    assert _only(q, "debt_to_equity") == 1.2
+    assert _only(q, "current_ratio") == 1.3 and _only(q, "quick_ratio") == 1.1
+
+
+def test_quarterly_annualizing_keeps_signs_gates_and_gaps():
+    """A loss quarter's negative ROE stays negative (×4); a missing ROE stays None; a
+    non-positive P/S / FCF / EBITDA is still no point."""
+    income, cf, km, ratios = _one_quarter_inputs()
+    km[0]["returnOnEquity"] = -0.02
+    km[0].pop("returnOnAssets")
+    ratios[0]["priceToSalesRatio"] = -3.0
+    cf[0]["freeCashFlow"] = -5.0
+    income[0].update({"ebitda": 0.0, "operatingIncome": -1.0})
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "roe") == -8.0
+    assert _only(q, "roa") is None
+    assert _only(q, "ps") is None and _only(q, "pfcf") is None and _only(q, "ev_ebitda") is None
+
+
+def test_quarterly_reconstruction_ceiling_judges_the_yearly_multiple():
+    """The artefact ceiling (`_RECON_RATIO_CEIL`, 1000×) applies to the ANNUALIZED multiple:
+    a quarter whose raw multiple is 2000 (yearly 500) is a point; a raw 8000 (yearly 2000)
+    is not. Mutation caught: dividing the already-ceiling-checked ratio by 4."""
+    income, cf, km, ratios = _one_quarter_inputs()
+    cf[0]["freeCashFlow"] = 1.0                       # 2000 / 1 = 2000 raw → 500 a year
+    income[0]["ebitda"] = 1.2                         # 2400 / 1.2 = 2000 raw → 500 a year
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "pfcf") == 500.0 and _only(q, "ev_ebitda") == 500.0
+    cf[0]["freeCashFlow"] = 0.25                      # 8000 raw → 2000 a year > ceiling
+    income[0]["ebitda"] = 0.3
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "pfcf") is None and _only(q, "ev_ebitda") is None
+
+
+def _out_with_quarterly_peers():
+    income, cf, km, ratios = _one_quarter_inputs()
+    out = CollectedTickerData(ticker="ORCL", persona_key="warren_buffett")
+    out.profile = {"industry": "Software - Infrastructure"}
+    out.income, out.ratios, out.key_metrics, out.cash_flow = [], [], [], []
+    out.income_q, out.ratios_q, out.key_metrics_q, out.cash_flow_q = income, ratios, km, cf
+    out.balance_q = []
+    out.sector_benchmark_history = {
+        "annual": {},
+        "quarterly": {
+            "roe": {"Q3'24": 0.03}, "roa": {"Q3'24": 0.01}, "ps_ratio": {"Q3'24": 12.0},
+            "pfcf_ratio": {"Q3'24": 60.0}, "ev_ebitda": {"Q3'24": 48.0},
+            "pe_ratio": {"Q3'24": 25.0}, "gross_margin": {"Q3'24": 0.4},
+        },
+    }
+    return out
+
+
+def test_quarterly_peer_line_gets_the_same_factor_so_bar_vs_peer_is_unchanged():
+    """The peer medians are one-quarter figures too; scaled alike, every bar/peer ratio is
+    what it was. Mutation caught: annualizing the company bars but not the peer line (ROE
+    20% against a 3% "industry" would read 6.7× instead of 1.67×)."""
+    hist = _build_fundamentals_history(_out_with_quarterly_peers())
+
+    def peer(key):
+        return [p["value"] for p in hist[key]["sector_quarterly"]]
+
+    assert peer("roe") == [12.0]           # 3% a quarter → 12%
+    assert peer("roa") == [4.0]
+    assert peer("ps") == [3.0]             # 12 ÷ 4
+    assert peer("pfcf") == [15.0]
+    assert peer("ev_ebitda") == [12.0]
+    assert peer("pe") == [25.0]            # P/E: untouched
+    assert peer("gross_margin") == [40.0]  # margin: untouched
+    # The comparison the legend prints is unchanged by the scaling.
+    roe_bar = hist["roe"]["quarterly"][0]["value"]
+    assert round(roe_bar / peer("roe")[0], 4) == round(5.0 / 3.0, 4)

@@ -5570,12 +5570,44 @@ def _history_period_id(
 _RECON_RATIO_CEIL = 1000.0
 
 
-def _hist_pfcf(km: Dict[str, Any], cf: Dict[str, Any]) -> Optional[float]:
+# Quarterly drill-down rows that divide ONE quarter's flow by a balance or a price, and the
+# factor that puts them on a yearly scale (owner, 2026-11-14: "Annualize ×4"). FMP's quarterly
+# returnOnEquity / returnOnAssets are one quarter's net income over the period-end equity /
+# assets and its quarterly priceToSalesRatio is price over one quarter's sales, and the
+# P/FCF and EV/EBITDA reconstructions below read quarterly flows: ORCL's Q4 '26 bars read ROE
+# 10.1% / ROA 1.6% / P/S 37.2 / EV/EBITDA 86.9 against FY2026's 40.2% / 6.5% / 10.6 / 25.1 on
+# the same 2026-05-31 balance sheet, and the card's 42.58% / 6.24% / 5.28 / 13.2. The peer
+# quarterly line is built the same way (sector_benchmark_service reads the same FMP fields per
+# quarter), so it is scaled by the same factor and every bar-vs-peer ratio is unchanged.
+# NOT here: P/E (FMP annualizes quarterly EPS: Q4 '26 42.2 vs FY 41.78) and earnings yield
+# (100 / that P/E); P/B, D/E, current / quick ratio (balance over balance); margins and
+# interest coverage (flow over flow); growth (same quarter a year earlier).
+_QUARTERS_PER_YEAR = 4.0
+_QUARTERLY_ANNUALIZATION: Dict[str, float] = {
+    "roe": _QUARTERS_PER_YEAR,             # flow ÷ balance → ×4
+    "roa": _QUARTERS_PER_YEAR,
+    "ps": 1.0 / _QUARTERS_PER_YEAR,        # price ÷ flow → ÷4
+    "pfcf": 1.0 / _QUARTERS_PER_YEAR,
+    "ev_ebitda": 1.0 / _QUARTERS_PER_YEAR,
+}
+
+
+def _scaled(v: Optional[float], factor: Optional[float]) -> Optional[float]:
+    """``v * factor`` when both are present; ``v`` unchanged when no factor applies."""
+    if v is None or factor is None:
+        return v
+    return v * factor
+
+
+def _hist_pfcf(
+    km: Dict[str, Any], cf: Dict[str, Any], flow_scale: float = 1.0,
+) -> Optional[float]:
     """P/FCF = market cap ÷ FCF. None for non-positive FCF or an artefact-grade
     multiple (near-zero FCF → astronomical ratio). Mirrors the reconstruction
-    in sector_benchmark_service / valuation_snapshot_service."""
+    in sector_benchmark_service / valuation_snapshot_service. ``flow_scale`` annualizes a
+    quarter's FCF (4.0) BEFORE the ceiling, so the ceiling judges the yearly multiple."""
     mcap = _safe_float(km, "marketCap")
-    fcf = _safe_float(cf, "freeCashFlow")
+    fcf = _safe_float(cf, "freeCashFlow") * flow_scale
     if mcap <= 0 or fcf <= 0:
         return None
     ratio = mcap / fcf
@@ -5584,12 +5616,14 @@ def _hist_pfcf(km: Dict[str, Any], cf: Dict[str, Any]) -> Optional[float]:
 
 def _hist_ev_ebitda(
     km: Dict[str, Any], cf: Dict[str, Any], inc: Dict[str, Any],
+    flow_scale: float = 1.0,
 ) -> Optional[float]:
     """EV/EBITDA with the same EBITDA fallback chain used elsewhere
     (inc.ebitda → operatingIncome + D&A). The fallback requires a POSITIVE
     operating income — otherwise a deep operating loss + heavy D&A can
     manufacture a fake positive EBITDA and a misleading multiple. Also drops
-    artefact-grade multiples (near-zero EBITDA)."""
+    artefact-grade multiples (near-zero EBITDA). ``flow_scale`` annualizes a quarter's
+    EBITDA (4.0) BEFORE the ceiling, so the ceiling judges the yearly multiple."""
     ev = _safe_float(km, "enterpriseValue")
     if ev <= 0:
         return None
@@ -5605,7 +5639,7 @@ def _hist_ev_ebitda(
         ebitda = op_income + d_and_a
     if ebitda <= 0:
         return None
-    ratio = ev / ebitda
+    ratio = ev / (ebitda * flow_scale)
     return ratio if ratio <= _RECON_RATIO_CEIL else None
 
 
@@ -5721,6 +5755,11 @@ def _fundamentals_history_for_period(
     def prior_key(cal_year: int, quarter: Optional[int]) -> str:
         return f"{cal_year - 1}" if quarter is None else f"{cal_year - 1}-Q{quarter}"
 
+    # A quarter's ROE / ROA / P/S / P/FCF / EV/EBITDA on a yearly scale
+    # (`_QUARTERLY_ANNUALIZATION`); annual rows are already yearly.
+    q_scale: Dict[str, float] = _QUARTERLY_ANNUALIZATION if quarterly else {}
+    q_flow = _QUARTERS_PER_YEAR if quarterly else 1.0
+
     for key, (year, quarter, label, _sort_date) in ordered:
         inc, bal = idx_inc.get(key), idx_bal.get(key)
         cf, km, rat = idx_cf.get(key), idx_km.get(key), idx_rat.get(key)
@@ -5744,7 +5783,10 @@ def _fundamentals_history_for_period(
             # misleading negative bar). D/E etc. below are NOT gated.
             add("pe", label, _positive_or_none(_num_or_none(rat.get("priceToEarningsRatio"))))
             add("pb", label, _positive_or_none(_num_or_none(rat.get("priceToBookRatio"))))
-            add("ps", label, _positive_or_none(_num_or_none(rat.get("priceToSalesRatio"))))
+            add("ps", label, _scaled(
+                _positive_or_none(_num_or_none(rat.get("priceToSalesRatio"))),
+                q_scale.get("ps"),
+            ))
             add("debt_to_equity", label, _num_or_none(rat.get("debtToEquityRatio")))
             # Current/Quick ratio are structurally >= 0 (assets & liabilities are
             # non-negative) → gate a negative as bad data (undefined marker).
@@ -5755,12 +5797,14 @@ def _fundamentals_history_for_period(
             add("interest_coverage", label, _num_or_none(rat.get("interestCoverageRatio")))
 
         if km is not None:
-            add("roe", label, _pct_or_none(km.get("returnOnEquity")))
-            add("roa", label, _pct_or_none(km.get("returnOnAssets")))
+            add("roe", label, _pct_or_none(
+                _scaled(_num_or_none(km.get("returnOnEquity")), q_scale.get("roe"))))
+            add("roa", label, _pct_or_none(
+                _scaled(_num_or_none(km.get("returnOnAssets")), q_scale.get("roa"))))
             if cf is not None:
-                add("pfcf", label, _hist_pfcf(km, cf))
+                add("pfcf", label, _hist_pfcf(km, cf, flow_scale=q_flow))
                 if inc is not None:
-                    add("ev_ebitda", label, _hist_ev_ebitda(km, cf, inc))
+                    add("ev_ebitda", label, _hist_ev_ebitda(km, cf, inc, flow_scale=q_flow))
 
         if bal is not None and inc is not None:
             # Use this period's own market cap (from key_metrics) so the
@@ -5943,8 +5987,15 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
 
         sa, sa_has = _aligned_sector_series(
             payload["annual"], ann_keys, _peer_map(annual_bench), to_percent)
+        # The quarterly peer medians are one-quarter figures exactly like the company's
+        # (`_QUARTERLY_ANNUALIZATION`): the same factor puts them on the yearly scale, and a
+        # median scales with its members, so bar-vs-peer is unchanged.
+        q_factor = _QUARTERLY_ANNUALIZATION.get(key)
+        q_peer = _peer_map(quarterly_bench)
+        if q_factor is not None:
+            q_peer = {k: v * q_factor for k, v in q_peer.items() if v is not None}
         sq, sq_has = _aligned_sector_series(
-            payload["quarterly"], qtr_keys, _peer_map(quarterly_bench), to_percent)
+            payload["quarterly"], qtr_keys, q_peer, to_percent)
         if sa_has:
             payload["sector_annual"] = sa
             if annual_levels.get(sector_name) in ("industry", "sector"):

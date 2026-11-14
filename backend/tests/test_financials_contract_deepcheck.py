@@ -271,6 +271,8 @@ def test_every_financials_handler_routes_its_failure_through_the_typed_helper():
 _NEW_FIELDS = [
     (EarningsResponse, "degraded", "EarningsDTO", "degraded", "[String]"),
     (EarningsQuarterSchema, "has_estimate", "EarningsQuarterDTO", "hasEstimate", "Bool"),
+    # 2026-11-14: the announcement day iOS pins each reported dot to on the price line.
+    (EarningsQuarterSchema, "report_date", "EarningsQuarterDTO", "reportDate", "String"),
     (GrowthResponse, "degraded", "GrowthResponseDTO", "degraded", "[String]"),
     (GrowthResponse, "peer_group_levels", "GrowthResponseDTO", "peerGroupLevels",
      "[String: String]"),

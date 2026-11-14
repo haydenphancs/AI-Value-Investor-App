@@ -2334,12 +2334,18 @@ struct EarningsQuarterData: Identifiable {
     let actualValue: Double?     // nil for future quarters
     let estimateValue: Double
     let surprisePercent: Double? // nil for future quarters
-    var fiscalDate: String? = nil // "yyyy-MM-dd" for price line positioning
+    /// "yyyy-MM-dd" fiscal PERIOD END (wire: `fiscal_date`). The price line falls back to it
+    /// only when too few quarters carry a `reportDate` (see `EarningsPriceTimeline`).
+    var fiscalDate: String? = nil
     /// False when no comparable analyst consensus existed for this quarter (wire:
     /// `has_estimate`). The backend still sends `estimate_value` = the actual so shipped
     /// builds keep decoding — which is exactly why it must never be compared. Defaults to
     /// true so an older payload without the key keeps today's behaviour.
     var hasEstimate: Bool = true
+    /// "yyyy-MM-dd" day the company ANNOUNCED this quarter (wire: `report_date`); nil for a
+    /// future quarter or one with no reported announcement on file. The price line pins the
+    /// dot to this day, so a move just right of a dot is the reaction to that report.
+    var reportDate: String? = nil
 
     var result: EarningsQuarterResult {
         // Pending is defined by the ABSENCE of a reported actual — NOT by a nil
@@ -2531,8 +2537,31 @@ struct EarningsData {
 }
 
 extension EarningsData {
+    /// PREVIEW-ONLY: gives the sample's calendar-quarter labels a period end and, for a
+    /// reported quarter, a report day 28 days later, so the previews draw a price line (the
+    /// chart places closes by these dates, never by a label). Live quarters carry the
+    /// backend's real dates; their labels are FISCAL and must never be read as calendar.
+    private static func previewDated(_ quarters: [EarningsQuarterData]) -> [EarningsQuarterData] {
+        let periodEnds: [String] = ["03-31", "06-30", "09-30", "12-31"]
+        let reportDays: [String] = ["04-28", "07-28", "10-28", "01-28"]
+        return quarters.map { quarter -> EarningsQuarterData in
+            var dated: EarningsQuarterData = quarter
+            let parts: [String] = quarter.quarter.components(separatedBy: " '")
+            guard parts.count == 2,
+                  let number = Int(String(parts[0].dropFirst())), (1...4).contains(number),
+                  let shortYear = Int(parts[1]) else { return dated }
+            let year: Int = 2000 + shortYear
+            dated.fiscalDate = "\(year)-\(periodEnds[number - 1])"
+            if quarter.actualValue != nil {
+                let reportYear: Int = number == 4 ? year + 1 : year
+                dated.reportDate = "\(reportYear)-\(reportDays[number - 1])"
+            }
+            return dated
+        }
+    }
+
     static let sampleData = EarningsData(
-        epsQuarters: [
+        epsQuarters: previewDated([
             // 2022 data
             EarningsQuarterData(quarter: "Q1 '22", actualValue: 0.45, estimateValue: 0.42, surprisePercent: 7.1),
             EarningsQuarterData(quarter: "Q2 '22", actualValue: 0.52, estimateValue: 0.50, surprisePercent: 4.0),
@@ -2551,8 +2580,8 @@ extension EarningsData {
             // 2025 future data
             EarningsQuarterData(quarter: "Q1 '25", actualValue: nil, estimateValue: 0.72, surprisePercent: nil),
             EarningsQuarterData(quarter: "Q2 '25", actualValue: nil, estimateValue: 1.35, surprisePercent: nil)
-        ],
-        revenueQuarters: [
+        ]),
+        revenueQuarters: previewDated([
             // 2022 data
             EarningsQuarterData(quarter: "Q1 '22", actualValue: 78.5, estimateValue: 76.0, surprisePercent: 3.3),
             EarningsQuarterData(quarter: "Q2 '22", actualValue: 82.3, estimateValue: 80.0, surprisePercent: 2.9),
@@ -2571,7 +2600,7 @@ extension EarningsData {
             // 2025 future data
             EarningsQuarterData(quarter: "Q1 '25", actualValue: nil, estimateValue: 96.0, surprisePercent: nil),
             EarningsQuarterData(quarter: "Q2 '25", actualValue: nil, estimateValue: 105.0, surprisePercent: nil)
-        ],
+        ]),
         priceHistory: [
             // 2022 data
             EarningsPricePoint(quarter: "Q1 '22", price: 0.42),

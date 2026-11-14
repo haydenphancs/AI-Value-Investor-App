@@ -231,9 +231,11 @@ def test_the_stale_rule_read_from_the_swift(raw, today, expected):
 def test_the_new_wire_fields_are_mapped_onto_the_display_models():
     src = _src(_REPOSITORY)
     q = _block(src, "struct EarningsQuarterDTO: Codable {")
-    assert "quarter.hasEstimate = hasEstimate ?? true" in _block(
-        q, "func toDisplayModel() -> EarningsQuarterData {"
-    )
+    mapper = _block(q, "func toDisplayModel() -> EarningsQuarterData {")
+    assert "quarter.hasEstimate = hasEstimate ?? true" in mapper
+    # 2026-11-14: the report day rides the same mapper, by assignment — a dropped line
+    # silently puts every dot back on its period end.
+    assert "quarter.reportDate = reportDate" in mapper
     earnings = _block(_block(src, "struct EarningsDTO: Codable, FinancialsCacheable {"),
                       "func toDisplayModel() -> EarningsData {")
     # BOTH series through the one mapper, so neither can drop `hasEstimate`.

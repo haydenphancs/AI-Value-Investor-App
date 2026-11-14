@@ -14,7 +14,9 @@ class EarningsQuarterSchema(BaseModel):
     actual_value: Optional[float] = None  # None for future quarters
     estimate_value: float
     surprise_percent: Optional[float] = None  # None for future quarters
-    fiscal_date: Optional[str] = None  # "yyyy-MM-dd" for sorting & iOS positioning
+    # "yyyy-MM-dd" fiscal PERIOD END: the sort key, the "period ending" chat prints and the
+    # key the report collector matches to income rows. Never the announcement day.
+    fiscal_date: Optional[str] = None
     # False when no COMPARABLE consensus existed for this quarter: none was published,
     # only a GAAP actual could be set against a non-GAAP estimate, the two sides came
     # from different sources/currencies, or the consensus itself was implausible. Then
@@ -23,6 +25,12 @@ class EarningsQuarterSchema(BaseModel):
     # this flag iOS read actual == estimate as "matched consensus exactly". None only on
     # payloads written before the field existed.
     has_estimate: Optional[bool] = None
+    # "yyyy-MM-dd" day the company ANNOUNCED this quarter, or None (a future quarter, no
+    # reported announcement on file, or a date that failed the lag / order checks in
+    # earnings_service). iOS pins the dot to this day on the price line: anchored on the
+    # period end instead, every report-day move drew 1-11 weeks right of its own dot.
+    # Only a reported fact — never a projection (next_earnings_date carries that).
+    report_date: Optional[str] = None
 
 
 class EarningsPricePointSchema(BaseModel):

@@ -2178,6 +2178,9 @@ struct EarningsQuarterDTO: Codable {
     /// why this flag — not an equality test — decides "no estimate". Optional: nil from an
     /// older backend keeps today's behaviour.
     let hasEstimate: Bool?
+    /// The day this quarter was ANNOUNCED ("yyyy-MM-dd"); nil for a future quarter, an
+    /// unannounced one, or an older backend. The price line pins the dot to it.
+    let reportDate: String?
 
     enum CodingKeys: String, CodingKey {
         case quarter
@@ -2186,6 +2189,7 @@ struct EarningsQuarterDTO: Codable {
         case surprisePercent = "surprise_percent"
         case fiscalDate = "fiscal_date"
         case hasEstimate = "has_estimate"
+        case reportDate = "report_date"
     }
 
     func toDisplayModel() -> EarningsQuarterData {
@@ -2197,6 +2201,7 @@ struct EarningsQuarterDTO: Codable {
             fiscalDate: fiscalDate
         )
         quarter.hasEstimate = hasEstimate ?? true
+        quarter.reportDate = reportDate
         return quarter
     }
 }

@@ -438,7 +438,8 @@ def test_input_order_and_junk_rows_do_not_matter():
 
 
 def test_the_payload_version_was_bumped_for_p16():
-    assert es._EARNINGS_PAYLOAD_VERSION == 4
+    # 4 was P16's bump; 5 (2026-11-14) adds report_date. Never below P16's.
+    assert es._EARNINGS_PAYLOAD_VERSION == 5
 
 
 # ═══════════════════════════════════════════════════════════════════════════

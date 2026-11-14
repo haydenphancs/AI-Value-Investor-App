@@ -414,3 +414,113 @@ def test_earnings_eps_is_labelled_adjusted():
     info = _struct(_INFO, "EarningsInfoSheet")
     assert '"Adjusted EPS (Earnings Per Share)"' in info
     assert "GAAP" in info and "Growth card" in info
+
+
+# ── 7. Each reported dot sits on its REPORT day (2026-11-14) ─────────────────
+# The price line used to pin every dot to its fiscal period END, so the report-day move
+# drew 1-11 weeks right of its own dot (CSCO two days after its 11-12 report: the line ran
+# 20 days past the newest dot). The math is ported and run on real dates in
+# test_ios_earnings_price_timeline.py; these tie that port to the Swift.
+
+
+def _timeline() -> str:
+    return _decl_body(_code(_CHART), "enum EarningsPriceTimeline")
+
+
+def test_quarter_carries_report_date_after_has_estimate():
+    """Mapped by assignment after construction (like `hasEstimate`), so it must be a
+    defaulted `var` declared after it — every memberwise call keeps compiling."""
+    model = _struct(_MODELS, "EarningsQuarterData")
+    has = model.index("var hasEstimate: Bool = true")
+    report = model.index("var reportDate: String? = nil")
+    assert has < report < model.index("var result: EarningsQuarterResult")
+
+
+def test_the_calendar_quarter_guess_is_gone():
+    """`estimatedDate(from:)` read "Q1 '27" as March 2027 — five months off for a July
+    year-end company. No label is ever read as a date on the live chart."""
+    chart = _code(_CHART)
+    assert "estimatedDate(" not in chart and "actualFiscalDate(" not in chart
+    assert "quarterEndMonths" not in chart
+
+
+def test_the_daily_line_is_placed_by_the_timeline_only():
+    line = _decl_body(_struct(_CHART, "EarningsChartView"), "private func dailyPriceLine(")
+    assert "EarningsPriceTimeline.placement(" in line
+    assert "nextEarningsDay: nextDay" in line and "lastCloseDay: closes.last?.day" in line
+    assert "timeline.slot(forDay: close.day)" in line
+    assert "CGFloat(slot + 0.5) * stepX" in line, "dot i's centre is (i + 0.5) * stepX"
+    assert "EarningsPriceTimeline.dayNumber(_dailyPriceDateFormatter.string(from: date))" in line
+    # No second, period-end placement path inside the view.
+    assert "fiscalDate" not in line and "reportDate" not in line
+    assert "timeIntervalSince" not in line, "day numbers, never Date intervals (DST days)"
+
+
+def test_the_next_report_day_only_ever_pins_the_first_gray_dot_in_report_mode():
+    body = _decl_body(_timeline(), "static func placement(")
+    report_mode, period_mode = body.split("var periodCandidates", 1)
+    assert "quarters[slot].reportDate" in report_mode
+    assert "reportLagDays.contains(reportDay - periodEndDay)" in report_mode
+    # The three conditions the port tests: ahead of the last anchor, not behind the line,
+    # and plausibly THIS quarter's release.
+    assert "nextDay > last.day" in report_mode
+    assert "nextDay >= (lastCloseDay ?? nextDay)" in report_mode
+    assert "nextLagDays.contains(nextDay - futurePeriodEnd)" in report_mode
+    # Review fix: a FOLLOWING quarter's date fits 7-110 for a fast reporter, so it must
+    # also sit near the company's own median lag.
+    assert "let typicalLag = median(ownLags)" in report_mode
+    assert ("abs(Double(nextDay - futurePeriodEnd) - typicalLag) <= Double(nextLagToleranceDays)"
+            in report_mode)
+    assert "$0 > last.slot && quarters[$0].actualValue == nil" in report_mode
+    assert "mode: .reportDay" in report_mode
+    # Period-end mode never mixes in an announcement day.
+    assert "nextEarningsDay" not in period_mode and "nextDay" not in period_mode
+    assert "reportDate" not in period_mode and "mode: .periodEnd" in period_mode
+
+
+def test_out_of_order_days_lose_both_dots_never_greedily():
+    ordered = _decl_body(_timeline(), "static func orderedAnchors(")
+    assert "day <= before" in ordered and "day >= after" in ordered
+    assert "latestBefore" in ordered and "earliestAfter" in ordered
+
+
+def test_outside_the_anchors_the_line_runs_at_the_median_rate():
+    timeline = _timeline()
+    slot = _decl_body(timeline, "func slot(forDay day: Int)")
+    assert slot.count("/ daysPerSlot") == 2
+    per_slot = _decl_body(timeline, "static func medianDaysPerSlot(")
+    assert "guard slots > 0, days > 0 else { return nil }" in per_slot
+    assert "return median(rates)" in per_slot
+    assert "values.sorted()" in _decl_body(timeline, "static func median(")
+
+
+def test_day_numbers_never_touch_a_calendar_or_time_zone():
+    day = _decl_body(_timeline(), "static func dayNumber(")
+    assert "Calendar" not in day and "TimeZone" not in day and "DateFormatter" not in day
+    assert "guard day <= monthLengths[month - 1] else { return nil }" in day
+
+
+def test_the_card_hands_the_next_report_day_to_the_chart():
+    card = _struct(_CARD, "EarningsSectionCard")
+    args = _call_args(card, "EarningsChartView(")
+    assert "nextEarningsDate: earningsData.nextEarningsDate?.date" in args
+
+
+def test_next_earnings_date_is_the_charts_last_stored_property():
+    """A defaulted LAST stored property keeps the memberwise init source-compatible."""
+    view = _struct(_CHART, "EarningsChartView")
+    assert view.index("var dataType: EarningsDataType = .eps") \
+        < view.index("var nextEarningsDate: Date? = nil") \
+        < view.index("private var earningsValues: [Double]")
+
+
+def test_the_info_sheet_says_what_a_dot_and_a_quarter_mean():
+    """Owner 2026-11-14: "Info sheet only" — no fiscal line on the card."""
+    info = _struct(_INFO, "EarningsInfoSheet")
+    # Hedged (review 2026-11-14): a partial build, or a quarter with no report day, is
+    # drawn by period end or interpolated.
+    assert "sits on the day the company announced its results (when that day is known)" in info
+    assert '"Fiscal Quarters"' in info and "own fiscal year" in info
+    assert "how the stock reacted to earnings reports" not in info
+    card = _struct(_CARD, "EarningsSectionCard")
+    assert "fiscal" not in card.lower(), "no fiscal note on the card (owner decision)"

@@ -177,8 +177,15 @@ class TimelinePricePointResponse(BaseModel):
 
 
 class RevenueForecastResponse(BaseModel):
+    # The growth rates the report PRINTS (insight, PDF, report chat), measured over the
+    # bars the Future Forecast chart draws; 0.0 = not measurable. Not the scored rates.
     cagr: float
     eps_growth: float
+    # Which fiscal years each rate spans ("FY2025–FY2030E": reported → consensus;
+    # "FY2026E–FY2030E": consensus only). None on older reports and on the fallback to
+    # the scored rate. Backend-only: iOS does not decode it.
+    cagr_span: Optional[str] = None
+    eps_growth_span: Optional[str] = None
     # "raised" | "maintained" | "lowered" — a READ of the latest earnings-call
     # transcript — or "unknown" when no transcript was available to read (the
     # transcripts package is off the Order Form, so that is every report today).

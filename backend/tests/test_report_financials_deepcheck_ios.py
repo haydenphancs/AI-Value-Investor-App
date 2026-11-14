@@ -196,3 +196,113 @@ def test_revenue_engine_model_eliminations_default_and_guard():
 ])
 def test_every_touched_view_keeps_a_preview(path):
     assert "#Preview" in _code(path)
+
+
+# ── Future Forecast chart, numbers around a correctly-timed chart (2026-11-14) ──
+# The timing was measured correct on 14 live tickers; these pin the four iOS fixes from the
+# same audit. Backend halves: tests/test_future_forecast_numbers_2026_11_14.py.
+
+
+def test_yoy_chips_take_sign_and_colour_from_the_rounded_value():
+    """A -0.47% change drew a red "-0%" (INTC FY2025): the sign came from the raw value."""
+    proj = _decl_body(_code(_REPORT_MODELS), r"struct RevenueProjection\s*:\s*Identifiable\s*\{")
+    assert "Self.yoyChipText(pct)" in _decl_body(proj, r"var revenueYoYText:\s*String\?\s*\{")
+    assert "Self.yoyChipText(pct)" in _decl_body(proj, r"var epsYoYText:\s*String\?\s*\{")
+    assert re.search(r"var revenueYoYColor:\s*Color\s*\{\s*Self\.yoyChipColor\(revenueYoyPct\)\s*\}", proj)
+    assert re.search(r"var epsYoYColor:\s*Color\s*\{\s*Self\.yoyChipColor\(epsYoyPct\)\s*\}", proj)
+    text = _decl_body(proj, r"static func yoyChipText\(_ pct: Double\)\s*->\s*String\s*\{")
+    assert "pct.rounded(.toNearestOrEven)" in text
+    assert 'if rounded == 0 { return "0%" }' in text
+    assert 'rounded > 0 ? "+" : ""' in text and "pct >= 0" not in text
+    color = _decl_body(proj, r"static func yoyChipColor\(_ pct: Double\?\)\s*->\s*Color\s*\{")
+    assert "pct.rounded(.toNearestOrEven)" in color
+    assert "if rounded == 0 { return AppColors.textMuted }" in color
+    assert "rounded > 0 ? AppColors.bullish : AppColors.bearish" in color
+    assert "pct >= 0 ?" not in proj
+
+
+def _swift_cutoff_note(timeline, prices):
+    """Python port of ReportEarningsTimelinePanel.priceCutoffNote + shortDate. `prices` are
+    (date, price) pairs."""
+    from datetime import date as _d
+    if not timeline or any(c["is_forecast"] for c in timeline):
+        return None
+    ends = []
+    for c in timeline:
+        end = c.get("period_end")
+        if not end or len(end) < 10:
+            return None
+        day = end[:10]
+        if ends and day <= ends[-1]:
+            return None
+        ends.append(day)
+
+    def num(text):
+        return _d.fromisoformat(text[:10]).toordinal()
+
+    opens_after, last_end = num(ends[0]) - 365, num(ends[-1])
+    drawn = [p for d, p in prices if opens_after < num(d) <= last_end]
+    latest = max((num(d) for d, _ in prices), default=None)
+    if len(drawn) < 2 or not max(drawn) > min(drawn) or latest is None or latest <= last_end:
+        return None
+    y, m, d = (int(x) for x in ends[-1].split("-"))
+    months = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+    return f"Price shown to {months[m - 1]} {d}, {y}."
+
+
+_IN = [("2025-03-03", 10.0), ("2025-09-01", 12.0)]      # inside FY2024..FY2025's windows
+
+
+@pytest.mark.parametrize("columns, prices, note", [
+    ([("2024-12-31", False), ("2025-12-31", False)], _IN + [("2026-11-13", 9.0)],
+     "Price shown to Dec 31, 2025."),
+    ([("2024-12-31", False), ("2025-12-31", True)], _IN + [("2026-11-13", 9.0)], None),   # forecast
+    ([("2024-12-31", False), ("2025-12-31", False)], _IN, None),                          # nothing cut off
+    ([("2025-12-31", False), ("2024-12-31", False)], _IN + [("2026-11-13", 9.0)], None),  # unordered
+    ([("2024-12-31", False), (None, False)], _IN + [("2026-11-13", 9.0)], None),          # older report
+    ([("2024-12-31", False)], [], None),
+    # Review 2026-11-14: listed AFTER the last year-end — no drawn line, so no "shown to".
+    ([("2024-12-31", False), ("2025-12-31", False)], [("2026-03-02", 5.0), ("2026-11-13", 9.0)], None),
+    # One drawn close, or a flat drawn series: the chart draws no line either.
+    ([("2024-12-31", False), ("2025-12-31", False)], [("2025-06-02", 5.0), ("2026-11-13", 9.0)], None),
+    ([("2024-12-31", False), ("2025-12-31", False)],
+     [("2025-03-03", 5.0), ("2025-06-02", 5.0), ("2026-11-13", 9.0)], None),
+])
+def test_price_cutoff_caption_rule(columns, prices, note):
+    timeline = [{"period_end": e, "is_forecast": f} for e, f in columns]
+    assert _swift_cutoff_note(timeline, prices) == note
+
+
+def test_no_forecast_column_gets_a_price_cutoff_caption():
+    """Owner 2026-11-14 ("Caption"): without forecasts the line stops at the last year-end."""
+    src = _code(_TIMELINE_PANEL)
+    body = _decl_body(src, r"var body:\s*some View\s*\{")
+    assert "if showPrice, let cutoff = Self.priceCutoffNote(timeline: timeline, prices: dailyPrices)" in body
+    note = _decl_body(src, r"static func priceCutoffNote\(")
+    assert "!timeline.contains(where: { $0.isForecast })" in note
+    assert "if let previous = ends.last, day <= previous { return nil }" in note
+    # Only when a line is drawn: >= 2 closes inside the windows, not flat, and a later close.
+    assert "firstEndDay - EarningsTimelineChart.firstColumnDays" in note
+    assert "if day > windowOpensAfter, day <= lastEndDay, point.price.isFinite" in note
+    assert "drawn.count >= 2" in note and "high > low" in note and "latest > lastEndDay" in note
+    assert '"Price shown to \\(shown)."' in note
+    short = _decl_body(src, r"static func shortDate\(_ ymd: String\)\s*->\s*String\?\s*\{")
+    assert "DateFormatter" not in short and "(1...12).contains(month)" in short
+
+
+def test_only_column_zero_lead_in_is_trimmed():
+    """A listing that starts in a later column keeps its first trading months."""
+    compute = _decl_body(_code(_TIMELINE_CHART), r"private func computePriceColumns\(\)[^{]*\{")
+    assert "cols.filter { $0.colX >= 0.5 }" in compute
+    assert "minColX" not in compute
+
+
+def test_boundary_anchor_id_is_applied_before_position():
+    """`.position` wraps the view in a chart-sized container: an id after it centred the whole
+    chart, which is the boundary only for 5 actual + 5 forecast columns."""
+    src = _code(_TIMELINE_CHART)
+    at = src.index(".id(boundaryAnchorID)")
+    chain = src[src.rindex("Color.clear", 0, at):src.index("\n", src.index(".position(", at))]
+    assert ".frame(width: 1, height: 1)" in chain
+    assert chain.index(".id(boundaryAnchorID)") < chain.index(".position(x: anchorX, y: topPad)")
+    assert ".position(" not in chain[:chain.index(".id(boundaryAnchorID)")]

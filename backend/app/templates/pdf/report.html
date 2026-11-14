@@ -349,8 +349,8 @@
   {% if forecast.fiscal_year_note %}<div class="caption-note" style="text-align:center">{{ forecast.fiscal_year_note }}</div>{% endif %}
   <table class="strip">
     <tr>
-      <td><div class="k">Revenue CAGR</div><div class="v">{{ pct(forecast.cagr) }}</div></td>
-      <td><div class="k">EPS Growth</div><div class="v">{{ pct(forecast.eps_growth) }}</div></td>
+      <td><div class="k">Revenue CAGR{% if forecast.cagr is not none and forecast.cagr_span %} ({{ forecast.cagr_span }}){% endif %}</div><div class="v">{{ pct(forecast.cagr) }}</div></td>
+      <td><div class="k">EPS CAGR{% if forecast.eps_growth is not none and forecast.eps_growth_span %} ({{ forecast.eps_growth_span }}){% endif %}</div><div class="v">{{ pct(forecast.eps_growth) }}</div></td>
       <td><div class="k">Guidance</div><div class="v" style="font-size:13px;text-transform:capitalize">{{ forecast.management_guidance or "—" }}</div></td>
       {% if forecast.beat_summary %}<td><div class="k">Track Record</div><div class="v" style="font-size:13px">{{ forecast.beat_summary }}</div></td>{% endif %}
     </tr>

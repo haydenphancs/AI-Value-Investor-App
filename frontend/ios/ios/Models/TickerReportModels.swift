@@ -726,24 +726,33 @@ struct RevenueProjection: Identifiable {
     /// we have no anchor — the view should hide the row entirely.
     var revenueYoYText: String? {
         guard let pct = revenueYoyPct else { return nil }
-        return String(format: "%@%.0f%%", pct >= 0 ? "+" : "", pct)
+        return Self.yoyChipText(pct)
     }
 
     var epsYoYText: String? {
         guard let pct = epsYoyPct else { return nil }
-        return String(format: "%@%.0f%%", pct >= 0 ? "+" : "", pct)
+        return Self.yoyChipText(pct)
     }
 
     /// Color for the YoY chip: green for growth, red for decline, gray
-    /// when missing (caller should also gate on the *Text property).
-    var revenueYoYColor: Color {
-        guard let pct = revenueYoyPct else { return AppColors.textMuted }
-        return pct >= 0 ? AppColors.bullish : AppColors.bearish
+    /// when missing (caller should also gate on the *Text property) or when it rounds to 0.
+    var revenueYoYColor: Color { Self.yoyChipColor(revenueYoyPct) }
+
+    var epsYoYColor: Color { Self.yoyChipColor(epsYoyPct) }
+
+    /// A whole percent whose sign and colour come from the ROUNDED value, half-to-even like
+    /// "%.0f": a -0.47% change read as a red "-0%" (INTC FY2025, 2026-11-14). It is "0%", gray.
+    static func yoyChipText(_ pct: Double) -> String {
+        let rounded: Double = pct.rounded(.toNearestOrEven)
+        if rounded == 0 { return "0%" }
+        return String(format: "%@%.0f%%", rounded > 0 ? "+" : "", rounded)
     }
 
-    var epsYoYColor: Color {
-        guard let pct = epsYoyPct else { return AppColors.textMuted }
-        return pct >= 0 ? AppColors.bullish : AppColors.bearish
+    static func yoyChipColor(_ pct: Double?) -> Color {
+        guard let pct = pct else { return AppColors.textMuted }
+        let rounded: Double = pct.rounded(.toNearestOrEven)
+        if rounded == 0 { return AppColors.textMuted }
+        return rounded > 0 ? AppColors.bullish : AppColors.bearish
     }
 }
 

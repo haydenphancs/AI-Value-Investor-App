@@ -870,7 +870,8 @@ def test_ios_mapping_matches_the_swift_source():
     swift = (Path(__file__).resolve().parents[2] / "frontend/ios/ios/Views/Molecules/"
              "EarningsTimelineChart.swift").read_text()
     code = "\n".join(ln.split("//", 1)[0] for ln in swift.splitlines())
-    assert "private static let firstColumnDays = 365" in code
+    # Internal since 2026-11-14: ReportEarningsTimelinePanel's price-cutoff caption reads it.
+    assert "static let firstColumnDays = 365" in code
     assert C._TIMELINE_FIRST_COLUMN_DAYS == 365
 
 

@@ -107,13 +107,15 @@ def test_a_banks_first_forecast_bar_has_no_revenue_change():
     assert first["revenue_yoy_pct"] is None
     assert first["revenue_label"] == "$208.4B", "the bar itself stays: the consensus is honest"
     later = [r["revenue_yoy_pct"] for r in rows if r["is_forecast"]][1:]
-    assert later == [4.2, 5.1], "estimate against estimate is one basis"
-    assert [r["revenue_yoy_pct"] for r in rows if not r["is_forecast"]][-1] == 3.3
+    # 3 dp on the wire since 2026-11-14 (readers round again; 1 dp double-rounded).
+    assert later == pytest.approx([4.2, 5.1], abs=0.05), "estimate against estimate is one basis"
+    assert [r["revenue_yoy_pct"] for r in rows if not r["is_forecast"]][-1] == \
+        pytest.approx(3.3, abs=0.05)
 
 
 def test_the_default_is_exactly_what_it_was():
     rows = C._build_annual_timeline(JPM_INCOME, JPM_ESTIMATES)
-    assert _first_forecast(rows)["revenue_yoy_pct"] == -25.5
+    assert _first_forecast(rows)["revenue_yoy_pct"] == pytest.approx(-25.5, abs=0.05)
 
 
 def test_a_real_decline_at_an_operating_company_still_shows():
@@ -130,7 +132,8 @@ def test_the_projections_carry_no_cross_basis_change_either():
     partial = C._build_revenue_forecast_partial(
         JPM_ESTIMATES, 4.6, 5.4, JPM_INCOME, revenue_crosses_basis=True,
     )
-    assert [p["revenue_yoy_pct"] for p in partial["projections"]] == [None, 4.2, 5.1]
+    yoys = [p["revenue_yoy_pct"] for p in partial["projections"]]
+    assert yoys[0] is None and yoys[1:] == pytest.approx([4.2, 5.1], abs=0.05)
     assert _first_forecast(partial["annual_timeline"])["revenue_yoy_pct"] is None
 
 
@@ -145,7 +148,8 @@ def test_the_collector_blanks_it_for_a_bank_and_only_for_one():
     assert _first_forecast(timeline)["revenue_yoy_pct"] is None
     assert report["revenue_forecast"]["projections"][0]["revenue_yoy_pct"] is None
     _, other = _bank_report("Software - Infrastructure")
-    assert _first_forecast(other["revenue_forecast"]["annual_timeline"])["revenue_yoy_pct"] == -25.5
+    assert _first_forecast(other["revenue_forecast"]["annual_timeline"])["revenue_yoy_pct"] == \
+        pytest.approx(-25.5, abs=0.05)
 
 
 def test_an_insurers_chip_goes_but_it_is_not_marked_gross():

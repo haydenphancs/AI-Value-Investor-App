@@ -165,21 +165,19 @@ struct EarningsTimelineChart: View {
         } else {
             cols = priceColumnsByCalendarYear()
         }
-        // Start the line at the CENTER of its leftmost data column, not that
-        // column's left edge — so the tail sits over the first bar instead of
-        // overshooting ~half a column to its left. A price's natural early-period
-        // start maps to colX ≈ idx (the left edge); we trim that lead-in up
-        // to idx + 0.5 (the bar center). Only ever pulls the tail rightward.
-        guard let minColX = cols.map(\.colX).min() else { return cols }
-        let firstCenter = minColX.rounded(.down) + 0.5
-        let clipped = cols.filter { $0.colX >= firstCenter }
+        // Start the line at the CENTER of the FIRST column, not its left edge — its window
+        // opens a whole year before its end, so the tail would overshoot ~half a column to
+        // the left of the first bar. Only column 0's lead-in is trimmed: a later column's
+        // first closes are a listing's first trading months (an IPO mid-series) — real
+        // data. Trimming to the centre of the first column WITH data cut them (2026-11-14).
+        let clipped = cols.filter { $0.colX >= 0.5 }
         return clipped.isEmpty ? cols : clipped
     }
 
     /// The first column has no previous period end on the wire: its window opens this many
     /// days before its own end. The backend's `_TIMELINE_FIRST_COLUMN_DAYS` (which trims the
     /// frozen price series to the same window) uses the same span.
-    private static let firstColumnDays = 365
+    static let firstColumnDays = 365
 
     /// Day numbers of each column's period end, or nil when any column lacks a parseable
     /// one (an older report) or they are not strictly increasing — then the calendar
@@ -421,10 +419,14 @@ struct EarningsTimelineChart: View {
                         if !points.isEmpty {
                             let anchorX = firstForecastIndex.map { sidePad + CGFloat($0) * colW }
                                 ?? centerX(points.count - 1)
+                            // `.id` BEFORE `.position`: `.position` wraps the 1pt view in a
+                            // container that fills the chart, so an id applied after it
+                            // centred the WHOLE chart, which coincides with the boundary only
+                            // for 5 actual + 5 forecast columns (JPM's 5 + 3 opened off it).
                             Color.clear
                                 .frame(width: 1, height: 1)
-                                .position(x: anchorX, y: topPad)
                                 .id(boundaryAnchorID)
+                                .position(x: anchorX, y: topPad)
                         }
 
                         // Transparent tap-catcher on top: a discrete tap maps the

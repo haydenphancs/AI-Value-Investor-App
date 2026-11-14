@@ -2770,11 +2770,13 @@ class TickerReportDataCollector:
         # regardless of FMP's response order (newest-first vs oldest-first
         # has flipped historically across endpoint versions).
         if estimates and len(estimates) >= 2:
-            # CAGR spans the visible chart years (up to 4) so the legend caption
-            # matches what the user sees. The off-screen anchor returned
-            # by the helper is consumed only by _build_revenue_forecast_
-            # partial for the leftmost bar's YoY chip — it must NOT
-            # stretch the CAGR span.
+            # The SCORED forecast CAGRs (forecast vital, persona inputs): up to 4 estimate
+            # years from the one in progress. No longer what any reader is shown — the
+            # legacy 4-bar chart is gone; the insight, PDF and chat print the timeline's own
+            # rate (`_timeline_growth`). Left as is so scores do not move (owner, 2026-11-14:
+            # "Keep scores unchanged"). The off-screen anchor returned by the helper is
+            # consumed only by _build_revenue_forecast_partial for the leftmost bar's YoY
+            # chip — it must NOT stretch the CAGR span.
             visible_est, _ = _select_visible_forecast_window(
                 estimates, income=income,
             )
@@ -3051,6 +3053,8 @@ class TickerReportDataCollector:
         out.revenue_forecast_partial = _build_revenue_forecast_partial(
             out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income,
             revenue_crosses_basis=_revenue_crosses_basis(out),
+            # The code every annual income row agrees on (None → "$", as before).
+            currency=_engine_reporting_currency(out.income, None, out.ticker),
         )
 
         # ── Fundamental metrics (4 cards) — deterministic from the
@@ -4215,16 +4219,20 @@ def _format_close_date(close_date_iso: Optional[str], now: datetime) -> str:
     return _format_live_date(now)
 
 
-def _format_revenue(rev: Optional[float]) -> str:
+def _format_revenue(rev: Optional[float], currency: Any = None) -> str:
+    """Compact revenue ("$710M", "$1.2B"). `currency` is the filer's reporting currency: a
+    non-USD code replaces the "$" ("CNY 1.0T" — BABA's yuan read as dollars beside a USD
+    price line, 2026-11-14); USD, None or garbage keep "$" (`money_prefix`)."""
+    prefix = money_prefix(currency)
     if not rev or rev <= 0:
-        return "$0"
+        return f"{prefix}0"
     if rev >= 1e12:
-        return f"${rev / 1e12:.1f}T"
+        return f"{prefix}{rev / 1e12:.1f}T"
     if rev >= 1e9:
-        return f"${rev / 1e9:.1f}B"
+        return f"{prefix}{rev / 1e9:.1f}B"
     if rev >= 1e6:
-        return f"${rev / 1e6:.0f}M"
-    return f"${rev:,.0f}"
+        return f"{prefix}{rev / 1e6:.0f}M"
+    return f"{prefix}{rev:,.0f}"
 
 
 def _format_money_compact(value: Optional[float], currency: Any = None, *,
@@ -6815,7 +6823,19 @@ def _annual_timeline_rows(
         # estimated* names. None-preserving (a genuinely absent field → "N/A"),
         # unlike _est_revenue/_est_eps which collapse missing to 0.0.
         v = _num_or_none(est.get(primary))
-        return v if v is not None else _num_or_none(est.get(legacy))
+        if v is None:
+            v = _num_or_none(est.get(legacy))
+        if v == 0:
+            # FMP sends a BLANK consensus as an exact 0 (BABA FY2031: epsAvg 0 from 7 analysts
+            # beside a CNY 1-trillion revenue). Drawn as a real 0.00 the EPS line dropped to
+            # zero and the popup read -100%. An average of several estimates landing on exactly
+            # zero is not a forecast anyone made: it is absent ("N/A").
+            logger.info(
+                "[report-timeline-blank-estimate] %s: %s %s is 0 — shown as N/A",
+                ticker, str(est.get("date") or "")[:10], primary,
+            )
+            return None
+        return v
 
     actual_by_fy: Dict[int, _TimelineRow] = {}
     for rec in income or []:
@@ -6884,23 +6904,108 @@ def _annual_timeline_rows(
     return actuals, forecasts
 
 
-def _signed_revenue_label(rev: Optional[float]) -> str:
+def _signed_revenue_label(rev: Optional[float], currency: Any = None) -> str:
     """`_format_revenue` with a sign: it collapses every non-positive value to "$0", which
-    captioned a below-zero bar (a financial's negative revenue year) "$0"."""
+    captioned a below-zero bar (a financial's negative revenue year) "$0". `currency` is the
+    filer's reporting currency ("CNY 1.0T", never "$1.0T" for a figure in yuan)."""
     if rev is None:
         return "N/A"
     if rev < 0:
-        return "-" + _format_revenue(-rev)
-    return _format_revenue(rev)
+        return "-" + _format_revenue(-rev, currency)
+    return _format_revenue(rev, currency)
 
 
-def _signed_eps_label(eps: Optional[float]) -> str:
-    """"-$2.00", not "$-2.00" — the module's sign style (`_format_money_compact`)."""
+def _signed_eps_label(eps: Optional[float], currency: Any = None) -> str:
+    """"-$2.00", not "$-2.00" — the module's sign style (`_format_money_compact`); a non-USD
+    filer's code replaces the "$" ("-CNY 2.00")."""
     if eps is None:
         return "N/A"
+    prefix = money_prefix(currency)
     if eps < 0 and round(abs(eps), 2) > 0:
-        return f"-${abs(eps):.2f}"
-    return f"${abs(eps):.2f}" if eps < 0 else f"${eps:.2f}"
+        return f"-{prefix}{abs(eps):.2f}"
+    return f"{prefix}{abs(eps):.2f}" if eps < 0 else f"{prefix}{eps:.2f}"
+
+
+# The Earnings Timeline's window: the last N reported years (the standard forecast-chart past)
+# and up to M forward estimate years (whatever FMP has, capped).
+_TIMELINE_ACTUALS_SHOWN = 5
+_TIMELINE_FORECASTS_SHOWN = 5
+
+
+def _timeline_window(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+) -> Tuple[List[_TimelineRow], List[_TimelineRow]]:
+    """(off-screen YoY anchor, DISPLAYED rows) of the Earnings Timeline — the one window the
+    chart (`_build_annual_timeline`) and the growth rates its text cites (`_timeline_growth`)
+    both read, so the insight can never quote a span the chart does not draw.
+
+    The anchor is the one older actual (when present) kept only as the leftmost bar's YoY
+    base, so it still gets a % chip; it is never drawn."""
+    actuals, forecasts = _annual_timeline_rows(income, estimates)
+    anchor: List[_TimelineRow] = (
+        actuals[-(_TIMELINE_ACTUALS_SHOWN + 1):-_TIMELINE_ACTUALS_SHOWN]
+        if len(actuals) > _TIMELINE_ACTUALS_SHOWN else []
+    )
+    return anchor, actuals[-_TIMELINE_ACTUALS_SHOWN:] + forecasts[:_TIMELINE_FORECASTS_SHOWN]
+
+
+def _span_cagr(
+    rows: List[_TimelineRow], first: int, last: int, field: str,
+) -> Tuple[Optional[float], Optional[str]]:
+    """(CAGR %, span label) of `field` ("revenue" / "eps") from rows[first] to rows[last].
+
+    The exponent is the FISCAL-YEAR difference, never the row count. None (and no label)
+    when the span is not one consecutive run of years (a gap, a duplicate, an unordered
+    year), is shorter than one year, or either end is missing or not positive — a growth
+    rate from or to a loss is not defined."""
+    if not (0 <= first < last < len(rows)):
+        return None, None
+    span = rows[first:last + 1]
+    if any(b.fy - a.fy != 1 for a, b in zip(span, span[1:])):
+        return None, None
+    start, end = getattr(span[0], field), getattr(span[-1], field)
+    if start is None or end is None or start <= 0 or end <= 0:
+        return None, None
+    years = span[-1].fy - span[0].fy
+    rate = round(((end / start) ** (1.0 / years) - 1) * 100, 1)
+    if not math.isfinite(rate):
+        return None, None
+    first_label = f"FY{span[0].fy}{'E' if span[0].is_forecast else ''}"
+    return rate + 0.0, f"{first_label}–FY{span[-1].fy}{'E' if span[-1].is_forecast else ''}"
+
+
+def _timeline_growth(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+    *,
+    revenue_crosses_basis: bool = False,
+) -> Dict[str, Any]:
+    """The growth rates the report's TEXT cites (insight prompt, evidence, PDF, chat), measured
+    over the bars the Future Forecast chart actually draws (`_timeline_window`).
+
+    The old figure was the consensus CAGR over a 4-estimate window of the legacy module chart
+    (PLUG: FY2026E-FY2029E, "22% annually") — a span drawn nowhere once the chart became the
+    timeline, skipping the FY2025→FY2026 step and the last bar. Owner, 2026-11-14:
+    - Revenue: the last REPORTED year → the last forecast year ("Last reported → last
+      forecast"). Where reported and consensus revenue are different measures (a bank,
+      `revenue_crosses_basis`) or nothing is reported, the first → last forecast year.
+    - EPS: first → last forecast year only: reported EPS is GAAP and the consensus usually
+      adjusted, so a span across that boundary is not a growth rate.
+    The SCORED rates (`c["revenue_cagr"]` / `c["eps_cagr"]`) are untouched ("Keep scores
+    unchanged"). Every value is None when it cannot be measured."""
+    out: Dict[str, Any] = {
+        "revenue_cagr": None, "revenue_span": None, "eps_cagr": None, "eps_span": None,
+    }
+    _anchor, rows = _timeline_window(income, estimates)
+    n_actual = sum(1 for r in rows if not r.is_forecast)
+    if not rows or n_actual == len(rows) or any(r.is_forecast for r in rows[:n_actual]):
+        return out  # no forecast column, or actuals and forecasts interleaved
+    last = len(rows) - 1
+    rev_first = n_actual - 1 if n_actual > 0 and not revenue_crosses_basis else n_actual
+    out["revenue_cagr"], out["revenue_span"] = _span_cagr(rows, rev_first, last, "revenue")
+    out["eps_cagr"], out["eps_span"] = _span_cagr(rows, n_actual, last, "eps")
+    return out
 
 
 def _build_annual_timeline(
@@ -6908,6 +7013,7 @@ def _build_annual_timeline(
     estimates: Optional[List[Dict[str, Any]]],
     *,
     revenue_crosses_basis: bool = False,
+    currency: Any = None,
 ) -> List[Dict[str, Any]]:
     """One continuous yearly revenue+EPS series for the Earnings Timeline view:
     the last 5 reported ACTUAL years (is_forecast=False) followed GAPLESSLY by up
@@ -6939,20 +7045,10 @@ def _build_annual_timeline(
     window in `_build_revenue_forecast_partial`. Reuses inputs the collector
     already fetched (no new FMP calls). Returns [] when there is no data.
     """
-    _ACTUALS_SHOWN = 5   # last N reported years (standard forecast-chart past window)
-    _FORECASTS_SHOWN = 5  # up to N forward estimate years (whatever FMP has, capped)
-
-    actuals, forecasts = _annual_timeline_rows(income, estimates)
-
     # Window: last 5 actuals DISPLAYED, plus one older actual (when present) kept
     # ONLY as the leftmost bar's off-screen YoY anchor (so it still gets a % chip),
-    # then up to 5 forecasts. Mirrors the off-screen-anchor idea in
-    # _select_visible_forecast_window.
-    anchor: List[_TimelineRow] = (
-        actuals[-(_ACTUALS_SHOWN + 1):-_ACTUALS_SHOWN]
-        if len(actuals) > _ACTUALS_SHOWN else []
-    )
-    display_rows = actuals[-_ACTUALS_SHOWN:] + forecasts[:_FORECASTS_SHOWN]
+    # then up to 5 forecasts. The same window `_timeline_growth` measures.
+    anchor, display_rows = _timeline_window(income, estimates)
     if not display_rows:
         return []
     rows_for_yoy = anchor + display_rows
@@ -6965,9 +7061,19 @@ def _build_annual_timeline(
         # abs(prior) so a NEGATIVE base (loss years — EPS/FCF for names like PLUG)
         # still yields a correctly-signed %: a narrowing loss reads positive, a
         # widening loss negative. Only a zero prior has no defined YoY.
+        # THREE decimals: every reader rounds again (iOS "%.0f", the PDF "%+.1f", the prompt
+        # ":+.0f"), and a 1-dp value rounded twice: PLUG FY2024's -29.453% became -29.5, then
+        # "-30" (half-to-even) on the chip, one point off (2026-11-14).
         if curr is None or prior is None or prior == 0:
             return None
-        return round((curr - prior) / abs(prior) * 100, 1)
+        return round((curr - prior) / abs(prior) * 100, 3)
+
+    def _revenue_yoy(curr: Optional[float], prior: Optional[float]) -> Optional[float]:
+        # The abs(prior) rule is for EPS loss years. Revenue at or below zero has no growth
+        # rate: PLUG FY2021 read +639% against its FY2020 revenue of -$93M (2026-11-14).
+        if curr is None or prior is None or prior <= 0 or curr < 0:
+            return None
+        return _yoy(curr, prior)
 
     series: List[Dict[str, Any]] = []
     for k in range(anchor_offset, len(rows_for_yoy)):
@@ -6985,11 +7091,13 @@ def _build_annual_timeline(
         series.append({
             "period": str(row.fy),
             "period_end": row.period_end,
-            "revenue": round(rev / divisor, 2) if rev else 0.0,
-            "revenue_label": _signed_revenue_label(rev),
-            "revenue_yoy_pct": _yoy(rev, prior_rev),
+            # 4 dp: at 2 dp NVDA's $26.9B bar beside a $1.21T maximum was stored as 0.03T,
+            # drawn ~11% too tall (2026-11-14).
+            "revenue": round(rev / divisor, 4) if rev else 0.0,
+            "revenue_label": _signed_revenue_label(rev, currency),
+            "revenue_yoy_pct": _revenue_yoy(rev, prior_rev),
             "eps": round(eps, 2) if eps else 0.0,
-            "eps_label": _signed_eps_label(eps),
+            "eps_label": _signed_eps_label(eps, currency),
             "eps_yoy_pct": _yoy(eps, prior_eps),
             "eps_basis": "consensus" if row.is_forecast else "gaap",
             "revenue_analyst_count": row.revenue_analyst_count,
@@ -7005,7 +7113,8 @@ _TIMELINE_FIRST_COLUMN_DAYS = 365
 
 
 def _build_timeline_prices(
-    historical: Any, annual_timeline: List[Dict[str, Any]]
+    historical: Any, annual_timeline: List[Dict[str, Any]],
+    *, now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Weekly close series (last trading day per ISO week) spanning the Earnings
     Timeline's ACTUAL years, for its price overlay.
@@ -7025,7 +7134,15 @@ def _build_timeline_prices(
     of the first label dropped NVDA's Feb–Dec prices of its first fiscal year (FY2022
     runs Feb 2021 – Jan 2022). Rows without `period_end` (older timelines) keep the
     calendar-year floor.
+
+    Only SETTLED closes: FMP's EOD feed carries the current session's partial bar, which a
+    report generated mid-session froze as its "last close" (2026-11-14). Rows dated after
+    the current close cycle's day are skipped — the rule `_latest_completed_close` uses.
     """
+    from app.services.ticker_report_cache import current_close_cycle_start
+    from app.utils.market_hours import ET
+
+    settled_through = current_close_cycle_start(now).astimezone(ET).date()
     actual_rows = [p for p in (annual_timeline or []) if not p.get("is_forecast")]
     if not actual_rows:
         return []
@@ -7055,7 +7172,7 @@ def _build_timeline_prices(
             d = date.fromisoformat(ds)
         except ValueError:
             continue
-        if not _in_window(d):
+        if not _in_window(d) or d > settled_through:
             continue
         close = _safe_float(rec, "close", _safe_float(rec, "price", 0.0))
         if close <= 0:
@@ -7113,7 +7230,13 @@ def _build_revenue_forecast_partial(
     income: Optional[List[Dict[str, Any]]] = None,
     *,
     revenue_crosses_basis: bool = False,
+    currency: Any = None,
 ) -> Dict[str, Any]:
+    # `revenue_cagr` / `eps_cagr` are the SCORED rates (the 4-estimate window below). The
+    # wire's `cagr` / `eps_growth` — what the insight, the PDF and report chat print — are
+    # measured over the timeline the chart draws (`_timeline_growth`) whenever it has a
+    # forecast column; the scored ones are only the fallback for a report without one.
+    # `currency`: the filer's reporting currency, for every money label ("CNY 1.0T").
     # Pick up to 4 forward projections plus the off-screen anchor (FY before
     # "current") for the leftmost bar's YoY chip. With fewer than 4 forward
     # years there is no anchor — see `_select_visible_forecast_window`.
@@ -7132,10 +7255,17 @@ def _build_revenue_forecast_partial(
     def _yoy(curr: float, prior: float) -> Optional[float]:
         """YoY % change. Uses abs(prior) so a negative base (loss years) still
         yields a correctly-signed % (a narrowing loss reads positive). None only
-        when prior is exactly zero (no defined YoY)."""
+        when prior is exactly zero (no defined YoY). Three decimals: readers round again
+        (see `_build_annual_timeline`)."""
         if prior is None or prior == 0:
             return None
-        return round((curr - prior) / abs(prior) * 100, 1)
+        return round((curr - prior) / abs(prior) * 100, 3)
+
+    def _revenue_yoy(curr: float, prior: Optional[float]) -> Optional[float]:
+        # Revenue at or below zero has no growth rate (abs(prior) is for EPS loss years).
+        if prior is None or prior <= 0 or curr < 0:
+            return None
+        return _yoy(curr, prior)
 
     # Label each projection with the SAME fiscal year the Earnings Timeline gives that
     # estimate (`_forecast_fiscal_label`). `date[:4]` named HD's FY2026 estimate (ending
@@ -7175,11 +7305,11 @@ def _build_revenue_forecast_partial(
             prior_eps = _est_eps(prior_est)
         projections.append({
             "period": period,
-            "revenue": round(rev / divisor, 2) if rev else 0.0,
-            "revenue_label": _format_revenue(rev),
-            "revenue_yoy_pct": _yoy(rev, prior_rev) if rev else None,
+            "revenue": round(rev / divisor, 4) if rev else 0.0,
+            "revenue_label": _format_revenue(rev, currency),
+            "revenue_yoy_pct": _revenue_yoy(rev, prior_rev) if rev else None,
             "eps": round(eps, 2) if eps else 0.0,
-            "eps_label": f"${eps:.2f}" if eps else "$0",
+            "eps_label": _signed_eps_label(eps, currency) if eps else f"{money_prefix(currency)}0",
             "eps_yoy_pct": _yoy(eps, prior_eps) if eps else None,
             "revenue_analyst_count": _int_or_none(est.get("numAnalystsRevenue")),
             "eps_analyst_count": _int_or_none(est.get("numAnalystsEps")),
@@ -7188,18 +7318,30 @@ def _build_revenue_forecast_partial(
             "is_forecast": True,
         })
 
+    annual_timeline = _build_annual_timeline(
+        income, estimates, revenue_crosses_basis=revenue_crosses_basis, currency=currency,
+    )
+    if any(row.get("is_forecast") for row in annual_timeline):
+        growth = _timeline_growth(income, estimates, revenue_crosses_basis=revenue_crosses_basis)
+        shown_rev, rev_span = growth["revenue_cagr"], growth["revenue_span"]
+        shown_eps, eps_span = growth["eps_cagr"], growth["eps_span"]
+    else:
+        shown_rev, rev_span, shown_eps, eps_span = revenue_cagr, None, eps_cagr, None
+
     return {
-        "cagr": revenue_cagr if revenue_cagr is not None else 0.0,
-        "eps_growth": eps_cagr if eps_cagr is not None else 0.0,
+        # Required floats on the wire: 0.0 is how "no rate" arrives (narrative_prompts and
+        # chat_context_resolver read it that way). The span says which bars a rate covers.
+        "cagr": shown_rev if shown_rev is not None else 0.0,
+        "cagr_span": rev_span,
+        "eps_growth": shown_eps if shown_eps is not None else 0.0,
+        "eps_growth_span": eps_span,
         "management_guidance": GUIDANCE_UNKNOWN,  # Stage A overlay sets a read only when a transcript existed
         "projections": projections,
         # Full GAPLESS yearly series (historical actuals + ALL forward estimates
         # after the last reported year) for the "Earnings Timeline" sheet —
         # independent of the curated `projections` window above (own divisor +
         # YoY). The module chart keeps using `projections`; the sheet uses this.
-        "annual_timeline": _build_annual_timeline(
-            income, estimates, revenue_crosses_basis=revenue_crosses_basis,
-        ),
+        "annual_timeline": annual_timeline,
         "forecast_analyst_count": _forecast_analyst_count(income, estimates),
         "guidance_quote": None,         # AI fills via Stage A (PR 6)
         "guidance_speaker": None,       # AI fills via Stage A (PR 6)
@@ -11446,10 +11588,28 @@ def build_financial_context(out: CollectedTickerData) -> str:
     else:
         parts.append(f"DCF Fair Value: {_fmt_currency_or_na(c.get('fair_value'))}")
         parts.append(f"DCF Upside: {_fmt_pct_or_na(c.get('upside_pct'))}")
-    parts.append(
-        f"Revenue CAGR (analyst est.): {_fmt_pct_or_na(c.get('revenue_cagr'))}"
-    )
-    parts.append(f"EPS CAGR (analyst est.): {_fmt_pct_or_na(c.get('eps_cagr'))}")
+    # The rates the report PRINTS (the Future Forecast chart's own span, `_timeline_growth`),
+    # with that span — never a second, differently-spanned figure beside the insight's. A
+    # collection built since 2026-11-14 always carries the span keys: then the printed value
+    # is the only one shown, N/A when the chart's span could not be measured (the scored
+    # 4-estimate rate here, unlabelled, contradicted the insight's "n/a" and the PDF's dash).
+    # A present span means MEASURED, so 0.0 is a flat outlook, not "no rate". Only an older
+    # cached collection, without the keys, still prints the scored rate.
+    rf_partial = getattr(out, "revenue_forecast_partial", None)
+    rf_partial = rf_partial if isinstance(rf_partial, dict) else {}
+    for label, key, span_key, scored in (
+        ("Revenue CAGR (analyst est.)", "cagr", "cagr_span", c.get("revenue_cagr")),
+        ("EPS CAGR (analyst est.)", "eps_growth", "eps_growth_span", c.get("eps_cagr")),
+    ):
+        if span_key not in rf_partial:
+            parts.append(f"{label}: {_fmt_pct_or_na(scored)}")
+            continue
+        shown, span = rf_partial.get(key), rf_partial.get(span_key)
+        number = shown if isinstance(shown, (int, float)) and not isinstance(shown, bool) else None
+        if span:
+            parts.append(f"{label}, {span}: {_fmt_pct_or_na(number)}")
+        else:
+            parts.append(f"{label}: {_fmt_pct_or_na(number if number else None)}")
 
     if income:
         for stmt in income[:3]:
@@ -11519,11 +11679,14 @@ def build_financial_context(out: CollectedTickerData) -> str:
 
     if estimates:
         parts.append("\nAnalyst Estimates:")
+        # In the filer's reporting currency, as the chart and the projection list label them:
+        # BABA's yuan estimates read "$1.1T" here beside "CNY 1.1T" there (2026-11-14).
+        est_currency = _engine_reporting_currency(out.income, None, out.ticker)
         for est in estimates[:2]:
             parts.append(
                 f"  {est.get('date', '?')}: "
-                f"Rev {_format_money_compact(_est_revenue(est))}, "
-                f"EPS ${_est_eps(est):.2f}"
+                f"Rev {_format_money_compact(_est_revenue(est), est_currency)}, "
+                f"EPS {_signed_eps_label(_est_eps(est), est_currency)}"
             )
         if _revenue_gross_of_interest(out):
             parts.append(

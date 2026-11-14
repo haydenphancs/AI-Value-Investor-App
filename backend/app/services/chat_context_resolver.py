@@ -663,7 +663,8 @@ _LEAD_OWNED_SECTION_KEYS: Dict[str, frozenset] = {
     "revenue_engine": frozenset({"segments", "period", "revenue_unit", "total_revenue",
                                  "intersegment_eliminations", "gross_reported_revenue",
                                  "reporting_currency", "currency"}),
-    "revenue_forecast": frozenset({"cagr", "eps_growth", "beat_summary", "forecast_analyst_count"}),
+    "revenue_forecast": frozenset({"cagr", "eps_growth", "cagr_span", "eps_growth_span",
+                                   "beat_summary", "forecast_analyst_count"}),
     "key_management": frozenset({"officers", "top_holders"}),
     "wall_street_consensus": frozenset({"caydex_fair_value"}),
 }
@@ -990,6 +991,8 @@ def _segment_figures(report: Dict[str, Any]) -> List[_FigSpec]:
 _ProjRow = Tuple[int, str, Dict[str, Any]]   # (payload index, period label, projection row)
 # The collector's stored growth rate per projected field (0.0 = "unknown").
 _STORED_GROWTH_KEY = {"revenue": "cagr", "eps": "eps_growth"}
+# The fiscal years a stored rate spans ("FY2025–FY2030E"); present on reports from 2026-11-14.
+_STORED_SPAN_KEY = {"revenue": "cagr_span", "eps": "eps_growth_span"}
 
 
 def _stored_growth(value: Any) -> Optional[float]:
@@ -1030,10 +1033,12 @@ def _projection_growth(rows: List[_ProjRow], field: str, stored: Optional[float]
                        complete: bool) -> Optional[Tuple[float, str, str]]:
     """(rate %/yr, first period, last period) for `field` across the projections, or None.
 
-    The STORED rate (`cagr` / `eps_growth`) is the one the report card and the PDF print — the
-    collector computed it from the unrounded estimates over this same visible window — so it is
-    stated whenever it is a real number and the window is intact (every payload row kept, both
-    endpoints positive), labelled with the window's first and last period. Its 0.0 means
+    Used for reports WITHOUT a stored span (before 2026-11-14), whose STORED rate (`cagr` /
+    `eps_growth`) the collector computed from the unrounded estimates over this same visible
+    window — so it is stated whenever it is a real number and the window is intact (every
+    payload row kept, both endpoints positive), labelled with the window's first and last
+    period. A newer report's rate spans the Future Forecast chart's own bars and carries that
+    span (`cagr_span`); `_forecast_figures` states it with that label instead. Its 0.0 means
     "unknown" (an endpoint without a positive estimate) and is never stated: the rate is then
     recomputed over the positive points — chained from the per-row YoY when every link is there,
     else from the rounded projections only when their rounding cannot move it by more than
@@ -1109,8 +1114,17 @@ def _forecast_figures(report: Dict[str, Any]) -> List[_FigSpec]:
             years.append(f"{period} {', '.join(bits)}")
     growth: List[str] = []
     for field, label in (("revenue", "revenue"), ("eps", "EPS")):
-        cagr = _projection_growth(rows, field, _stored_growth(rf.get(_STORED_GROWTH_KEY[field])),
-                                  complete)
+        stored = _stored_growth(rf.get(_STORED_GROWTH_KEY[field]))
+        span = _fig_label(rf.get(_STORED_SPAN_KEY[field]), 24)
+        measured = _fig_float(rf.get(_STORED_GROWTH_KEY[field])) if span else None
+        if measured is not None and abs(measured) < _CAGR_MAX_ABS:
+            # The rate the report prints, over the chart's own fiscal years (2026-11-14). A
+            # span means MEASURED, so 0.0 is a flat outlook, stated as such. The projections
+            # window below is a different span: labelling this rate with its first and last
+            # period would put it on years it was not measured over.
+            growth.append(f"{label} CAGR {span} {_fig_pct(measured)}/yr")
+            continue
+        cagr = _projection_growth(rows, field, None if span else stored, complete)
         if cagr is not None:
             rate, first, last = cagr
             growth.append(f"{label} CAGR {first}–{last} {_fig_pct(rate)}/yr")

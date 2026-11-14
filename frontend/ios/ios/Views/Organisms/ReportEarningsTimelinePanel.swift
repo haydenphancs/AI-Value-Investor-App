@@ -69,7 +69,69 @@ struct ReportEarningsTimelinePanel: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, AppSpacing.xs)
             }
+
+            // No forecast column (a ticker without analyst estimates): the price line stops
+            // at the last fiscal year-end, so the months since would read as missing.
+            if showPrice, let cutoff = Self.priceCutoffNote(timeline: timeline, prices: dailyPrices) {
+                Text(cutoff)
+                    .font(AppTypography.caption)
+                    .foregroundColor(AppColors.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, AppSpacing.xs)
+            }
         }
+    }
+
+    /// "Price shown to Dec 31, 2025." — only when no column is a forecast, the frozen price
+    /// series runs past the last column's period end, AND the chart actually draws a line.
+    /// EarningsTimelineChart places a close only inside some column's fiscal window (the first
+    /// opens `firstColumnDays` before its end), so the later closes are not drawn (owner,
+    /// 2026-11-14: "Caption", not an extra column). A listing that began after the last
+    /// year-end has no drawn close at all, and "shown to" would describe a line that is not
+    /// there; nor is one drawn from a single close or a flat series. nil whenever the chart is
+    /// not on its period-end mapping (a column without a period end, or ends out of order).
+    static func priceCutoffNote(
+        timeline: [RevenueProjection],
+        prices: [EarningsDailyPricePoint]
+    ) -> String? {
+        guard !timeline.isEmpty, !timeline.contains(where: { $0.isForecast }) else { return nil }
+        var ends: [String] = []
+        for column in timeline {
+            guard let end = column.periodEnd, end.count >= 10 else { return nil }
+            let day = String(end.prefix(10))
+            if let previous = ends.last, day <= previous { return nil }
+            ends.append(day)
+        }
+        guard let firstEnd = ends.first, let lastEnd = ends.last,
+              let firstEndDay = EarningsPriceTimeline.dayNumber(firstEnd),
+              let lastEndDay = EarningsPriceTimeline.dayNumber(lastEnd) else { return nil }
+        let windowOpensAfter: Int = firstEndDay - EarningsTimelineChart.firstColumnDays
+        var drawn: [Double] = []
+        var latestDay: Int? = nil
+        for point in prices {
+            guard let day = EarningsPriceTimeline.dayNumber(point.date) else { continue }
+            latestDay = max(latestDay ?? day, day)
+            if day > windowOpensAfter, day <= lastEndDay, point.price.isFinite {
+                drawn.append(point.price)
+            }
+        }
+        guard drawn.count >= 2, let low = drawn.min(), let high = drawn.max(), high > low,
+              let latest = latestDay, latest > lastEndDay,
+              let shown = shortDate(lastEnd) else { return nil }
+        return "Price shown to \(shown)."
+    }
+
+    private static let monthAbbreviations: [String] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+
+    /// "2025-12-31" → "Dec 31, 2025", by string arithmetic (no DateFormatter, no zone).
+    static func shortDate(_ ymd: String) -> String? {
+        let parts: [Substring] = ymd.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]),
+              (1...12).contains(month), (1...31).contains(day) else { return nil }
+        return "\(monthAbbreviations[month - 1]) \(day), \(year)"
     }
 
     /// True when the timeline has GAAP actual years AND consensus forecast years.

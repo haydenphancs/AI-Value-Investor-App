@@ -576,3 +576,104 @@ def test_the_single_caller_guard_fails_on_its_mutation(label, old, new):
     mutated[_TECH_SECTIONS] = _mutate(sources[_TECH_SECTIONS], old, new)
     with pytest.raises(AssertionError):
         _check_volume_label_has_one_caller(mutated)
+
+
+# ── 3. The paywall names the same section (owner, 2026-11-14: "Rename it now") ──────────
+#
+# The section it sells became "Picks · <quarter> 13F" above, but the paywall still said
+# "Current Picks, Recent Trades and the AI sentiment summary". Both copies of that sentence
+# are renamed "13F picks": the server's plan row (`plan_features._whale_detail_row`, served
+# to every build) and the app's compiled copies — the bundled offline plan table and the
+# `.whaleDetail` paywall subheadline in SubscriptionModels.swift. The bundled table must say
+# exactly what the server says, or an offline paywall reads differently from an online one.
+
+from app.services import entitlements  # noqa: E402
+from app.services import plan_features as pf  # noqa: E402
+
+_SUBSCRIPTION_MODELS = _IOS / "Models" / "SubscriptionModels.swift"
+
+_BUNDLED_WHALE_ROW = re.compile(
+    r'key:\s*"whale_detail",\s*title:\s*"[^"\n]*",\s*detail:\s*paid\s*'
+    r'\?\s*"([^"\n]*)"\s*:\s*"([^"\n]*)"'
+)
+_WHALE_SUBHEADLINE = re.compile(r'case\s+\.whaleDetail\s*:\s*return\s+"([^"\n]*)"')
+_PAYWALL_CONTEXT_DECL = r"\benum\s+PaywallContext\s*:[^{]*"
+_SUBHEADLINE_DECL = r"\bvar\s+subheadline\s*:\s*String\s*"
+
+
+def _server_whale_detail(tier: str) -> str:
+    rows = [
+        r for r in pf.features_for_tier(tier, monthly_credits=100, report_cost=20, chat_cost=1)
+        if r["key"] == pf.KEY_WHALE_DETAIL
+    ]
+    assert len(rows) == 1, (tier, rows)
+    return rows[0]["detail"]
+
+
+def _check_paywall_copy(raw: str) -> None:
+    code = _strip_swift_comments(raw)
+    assert not re.search(r"\"[^\"\n]*Current Picks[^\"\n]*\"", code), \
+        "a paywall string still sells 'Current Picks'"
+
+    bundled = _BUNDLED_WHALE_ROW.findall(code)
+    assert len(bundled) == 1, f"expected ONE bundled whale_detail row, found {len(bundled)}"
+    paid, free = bundled[0]
+    assert paid == _server_whale_detail(entitlements.TIER_PRO), \
+        "the bundled paid row must equal the server's unlocked row word for word"
+    assert free == _server_whale_detail(entitlements.TIER_FREE), \
+        "the bundled free row must equal the server's locked row word for word"
+
+    # Brace-bound to PaywallContext.subheadline: `.whaleDetail` also has a headline, a
+    # feature key and a symbol in sibling switches of the same enum.
+    subheadline = _decl(_decl(code, _PAYWALL_CONTEXT_DECL), _SUBHEADLINE_DECL)
+    subheads = _WHALE_SUBHEADLINE.findall(subheadline)
+    assert len(subheads) == 1, f"expected ONE .whaleDetail paywall subheadline, found {subheads}"
+    assert subheads[0].startswith("13F picks, "), subheads[0]
+
+
+def test_the_server_plan_row_sells_13f_picks_on_every_tier():
+    for tier in (entitlements.TIER_FREE, entitlements.TIER_PRO, entitlements.TIER_MAX):
+        detail = _server_whale_detail(tier)
+        assert "13F picks" in detail, (tier, detail)
+        assert "current" not in detail.lower(), (tier, detail)
+
+
+def test_the_app_paywall_copy_matches_the_renamed_section():
+    _check_paywall_copy(_raw(_SUBSCRIPTION_MODELS))
+
+
+_SUBHEAD_NOW = 'return "13F picks, Recent Trades and the AI sentiment summary on any investor."'
+_SUBHEAD_OLD = 'return "Current Picks, Recent Trades and the AI sentiment summary on any investor."'
+
+_PAYWALL_MUTATIONS = [
+    ("subheadline reverted", _SUBHEAD_NOW, _SUBHEAD_OLD),
+    ("subheadline reverted behind a comment", _SUBHEAD_NOW, _SUBHEAD_OLD + " // " + _SUBHEAD_NOW),
+    ("bundled paid row reverted", '? "13F picks, Recent Trades', '? "Current Picks, Recent Trades'),
+    ("bundled free row drifts from the server", "sector exposure. 13F picks, Recent",
+     "sector exposure. 13F Picks, Recent"),
+]
+
+
+@pytest.mark.parametrize(
+    "label, old, new", _PAYWALL_MUTATIONS, ids=[m[0] for m in _PAYWALL_MUTATIONS]
+)
+def test_each_paywall_guard_fails_on_its_mutation(label, old, new):
+    raw = _raw(_SUBSCRIPTION_MODELS)
+    _check_paywall_copy(raw)  # green on the real source
+    mutated = _mutate(raw, old, new)  # outside `raises`: a stale target must fail loudly
+    with pytest.raises(AssertionError):
+        _check_paywall_copy(mutated)
+
+
+def test_a_server_row_that_drifts_fails_the_bundled_parity(monkeypatch):
+    raw = _raw(_SUBSCRIPTION_MODELS)
+    real = pf._whale_detail_row
+
+    def drifted(tier):
+        row = dict(real(tier))
+        row["detail"] = row["detail"].replace("13F picks", "Quarter picks")
+        return row
+
+    monkeypatch.setattr(pf, "_whale_detail_row", drifted)
+    with pytest.raises(AssertionError):
+        _check_paywall_copy(raw)

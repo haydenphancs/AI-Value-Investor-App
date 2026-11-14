@@ -48,8 +48,20 @@ class SnapshotMetricResponse(BaseModel):
     # when `name` prints none. `peer_level` set implies `peer_median` set, never the reverse
     # (a median whose cell carries no known level still prints). Optional and additive: the
     # Financials-tab decoder and legacy cached rows have neither.
+    # Growth rows (2026-11-13, owner decision "Name the periods") print no median in `name`:
+    # there `numeric_value` is the newest annual YoY the row prints, unrounded, and
+    # `peer_median` the SAME fiscal year's peer YoY the score was judged against — None while
+    # that year is not reported (or the company has no peer group).
     numeric_value: Optional[float] = None
     peer_median: Optional[float] = None
+    # The DISPLAY label of the CLOSED period the row's figure covers ("FY2026"), 2026-11-13.
+    # Growth sets it on rows with a value (the newest fiscal year's YoY, never "now"). The
+    # Price card sets it on a P/FCF or EV/EBITDA row shown on a LAST-FISCAL-YEAR basis (owner
+    # decision "Fallback TTM labels"): that row's name still prints its median and keeps its
+    # `peer_level`, but carries no `numeric_value` / `peer_median` — the one exception to the
+    # rules above — so no "Current (TTM)" line is built from it. None on a TTM / current
+    # row. Optional and additive: the Financials-tab decoder and legacy cached rows have none.
+    period_label: Optional[str] = None
 
 
 # Wire format of `SnapshotItemResponse.computed_at`: ISO-8601 UTC to the second with a

@@ -2047,9 +2047,14 @@ struct VolumeAnalysisData {
         formatVolume(currentVolume)
     }
 
+    /// "+12% vs prior day": the latest daily bar's volume against the bar BEFORE it
+    /// (backend `technical_analysis_service._compute_volume_analysis`, `vol_change`
+    /// over `df_daily`), not against the 30-day average shown beside it, so the
+    /// comparator is named. Its only caller is the Volume Analysis "Current Volume"
+    /// card's subtitle.
     var formattedVolumeChange: String {
         let sign = currentVolumeChange >= 0 ? "+" : ""
-        return "\(sign)\(String(format: "%.0f", currentVolumeChange))%"
+        return "\(sign)\(String(format: "%.0f", currentVolumeChange))% vs prior day"
     }
 
     var volumeChangeColor: Color {

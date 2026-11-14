@@ -50,6 +50,7 @@ from app.services.sector_benchmark_lookup import (
 )
 from app.services.sector_benchmark_service import _normalize_sector
 from app.utils.earnings_yield import earnings_yield_text, parse_multiple
+from app.utils.period_labels import annual_fiscal_year
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,10 @@ _CACHE_TTL = 300  # 5 minutes
 #     `numeric_value` and `peer_median`, in display units — for the report drill-down's
 #     "Current (TTM)" legend line. A v10 row has neither, and a report built from it would
 #     freeze without that line.
-_SNAPSHOT_PAYLOAD_VERSION = 11
+# 12 (2026-11-13, owner decision "Fallback TTM labels"): a P/FCF or EV/EBITDA row shown on a
+#     LAST-FISCAL-YEAR basis carries no `numeric_value` / `peer_median` and names that year
+#     (`period_label`), so the drill-down never calls it TTM. A v11 row did.
+_SNAPSHOT_PAYLOAD_VERSION = 12
 _VERSION_KEY = "_schema_v"
 # Which DCF a cached row carries: True = the Caydex Fair Value Estimate (`caydex_estimate`),
 # False/absent = FMP's model (`dcf`). A row that disagrees with settings.DCF_ENABLED is rebuilt,
@@ -1139,6 +1143,18 @@ def build_price_snapshot(
     #      ratio is meaningless (negative multiples don't compare), so pfcf stays None.
     # A ratio of exactly 0 is FMP's "absent" on these fields (`_fmt_pfcf` already reads it
     # so), so it takes the fallbacks too instead of scoring a neutral 3 beside a "—".
+    #
+    # Which BASIS each of P/FCF and EV/EBITDA was shown on (owner decision 2026-11-13,
+    # "Fallback TTM labels"): every field of /ratios-ttm and /key-metrics-ttm (and 1 / the TTM
+    # FCF yield) is trailing-twelve-month; the rungs below that divide by the LAST FISCAL
+    # YEAR's statement (`cf` / `inc` are fetched `period="annual", limit=1`) are not. A row
+    # shown on that fiscal-year basis carries no `numeric_value` / `peer_median`
+    # (`_metric(ttm=False)`), so the report drill-down never builds its "Current (TTM)" line
+    # from it, and names the statement's fiscal year (`period_label`, e.g. "FY2025") so the
+    # drill-down header and caption say which year it divides by instead of "TTM". The
+    # value, the label, the score and the rating are unchanged.
+    pfcf_fiscal_year = False
+    ev_ebitda_fiscal_year = False
     if pfcf == 0:
         pfcf = None
     if pfcf is None:
@@ -1150,10 +1166,16 @@ def build_price_snapshot(
             fcf = _safe_float(cf, "freeCashFlow")
             if mcap and mcap > 0 and fcf and fcf > 0:
                 pfcf = round(mcap / fcf, 2)
+                pfcf_fiscal_year = True
                 logger.info(
                     "P/FCF for %s reconstructed from the last fiscal year's FCF "
                     "(no TTM ratio or yield): %.2f", ticker, pfcf,
                 )
+            elif fcf is not None and fcf < 0:
+                # No multiple, but `_fmt_pfcf` prints "Neg." from THIS fiscal-year sign (no
+                # TTM yield to decide it): the row's figure is still a fiscal-year one, and a
+                # "Current (TTM) Negative" line would call it trailing.
+                pfcf_fiscal_year = True
 
     # Fallback chain for EV/EBITDA when both /ratios-ttm and /key-metrics-ttm
     # return null:
@@ -1215,6 +1237,9 @@ def build_price_snapshot(
         # rarer condition, and not what this change is about.
         if ev and ev > 0 and ebitda:
             ev_ebitda = round(ev / ebitda, 2)
+            # Every EBITDA rung above reads the LAST FISCAL YEAR's statement (`inc` / `cf`
+            # are annual, limit 1), whatever the EV rung: a fiscal-year basis.
+            ev_ebitda_fiscal_year = True
             logger.info(
                 "EV/EBITDA reconstructed for %s via ev=%s, ebitda=%s, ratio=%.2f",
                 ticker, ev_source, ebitda_source, ev_ebitda,
@@ -1354,10 +1379,23 @@ def build_price_snapshot(
             rating = 0
             weighted_score = None
 
+    def _statement_year(*records) -> Optional[str]:
+        """"FY2025" for the first annual statement row that names its fiscal year."""
+        for record in records:
+            if isinstance(record, dict) and record:
+                fy = annual_fiscal_year(record)
+                if fy:
+                    return f"FY{fy}"
+        return None
+
     def _metric(label, key, bench_key, value, display, score, pct=False, median=_FROM_BENCH,
-                shown=_FROM_BENCH):
+                shown=_FROM_BENCH, ttm=True, basis_period=None):
         # `median` overrides the bench cell (the yield row passes 1 / the P/E median, None
         # included); `bench_key` still names the cell whose peer level the label prints.
+        # `ttm=False`: the row was shown on a LAST-FISCAL-YEAR basis (a P/FCF or EV/EBITDA
+        # reconstruction): no `numeric_value` and no `peer_median`, so no "Current (TTM)"
+        # drill-down line is built from a fiscal-year figure. The name, value, level and
+        # score stay exactly as the card prints and scores them.
         median = _median(bench_key) if median is _FROM_BENCH else median
         ctx = (_sector_ctx_pct if pct else _sector_ctx)(value, median)
         # `peer_level` is the level of the median the label PRINTS — None when it prints none.
@@ -1380,8 +1418,11 @@ def build_price_snapshot(
             value * scale
             if value is not None and math.isfinite(value) and value > 0 else None
         )
+        if not ttm:
+            numeric_value = peer_median = None
         return SnapshotMetricResponse(
             name=_metric_name(label, ctx), value=display, metric_key=key, score=score,
+            period_label=basis_period if not ttm else None,
             peer_level=level if level in ("industry", "sector") else None,
             numeric_value=numeric_value, peer_median=peer_median,
         )
@@ -1389,6 +1430,20 @@ def build_price_snapshot(
     def _not_scored(label, key):
         """A row that means nothing for this business: a bare name, no peer line, no score."""
         return SnapshotMetricResponse(name=label, value=_NOT_MEANINGFUL, metric_key=key, score=None)
+
+    # One line per build naming the rows shown on a fiscal-year basis (an "N/M" row shows
+    # nothing, so it is not named): why the report drill-down has no "Current (TTM)" line there.
+    fiscal_year_rows = [
+        key for key, fiscal_year in (("pfcf", pfcf_fiscal_year), ("ev_ebitda", ev_ebitda_fiscal_year))
+        if fiscal_year and key not in excluded_rows
+    ]
+    if fiscal_year_rows:
+        logger.info(
+            "[valuation-fiscal-year-basis] ticker=%s rows=%s: shown from the LAST FISCAL YEAR's "
+            "statement (no TTM figure) — no numeric_value / peer_median, so the report "
+            "drill-down draws no \"Current (TTM)\" line for them",
+            ticker, ",".join(fiscal_year_rows),
+        )
 
     metrics = [
         _metric("P/E", "pe", "pe_ratio", pe, _fmt_ratio(pe),
@@ -1400,10 +1455,12 @@ def build_price_snapshot(
                 score_ps if ps is not None else None),
         _not_scored("P/FCF", "pfcf") if "pfcf" in excluded_rows else
         _metric("P/FCF", "pfcf", "pfcf_ratio", pfcf, _fmt_pfcf(pfcf, km, cf),
-                score_pfcf if pfcf is not None else None),
+                score_pfcf if pfcf is not None else None, ttm=not pfcf_fiscal_year,
+                basis_period=_statement_year(cf)),
         _not_scored("EV/EBITDA", "ev_ebitda") if "ev_ebitda" in excluded_rows else
         _metric("EV/EBITDA", "ev_ebitda", "ev_ebitda", ev_ebitda, _fmt_ratio(ev_ebitda),
-                score_ev if ev_ebitda is not None else None),
+                score_ev if ev_ebitda is not None else None, ttm=not ev_ebitda_fiscal_year,
+                basis_period=_statement_year(inc, cf)),
         # Earnings Yield: informational — not part of the composite
         # star-rating (which weights P/E, P/B, P/S, P/FCF, EV/EBITDA only)
         # to keep historical ratings comparable. score=None → not a verdict driver.

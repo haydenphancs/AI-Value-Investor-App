@@ -359,7 +359,19 @@ TABLE_NAME = "ticker_report_cache"
 #     SCORER_VERSION stays: no score changes. Same rule: a PAST instant, moved to the push
 #     time if the deploy lands later. The full backend suite ran on this change, on the exact
 #     commit, BEFORE it was pushed. This ONE bump supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 11, 13, 23, 42, 0, tzinfo=timezone.utc)
+# 2026-11-14 (02:24 UTC = 21:24 ET on the 13th, after the close; the push, owner's "Yes, push
+#     it"): the rest of the drill-down work, two sessions in one commit. Cached collections carry
+#     Profitability snapshot rows without `numeric_value` / `peer_median` (the Profitability
+#     sheet's "Current (TTM)" line), Growth rows without `numeric_value` / `peer_median` /
+#     `period_label` (the Growth sheet's "FY2026 …" card line, owner: "Name the periods"), and
+#     Price rows whose last-fiscal-year P/FCF or EV/EBITDA still carry numbers the sheet would
+#     call TTM (owner: "Fallback TTM labels"). It also closes the 23:42-00:10 UTC window the
+#     entry above left (its deploy landed after its instant). Ships with Profitability 7,
+#     Growth 7 and Price 12. SCORER_VERSION stays: no score changes. Same rule: a PAST instant,
+#     moved to the push time if the deploy lands later. The full backend suite ran on this
+#     change, on the exact commit, BEFORE it was pushed. This ONE bump supersedes every
+#     instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 11, 14, 2, 24, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

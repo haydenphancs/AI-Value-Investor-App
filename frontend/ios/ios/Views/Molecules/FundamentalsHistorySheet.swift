@@ -189,12 +189,26 @@ struct FundamentalsHistorySheet: View {
         }
     }
 
+    /// The word for THIS row's figure: `currentPrefix`, unless the backend named the closed
+    /// period it covers (`currentPeriod`, 2026-11-13). A Growth row's figure is a fiscal year's
+    /// YoY ("FY2026"); a Price row shown on a last-fiscal-year basis divides today's price by
+    /// that year's statement ("FY2025 FCF basis", owner: "Fallback TTM labels") — never "TTM".
+    private func prefix(for m: DeepDiveMetric) -> String {
+        guard let period = m.currentPeriod, !period.isEmpty else { return currentPrefix }
+        guard card.title == "Valuation" else { return period }
+        switch m.historyKey {
+        case "pfcf":      return "\(period) FCF basis"
+        case "ev_ebitda": return "\(period) EBITDA basis"
+        default:          return "\(period) basis"
+        }
+    }
+
     private func header(_ m: DeepDiveMetric) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(m.historyTitle)
                 .font(AppTypography.heading)
                 .foregroundColor(AppColors.textPrimary)
-            Text("\(currentPrefix): \(currentValueText(m.value))")
+            Text("\(prefix(for: m)): \(currentValueText(m.value))")
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
         }
@@ -267,7 +281,7 @@ struct FundamentalsHistorySheet: View {
         let peer = currentPeerWord(m)
         let shown = m.currentValue.map { Self.format($0, unit: m.historyUnit) }
             ?? currentValueText(m.value)
-        var text = "\(currentPrefix) \(shown) · \(peer) \(Self.format(median, unit: m.historyUnit))"
+        var text = "\(prefix(for: m)) \(shown) · \(peer) \(Self.format(median, unit: m.historyUnit))"
         if let value = m.currentValue, value > 0, median > 0 {
             // A ratio that rounds to "0.00×" says nothing (a 0.02% yield against 5.00%):
             // the card's own label leaves it out too, and the colour still carries the verdict.
@@ -376,6 +390,9 @@ struct FundamentalsHistorySheet: View {
             } else {
                 // Line 1: a closed year or quarter against the SAME period's peer median
                 // (`sectorPair`), named by its period — "Current" belongs to line 2 alone.
+                // Each comparison stays on ONE row (owner, 2026-11-13: "i don't want to make new
+                // line for the second line"): it shrinks a little before it would wrap, never
+                // below 85% (14pt → 11.9pt, above the 11pt data floor).
                 if let pair {
                     Text(deltaText(prefix: periodLabel(pair.period),
                                    company: pair.company, sector: pair.sector, unit: m.historyUnit,
@@ -383,6 +400,9 @@ struct FundamentalsHistorySheet: View {
                         .font(AppTypography.bodySmall)
                         .foregroundColor(deltaColor(m))
                         .multilineTextAlignment(.center)
+                        .lineLimit(1)
+                        .minimumScaleFactor(Self.legendLineMinScale)
+                        .allowsTightening(true)
                 } else if let lc = latestCompanyPoint(m), let v = lc.value {
                     Text("\(periodLabel(lc.period)) \(Self.format(v, unit: m.historyUnit)) · Company only")
                         .font(AppTypography.bodySmall)
@@ -395,11 +415,16 @@ struct FundamentalsHistorySheet: View {
                         .font(AppTypography.bodySmall)
                         .foregroundColor(currentLineColor(m))
                         .multilineTextAlignment(.center)
+                        .lineLimit(1)
+                        .minimumScaleFactor(Self.legendLineMinScale)
+                        .allowsTightening(true)
                 }
             }
         }
         .padding(.vertical, AppSpacing.sm)
-        .padding(.horizontal, AppSpacing.md)
+        // `sm`, not `md`: the comparison lines use more of the card's width (owner,
+        // 2026-11-13: "stress out the line a bit to both side of the card").
+        .padding(.horizontal, AppSpacing.sm)
         .frame(maxWidth: .infinity, alignment: .center)
         .background(
             RoundedRectangle(cornerRadius: AppCornerRadius.medium)
@@ -429,6 +454,17 @@ struct FundamentalsHistorySheet: View {
 
     private func ttmNoteText(_ m: DeepDiveMetric) -> String {
         let pricing = "at the price when the report was made. Chart points use each period's own price."
+        // A row shown on a last-fiscal-year basis (the last 12 months were not available):
+        // say which year it divides by, never "TTM".
+        if let period = m.currentPeriod, !period.isEmpty {
+            let base: String
+            switch m.historyKey {
+            case "pfcf":      base = "free cash flow"
+            case "ev_ebitda": base = "EBITDA"
+            default:          base = "results"
+            }
+            return "Uses \(period) \(base) (the last 12 months were not available), \(pricing)"
+        }
         switch m.historyKey {
         case "pb":        return "For P/B, TTM means the latest book value, \(pricing)"
         case "ps":        return "TTM = the last 12 months of sales, \(pricing)"
@@ -463,6 +499,9 @@ struct FundamentalsHistorySheet: View {
 
 
     // MARK: - Formatting (shared with MetricHistoryChart's units)
+
+    /// How far a legend comparison line may shrink to stay on one row.
+    static let legendLineMinScale: CGFloat = 0.85
 
     /// Expand the compact "Neg." sentinel to "Negative" for the sheet header.
     /// The report card keeps "Neg." (it's space-constrained).

@@ -198,6 +198,11 @@ struct DeepDiveMetricDTO: Codable {
     let currentPeerMedian: Double?
     let currentScore: Int?
     let peerLevel: String?
+    // The closed period `currentValue` covers, as a display label ("FY2026"), when the row
+    // is a closed period's figure rather than a TTM / today reading (the Growth card's
+    // fiscal-year rates). nil for TTM rows and on reports generated before 2026-11-13: the
+    // Growth drill-down then draws no card line (it never calls a closed year "Current").
+    let currentPeriod: String?
 
     enum CodingKeys: String, CodingKey {
         case label, value, trend
@@ -213,6 +218,7 @@ struct DeepDiveMetricDTO: Codable {
         case currentPeerMedian = "current_peer_median"
         case currentScore = "current_score"
         case peerLevel = "peer_level"
+        case currentPeriod = "current_period"
     }
 }
 
@@ -936,7 +942,8 @@ extension TickerReportAPIResponse {
                         currentValue: m.currentValue,
                         currentPeerMedian: m.currentPeerMedian,
                         currentScore: m.currentScore,
-                        peerLevel: m.peerLevel
+                        peerLevel: m.peerLevel,
+                        currentPeriod: m.currentPeriod
                     )
                 },
                 qualityLabel: card.qualityLabel,

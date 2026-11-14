@@ -1056,21 +1056,21 @@ async def test_growth_payload_version_is_8_and_older_rows_rebuild(monkeypatch):
     assert svc._check_supabase_cache("MA") is not None
 
 
-def test_growth_snapshot_payload_version_is_6_and_older_rows_rebuild():
+def test_growth_snapshot_payload_version_is_7_and_older_rows_rebuild():
     """Growth snapshot v4 (2026-10-09, NET-4): a v3 row of MA scored its growth 2/5 against
-    the lenders' median; v5 (2026-10-21): the Financial Services peer rule. Mutation: the
-    constant left at 3 serves that score."""
+    the lenders' median; v5 (2026-10-21): the Financial Services peer rule; v7 (2026-11-13):
+    the drill-down card line's numbers. Mutation: the constant left at 3 serves that score."""
     from app.services import growth_snapshot_service as gss
 
-    assert gss._SNAPSHOT_PAYLOAD_VERSION == 6
+    assert gss._SNAPSHOT_PAYLOAD_VERSION == 7
     body = SnapshotItemResponse(category="Growth", rating=2, metrics=[],
                                 computed_at="2026-10-08T09:15:00Z").model_dump()
     svc = gss.GrowthSnapshotService.__new__(gss.GrowthSnapshotService)
-    for old in (None, 2, 3, 4, 5):
+    for old in (None, 2, 3, 4, 5, 6):
         stale = dict(body) if old is None else {**body, gss._VERSION_KEY: old}
         svc.supabase = sph._Supabase([sph._row(stale)[0]])
         assert svc._check_supabase_cache("MA") is None, f"a v{old} growth snapshot was served"
-    svc.supabase = sph._Supabase([sph._row({**body, gss._VERSION_KEY: 6})[0]])
+    svc.supabase = sph._Supabase([sph._row({**body, gss._VERSION_KEY: 7})[0]])
     assert svc._check_supabase_cache("MA") is not None
 
 

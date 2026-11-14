@@ -390,46 +390,51 @@ def test_profit_power_label_clears_the_shifted_arrow():
 # ── R35: the drill-down's "Current" is the latest period ──────────────────────
 
 
-def test_drill_down_current_and_verdict_anchor_on_the_latest_period():
+def test_drill_down_never_presents_an_older_year_as_the_latest():
+    """R35's intent, kept through the two-line legend (owner decision 2026-11-13): the
+    header without the card's TTM figure names the chart's genuinely newest period (a
+    revenue gap reads "FY2025: —", never the 2023 margin), and every older figure is shown
+    only under its OWN period. The legend's period line may now be an older pair — named by
+    its year, so it is never read as the latest; its port and the "Current (TTM)" line are
+    pinned in tests/test_profitability_drilldown_current_line_2026_11_13.py."""
     sheet = _sheet()
     latest = _decl_body(sheet, "private var latestPoint")
     assert re.fullmatch(r"\{\s*current\.last\s*\}", latest), (
-        "a backward scan presents an older year as 'Current' after a revenue gap"
+        "a backward scan presents an older year as the latest after a revenue gap"
     )
-    pair = _decl_body(sheet, "private var sectorPair")
-    assert "last(where:" not in pair and "latestPoint" in pair, (
-        "the verdict-coloured vs-industry line must use the latest period only"
-    )
-    assert "sectorPair" in _decl_body(sheet, "private var isCurrentlyGood")
-    current = _decl_body(sheet, "private var currentText")
-    assert "latestPoint" in current and "last(where:" not in current
+    header_text = _decl_body(sheet, "private var headerText")
+    assert "latestPoint" in header_text and "lastReported" not in header_text
+    assert "last(where:" not in header_text
     # The last reported value is shown only under its OWN period.
     header = _decl_body(sheet, "private var header")
-    assert re.search(r'Text\("Last reported: \\\(pct\(v\)\) \(\\\(lr\.period\)\)"\)', header)
-    assert "lastReported" in _decl_body(sheet, "private var notReportedText")
+    assert re.search(
+        r'Text\("Last reported: \\\(pct\(v\)\) \(\\\(periodLabel\(lr\.period\)\)\)"\)', header)
     legend = _decl_body(sheet, "private var legendAndDelta")
-    assert "notReportedText" in legend
+    assert "deltaText(prefix: periodLabel(pair.period)," in legend
+    assert "periodLabel(lr.period)" in legend
 
 
 def _sheet_port(points):
-    """Port of the sheet's header / legend decisions. ``points`` = [(period, company,
-    sector)]. Returns (current_text, last_reported, pair)."""
+    """Port of the sheet's header / line-1 decisions (annual tab, no card TTM figure).
+    ``points`` = [(period, company, sector)]. Returns (header, last_reported, pair)."""
     latest = points[-1] if points else None
     last_reported = next((p for p in reversed(points) if p[1] is not None), None)
     if latest is None:
-        current = "—"
+        header = "—"
     elif latest[1] is None:
-        current = f"— ({latest[0]})"
+        header = f"FY{latest[0]}: —"
     else:
-        current = f"{latest[1]:.2f}%"
-    pair = (latest[1], latest[2]) if latest and latest[1] is not None and latest[2] is not None else None
-    return current, last_reported, pair
+        header = f"FY{latest[0]}: {latest[1]:.2f}%"
+    pair = next(((p, c, s) for p, c, s in reversed(points) if c is not None and s is not None),
+                None)
+    return header, last_reported, pair
 
 
 def test_drill_down_port_trailing_revenue_gap():
     biotech = [("2022", 15.0, 11.0), ("2023", 20.0, 12.0), ("2024", None, 12.0),
                ("2025", None, 12.5)]
-    current, last_reported, pair = _sheet_port(biotech)
-    assert current == "— (2025)"
+    header, last_reported, pair = _sheet_port(biotech)
+    assert header == "FY2025: —"
     assert last_reported == ("2023", 20.0, 12.0)
-    assert pair is None, "no 1.67× vs-industry verdict from 2023 under a 2025 chart"
+    # The 2023 pair is shown — as "FY2023 …", never as the chart's latest year.
+    assert pair == ("2023", 20.0, 12.0)

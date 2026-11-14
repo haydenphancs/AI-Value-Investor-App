@@ -5900,28 +5900,48 @@ def _growth_row_values(metrics: Any) -> Dict[str, float]:
 
 
 def _current_comparison(m: Any, rows: Any) -> Dict[str, Any]:
-    """The drill-down's "Current" legend line for one card row (owner decision 2026-11-13):
-    ``current_value`` / ``current_peer_median`` / ``current_score``, from the row's own
-    `numeric_value` / `peer_median` / `score` — the comparison the card itself printed and
-    scored, so the line can never disagree with the card. Keys are emitted only when they
-    hold a finite number (a NaN would 500 the report and cannot be stored in jsonb); the
-    median and the score travel together. Earnings Yield is unscored by design, so it takes
-    the P/E row's score: its median is 1 / the P/E row's usable median and its value 1 / the
-    displayed P/E, so the P/E bands judge it exactly (cheap P/E = high yield = good).
+    """The drill-down's second legend line for one card row (owner decisions 2026-11-13):
+    ``current_value`` / ``current_peer_median`` / ``current_score`` / ``current_period``,
+    from the row's own `numeric_value` / `peer_median` / `score` / `period_label` — the
+    comparison the card itself printed and scored, so the line can never disagree with the
+    card.
+
+    - The numbers are emitted only when finite (a NaN would 500 the report and cannot be
+      stored in jsonb).
+    - ``current_score`` is the row's own score (an int, never a bool) whenever the line has
+      a number at all — a value, a median, or both: a Growth row whose year has no peer
+      figure yet ("FY2026 34.33% · Industry not out yet") is still coloured as the card
+      judged it. EXCEPT Earnings Yield, unscored by design: it takes the P/E row's score,
+      and only beside a median — its median is 1 / the P/E row's usable median and its value
+      1 / the displayed P/E, so the P/E bands judge exactly that pair (cheap P/E = high
+      yield = good), and nothing else.
+    - ``current_period`` ("FY2026") names the CLOSED period the row's figure covers, whenever
+      the row has a `period_label`: a Growth row (its value is a fiscal year's YoY), or a
+      Price row shown on a LAST-FISCAL-YEAR basis (a P/FCF or EV/EBITDA reconstruction, which
+      carries no value or median — the period alone stops the sheet calling it TTM). A row
+      without it is a TTM / current row and keeps its "Current (TTM)" wording.
+
     A snapshot cached before these fields existed yields nothing — period line only."""
     out: Dict[str, Any] = {}
     value = _finite_or_none(getattr(m, "numeric_value", None))
     if value is not None:
         out["current_value"] = value
     median = _finite_or_none(getattr(m, "peer_median", None))
-    if median is None:
+    if median is not None:
+        out["current_peer_median"] = median
+    period = getattr(m, "period_label", None)
+    if isinstance(period, str) and period.strip():
+        out["current_period"] = period.strip()
+    if value is None and median is None:
         return out
-    out["current_peer_median"] = median
     score = getattr(m, "score", None)
     if getattr(m, "metric_key", None) == "earnings_yield":
         pe_row = next(
             (r for r in (rows or []) if getattr(r, "metric_key", None) == "pe"), None)
-        score = getattr(pe_row, "score", None) if pe_row is not None else None
+        score = (
+            getattr(pe_row, "score", None)
+            if (pe_row is not None and median is not None) else None
+        )
     if isinstance(score, int) and not isinstance(score, bool):
         out["current_score"] = score
     return out

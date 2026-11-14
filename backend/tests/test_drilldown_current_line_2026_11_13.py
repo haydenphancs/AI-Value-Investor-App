@@ -23,6 +23,12 @@ D. `_snapshot_to_card` maps them onto the charted rows as `current_value` /
    finite-only, and the card survives Pydantic and strict JSON;
 E. the numbers survive the collection cache and the snapshot cache; a legacy payload
    decodes with None and draws the period line only.
+F. the Growth card (owner decision 2026-11-13, "Name the periods" + "Say not out yet"):
+   each valued row carries the newest annual YoY, that SAME year's peer YoY (None while the
+   year is not reported) and its "FY…" label; `_snapshot_to_card` turns them into
+   `current_value` / `current_peer_median` / `current_score` / `current_period`, the score
+   riding with any number (Earnings Yield excepted, unchanged); the N/M and "—" rows carry
+   nothing; NaN/inf never reach a row; ORCL's -5911.7% FCF YoY is kept exactly.
 
 Hermetic: every benchmark read is a local double, every FMP / Health Check call a stub.
 Dates are relative to the year the TEST runs in (with 2026 they are exactly the period
@@ -41,10 +47,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 import app.services.agents.ticker_report_data_collector as C
+import app.services.growth_service as growth_mod
+import app.services.growth_snapshot_service as gss
 import app.services.health_snapshot_service as hs
 import app.services.sector_benchmark_lookup as sbl
 import app.services.valuation_snapshot_service as vss
 from app.config import settings
+from app.schemas.growth import GrowthDataPointSchema, GrowthResponse
 from app.schemas.health_check import HealthCheckResponse
 from app.schemas.stock_overview import SnapshotItemResponse, SnapshotMetricResponse
 from app.schemas.ticker_report import DeepDiveMetricCardResponse, DeepDiveMetricResponse
@@ -584,7 +593,7 @@ def _price_snapshot(rows: List[SnapshotMetricResponse]) -> SnapshotItemResponse:
                                 full_report_available=True)
 
 
-_CURRENT_KEYS = ("current_value", "current_peer_median", "current_score")
+_CURRENT_KEYS = ("current_value", "current_peer_median", "current_score", "current_period")
 
 
 def _current(md: Dict[str, Any]) -> Dict[str, Any]:
@@ -604,7 +613,9 @@ def test_the_card_rows_carry_the_current_comparison_and_ey_takes_the_pe_score():
         # "Neg." beside a printed median: the median (and its score, when scored) only.
         _row(name="P/B (sector avg 4.25)", value="Neg.", metric_key="pb", score=None,
              peer_level="industry", numeric_value=None, peer_median=4.25),
-        # A value with no median: no median, and the score does not travel without one.
+        # A value with no median: no median, but the row's own score travels with the value
+        # (the Growth "not out yet" rule, 2026-11-13: the line is coloured as the card judged
+        # the row).
         _row(name="P/S", value="7.50", metric_key="ps", score=4, numeric_value=7.5),
         # Non-finite numbers (never produced by the services; a corrupted row): no key.
         _row(name="EV/EBITDA (1.10x sector avg 16.0)", value="17.60", metric_key="ev_ebitda",
@@ -623,7 +634,7 @@ def test_the_card_rows_carry_the_current_comparison_and_ey_takes_the_pe_score():
     assert _current(by["pe"]) == {"current_value": _ORCL_PE_TTM,
                                   "current_peer_median": _TTM_PE_MEDIAN, "current_score": 5}
     assert _current(by["pb"]) == {"current_peer_median": 4.25}
-    assert _current(by["ps"]) == {"current_value": 7.5}
+    assert _current(by["ps"]) == {"current_value": 7.5, "current_score": 4}
     assert _current(by["ev_ebitda"]) == {}
     assert _current(by["earnings_yield"]) == {
         "current_value": 100 / 18.21, "current_peer_median": 100 / _TTM_PE_MEDIAN,
@@ -714,8 +725,9 @@ def test_current_comparison_emits_only_finite_numbers_and_scores(row, others, ex
 
 def test_the_deep_dive_metric_decodes_without_the_new_fields():
     m = DeepDiveMetricResponse.model_validate({"label": "P/E", "value": "20"})
-    assert (m.current_value, m.current_peer_median, m.current_score) == (None, None, None)
-    assert {"current_value", "current_peer_median", "current_score"} <= set(m.model_dump())
+    assert (m.current_value, m.current_peer_median, m.current_score, m.current_period) == (
+        None, None, None, None)
+    assert set(_CURRENT_KEYS) <= set(m.model_dump())
 
 
 @pytest.mark.asyncio
@@ -862,8 +874,10 @@ def test_a_yield_whose_ratio_rounds_to_zero_still_carries_its_printed_value():
 
 def test_a_health_card_row_carries_its_own_comparison_and_altman_z_none():
     """The Health card through `_snapshot_to_card`: a D/E row judged worse than its peers
-    (score 2) carries the trio; Altman Z (absolute bands, no peer) carries its value only,
-    so the sheet draws its zone line and no "Current" comparison."""
+    (score 2) carries the trio; Altman Z (absolute bands, no peer) carries its value and its
+    own score but no median, so the sheet draws its zone line and no peer comparison
+    (2026-11-13: the score rides with any number, not only with a median). Neither is a
+    closed period: no `current_period`."""
     snap = SnapshotItemResponse(category="Financial Health", rating=2, full_report_available=True,
                                 metrics=[
         _row(name="Debt-to-Equity (vs sector 0.90)", value="1.52", metric_key="debt_to_equity",
@@ -876,8 +890,406 @@ def test_a_health_card_row_carries_its_own_comparison_and_altman_z_none():
                            "quarterly": []}}
     card = _validated(C._snapshot_to_card("Health", snap, history_lookup=lookup))
     by = {m["label"].split(" (")[0]: m for m in card["metrics"]}
-    assert _current(by["Debt-to-Equity"]) == {
-        "current_value": 1.52, "current_peer_median": 0.9, "current_score": 2}
+    de = {k: v for k, v in _current(by["Debt-to-Equity"]).items() if v is not None}
+    assert de == {"current_value": 1.52, "current_peer_median": 0.9, "current_score": 2}
     assert by["Debt-to-Equity"]["peer_level"] == "industry"
     altman = {k: v for k, v in _current(by["Altman Z-Score"]).items() if v is not None}
-    assert altman == {"current_value": 3.25}
+    assert altman == {"current_value": 3.25, "current_score": 4}
+    assert all(m["current_period"] is None for m in card["metrics"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# F. The Growth card (owner decisions 2026-11-13: "Name the periods", "Say not out yet",
+#    "Keep the exact figure"): each valued row names its fiscal year and carries that
+#    year's own peer YoY; the drill-down's second line never says "Current" on Growth.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_GROWTH_KEYS = ("revenue_growth", "eps_growth", "fcf_growth", "operating_income_growth")
+_GROWTH_NUMBERS = ("numeric_value", "peer_median", "period_label")
+
+
+def _gpt(period: str, yoy: Optional[float], peer: Optional[float] = None) -> GrowthDataPointSchema:
+    return GrowthDataPointSchema(period=period, value=10.0, yoy_change_percent=yoy,
+                                 sector_average_yoy=peer)
+
+
+class _GrowthStub:
+    def __init__(self, response: GrowthResponse):
+        self.response = response
+
+    async def get_growth_with_status(self, ticker):
+        return self.response, []
+
+
+def _growth_resp(*, rev=(), eps=(), fcf=(), op=(),
+                 industry: Optional[str] = "Software - Infrastructure") -> GrowthResponse:
+    return GrowthResponse(symbol="ORCL", industry=industry,
+                          revenue_annual=list(rev), revenue_quarterly=[],
+                          eps_annual=list(eps), eps_quarterly=[],
+                          free_cash_flow_annual=list(fcf), operating_profit_annual=list(op))
+
+
+async def _growth_snapshot(monkeypatch, response: GrowthResponse, ticker: str = "ORCL"):
+    # growth_snapshot_service imports `get_growth_service` inside the function, so the
+    # source module's binding is the one it resolves on every call.
+    monkeypatch.setattr(growth_mod, "get_growth_service", lambda: _GrowthStub(response))
+    svc = gss.GrowthSnapshotService.__new__(gss.GrowthSnapshotService)
+    svc.supabase = None
+    return await svc._compute_with_status(ticker)
+
+
+def _growth_lookup() -> Dict[str, Dict[str, Any]]:
+    return {k: {"unit": "percent", "annual": [{"period": "2026", "value": 1.0}],
+                "quarterly": []} for k in _GROWTH_KEYS}
+
+
+def _growth_card(snap: SnapshotItemResponse) -> Dict[str, Any]:
+    return C._snapshot_to_card("Growth", snap, history_lookup=_growth_lookup(),
+                               peer_group_level="industry")
+
+
+def _by_history_key(card: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    return {md["history_key"]: md for md in card["metrics"] if md.get("history_key")}
+
+
+def _orcl_growth() -> GrowthResponse:
+    """ORCL's shape on 2026-11-13: FY2026 closed; its revenue year has no industry YoY yet,
+    the older year has one (never borrowed); EPS has a same-year median; FCF went -$0.39B ->
+    -$23.7B (a deepening negative base, -5911.7%, kept exactly); operating income well ahead."""
+    return _growth_resp(
+        rev=[_gpt("2025", 8.4, 9.1), _gpt("2026", 34.33, None)],
+        eps=[_gpt("2025", 4.0, 6.0), _gpt("2026", 21.85, 27.50)],
+        fcf=[_gpt("2025", -110.0, 3.0), _gpt("2026", -5911.72, 4.0)],
+        op=[_gpt("2025", 12.0, 8.0), _gpt("2026", 50.0, 10.0)],
+    )
+
+
+@pytest.mark.asyncio
+async def test_orcl_growth_rows_name_their_fiscal_year_and_carry_that_years_median(monkeypatch):
+    snap, degraded = await _growth_snapshot(monkeypatch, _orcl_growth())
+    assert degraded == []
+    rev, eps, fcf, op = (_m(snap, k) for k in _GROWTH_KEYS)
+
+    # Revenue: FY2026 34.33%, no industry figure for FY2026 yet ("not out yet") — and the
+    # older year's 9.1 is never borrowed. Scored on the absolute bands: > 20% -> 5.
+    assert (rev.value, rev.numeric_value, rev.peer_median, rev.period_label, rev.score) == (
+        "+34.3%", 34.33, None, "FY2026", 5)
+    # EPS: the same year's median. 21.85 vs 27.50 = 5.65 pp below (2), floored at 3 (>= 20%).
+    assert (eps.numeric_value, eps.peer_median, eps.period_label, eps.score) == (
+        21.85, 27.50, "FY2026", 3)
+    # FCF: the exact -5911.72 (unrounded), against its own year's 4.0, scored 1.
+    assert (fcf.value, fcf.numeric_value, fcf.peer_median, fcf.period_label, fcf.score) == (
+        "-5911.7%", -5911.72, 4.0, "FY2026", 1)
+    assert (op.numeric_value, op.peer_median, op.score) == (50.0, 10.0, 5)
+    # The rows print no median in their names (Growth never did), and no peer_level.
+    assert all("avg" not in m.name and m.peer_level is None for m in snap.metrics)
+    # The rating is untouched by the new fields: (5*.3 + 3*.3 + 1*.2 + 5*.2) / 1.0 = 3.6.
+    assert (snap.weighted_score, snap.rating) == (3.6, 4)
+
+    card = _growth_card(snap)
+    by = _by_history_key(card)
+    assert set(by) == set(_GROWTH_KEYS)
+    assert _current(by["revenue_growth"]) == {
+        "current_value": 34.33, "current_score": 5, "current_period": "FY2026"}
+    assert _current(by["eps_growth"]) == {
+        "current_value": 21.85, "current_peer_median": 27.50, "current_score": 3,
+        "current_period": "FY2026"}
+    assert f"{21.85 / 27.50:.2f}" == "0.79"            # the legend's "0.79× vs industry"
+    assert _current(by["fcf_growth"]) == {
+        "current_value": -5911.72, "current_peer_median": 4.0, "current_score": 1,
+        "current_period": "FY2026"}
+
+    dumped = {md["history_key"]: md for md in _validated(card)["metrics"]}
+    assert dumped["revenue_growth"]["current_peer_median"] is None
+    assert dumped["revenue_growth"]["current_period"] == "FY2026"
+    assert dumped["revenue_growth"]["current_score"] == 5
+    for key in _GROWTH_KEYS:
+        for field in _CURRENT_KEYS:
+            assert dumped[key][field] == by[key].get(field), (key, field)
+    # The strict-JSON round trip iOS decodes keeps every field (and its snake_case key).
+    blob = json.dumps(DeepDiveMetricCardResponse.model_validate(card).model_dump(mode="json"),
+                      allow_nan=False)
+    assert '"current_period": "FY2026"' in blob
+    back = DeepDiveMetricCardResponse.model_validate(json.loads(blob))
+    assert {m.history_key: m.current_period for m in back.metrics} == {
+        k: "FY2026" for k in _GROWTH_KEYS}
+
+
+@pytest.mark.asyncio
+async def test_a_growth_row_with_its_years_median_carries_all_four(monkeypatch):
+    snap, _ = await _growth_snapshot(monkeypatch, _growth_resp(
+        rev=[_gpt("2026", 34.33, 27.50)]))
+    rev = _m(snap, "revenue_growth")
+    assert rev.score == 4      # 6.83 pp above -> 4; the absolute floor at 20% is 3
+    md = _by_history_key(_growth_card(snap))["revenue_growth"]
+    assert _current(md) == {"current_value": 34.33, "current_peer_median": 27.50,
+                            "current_score": 4, "current_period": "FY2026"}
+
+
+@pytest.mark.asyncio
+async def test_the_nm_fcf_row_and_the_dash_rows_carry_nothing(monkeypatch):
+    """A bank's FCF growth is a fixed "N/M" (`score_excluded_rows`): no number, median or
+    year even though its series has one; a newest year with an n/m YoY prints "—" and
+    carries nothing, though that year has a median and the year before has a value."""
+    snap, degraded = await _growth_snapshot(monkeypatch, _growth_resp(
+        industry="Banks - Diversified",
+        rev=[_gpt("2025", 13.4, 9.0), _gpt("2026", None, 8.0)],
+        eps=[],
+        fcf=[_gpt("2026", 12.0, 5.0)],
+        op=[_gpt("2026", 7.5, 6.0)],
+    ), ticker="JPM")
+    assert degraded == []
+    by = {m.metric_key: m for m in snap.metrics}
+    assert by["fcf_growth"].value == "N/M"
+    for key in ("fcf_growth", "revenue_growth", "eps_growth"):
+        assert by[key].score is None, key
+        assert all(getattr(by[key], f) is None for f in _GROWTH_NUMBERS), by[key]
+    assert by["revenue_growth"].value == by["eps_growth"].value == "—"
+    op = by["operating_income_growth"]
+    assert (op.numeric_value, op.peer_median, op.period_label) == (7.5, 6.0, "FY2026")
+
+    card = _growth_card(snap)
+    rows = {md["label"]: md for md in card["metrics"]}
+    nm = rows["Free Cash Flow Growth (YoY)"]
+    assert "history_key" not in nm and _current(nm) == {}, "an N/M row is never charted"
+    for label in ("Revenue Growth (YoY)", "EPS Growth"):
+        assert _current(rows[label]) == {}, label
+    assert _current(rows["Operating Income Growth"])["current_period"] == "FY2026"
+    _validated(card)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("yoy, peer, value, numeric, median, score", [
+    # A non-finite YoY is no value: "—", nothing carried, unscored (it printed "nan%").
+    (float("nan"), 5.0, "—", None, None, None),
+    (float("inf"), 5.0, "—", None, None, None),
+    (float("-inf"), None, "—", None, None, None),
+    # A non-finite median is no median: absolute bands (12% -> 4), never the 1/5 that every
+    # NaN / -inf comparison fell to.
+    (12.0, float("nan"), "+12.0%", 12.0, None, 4),
+    (12.0, float("inf"), "+12.0%", 12.0, None, 4),
+    (12.0, float("-inf"), "+12.0%", 12.0, None, 4),
+    # Boundaries: a zero YoY, a zero median, a huge magnitude, a tiny negative.
+    (0.0, 0.0, "+0.0%", 0.0, 0.0, 3),
+    (-0.0, -0.0, "+0.0%", 0.0, 0.0, 3),       # a negative zero printed "+-0.0%"
+    (1e9, 2.0, "+1000000000.0%", 1e9, 2.0, 5),
+    (-0.04, None, "-0.0%", -0.04, None, 2),
+])
+async def test_growth_rows_never_carry_a_non_finite_number(
+    monkeypatch, yoy, peer, value, numeric, median, score,
+):
+    snap, _ = await _growth_snapshot(monkeypatch, _growth_resp(rev=[_gpt("2026", yoy, peer)]))
+    rev = _m(snap, "revenue_growth")
+    assert (rev.value, rev.numeric_value, rev.peer_median, rev.score) == (
+        value, numeric, median, score)
+    assert rev.period_label == ("FY2026" if numeric is not None else None)
+    assert "-0.0" not in (repr(rev.numeric_value), repr(rev.peer_median)), "a negative zero"
+    json.dumps(snap.model_dump(), allow_nan=False)
+    card = _growth_card(snap)
+    _validated(card)
+    md = _by_history_key(card)["revenue_growth"]
+    if numeric is None:
+        assert _current(md) == {}
+    else:
+        assert md["current_value"] == numeric and md["current_score"] == score
+        assert md.get("current_peer_median") == median
+
+
+@pytest.mark.parametrize("period, label", [
+    ("2026", "FY2026"), (" 2026 ", "FY2026"), ("1999", "FY1999"),
+    ("", None), ("   ", None), (None, None), (2026, None), ("FY2026", None),
+    ("Q1'26", None), ("Q4 '26", None), ("20266", None), ("226", None),
+    ("２０２６", None),                 # fullwidth digits are not a fiscal year label
+])
+def test_the_fiscal_year_label_names_only_a_four_digit_year(period, label):
+    assert gss._fiscal_year_label(period) == label
+
+
+@pytest.mark.parametrize("raw, finite", [
+    (None, None), (True, None), (False, None), ("12", 12.0), ("x", None), (float("nan"), None),
+    (float("inf"), None), (-5911.72, -5911.72), (0, 0.0),
+])
+def test_the_growth_finite_guard(raw, finite):
+    assert gss._finite(raw) == finite
+    assert repr(gss._finite(-0.0)) == "0.0"
+
+
+@pytest.mark.asyncio
+async def test_a_valued_row_whose_period_is_not_a_year_keeps_its_number_and_names_no_year(
+    monkeypatch, caplog,
+):
+    caplog.set_level("WARNING", logger=gss.logger.name)
+    snap, degraded = await _growth_snapshot(monkeypatch, _growth_resp(
+        rev=[_gpt("FY2026", 34.33, 27.5)]))
+    rev = _m(snap, "revenue_growth")
+    assert (rev.numeric_value, rev.peer_median, rev.period_label) == (34.33, 27.5, None)
+    assert degraded == []
+    assert "[growth-snapshot-period-label]" in caplog.text and "ORCL" in caplog.text
+    md = _by_history_key(_growth_card(snap))["revenue_growth"]
+    assert "current_period" not in md and md["current_value"] == 34.33
+
+
+@pytest.mark.parametrize("row, expected", [
+    # The score is an int, never a bool, and rides with any number.
+    (dict(metric_key="revenue_growth", numeric_value=34.33, peer_median=None, score=True,
+          period_label="FY2026"),
+     {"current_value": 34.33, "current_period": "FY2026"}),
+    (dict(metric_key="revenue_growth", numeric_value=34.33, peer_median=None, score=5,
+          period_label="FY2026"),
+     {"current_value": 34.33, "current_score": 5, "current_period": "FY2026"}),
+    # A named period travels on its own (review round 2026-11-13: a Price row on a
+    # last-fiscal-year basis names its year with no value or median, so the sheet never calls
+    # it TTM); the score still rides only with a number.
+    (dict(metric_key="revenue_growth", numeric_value=None, peer_median=27.5, score=3,
+          period_label="FY2026"),
+     {"current_peer_median": 27.5, "current_score": 3, "current_period": "FY2026"}),
+    (dict(metric_key="revenue_growth", numeric_value=float("nan"), peer_median=None, score=5,
+          period_label="FY2026"), {"current_period": "FY2026"}),
+    (dict(metric_key="revenue_growth", numeric_value=True, peer_median=None, score=5,
+          period_label="FY2026"), {"current_period": "FY2026"}),
+    # Junk labels are no label; a padded one is trimmed.
+    (dict(metric_key="eps_growth", numeric_value=1.0, peer_median=None, score=3,
+          period_label="   "), {"current_value": 1.0, "current_score": 3}),
+    (dict(metric_key="eps_growth", numeric_value=1.0, peer_median=None, score=3,
+          period_label=2026), {"current_value": 1.0, "current_score": 3}),
+    (dict(metric_key="eps_growth", numeric_value=1.0, peer_median=None, score=3,
+          period_label=" FY2026 "),
+     {"current_value": 1.0, "current_score": 3, "current_period": "FY2026"}),
+    # Nothing to compare -> no number and no score; a named period still travels.
+    (dict(metric_key="eps_growth", numeric_value=None, peer_median=None, score=4,
+          period_label="FY2026"), {"current_period": "FY2026"}),
+    (dict(metric_key="eps_growth", numeric_value=None, peer_median=None, score=4,
+          period_label=None), {}),
+    # A legacy row with no such attributes at all.
+    (dict(metric_key="eps_growth", score=4), {}),
+])
+def test_current_comparison_growth_rules(row, expected):
+    m = SimpleNamespace(**row)
+    got = C._current_comparison(m, [m])
+    assert got == expected
+    if "current_score" in got:
+        assert type(got["current_score"]) is int
+
+
+@pytest.mark.parametrize("ey_score, pe_score, median, expected_score", [
+    # Earnings Yield is unchanged: the P/E row's score, and only beside a median — never
+    # its own score under the "score rides with any number" rule.
+    (4, 5, None, None),
+    (None, 5, None, None),
+    (4, 2, 3.4, 2),
+    (4, None, 3.4, None),
+    (4, True, 3.4, None),
+])
+def test_earnings_yield_keeps_the_pe_score_rule(ey_score, pe_score, median, expected_score):
+    ey = SimpleNamespace(metric_key="earnings_yield", numeric_value=5.0, peer_median=median,
+                         score=ey_score, period_label=None)
+    pe = SimpleNamespace(metric_key="pe", score=pe_score)
+    got = C._current_comparison(ey, [pe, ey])
+    assert got.get("current_score") == expected_score
+    assert got["current_value"] == 5.0 and "current_period" not in got
+
+
+def test_legacy_and_in_between_growth_rows():
+    """A Growth row cached before the numbers existed draws the period line only; a row with
+    a value but no label (a build that never named the year) still carries its value and
+    score, and names no year — iOS never invents one."""
+    legacy = SnapshotMetricResponse.model_validate(
+        {"name": "Revenue Growth (YoY)", "value": "+34.3%", "metric_key": "revenue_growth",
+         "score": 5})
+    assert all(getattr(legacy, f) is None for f in _GROWTH_NUMBERS)
+    unnamed = SnapshotMetricResponse(name="EPS Growth", value="+21.9%", metric_key="eps_growth",
+                                     score=3, numeric_value=21.85, peer_median=27.5)
+    snap = SnapshotItemResponse(category="Growth", rating=4, metrics=[legacy, unnamed])
+    by = _by_history_key(_growth_card(snap))
+    assert _current(by["revenue_growth"]) == {}
+    assert _current(by["eps_growth"]) == {
+        "current_value": 21.85, "current_peer_median": 27.5, "current_score": 3}
+    _validated(_growth_card(snap))
+
+
+@pytest.mark.parametrize("which", ["valuation", "health"])
+def test_valuation_and_health_rows_never_name_a_closed_period(which):
+    """Their rows are TTM / current: no `period_label`, so the sheet keeps "Current (TTM)"."""
+    valuation, health = _numbered_snapshots()
+    snap = valuation if which == "valuation" else health
+    assert all(m.period_label is None for m in snap.metrics)
+    title = "Valuation" if which == "valuation" else "Health"
+    lookup = {k: dict(_HISTORY_POINT) for k in (
+        "pe", "pb", "ps", "pfcf", "ev_ebitda", "earnings_yield", "debt_to_equity", "altman_z")}
+    card = _validated(C._snapshot_to_card(title, snap, history_lookup=lookup))
+    assert all(m["current_period"] is None for m in card["metrics"])
+    assert any(m["current_value"] is not None for m in card["metrics"]), "not vacuous"
+
+
+def test_a_price_snapshot_built_by_the_service_names_no_period():
+    snap = vss.build_price_snapshot(
+        fr={"priceToEarningsRatioTTM": _ORCL_PE_TTM}, km={}, cf={}, inc={}, bs={}, profile={},
+        bench={"pe_ratio": _TTM_PE_MEDIAN}, bench_levels={"pe_ratio": "industry"},
+        ticker="ORCL")
+    assert all(m.period_label is None for m in snap.metrics)
+
+
+@pytest.mark.asyncio
+async def test_the_growth_numbers_survive_both_caches(monkeypatch):
+    snap, _ = await _growth_snapshot(monkeypatch, _orcl_growth())
+    expected = [tuple(getattr(m, f) for f in _GROWTH_NUMBERS) for m in snap.metrics]
+    assert ("FY2026" in {e[2] for e in expected}) and (None in {e[1] for e in expected})
+
+    # snapshot_cache (whatever the payload version is: the main session bumps it).
+    svc = gss.GrowthSnapshotService.__new__(gss.GrowthSnapshotService)
+    svc.supabase = _SnapshotCacheTable()
+    svc._upsert_supabase_cache("ORCL", snap)
+    (written,) = svc.supabase.upserts
+    stored = json.loads(json.dumps(written["response_json"], allow_nan=False))
+    assert stored[gss._VERSION_KEY] == gss._SNAPSHOT_PAYLOAD_VERSION
+    svc.supabase = _SnapshotCacheTable([
+        {"response_json": dict(stored), "cached_at": written["cached_at"]}])
+    got = svc._check_supabase_cache("ORCL")
+    assert got is not None
+    assert [tuple(getattr(m, f) for f in _GROWTH_NUMBERS) for m in got.metrics] == expected
+    older = {**stored, gss._VERSION_KEY: gss._SNAPSHOT_PAYLOAD_VERSION - 1}
+    svc.supabase = _SnapshotCacheTable([
+        {"response_json": older, "cached_at": written["cached_at"]}])
+    assert svc._check_supabase_cache("ORCL") is None
+
+    # The report's collection cache.
+    out = _sample()
+    out.snap_growth = snap
+    back = _deserialize(json.loads(json.dumps(_serialize(out), allow_nan=False)), _field_names())
+    assert back is not None
+    assert [tuple(getattr(m, f) for f in _GROWTH_NUMBERS) for m in back.snap_growth.metrics] == \
+        expected
+
+    # A legacy collection (no such keys) decodes with None and draws the period line only.
+    blob = json.loads(json.dumps(_serialize(out)))
+    for row in blob["snap_growth"]["metrics"]:
+        for f in _GROWTH_NUMBERS:
+            row.pop(f)
+    legacy = _deserialize(blob, _field_names())
+    assert legacy is not None
+    assert all(_current(md) == {} for md in _growth_card(legacy.snap_growth)["metrics"])
+
+
+@pytest.mark.asyncio
+async def test_the_growth_card_through_the_report_builder(monkeypatch):
+    """The production entry point (`_build_fundamental_metrics_from_snapshots`) with the
+    Growth snapshot: the card validates and its rows carry the line's numbers."""
+    snap, _ = await _growth_snapshot(monkeypatch, _orcl_growth())
+    cards = C._build_fundamental_metrics_from_snapshots(
+        None, snap, None, None, history_lookup=_growth_lookup())
+    growth = next(c for c in cards if c["title"] == "Growth")
+    dumped = _validated(growth)
+    periods = {m["history_key"]: m["current_period"] for m in dumped["metrics"]}
+    assert periods == {k: "FY2026" for k in _GROWTH_KEYS}
+
+
+def test_compute_yoy_keeps_orcls_exact_figure_and_is_null_only_without_a_base():
+    """The docstring's example, pinned: -$0.39B -> -$23.7B (a deepening negative base) reads
+    -5911.7%, shown verbatim; None only for a missing value or a zero base."""
+    got = growth_mod._compute_yoy(-23.70e9, -0.39423e9)
+    assert got == pytest.approx(-5911.72, abs=0.01)
+    assert growth_mod._compute_yoy(0.4e9, -0.4e9) == 200.0      # loss -> profit reads up
+    assert growth_mod._compute_yoy(-0.4e9, 0.4e9) == -200.0     # profit -> loss reads down
+    for cur, prev in ((None, 1.0), (1.0, None), (1.0, 0.0), (0.0, 0.0), (None, None)):
+        assert growth_mod._compute_yoy(cur, prev) is None, (cur, prev)
+    assert growth_mod._compute_yoy(1e12, 1e-3) is not None, "a huge magnitude is kept"

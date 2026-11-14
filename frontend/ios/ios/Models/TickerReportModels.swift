@@ -382,6 +382,10 @@ struct DeepDiveMetric: Identifiable {
     let currentPeerMedian: Double?
     let currentScore: Int?
     let peerLevel: String?
+    // The closed period `currentValue` covers ("FY2026"), set only for a closed period's
+    // figure (the Growth card's fiscal-year rates); nil for TTM / today readings and on
+    // older reports. The Growth drill-down names its card line by it and draws none without it.
+    let currentPeriod: String?
 
     init(
         label: String,
@@ -398,7 +402,8 @@ struct DeepDiveMetric: Identifiable {
         currentValue: Double? = nil,
         currentPeerMedian: Double? = nil,
         currentScore: Int? = nil,
-        peerLevel: String? = nil
+        peerLevel: String? = nil,
+        currentPeriod: String? = nil
     ) {
         self.label = label
         self.value = value
@@ -415,6 +420,7 @@ struct DeepDiveMetric: Identifiable {
         self.currentPeerMedian = currentPeerMedian
         self.currentScore = currentScore
         self.peerLevel = peerLevel
+        self.currentPeriod = currentPeriod
     }
 
     /// True when a sector-average series exists for this metric (the "*"

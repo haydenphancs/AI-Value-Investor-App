@@ -563,9 +563,12 @@ def test_the_operating_path_keeps_its_job():
 def test_the_cards_cannot_serve_old_rows():
     from app.services import growth_service as gs
     # 11 (2026-11-13): `numeric_value` / `peer_median` on each Price metric.
-    assert vss._SNAPSHOT_PAYLOAD_VERSION == 11
-    assert ps._SNAPSHOT_PAYLOAD_VERSION == 6
-    assert gss._SNAPSHOT_PAYLOAD_VERSION == 6
+    # 12 (2026-11-13): a fiscal-year P/FCF / EV/EBITDA row names its year, never TTM.
+    assert vss._SNAPSHOT_PAYLOAD_VERSION == 12
+    # 7 (2026-11-13): `numeric_value` / `peer_median` on each Profitability metric.
+    assert ps._SNAPSHOT_PAYLOAD_VERSION == 7
+    # 7 (2026-11-13): Growth rows carry `numeric_value` / `peer_median` / `period_label`.
+    assert gss._SNAPSHOT_PAYLOAD_VERSION == 7
     assert gs._GROWTH_PAYLOAD_VERSION == 8
     assert pp._PP_PAYLOAD_VERSION == 10
 

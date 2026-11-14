@@ -460,8 +460,14 @@ def test_the_legend_and_the_delta_line_both_use_that_word():
     assert 'Text("\\(peerWord) Average")' in _decl(sheet, r"\bprivate\s+var\s+legendAndDelta\s*:\s*some\s+View\s*")
     delta = _decl(sheet, r"\bprivate\s+func\s+deltaText\s*\(")
     assert re.search(r"let\s+peer\s*=\s*peerWord\b", delta)
-    # No second, period-blind reading of a series level anywhere in the sheet.
-    assert len(re.findall(r"\.peerLevel\b", sheet)) == 2, re.findall(r".{40}\.peerLevel\b", sheet)
+    # No second, period-blind reading of a series level anywhere in the sheet. The one other
+    # `.peerLevel` is the CARD ROW's own (2026-11-13: the "Current (TTM)" line names the group
+    # of the median the card scored, `currentPeerWord`) — a row's field, not a series level.
+    row_word = _decl(sheet, r"\bprivate\s+func\s+currentPeerWord\s*\(")
+    assert re.findall(r"\.peerLevel\b", row_word) == [".peerLevel"]
+    assert "row.peerLevel" in row_word
+    rest = sheet.replace(row_word, "")
+    assert len(re.findall(r"\.peerLevel\b", rest)) == 2, re.findall(r".{40}\.peerLevel\b", rest)
 
 
 def test_roe_and_roa_take_each_tabs_level_from_the_card_metric():

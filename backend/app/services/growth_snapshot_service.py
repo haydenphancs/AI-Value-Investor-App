@@ -14,6 +14,7 @@ Matches the iOS SnapshotItemDTO struct.
 
 import asyncio
 import logging
+import math
 import re
 import time
 from datetime import datetime, timezone, timedelta
@@ -121,7 +122,10 @@ _inflight: Dict[str, asyncio.Future] = {}
 #     2026-10-20). A v4 row of a small FS industry scored against the sector's growth.
 # 6 (2026-11-05): `score_excluded_rows`: a bank's, an insurer's or a lender's FCF growth reads
 #     "N/M" and does not count. A v5 row counted it.
-_SNAPSHOT_PAYLOAD_VERSION = 6
+# 7 (2026-11-13, owner decision "Name the periods"): each row with a value carries
+#     `numeric_value`, `peer_median` and `period_label` ("FY2026") for the report Growth
+#     drill-down's card line, and a NaN/inf YoY or median reads as absent. A v6 row has none.
+_SNAPSHOT_PAYLOAD_VERSION = 7
 _VERSION_KEY = "_schema_v"
 
 # GrowthService legs this card does NOT read: it scores only the newest ANNUAL point of
@@ -150,6 +154,36 @@ def _fmt_growth(val: Optional[float]) -> str:
         return "—"
     sign = "+" if val >= 0 else ""
     return f"{sign}{val:.1f}%"
+
+
+def _finite(val: Any) -> Optional[float]:
+    """``float(val)`` when that is a real number, else None (bool, NaN/±inf, junk).
+
+    A NaN YoY printed "nan%" and a NaN median scored the row 1/5 (every comparison with
+    NaN is False, so `_growth_score` fell to its last band); neither may reach the row.
+    A negative zero (growth_service's ``round(-0.001, 2)``) becomes 0.0: it printed
+    "+-0.0%" (``-0.0 >= 0`` is True, then ``f"{-0.0:.1f}"`` is "-0.0")."""
+    if val is None or isinstance(val, bool):
+        return None
+    try:
+        f = float(val)
+    except (TypeError, ValueError):
+        return None
+    return f + 0.0 if math.isfinite(f) else None
+
+
+_ANNUAL_LABEL_RE = re.compile(r"[0-9]{4}")
+
+
+def _fiscal_year_label(period: Any) -> Optional[str]:
+    """``"FY2026"`` for an annual point's display period ``"2026"`` (growth_service's
+    `_annual_period_label`, the FISCAL year) — the label the report's Growth drill-down
+    names the card's figure by (owner decision 2026-11-13, "Name the periods"). None for
+    anything that is not a 4-digit year: an unnamed period is never guessed."""
+    if not isinstance(period, str):
+        return None
+    text = period.strip()
+    return f"FY{text}" if _ANNUAL_LABEL_RE.fullmatch(text) else None
 
 
 def _growth_score(value: Optional[float], sector_median: Optional[float]) -> int:
@@ -401,17 +435,33 @@ class GrowthSnapshotService:
         # a loss→profit flip) showed LAST year's growth, scored it, and pinned it for 24h,
         # while GrowthChartSheet (which deliberately refuses that backfill) said "n/m".
         # A null latest YoY now renders "—" with no score, like any absent metric.
-        def _latest(points) -> Tuple[Optional[float], Optional[float]]:
-            """Return (yoy_change_percent, sector_average_yoy) of the newest point."""
+        # A non-finite YoY or median is treated as absent (`_finite`).
+        def _latest(points, series: str) -> Tuple[Optional[float], Optional[float], Optional[str]]:
+            """Return (yoy_change_percent, sector_average_yoy, "FY…" label) of the newest
+            point — all three of the SAME point, so the drill-down's line names the year
+            the figure and its median belong to. The median and the label only beside a
+            value: a "—" row compares nothing."""
             if not points:
-                return None, None
+                return None, None, None
             newest = points[-1]
-            return newest.yoy_change_percent, newest.sector_average_yoy
+            yoy = _finite(getattr(newest, "yoy_change_percent", None))
+            if yoy is None:
+                return None, None, None
+            label = _fiscal_year_label(getattr(newest, "period", None))
+            if label is None:
+                logger.warning(
+                    "[growth-snapshot-period-label] ticker=%s series=%s step=snapshot: newest "
+                    "annual point's period %r is not a fiscal year — the row carries its YoY "
+                    "with no period label", ticker, series, getattr(newest, "period", None),
+                )
+            return yoy, _finite(getattr(newest, "sector_average_yoy", None)), label
 
-        rev_growth, sector_rev = _latest(growth.revenue_annual)
-        eps_growth, sector_eps = _latest(growth.eps_annual)
-        fcf_growth, sector_fcf = _latest(growth.free_cash_flow_annual)
-        op_growth, sector_op = _latest(growth.operating_profit_annual)
+        rev_growth, sector_rev, period_rev = _latest(growth.revenue_annual, "revenue_annual")
+        eps_growth, sector_eps, period_eps = _latest(growth.eps_annual, "eps_annual")
+        fcf_growth, sector_fcf, period_fcf = _latest(
+            growth.free_cash_flow_annual, "free_cash_flow_annual")
+        op_growth, sector_op, period_op = _latest(
+            growth.operating_profit_annual, "operating_profit_annual")
 
         # Score each metric against sector median
         score_rev = _growth_score(rev_growth, sector_rev)
@@ -461,18 +511,30 @@ class GrowthSnapshotService:
             weighted = 3.0
         rating = max(1, min(5, round(weighted)))
 
+        def _row(name: str, key: str, value: Optional[float], median: Optional[float],
+                 period: Optional[str], score: int) -> SnapshotMetricResponse:
+            """One row. A row with a value also carries it as a number with its own year's
+            peer median and that year's label (owner decision 2026-11-13, the drill-down's
+            "FY2026 34.33% · Industry …" line); a "—" row carries none of them."""
+            if value is None:
+                return SnapshotMetricResponse(name=name, value="—", metric_key=key, score=None)
+            return SnapshotMetricResponse(
+                name=name, value=_fmt_growth(value), metric_key=key, score=score,
+                numeric_value=value, peer_median=median, period_label=period,
+            )
+
         metrics = [
-            SnapshotMetricResponse(name="Revenue Growth (YoY)", value=_fmt_growth(rev_growth),
-                                   metric_key="revenue_growth", score=score_rev if rev_growth is not None else None),
-            SnapshotMetricResponse(name="EPS Growth", value=_fmt_growth(eps_growth),
-                                   metric_key="eps_growth", score=score_eps if eps_growth is not None else None),
+            _row("Revenue Growth (YoY)", "revenue_growth", rev_growth, sector_rev, period_rev,
+                 score_rev),
+            _row("EPS Growth", "eps_growth", eps_growth, sector_eps, period_eps, score_eps),
+            # `score_excluded_rows`: a fixed "N/M" with no number, median or period.
             SnapshotMetricResponse(name="Free Cash Flow Growth (YoY)", value="N/M",
                                    metric_key="fcf_growth", score=None)
             if fcf_excluded else
-            SnapshotMetricResponse(name="Free Cash Flow Growth (YoY)", value=_fmt_growth(fcf_growth),
-                                   metric_key="fcf_growth", score=score_fcf if fcf_growth is not None else None),
-            SnapshotMetricResponse(name="Operating Income Growth", value=_fmt_growth(op_growth),
-                                   metric_key="operating_income_growth", score=score_op if op_growth is not None else None),
+            _row("Free Cash Flow Growth (YoY)", "fcf_growth", fcf_growth, sector_fcf,
+                 period_fcf, score_fcf),
+            _row("Operating Income Growth", "operating_income_growth", op_growth, sector_op,
+                 period_op, score_op),
         ]
 
         snapshot = SnapshotItemResponse(

@@ -1333,7 +1333,13 @@ def test_the_drill_down_never_calls_a_closed_period_current():
     assert re.search(r'default:\s*return "Current \(TTM\)"\s', prefix), prefix
     assert '"Current' not in sheet.replace(prefix, ""), "a second spelling of Current"
     header = _decl_body(sheet, "private func header(_ m: DeepDiveMetric)")
-    assert 'Text("\\(currentPrefix): \\(currentValueText(m.value))")' in header
+    assert 'Text("\\(prefix(for: m)): \\(currentValueText(m.value))")' in header
+    # A row the backend names a closed period for (a Growth row's fiscal year, or a Price row
+    # on a last-fiscal-year basis — owner: "Fallback TTM labels") never says "Current (TTM)".
+    word = _decl_body(sheet, "private func prefix(for m: DeepDiveMetric) -> String")
+    assert "guard let period = m.currentPeriod, !period.isEmpty else { return currentPrefix }" in word
+    assert re.search(r'case "pfcf":\s*return "\\\(period\) FCF basis"', word), word
+    assert "TTM" not in word
     legend = sheet[sheet.index("deltaText(prefix:"):]
     assert legend.startswith("deltaText(prefix: periodLabel(pair.period),")
     label = _decl_body(sheet, "private func periodLabel(_ label: String)")
@@ -1351,7 +1357,7 @@ def test_the_current_line_is_the_card_rows_own_comparison():
     sheet = _swift("Views/Molecules/FundamentalsHistorySheet.swift")
     text = _decl_body(sheet, "private func currentLineText(_ m: DeepDiveMetric)")
     assert "guard let median = m.currentPeerMedian else { return nil }" in text
-    assert "m.currentValue" in text and "currentPrefix" in text
+    assert "m.currentValue" in text and "prefix(for: m)" in text
     color = _decl_body(sheet, "private func currentLineColor(_ m: DeepDiveMetric)")
     # Each arm as ONE unit (a swapped gain/loss or a dropped muted guard must fail), and the
     # muted guard runs before the unrated-card gate.
@@ -1370,6 +1376,14 @@ def test_the_current_line_is_the_card_rows_own_comparison():
     legend = _decl_body(sheet, "private func legendAndDelta(_ m: DeepDiveMetric)")
     assert "if usesLineChart, let current = currentLineText(m)" in legend
     assert ".foregroundColor(currentLineColor(m))" in legend
+    # One row per comparison (owner 2026-11-13: "i don't want to make new line for the
+    # second line"): both lines are single-line, shrinking no further than the 11pt floor.
+    for color in ("deltaColor(m)", "currentLineColor(m)"):
+        assert re.search(rf"\.foregroundColor\({re.escape(color)}\)\s*"
+                         r"\.multilineTextAlignment\(\.center\)\s*\.lineLimit\(1\)\s*"
+                         r"\.minimumScaleFactor\(Self\.legendLineMinScale\)", legend), color
+    scale = re.search(r"static let legendLineMinScale: CGFloat = ([\d.]+)", sheet)
+    assert scale and 11 / 14 <= float(scale.group(1)) < 1, "bodySmall is 14pt; the data floor is 11pt"
     note = _decl_body(sheet, "private func ttmNote(_ m: DeepDiveMetric)")
     assert 'card.title == "Valuation"' in note and "Text(ttmNoteText(m))" in note
     assert re.search(r"legendAndDelta\(m\)\s*ttmNote\(m\)", sheet), "the caption is never drawn"
@@ -1386,20 +1400,23 @@ def test_the_report_dto_carries_the_current_comparison_optionally():
                       ("let currentPeerMedian: Double?",
                        'case currentPeerMedian = "current_peer_median"'),
                       ("let currentScore: Int?", 'case currentScore = "current_score"'),
-                      ("let peerLevel: String?", 'case peerLevel = "peer_level"')):
+                      ("let peerLevel: String?", 'case peerLevel = "peer_level"'),
+                      ("let currentPeriod: String?", 'case currentPeriod = "current_period"')):
         assert decl in dto and key in dto, decl
     response = _swift("Models/TickerReportResponse.swift")
     mapper = response[response.index("return DeepDiveMetric("):]
     mapper = mapper[:mapper.index(")\n")]
-    for field in ("currentValue", "currentPeerMedian", "currentScore", "peerLevel"):
+    for field in ("currentValue", "currentPeerMedian", "currentScore", "peerLevel", "currentPeriod"):
         assert f"{field}: m.{field}" in mapper, field
     model = _decl_body(_swift("Models/TickerReportModels.swift"), "struct DeepDiveMetric: Identifiable")
     for field, kind in (("currentValue", "Double"), ("currentPeerMedian", "Double"),
-                        ("currentScore", "Int"), ("peerLevel", "String")):
+                        ("currentScore", "Int"), ("peerLevel", "String"),
+                        ("currentPeriod", "String")):
         assert f"let {field}: {kind}?" in model and f"{field}: {kind}? = nil" in model, field
     # The wire names are the backend's.
     from app.schemas.ticker_report import DeepDiveMetricResponse
-    for key in ("current_value", "current_peer_median", "current_score", "peer_level"):
+    for key in ("current_value", "current_peer_median", "current_score", "peer_level",
+                "current_period"):
         assert key in DeepDiveMetricResponse.model_fields, key
 
 

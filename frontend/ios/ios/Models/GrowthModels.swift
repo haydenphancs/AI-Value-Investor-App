@@ -61,9 +61,11 @@ struct GrowthDataPoint: Identifiable, Equatable, Hashable {
     let id = UUID()
     let period: String              // e.g., "2020", "2021" or "Q1 '24"
     let value: Double               // Absolute value — CAN be negative (loss-makers)
-    // nil = "not meaningful": the backend returns a null YoY for a non-positive
-    // base or a sign-flip into negative (e.g. FCF +$0.4B → -$23.7B). Kept Optional
-    // so the chart shows a GAP / "—" rather than fabricating a flat green +0.0%.
+    // nil = "not meaningful": the backend (`growth_service._compute_yoy`) returns a null
+    // YoY only when a value is missing or the base is exactly 0. A NEGATIVE base is not
+    // nulled: it divides by abs(base), so the sign still says better or worse, and the
+    // figure is shown verbatim however large (ORCL FCF -$0.39B → -$23.7B = -5911.7%).
+    // Kept Optional so the chart shows a GAP / "—" rather than fabricating a flat +0.0%.
     let yoyChangePercent: Double?   // Year-over-Year change percentage (nil = n/m)
     let sectorAverageYoY: Double?   // Sector average YoY (nil = no benchmark)
 

@@ -81,13 +81,23 @@ class DeepDiveMetricResponse(BaseModel):
     # legend's second line, "Current (TTM) 18.21x · Industry 29.32x · 0.62× vs industry",
     # coloured by `current_score` exactly as the card judged the row. Display units (a
     # percent row in percentage points). `current_value` is None where the row prints no
-    # comparable number ("—", "Neg.", "N/A"); `current_peer_median` is the median `label`
-    # prints, and `current_score` rides with it (None = unscored, drawn neutral). Present
-    # only on a charted row (one with history). Optional and additive: legacy reports and
-    # older app builds decode unchanged — a report without them shows the period line only.
+    # comparable number ("—", "Neg.", "N/A", "N/M"); `current_peer_median` is the median the
+    # row was judged against (the one `label` prints; a Growth row's name prints none, so it
+    # is the same fiscal year's peer YoY, None while that year is not reported). `current_score`
+    # is the row's own score whenever either number is present (Earnings Yield: the P/E
+    # row's, and only beside a median); None = unscored, drawn neutral. Present only on a
+    # charted row (one with history). Optional and additive: legacy reports and older app
+    # builds decode unchanged — a report without them shows the period line only.
     current_value: Optional[float] = None
     current_peer_median: Optional[float] = None
     current_score: Optional[int] = None
+    # The CLOSED period `current_value` covers, as displayed ("FY2026"), when it is not "now"
+    # (Growth owner decision 2026-11-13, "Name the periods": the Growth sheet never says
+    # "Current"), or the fiscal year a Price row shown on a LAST-FISCAL-YEAR basis divides by
+    # (a P/FCF or EV/EBITDA reconstruction; that row has no `current_value`, and the sheet
+    # names the year instead of "TTM"). None on a TTM / current row (Valuation, Health),
+    # which keeps its "Current (TTM)" wording. Optional and additive.
+    current_period: Optional[str] = None
 
 
 class DeepDiveMetricCardResponse(BaseModel):

@@ -180,11 +180,13 @@ def _compute_yoy(current: Optional[float], previous: Optional[float]) -> Optiona
     improvement (current > previous) reads positive and a deterioration reads
     negative, even when the base is negative (a deepening loss correctly reads
     negative instead of the +% that naive negative÷negative would give). The
-    magnitude can be large across a sign change (e.g. +$0.4B → -$23.7B ≈ -5900%);
-    that value is still CORRECT and is shown verbatim — the chart's YoY line uses
-    a robust/compressed scale so one outlier doesn't flatten the rest. Matches
-    the collector's _safe_pct_change convention. None only when an endpoint is
-    missing or the base is exactly zero (undefined).
+    magnitude can be huge on a small base: Oracle's free cash flow went from
+    -$0.39B to -$23.7B, a deepening NEGATIVE base, which reads -5911.7% (owner
+    decision 2026-11-13: "Keep the exact figure"). That value is CORRECT and is
+    shown verbatim — the chart's YoY line uses a robust/compressed scale so one
+    outlier doesn't flatten the rest. Matches the collector's _safe_pct_change
+    convention. None ONLY for a missing value or a zero base (undefined) — never
+    for a large magnitude or a sign change.
     """
     if current is None or previous is None or previous == 0:
         return None

@@ -1006,11 +1006,16 @@ def decide_web_search(
         auto_in_chat = mode == "on" and auto_reason in ("auto_budget", "market_data")
 
         if ask:
+            # `market_data` here too (2026-11-14): an asked turn no tier can serve is told so in
+            # one sentence (`ChatService._WEB_UNAVAILABLE_ASKED_RULE`) — except a market-data ask,
+            # which the web never serves by policy ("search the web for ORCL price" is answered
+            # from the quote, never with "a web search is not available right now").
             return WebSearchDecision(
                 ask_kind=ask, reason=_explicit_closed_reason(report, bool(report_avail), uid),
                 unavailable=True, shadow=shadow,
                 shadow_topic=web_fallback_topic(user_message) if shadow else None,
                 context=ctx, explicit_open=explicit_in_chat,
+                market_data=is_market_data_question(user_message),
             )
         on_request = bool(report_avail) or explicit_open
         return WebSearchDecision(

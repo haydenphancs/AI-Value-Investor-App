@@ -78,6 +78,40 @@ def free_cash_flow_reading(value: Optional[float]) -> Optional[float]:
     return value
 
 
+def operating_cash_flow_reading(value: Optional[float]) -> Optional[float]:
+    """Operating cash flow that can be a real figure, else None (2026-11-14).
+
+    The same zero-fill as free cash flow: a cash-flow statement FMP does not have reads
+    operatingCashFlow = 0 (HSBC's quarters, JPM's not-yet-filed quarter — see
+    `free_cash_flow_reading`), and charted as a figure it drew a 0.00 bar with a -100% YoY. A
+    company whose operations moved exactly no cash to the last unit is vanishingly rare, so an
+    exact 0 (``-0.0`` too) is no reading, nor is a non-finite value. A negative is real (kept):
+    a cash burn is a figure, not a blank."""
+    if value is None or not math.isfinite(value) or value == 0:
+        return None
+    return value
+
+
+def capital_expenditure_reading(value: Optional[float]) -> Optional[float]:
+    """Capital expenditure as the cash SPENT (a positive amount), else None (2026-11-14).
+
+    FMP files ``capitalExpenditure`` NEGATIVE — an outflow on the cash-flow statement — so a
+    finite negative value is returned flipped (-value): "spent 2.78B", which is what a person
+    means by capex and what a year-over-year change of spending must be computed on. No
+    reading (None):
+
+    * 0 / ``-0.0`` — FMP's zero-fill for a statement it does not have (`free_cash_flow_reading`),
+      never "spent nothing";
+    * a POSITIVE value — a sign anomaly or disposals netted into the line. Flipping it would
+      present cash RECEIVED as spending, and keeping it would print a negative "spend"; the
+      caller logs it (`[growth-capex-sign]`);
+    * a non-finite value.
+    """
+    if value is None or not math.isfinite(value) or value >= 0:
+        return None
+    return -value
+
+
 def sga_reading(value: Optional[float]) -> Optional[float]:
     """SG&A (a total, or its share of revenue) that can be a real figure, else None.
 

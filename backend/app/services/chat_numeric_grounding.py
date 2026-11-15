@@ -210,7 +210,8 @@ _SENTENCE_END_RE = re.compile(r"[.!?](?=\s)|\n")
 _METRIC_RE = re.compile(
     r"(?i)\b(?:revenue|revenues|sales|eps|earnings|net income|operating income|gross profit"
     r"|ebitda|margin|margins|shares|share count|dividend|dividends|payout|p/e|pe ratio"
-    r"|price-to-earnings|free cash flow|fcf|cash flow|debt|book value|buyback|buybacks)\b"
+    r"|price-to-earnings|free cash flow|fcf|cash flow|debt|book value|buyback|buybacks"
+    r"|capex|capital expenditures?|capital spending)\b"
 )
 
 

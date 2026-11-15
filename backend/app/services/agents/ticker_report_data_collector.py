@@ -118,7 +118,7 @@ from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
-from app.schemas.growth import GrowthResponse
+from app.schemas.growth import GROWTH_CHAT_ONLY_SERIES, GrowthResponse
 from app.schemas.profit_power import ProfitPowerResponse
 from app.schemas.dcf_fair_value import DcfFairValueResponse
 from app.services._insider_common import (
@@ -942,10 +942,18 @@ _GROWTH_LEG_SERIES: Dict[str, Tuple[str, ...]] = {
         "eps_quarterly", "revenue_quarterly", "net_income_quarterly",
         "operating_profit_quarterly",
     ),
-    "annual_cashflow": ("free_cash_flow_annual",),
-    "quarterly_cashflow": ("free_cash_flow_quarterly",),
+    "annual_cashflow": (
+        "free_cash_flow_annual", "operating_cash_flow_annual", "capital_expenditure_annual",
+    ),
+    "quarterly_cashflow": (
+        "free_cash_flow_quarterly", "operating_cash_flow_quarterly",
+        "capital_expenditure_quarterly",
+    ),
 }
 _GROWTH_SERIES: Tuple[str, ...] = tuple(s for v in _GROWTH_LEG_SERIES.values() for s in v)
+# Series only Ask Cay AI reads (`app.schemas.growth.GROWTH_CHAT_ONLY_SERIES`, imported above,
+# 2026-11-14): no chart draws them, so they are never what keeps a narrowed build alive and the
+# frozen `growth_chart` leaves them out (~25 KB per report, data the report never shows).
 # `peer_group_levels` key of each series (GrowthService names FCF "fcf_*").
 _GROWTH_LEVEL_KEY = {
     "free_cash_flow_annual": "fcf_annual", "free_cash_flow_quarterly": "fcf_quarterly",
@@ -980,7 +988,8 @@ def _narrow_growth_chart(resp: Any, blocking: List[str]) -> Optional[Any]:
                 for p in points
             ]
     if not any(
-        (update[s] if s in update else (getattr(resp, s, None) or [])) for s in _GROWTH_SERIES
+        (update[s] if s in update else (getattr(resp, s, None) or []))
+        for s in _GROWTH_SERIES if s not in GROWTH_CHAT_ONLY_SERIES
     ):
         return None
     levels = dict(getattr(resp, "peer_group_levels", None) or {})
@@ -3755,7 +3764,7 @@ class TickerReportDataCollector:
             # the report. JSON-clean dict → TickerReportResponse coerces back to
             # GrowthResponse. None when the growth fetch failed (legacy-safe).
             "growth_chart": (
-                out.growth_chart.model_dump(mode="json")
+                out.growth_chart.model_dump(mode="json", exclude=GROWTH_CHAT_ONLY_SERIES)
                 if out.growth_chart else None
             ),
             # Rich Profit Power chart (margins + per-margin sector medians), frozen

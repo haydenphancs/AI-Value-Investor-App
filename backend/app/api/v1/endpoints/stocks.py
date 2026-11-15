@@ -63,7 +63,7 @@ from app.services.valuation_snapshot_service import gate_caydex_estimate
 from app.services.analyst_service import get_analyst_service
 from app.services.earnings_service import get_earnings_service
 from app.schemas.earnings import EarningsResponse
-from app.schemas.growth import GrowthResponse
+from app.schemas.growth import GROWTH_CHAT_ONLY_SERIES, GrowthResponse
 from app.services.growth_service import get_growth_service
 from app.schemas.profit_power import ProfitPowerResponse
 from app.services.profit_power_service import get_profit_power_service
@@ -1296,7 +1296,10 @@ async def get_earnings(ticker: str):
 
 # ── Growth endpoint ──────────────────────────────────────────────
 
-@router.get("/{ticker}/growth", response_model=GrowthResponse)
+# The chat-only series (capex, operating cash flow — 2026-11-14) never go to the app: no chart
+# draws them and iOS's DTO ignores them, so sending them was ~25 KB of dead weight per call.
+@router.get("/{ticker}/growth", response_model=GrowthResponse,
+            response_model_exclude=set(GROWTH_CHAT_ONLY_SERIES))
 async def get_growth(ticker: str, _fanout: None = MarketFanoutRateLimit):
     """Get growth data (EPS & Revenue YoY growth with sector comparison)."""
     ticker = ticker.upper()

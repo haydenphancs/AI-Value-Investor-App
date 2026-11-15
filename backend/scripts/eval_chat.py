@@ -202,6 +202,30 @@ _PROBE_CASES: List[Dict[str, Any]] = [
         "expect": {"tool": "check_asset_profile", "tool_args": {"ticker": ["SPY"]},
                    "resolved_as": ["exchange-traded fund", "— a fund"]},
     },
+    {
+        # 2026-11-14 (owner: "Yes, add capex"): capital expenditure is in the growth section
+        # (and the summary's latest year) — never a web search for a figure Caydex holds.
+        "id": "probe-capex",
+        "intent": "financials",
+        "question": "How much did they spend on capex last fiscal year?",
+        "session_type": "STOCK",
+        "stock_id": "MSFT",
+        "context_type": "STOCK",
+        "reference_id": "MSFT",
+        "expect": {"tool": "check_company_financials",
+                   "tool_args": {"ticker": ["MSFT"], "section": ["growth", "summary"]}},
+    },
+    {
+        "id": "probe-operating-cash-flow",
+        "intent": "financials",
+        "question": "What was their operating cash flow in the latest quarter?",
+        "session_type": "STOCK",
+        "stock_id": "AAPL",
+        "context_type": "STOCK",
+        "reference_id": "AAPL",
+        "expect": {"tool": "check_company_financials",
+                   "tool_args": {"ticker": ["AAPL"], "section": ["growth", "summary"]}},
+    },
 ]
 
 _GOLDEN = REPO / "backend" / "data" / "chat_eval_golden.json"

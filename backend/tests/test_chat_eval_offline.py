@@ -767,8 +767,9 @@ async def test_a_web_intent_the_gate_cannot_serve_gets_only_the_one_liner(monkey
 @pytest.mark.asyncio
 @pytest.mark.parametrize("message,session_type,line", [
     # web intent outside a report chat, with every-chat search off: "none on this turn"
-    (_WEB_ASK, "STOCK", ChatService._WEB_UNAVAILABLE_RULE),
-    (_WEB_ASK, "NORMAL", ChatService._WEB_UNAVAILABLE_RULE),
+    # — and, since it ASKED, told so in one sentence (2026-11-14, `_WEB_UNAVAILABLE_ASKED_RULE`)
+    (_WEB_ASK, "STOCK", ChatService._WEB_UNAVAILABLE_ASKED_RULE),
+    (_WEB_ASK, "NORMAL", ChatService._WEB_UNAVAILABLE_ASKED_RULE),
     # no ask, no tier open in this chat: "no web search in this chat" (2026-10-08)
     ("What is the moat?", "STOCK", ChatService._WEB_NONE_RULE),
 ])
@@ -937,6 +938,13 @@ _PROBES = {
                              "check_asset_profile", {"ticker": ["LTC"], "kind": ["company"]}),
     "probe-fed-funds": ("What's the fed funds rate", "get_market_snapshot", {}),
     "probe-spy-expense-ratio": ("SPY expense ratio", "check_asset_profile", {"ticker": ["SPY"]}),
+    # 2026-11-14 (owner: "Yes, add capex"): capex and operating cash flow are Caydex data.
+    "probe-capex": ("How much did they spend on capex last fiscal year?",
+                    "check_company_financials",
+                    {"ticker": ["MSFT"], "section": ["growth", "summary"]}),
+    "probe-operating-cash-flow": ("What was their operating cash flow in the latest quarter?",
+                                  "check_company_financials",
+                                  {"ticker": ["AAPL"], "section": ["growth", "summary"]}),
 }
 _EVAL_SWITCHES = ("CHAT_REPORT_WEB_SEARCH_ENABLED", "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED",
                   "CHAT_AUTO_WEB_SEARCH_MODE")

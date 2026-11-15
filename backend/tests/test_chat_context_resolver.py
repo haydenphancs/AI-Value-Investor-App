@@ -1992,8 +1992,12 @@ async def test_chat_reads_the_score_coverage_line_beside_the_score(resolver, mon
 async def test_the_fenced_text_no_longer_invites_the_report_lacks_it(resolver, monkeypatch):
     block = await _resolve_report(resolver, monkeypatch, _avgo_shaped_report())
     assert "Report data the user can see (an excerpt; long sections are shortened):" in block
-    assert block.endswith("If something is not in this excerpt, say it was not included here, "
-                          "never that the report lacks it.")
+    # Scoped to the report since 2026-11-14 (questions beyond it are answered under the trusted
+    # report rule); the "\nAnswer grounded in THIS report" split prefix is unchanged.
+    assert block.endswith("If part of the report is not in this excerpt, say it was not included "
+                          "here, never that the report lacks it.")
+    assert "\nAnswer grounded in THIS report for questions about it, and never invent figures." in block
+    assert "If something is not in this excerpt" not in block
     assert "if asked about something it doesn't cover, say so" not in block
     assert "Full report data the user can see" not in block
 

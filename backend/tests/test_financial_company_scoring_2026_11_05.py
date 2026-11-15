@@ -568,8 +568,10 @@ def test_the_cards_cannot_serve_old_rows():
     # 7 (2026-11-13): `numeric_value` / `peer_median` on each Profitability metric.
     assert ps._SNAPSHOT_PAYLOAD_VERSION == 7
     # 7 (2026-11-13): Growth rows carry `numeric_value` / `peer_median` / `period_label`.
-    assert gss._SNAPSHOT_PAYLOAD_VERSION == 7
-    assert gs._GROWTH_PAYLOAD_VERSION == 8
+    # 8 (2026-11-14): Growth's zero-filled FCF year is a gap, not a -100% point.
+    assert gss._SNAPSHOT_PAYLOAD_VERSION == 8
+    # 9 (2026-11-14): operating cash flow + capex series, FCF zero-fill is a gap.
+    assert gs._GROWTH_PAYLOAD_VERSION == 9
     assert pp._PP_PAYLOAD_VERSION == 10
 
 

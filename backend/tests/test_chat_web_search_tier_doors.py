@@ -313,12 +313,14 @@ async def test_without_consent_v3_a_stock_chat_gets_no_tool_and_the_honest_line(
     cws.set_client_ai_consent_version(consent)
     svc = _svc(monkeypatch)
     svc.gemini = _Gem()
-    for msg, line in ((ASK, ChatService._WEB_UNAVAILABLE_RULE), (PLAIN, ChatService._WEB_NONE_RULE)):
+    for msg, line in ((ASK, ChatService._WEB_UNAVAILABLE_ASKED_RULE), (PLAIN, ChatService._WEB_NONE_RULE)):
         await _gen(svc, msg)
         kw = svc.gemini.kw
         assert "web_search" not in kw["tool_handlers"] and kw["force_first_tool"] is None
         assert kw["system_instruction"].count(line) == 1, msg
         assert "web_search" not in kw["system_instruction"]
+    # A turn that did not ask is never told a search is unavailable (2026-11-14).
+    assert ChatService._WEB_UNAVAILABLE_ASKED_TAIL not in svc.gemini.kw["system_instruction"]
 
 
 @pytest.mark.asyncio
@@ -477,6 +479,8 @@ async def test_an_automatic_turns_no_web_instructions_claim_no_search(env, monke
     monkeypatch.setattr(cws.settings, "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED", False)
     prep = await _prep(svc, PLAIN)
     assert prep["system_instruction_no_web"].count(ChatService._WEB_UNAVAILABLE_RULE) == 1
+    # No ask on this turn: the dropped automatic search is never announced.
+    assert ChatService._WEB_UNAVAILABLE_ASKED_TAIL not in prep["system_instruction_no_web"]
 
 
 @pytest.mark.asyncio
@@ -486,6 +490,7 @@ async def test_the_tool_less_build_of_an_automatic_turn_claims_no_search(env, mo
     prep = await _prep(svc, PLAIN)
     no_tools = prep["system_instruction_no_tools"]
     assert no_tools.count(ChatService._WEB_UNAVAILABLE_RULE) == 1 and "WEB RESULTS:" not in no_tools
+    assert ChatService._WEB_UNAVAILABLE_ASKED_TAIL not in no_tools
 
 
 # ── chips ────────────────────────────────────────────────────────────────────
@@ -559,3 +564,39 @@ async def test_send_door_the_deadline_reaches_generate_with_tools(env, monkeypat
     assert svc.gemini.kw["deadline"] == 12345.0
     await _gen(svc, PLAIN)
     assert svc.gemini.kw["deadline"] is None, "no door deadline: the elapsed-time gate"
+
+
+
+# ── The asked half of the unavailable line through the doors (2026-11-14) ───────
+
+
+@pytest.mark.asyncio
+async def test_an_asked_search_with_every_chat_search_off_is_told_on_the_dropped_path(env, monkeypatch):
+    """Every-chat search off, the automatic tier on: an explicit ask in a stock chat reaches the
+    AUTOMATIC tier carrying the ask. When the endpoint drops that search for a synthesis route,
+    the no-web builds tell the user the asked search cannot run — once."""
+    monkeypatch.setattr(cws.settings, "CHAT_WEB_SEARCH_ALL_CHATS_ENABLED", False)
+    svc = _svc(monkeypatch)
+    svc.gemini = _Gem()
+    prep = await _prep(svc, ASK)
+    assert prep["web_turn"] is not None and prep["web_turn"].tier == "auto"
+    for key in ("system_instruction_no_web", "system_instruction_no_tools_no_web"):
+        text = prep[key]
+        assert text.count(ChatService._WEB_UNAVAILABLE_ASKED_RULE) == 1, key
+        assert text.count("WEB SEARCH:") == 1 and "WEB RESULTS:" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("consent", [None, "2"])
+async def test_a_news_or_market_data_ask_no_tier_serves_keeps_the_plain_line(env, monkeypatch, consent):
+    """A news ask is answered from Caydex's licensed headlines and a market-data ask from the
+    quote: neither is ever told "a web search is not available right now"."""
+    cws.set_client_ai_consent_version(consent)
+    svc = _svc(monkeypatch)
+    svc.gemini = _Gem()
+    for msg in (NEWS, "Search the web for Apple's stock price"):
+        await _gen(svc, msg)
+        instr = svc.gemini.kw["system_instruction"]
+        assert "web_search" not in svc.gemini.kw["tool_handlers"]
+        assert instr.count(ChatService._WEB_UNAVAILABLE_RULE) == 1, msg
+        assert ChatService._WEB_UNAVAILABLE_ASKED_TAIL not in instr, msg

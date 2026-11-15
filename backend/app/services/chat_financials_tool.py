@@ -12,10 +12,13 @@ figure here is the figure on the screen:
   * `StockOverviewService.get_key_facts` — the Overview's Key Stats rows (the same builder),
     the statements' and the listing's currencies, the latest annual balance sheet's totals,
     and the fund flags;
-  * `GrowthService` (revenue, GAAP diluted EPS, net income, operating income, free cash flow),
-    `ProfitPowerService` (margins), `HealthSnapshotService`, `EarningsService` (results against
-    estimates, the next report date), `ValuationSnapshotService` (multiples; the Caydex fair
-    value only while `DCF_ENABLED`, else the third-party DCF, labelled so),
+  * `GrowthService` (revenue, GAAP diluted EPS, net income, operating income, free cash flow,
+    and since 2026-11-14 operating cash flow and capital expenditure — the cash spent, shown
+    positive; a bank's, insurer's, lender's or broker's free and operating cash flow are named
+    "not meaningful for this company", never missing), `ProfitPowerService` (margins),
+    `HealthSnapshotService`, `EarningsService` (results against estimates, the next report
+    date), `ValuationSnapshotService` (multiples; the Caydex fair value only while
+    `DCF_ENABLED`, else the third-party DCF, labelled so),
     `RevenueBreakdownService` (segments), `SignalOfConfidenceService` (dividends) and
     `CorporateActionsService.get_split_rows` (splits);
   * `AnalystService.get_analysis().estimates` ONLY while `analyst_estimates_available()` — the
@@ -114,7 +117,8 @@ _SHORTENED = ("some periods or detail were left out to fit this answer: anything
 _HOW_TO_READ = (
     "Caydex's financial data, newest period first. FY = fiscal year, Q = fiscal quarter, TTM = "
     "trailing twelve months. Give every figure with its period, its basis and its currency. "
-    "Anything under 'unavailable', or absent, was not loaded - never treat it as zero or none. "
+    "Anything under 'unavailable', or absent, was not loaded - never treat it as zero or none "
+    "(a series under 'not_meaningful_for_this_company' is left out on purpose). "
     "In Key Stats, 'Neg.' means the multiple is not meaningful because earnings are negative, "
     "and a Dividends value of 'None' means the company pays no dividend. Estimates are analysts' "
     "forecasts, not reported results."
@@ -155,9 +159,20 @@ _KEY_STATS_EARNINGS_YIELD = (" earnings_yield is 1 / the P/E (TTM) shown here, o
                              "multiple's own basis.")
 _GROWTH_BASIS = (
     "Fiscal years and fiscal quarters as filed, newest first. EPS is GAAP diluted EPS from the "
-    "income statement. Free cash flow is operating cash flow minus capital expenditure. YoY "
-    "compares with the same period a year earlier; the peer median is the named peer group's "
-    "median YoY for the same period."
+    "income statement. Free cash flow is operating cash flow minus capital expenditure. Capital "
+    "expenditure is the cash spent, shown as a positive amount (the cash-flow statement files "
+    "it as a negative), so its YoY is the change in that spending. YoY compares with the same "
+    "period a year earlier; the peer median, where shown, is the named peer group's median YoY "
+    "for the same period."
+)
+# A bank's, insurer's, lender's or broker's cash flows (`GrowthResponse.series_not_meaningful`,
+# owner decision 2026-11-14 "Hide, say why"): left out on purpose, and the model must say why —
+# never "missing" or "not loaded", which sends it to the web for a figure Caydex withholds.
+_NOT_MEANINGFUL_KEY = "not_meaningful_for_this_company"
+_NOT_MEANINGFUL_REASON = (
+    "not meaningful for a bank, insurer, lender or broker: its cash flows swing with deposits, "
+    "loans and claims. Say exactly that - never that they are missing or not loaded, and never "
+    "look them up elsewhere."
 )
 _MARGINS_BASIS = (
     "Each margin is a percentage of revenue for that fiscal year or quarter, newest first; the "
@@ -651,7 +666,24 @@ _GROWTH_SERIES = (
     ("net_income", "net_income", _money, "net_income"),
     ("operating_income", "operating_profit", _money, "operating_profit"),
     ("free_cash_flow", "free_cash_flow", _money, "fcf"),
+    # Chat-only series (2026-11-14): no peer median, so no peer-level key ever matches.
+    ("operating_cash_flow", "operating_cash_flow", _money, "operating_cash_flow"),
+    ("capital_expenditure", "capital_expenditure", _money, "capital_expenditure"),
 )
+
+
+def _not_meaningful(resp: Any) -> List[str]:
+    """The growth series the response withholds as meaningless for this company, in
+    `_GROWTH_SERIES` order — only known series names, so a cached payload never echoes junk."""
+    raw = _get(resp, "series_not_meaningful")
+    named = {v for v in raw if isinstance(v, str)} if isinstance(raw, (list, tuple)) else set()
+    return [key for key, *_rest in _GROWTH_SERIES if key in named]
+
+
+def _not_meaningful_note(series: List[str]) -> Dict[str, Any]:
+    return {"series": list(series), "reason": _NOT_MEANINGFUL_REASON}
+
+
 _DEGRADED_LEGS = {
     "annual_income": "the annual income statement",
     "quarterly_income": "the quarterly income statement",
@@ -690,7 +722,11 @@ def _growth_block(resp: Any, kf: Optional[Dict[str, Any]], annual: int, quarterl
     levels = levels if isinstance(levels, dict) else {}
     block: Dict[str, Any] = {"basis": _GROWTH_BASIS, "currency": _currency_label(kf)}
     any_rows = False
+    # A series named not meaningful is never shown, even if a payload still holds rows for it.
+    withheld = _not_meaningful(resp)
     for key, attr, fmt, level_key in _GROWTH_SERIES:
+        if key in withheld:
+            continue
         series: Dict[str, Any] = {}
         for span, limit in (("annual", annual), ("quarterly", quarterly)):
             peer = _peer_word(levels.get(f"{level_key}_{span}"))
@@ -713,12 +749,14 @@ def _growth_block(resp: Any, kf: Optional[Dict[str, Any]], annual: int, quarterl
         if note:
             raise _Incomplete(note)
         return None
+    if withheld:
+        block[_NOT_MEANINGFUL_KEY] = _not_meaningful_note(withheld)
     block["eps_basis"] = "GAAP diluted EPS (per share)"
     # The periods held, from the WHOLE cached series: the rows above are only the newest, and
     # read alone they said "the data goes back to Q4 2024" (eval `hallucination-bait`).
     history = _history({
         span: set().union(*(_keys_shown(_get(resp, f"{attr}_{span}"), _growth_shown, span, fmt)
-                            for _k, attr, fmt, _lk in _GROWTH_SERIES))
+                            for key, attr, fmt, _lk in _GROWTH_SERIES if key not in withheld))
         for span in ("annual", "quarterly")})
     if history:
         block["history"] = history
@@ -972,7 +1010,8 @@ def _span_failed(degraded: Any, span: str) -> bool:
 
 # Which statement each growth series is read from (the service's `degraded` leg names).
 _SERIES_STATEMENT = {"revenue": "income", "eps": "income", "net_income": "income",
-                     "operating_income": "income", "free_cash_flow": "cashflow"}
+                     "operating_income": "income", "free_cash_flow": "cashflow",
+                     "operating_cash_flow": "cashflow", "capital_expenditure": "cashflow"}
 
 
 def _money_exact(value: Any) -> Optional[str]:
@@ -983,6 +1022,26 @@ def _money_exact(value: Any) -> Optional[str]:
     if short is None or f is None or abs(f) < 1e4:
         return short
     return f"{short} ({f:,.0f} as reported)"
+
+
+def _capex_exact(value: Any) -> Optional[str]:
+    """Capital expenditure's exact form: the series holds the cash SPENT (positive), and the
+    statement files it negative, so "as reported" would be false — "2.78B (2,777,000,000
+    spent; filed as a negative)"."""
+    short = _money(value)
+    f = _num(value)
+    if short is None or f is None or abs(f) < 1e4:
+        return short
+    return f"{short} ({f:,.0f} spent; filed as a negative)"
+
+
+# The exact formatter of one period's row: a per-series override, else by the series' format.
+_EXACT_BY_SERIES = {"capital_expenditure": _capex_exact}
+_EXACT_BY_FORMAT = {_money: _money_exact}
+
+
+def _exact_format(key: str, fmt: Any) -> Any:
+    return _EXACT_BY_SERIES.get(key) or _EXACT_BY_FORMAT.get(fmt, fmt)
 
 
 def _growth_period_block(resp: Any, kf: Optional[Dict[str, Any]],
@@ -997,8 +1056,11 @@ def _growth_period_block(resp: Any, kf: Optional[Dict[str, Any]],
     keys = {"annual": set(), "quarterly": set()}
     found: Dict[str, str] = {}
     quarters: Dict[str, List[str]] = {}
+    withheld = _not_meaningful(resp)
     for key, attr, fmt, level_key in _GROWTH_SERIES:
-        exact = _money_exact if fmt is _money else fmt
+        if key in withheld:
+            continue        # named below as not meaningful, never shown
+        exact = _exact_format(key, fmt)
         for s in ("annual", "quarterly"):
             peer = _peer_word(levels.get(f"{level_key}_{s}"))
             for label, point in _newest_first(_get(resp, f"{attr}_{s}")):
@@ -1022,14 +1084,17 @@ def _growth_period_block(resp: Any, kf: Optional[Dict[str, Any]],
         return None
     block: Dict[str, Any] = {"basis": _GROWTH_BASIS, "period": period.label,
                              "currency": _currency_label(kf)}
+    if withheld:
+        block[_NOT_MEANINGFUL_KEY] = _not_meaningful_note(withheld)
     if found:
         for key, _attr, _fmt, _lk in _GROWTH_SERIES:
             if key in found:
                 block[key] = found[key]
         # A series whose statement leg failed in this build did not load; any other one has no
-        # figure for this period in Caydex's data. Neither is ever zero.
+        # figure for this period in Caydex's data. Neither is ever zero. A series withheld as
+        # not meaningful for this company is neither (it is named above).
         failed = _failed_legs(degraded)
-        missing = [key for key, *_r in _GROWTH_SERIES if key not in found]
+        missing = [key for key, *_r in _GROWTH_SERIES if key not in found and key not in withheld]
         unloaded = [key for key in missing if f"{span}_{_SERIES_STATEMENT[key]}" in failed]
         absent = [key for key in missing if key not in unloaded]
         if unloaded:

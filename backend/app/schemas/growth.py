@@ -15,6 +15,15 @@ class GrowthDataPointSchema(BaseModel):
     sector_average_qoq: Optional[float] = None   # sector peers' median QoQ % (quarterly only)
 
 
+# The series only Ask Cay AI reads (2026-11-14). No chart draws them, so the iOS `/growth` route
+# (`response_model_exclude`) and the report's frozen `growth_chart` leave them out (~25 KB raw
+# per payload at 16 years + 80 quarters); GrowthService still builds them for the chat tool.
+GROWTH_CHAT_ONLY_SERIES: frozenset = frozenset({
+    "operating_cash_flow_annual", "operating_cash_flow_quarterly",
+    "capital_expenditure_annual", "capital_expenditure_quarterly",
+})
+
+
 class GrowthResponse(BaseModel):
     symbol: str
     # The profile's FMP industry, for the Growth card's `score_excluded_rows`. None on a failed
@@ -30,6 +39,21 @@ class GrowthResponse(BaseModel):
     operating_profit_quarterly: List[GrowthDataPointSchema] = []
     free_cash_flow_annual: List[GrowthDataPointSchema] = []
     free_cash_flow_quarterly: List[GrowthDataPointSchema] = []
+    # CHAT-ONLY (2026-11-14, owner decision "Yes, add capex"): Ask Cay AI's financials tool
+    # reads them; no chart draws them, they never carry a peer median (`sector_average_yoy`
+    # is always None) and have no `peer_group_levels` key. Capital expenditure is the cash
+    # SPENT, a POSITIVE amount (the statement files it negative), so its YoY is the change in
+    # spending. Additive: iOS `GrowthResponseDTO` (StockRepository.swift) decodes through
+    # explicit CodingKeys and ignores them; the report's frozen `growth_chart` leaves them out.
+    operating_cash_flow_annual: List[GrowthDataPointSchema] = Field(default_factory=list)
+    operating_cash_flow_quarterly: List[GrowthDataPointSchema] = Field(default_factory=list)
+    capital_expenditure_annual: List[GrowthDataPointSchema] = Field(default_factory=list)
+    capital_expenditure_quarterly: List[GrowthDataPointSchema] = Field(default_factory=list)
+    # Series hidden because they mean nothing for THIS company — "free_cash_flow" and
+    # "operating_cash_flow" for a bank, insurer, lender or broker (`score_excluded_rows`), whose
+    # cash flows swing with deposits, loans and claims. Empty otherwise. Chat says "not
+    # meaningful for this company", never "missing" (owner decision 2026-11-14 "Hide, say why").
+    series_not_meaningful: List[str] = Field(default_factory=list)
     # The FMP legs that failed in THIS build ("quarterly_income", "profile", ...). Empty
     # for a complete build. Reflects the value actually served — a Tier-1 hit or an
     # in-flight join reports the degradation of the build it hands out — so a client

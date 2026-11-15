@@ -125,7 +125,11 @@ _inflight: Dict[str, asyncio.Future] = {}
 # 7 (2026-11-13, owner decision "Name the periods"): each row with a value carries
 #     `numeric_value`, `peer_median` and `period_label` ("FY2026") for the report Growth
 #     drill-down's card line, and a NaN/inf YoY or median reads as absent. A v6 row has none.
-_SNAPSHOT_PAYLOAD_VERSION = 7
+# 8 (2026-11-14, owner decision "Fix it too"; Growth is v9): the FCF row reads Growth's
+#     `free_cash_flow_annual`, where a year FMP zero-filled is now NO point (a gap) — a v7 row
+#     could score a zero-filled newest year's 0.00 as a -100% FCF growth. The row now reads
+#     the newest year that HAS a figure, named by its own `period_label`.
+_SNAPSHOT_PAYLOAD_VERSION = 8
 _VERSION_KEY = "_schema_v"
 
 # GrowthService legs this card does NOT read: it scores only the newest ANNUAL point of

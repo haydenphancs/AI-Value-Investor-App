@@ -1073,7 +1073,12 @@ async def _continue_cut_answer(
     signals["continuation"] = "failed"
     got_text = False
     cut_again: Optional[str] = None
-    from app.services.chat_service import _chat_thinking_budget
+    from app.services.chat_service import WEB_UNAVAILABLE_ASKED_TAIL, _chat_thinking_budget
+    # The continuation never re-asks for the "a web search is not available right now" sentence
+    # (2026-11-14): the partial answer already said it, and asking again would repeat it mid-answer
+    # against "add no preamble". The plain unavailable line (never claim a search) stays.
+    instruction = (prep.get("system_instruction_no_tools") or prep.get("system_instruction") or "")
+    instruction = instruction.replace(WEB_UNAVAILABLE_ASKED_TAIL, "")
     prompt = (
         f"{prep.get('prompt') or ''}\n\n"
         "Your answer to the USER MESSAGE above was cut off by a length limit. What "
@@ -1094,7 +1099,7 @@ async def _continue_cut_answer(
     try:
         async for kind, text in chat_service.gemini.stream_text(
             prompt,
-            system_instruction=prep.get("system_instruction_no_tools") or prep.get("system_instruction"),
+            system_instruction=instruction or None,
             model_name=model_name,
             max_output_tokens=max_output_tokens,
             thinking_budget=_chat_thinking_budget(model_name),

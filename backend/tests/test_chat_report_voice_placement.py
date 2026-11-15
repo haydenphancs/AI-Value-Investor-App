@@ -213,3 +213,6 @@ def test_the_voice_does_not_depend_on_report_grounding(svc):
     assert ungrounded.count(_LYNCH) == 1
     assert "THE REPORT ON SCREEN:" not in ungrounded
     assert "Describe the report only from report data you were given." in ungrounded
+    # With no report rule beside it, the trailer itself keeps beyond-report questions open.
+    assert ("A question beyond it is still answered, never with a remembered figure, never "
+            "refused for being outside it.") in ungrounded

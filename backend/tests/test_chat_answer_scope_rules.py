@@ -203,6 +203,33 @@ def test_the_report_rule_is_substantive_and_clean():
     assert "never that the report lacks it" in _REPORT_RULE
 
 
+def test_the_report_rule_answers_beyond_the_report_without_a_remembered_figure():
+    """Owner 2026-11-14: "I need Cay AI be able answer things outside of the report too … for data
+    like number, it should prefer what we have in the report" — decision "Tools + web only". The
+    ORCL "how much does Oracle invest in data centers" turn stopped at "The report does not
+    provide…" because the rule's only exit was unscoped."""
+    rule = _REPORT_RULE
+    # A question beyond the report is answered, in this order of sources.
+    assert "A question that goes beyond the report" in rule
+    assert ("Caydex's data and tools first, then a web search when one is available on this "
+            "turn, and your general knowledge only for stable background, never for a figure") in rule
+    assert "never decline a question because the report does not cover it" in rule
+    assert "this part is not from the report" in rule
+    # The report's figure leads; a later-dated Caydex figure follows as the current one.
+    assert "lead with the report's figure, its period and the report date" in rule
+    assert "later-dated figure for the same item, give it next, with its own period, as the current one" in rule
+    # The broader-view licence never carries a figure (no remembered numbers).
+    assert "clearly labelled as your broader view and never with a figure" in rule
+    # The honest exit is scoped to claims ABOUT the report, and names "does not provide".
+    assert "does not cover something about the report, say it is not in what you were given" in rule
+    assert "does not mention it or does not provide it" in rule
+    # Retired: the unscoped exit that ended the ORCL answer.
+    assert "If the report data you were given does not cover something, say" not in rule
+    # Never a promise of a specific tool (the kill switch can withdraw any of them).
+    for name in TOOL_DESCRIPTIONS:
+        assert name not in rule, name
+
+
 @pytest.mark.parametrize("asset_type", _ASSET_TYPES)
 @pytest.mark.parametrize("tools_granted", [True, False])
 @pytest.mark.parametrize("is_deep_dive", [False, True])
@@ -639,6 +666,7 @@ _TIER_RULES = {
 }
 _ONE_LINERS = {
     "unavailable": ChatService._WEB_UNAVAILABLE_RULE,
+    "unavailable_asked": ChatService._WEB_UNAVAILABLE_ASKED_RULE,
     "on_request": ChatService._WEB_ON_REQUEST_RULE,
     "none": ChatService._WEB_NONE_RULE,
 }
@@ -693,6 +721,11 @@ def test_the_auto_rule_is_a_fallback_never_for_market_data_and_never_names_a_lim
                    "never to restate or check a Caydex figure", "at most once",
                    "never mention a search limit"):
         assert phrase in rule, phrase
+    # 2026-11-14 (owner: answer beyond the report; decision "On now, every chat"): the fallback
+    # covers announced plans, investments and commitments, and any recent fact Caydex lacks.
+    assert ("a company's announced plans, investments, spending commitments, deals, partnerships "
+            "or strategy") in rule
+    assert "any other recent fact outside Caydex's data" in rule
     assert "daily web-search limit" not in rule
     assert "explicitly asked" not in rule and "the user asked" not in rule.lower()
 
@@ -714,6 +747,13 @@ def test_the_none_and_on_request_lines_say_what_they_must():
     ({"web_search_granted": True, "web_search_tier": "auto", "web_ask_kind": "news"},
      ChatService._AUTO_WEB_RULE),
     ({"web_search_unavailable": True}, ChatService._WEB_UNAVAILABLE_RULE),
+    ({"web_search_unavailable": True, "web_search_asked": True},
+     ChatService._WEB_UNAVAILABLE_ASKED_RULE),
+    # A granted tier wins over the asked flag.
+    ({"web_search_granted": True, "web_search_asked": True}, ChatService._WEB_RESULTS_RULE),
+    # The asked flag never replaces the on-request or none lines.
+    ({"web_search_on_request": True, "web_search_asked": True}, ChatService._WEB_ON_REQUEST_RULE),
+    ({"web_search_none": True, "web_search_asked": True}, ChatService._WEB_NONE_RULE),
     ({"web_search_on_request": True}, ChatService._WEB_ON_REQUEST_RULE),
     ({"web_search_none": True}, ChatService._WEB_NONE_RULE),
     # A granted tier wins over every one-liner flag (a caller passing both is a bug, not a merge).
@@ -735,6 +775,11 @@ def test_a_tool_less_build_of_any_web_turn_gets_only_the_one_liner(tier, ask):
                    web_ask_kind=ask)
     assert _web_lines(instr) == 1 and instr.count(ChatService._WEB_UNAVAILABLE_RULE) == 1
     assert _AUTO_CLAUSE not in instr
+    # Its tool round or a specialist may already have searched: never "not available".
+    asked = _instr("STOCK", tools_granted=False, web_search_granted=True, web_search_tier=tier,
+                   web_ask_kind=ask, web_search_asked=True)
+    assert ChatService._WEB_UNAVAILABLE_ASKED_TAIL not in asked
+    assert _web_lines(asked) == 1 and asked.count(ChatService._WEB_UNAVAILABLE_RULE) == 1
 
 
 @pytest.mark.parametrize("asset_type", _ASSET_TYPES)
@@ -761,3 +806,135 @@ def test_the_capability_line_follows_the_tier(kw, mode):
     for other, text in WEB_SEARCH_TIER_CAPABILITIES.items():
         if other != mode:
             assert text not in instr, other
+
+
+# ── The asked half of the unavailable line (2026-11-14) ─────────────────────────
+# "Search for me, how much Oracle invest in data center?" on a backend with no search key got an
+# answer that never said the requested search could not run. An EXPLICIT ask that no tier serves
+# is now told so in one sentence — never a news ask (Caydex's headlines answer it), never a
+# market-data ask (the web never serves one), never an automatic turn (no ask), never a tool-less
+# build of a granted turn.
+
+def test_the_asked_rule_extends_the_unavailable_line():
+    rule = ChatService._WEB_UNAVAILABLE_ASKED_RULE
+    assert rule.startswith(ChatService._WEB_UNAVAILABLE_RULE)
+    assert rule.count(_WEB_NONE_SENTINEL) == 1 and _WEB_SENTINEL not in rule
+    assert "never say you searched the web" in rule
+    assert "say in one short sentence that a web search is not available right now" in rule
+    assert "answer as fully as you can from Caydex's data" in rule
+
+
+@pytest.mark.parametrize("asset_type", _ASSET_TYPES)
+@pytest.mark.parametrize("tools_granted", [True, False])
+def test_the_asked_tail_renders_only_for_an_unserved_ask(asset_type, tools_granted):
+    tail = ChatService._WEB_UNAVAILABLE_ASKED_TAIL
+    asked = _instr(asset_type, tools_granted=tools_granted, web_search_unavailable=True,
+                   web_search_asked=True)
+    assert asked.count(tail) == 1 and _web_lines(asked) == 1
+    plain = _instr(asset_type, tools_granted=tools_granted, web_search_unavailable=True)
+    assert tail not in plain and plain.count(ChatService._WEB_UNAVAILABLE_RULE) == 1
+    # The flag alone draws no line at all.
+    alone = _instr(asset_type, tools_granted=tools_granted, web_search_asked=True)
+    assert tail not in alone and _web_lines(alone) == 0
+
+
+def _decision(**kw):
+    from app.services.chat_web_search_service import WebSearchDecision
+    return WebSearchDecision(**kw)
+
+
+@pytest.mark.parametrize("decision,expected", [
+    (dict(ask_kind="explicit", unavailable=True, reason="no_key"), True),
+    (dict(ask_kind="explicit", unavailable=True, reason="app_version", explicit_open=True), True),
+    # A news ask is answered from Caydex's licensed headlines.
+    (dict(ask_kind="news", unavailable=True, reason="no_key"), False),
+    # A market-data ask is never a web question.
+    (dict(ask_kind="explicit", unavailable=True, reason="no_key", market_data=True), False),
+    # No ask: an automatic turn that could not run, a decision failure.
+    (dict(unavailable=True, reason="auto_budget"), False),
+    (dict(unavailable=True, reason="error"), False),
+    (dict(ask_kind="", unavailable=True, reason="no_key"), False),
+    (dict(ask_kind="explicit", on_request=True, reason="no_ask"), False),
+])
+def test_the_asked_flag_matrix(decision, expected):
+    flags = ChatService._web_prompt_flags(_decision(**decision), None)
+    assert flags["web_search_asked"] is expected
+    if expected:
+        assert flags["web_search_unavailable"] is True
+
+
+@pytest.mark.parametrize("decision", [None, "garbage", 3, object()])
+def test_the_asked_flag_is_false_for_a_non_decision(decision):
+    assert ChatService._web_prompt_flags(decision, None)["web_search_asked"] is False
+    assert ChatService._web_prompt_flags_dropped(decision)["web_search_asked"] is False
+
+
+def test_a_granted_turn_is_never_told_the_search_is_unavailable():
+    from app.services.chat_web_search_service import WebSearchTurn
+    turn = WebSearchTurn(user_id="u-1", ticker="ORCL", tier="report_explicit", ask_kind="explicit")
+    flags = ChatService._web_prompt_flags(
+        _decision(tier="report_explicit", ask_kind="explicit", explicit_open=True), turn)
+    assert flags["web_search_granted"] is True
+    assert flags["web_search_asked"] is False and flags["web_search_unavailable"] is False
+
+
+@pytest.mark.parametrize("decision", [
+    dict(tier="auto", ask_kind="explicit"),
+    dict(tier="auto", ask_kind="explicit", explicit_open=True),
+    dict(tier="auto", explicit_open=True),
+    dict(tier="auto"),
+    dict(tier="auto", ask_kind="news"),
+])
+def test_the_dropped_search_flags_match_the_send_door_fallback(decision):
+    """The stream drops an automatic search on a synthesis route and hands its send-door fallback
+    `decision_without_web(...)`: both builds must render the same web line."""
+    from app.services.chat_web_search_service import decision_without_web
+    d = _decision(**decision)
+    dropped = ChatService._web_prompt_flags_dropped(d)
+    fallback = ChatService._web_prompt_flags(decision_without_web(d), None)
+    for key in ("web_search_granted", "web_search_unavailable", "web_search_asked",
+                "web_search_on_request", "web_search_none"):
+        assert dropped[key] == fallback[key], (key, decision)
+    assert dropped["web_search_asked"] is (decision.get("ask_kind") == "explicit"
+                                           and not decision.get("explicit_open", False))
+
+
+def test_the_auto_clause_credits_a_searched_figure_and_names_announced_plans():
+    clause = ChatService._KNOWLEDGE_AUTO_WEB_CLAUSE
+    assert "a figure found that way is given with its publisher and date, never as Caydex's" in clause
+    assert "a company's announced plans, investments, spending commitments or deals" in clause
+    assert "A figure Caydex's data holds never comes from the web" in clause
+
+
+@pytest.mark.parametrize("body", ["_WEB_RESULTS_BODY", "_WEB_RESULTS_BODY_GENERAL"])
+def test_an_announced_plan_is_a_dated_event_not_a_restated_figure(body):
+    """With capital expenditure in Caydex's financials (2026-11-14), CAYDEX FIGURE ONLY must not
+    withhold an announced data-center commitment as "the same item" as a past capex."""
+    text = getattr(ChatService, body)
+    assert ("A plan, commitment or guidance the company announced is such a dated event, not the "
+            "same item as a past filed figure.") in text
+
+
+# ── A ceiling for the REPORT-chat build (2026-11-14) ────────────────────────────
+# The per-asset ceilings in test_chat_capability_block measure a plain chat; a report chat adds
+# the report rule (which grew by ~0.7k chars on 2026-11-14 to answer beyond the report), the mode
+# voice and, with the automatic tier on in production, the fallback rule. Measured 2026-11-14 with
+# the bill_ackman voice (the longest), a one-line report stub and the date line off: plain 19,616;
+# automatic tier granted 22,937. The ceiling makes further growth a decision, not a drift.
+_REPORT_BUILD_CEILING = 24_000
+
+
+@pytest.mark.parametrize("kw", [
+    {},
+    {"web_search_unavailable": True, "web_search_asked": True},
+    {"web_search_on_request": True},
+    {"web_search_granted": True, "web_search_tier": "report_explicit", "web_ask_kind": "explicit"},
+    {"web_search_granted": True, "web_search_tier": "auto"},
+])
+def test_a_report_chat_build_stays_under_its_ceiling(kw):
+    instr = _svc()._build_system_instruction(
+        "REPORT", "ORCL", asset_type="STOCK", tools_granted=True, include_today_line=False,
+        report_grounded=True, client_context="The user is viewing the Cay report for ORCL.",
+        reference_id="ORCL|bill_ackman|r1", report_persona_key="bill_ackman", **kw)
+    assert instr.count(_REPORT_SENTINEL) == 1
+    assert len(instr) <= _REPORT_BUILD_CEILING, (kw, len(instr))

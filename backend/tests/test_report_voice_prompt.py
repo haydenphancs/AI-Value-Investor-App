@@ -251,6 +251,11 @@ def test_the_trailer_keeps_the_scope_rules_open(key):
     low = _block(key).lower()
     assert "keep to the company" not in low
     assert "no talk of feelings or the relationship" in low
+    # 2026-11-14 (owner: report chat answers beyond the report too): describing the REPORT stays
+    # limited to report data, and a question beyond it is still answered.
+    assert "describe the report only from report data you were given." in low
+    assert ("a question beyond it is still answered, never with a remembered figure, never refused "
+            "for being outside it.") in low
 
 
 # ── Identity lines ────────────────────────────────────────────────────────────

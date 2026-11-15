@@ -75,6 +75,15 @@ from app.services.chat_web_search_service import (
     web_results_delivered,
     web_search_mode,
 )
+from app.services.chat_intent import WEB_ASK_EXPLICIT
+
+# The asked half of the unavailable web line (2026-11-14; `ChatService._WEB_UNAVAILABLE_ASKED_RULE`).
+# Module-level so the stream door's cut-answer continuation can strip it without reaching
+# through the class (`endpoints.chat._continue_cut_answer`).
+WEB_UNAVAILABLE_ASKED_TAIL = (
+    "This question asked for a web search or a check: say in one short sentence that a web "
+    "search is not available right now, then answer as fully as you can from Caydex's data. "
+)
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
 from app.services.chart_helper import _finite_or_none, fetch_chart_data
@@ -1245,14 +1254,32 @@ class ChatService:
         them."""
         granted = web_turn is not None
         d = decision if isinstance(decision, WebSearchDecision) else WebSearchDecision()
+        unavailable = (not granted) and d.unavailable
         return dict(
             web_search_granted=granted,
             web_search_tier=web_turn.tier if granted else None,
             web_ask_kind=web_prompt_kind(web_turn, allowed) if granted else None,
-            web_search_unavailable=(not granted) and d.unavailable,
+            web_search_unavailable=unavailable,
+            # The user asked for a search no tier can serve: they are told so in one sentence.
+            web_search_asked=unavailable and ChatService._web_search_asked(d),
             web_search_on_request=(not granted) and d.on_request,
             web_search_none=(not granted) and d.none_line,
         )
+
+    @staticmethod
+    def _web_search_asked(decision: Any) -> bool:
+        """The message EXPLICITLY asked for a web search or a check (2026-11-14) — the asked half
+        of the unavailable line (`_WEB_UNAVAILABLE_ASKED_RULE`). Never a NEWS ask (Caydex's
+        licensed headlines answer it, so "a web search is not available" would be a non sequitur),
+        never a market-data ask (the web never serves one by policy) and never an automatic turn
+        (no ask: a search the user never asked for is never announced). Never raises."""
+        try:
+            return (isinstance(decision, WebSearchDecision)
+                    and decision.ask_kind == WEB_ASK_EXPLICIT
+                    and not decision.market_data)
+        except Exception as e:  # noqa: BLE001 — a prompt flag must never break a turn
+            logger.warning("web search: asked-flag read failed (%s) — plain line", type(e).__name__)
+            return False
 
     @staticmethod
     def _web_prompt_flags_dropped(decision: Optional[WebSearchDecision]) -> Dict[str, Any]:
@@ -1262,7 +1289,10 @@ class ChatService:
         explicit_open = isinstance(decision, WebSearchDecision) and decision.explicit_open
         return dict(
             web_search_granted=False, web_search_tier=None, web_ask_kind=None,
-            web_search_unavailable=not explicit_open, web_search_on_request=explicit_open,
+            web_search_unavailable=not explicit_open,
+            # Parity with the send-door fallback, which is handed `decision_without_web(...)`.
+            web_search_asked=(not explicit_open) and ChatService._web_search_asked(decision),
+            web_search_on_request=explicit_open,
             web_search_none=False,
         )
 
@@ -3693,17 +3723,40 @@ class ChatService:
     # pass-through or timed-out resolve the fenced text is the client's, and must never be
     # promoted to "what the report shows". No tool identifiers (test_chat_capability_block)
     # and none of the injection words test_chat_prompt_fencing forbids.
+    #
+    # Beyond the report (owner 2026-11-14: "I need Cay AI be able answer things outside of the
+    # report too … for data like number, it should prefer what we have in the report"; decision
+    # "Tools + web only"). The ORCL "how much does Oracle invest in data centers" turn ended at
+    # "The report does not provide…": the rule's only unscoped sentence was "if the report data
+    # does not cover something, say it is not in what you were given", which read as the whole
+    # answer to a question the report was never about. Now a question beyond the report is
+    # answered like any other chat question — Caydex's data and tools, then a web search when one
+    # runs on the turn, memory only for stable background and never for a figure (the company
+    # tier of WHAT YOU KNOW is unchanged); a figure the report holds leads, with its period and
+    # the report date, and a later-dated Caydex figure follows as the current one (CAYDEX DATA
+    # FIRST's "the later-dated one is current"); the honest exit is scoped to claims about the
+    # report. The "broader view" licence never carries a figure.
     _REPORT_GROUNDING_RULE = (
         "\nTHE REPORT ON SCREEN: The user is reading a Cay research report, and the report data "
         "in the CLIENT CONTEXT block below is what that report shows. When a question is about "
         "the report itself — its lists, rankings, scores, thesis, competitors and risks, or how "
         "it defines a score or an order — answer from that report data first and explain the "
         "report's own definition. Your general knowledge may add a second point, clearly "
-        "labelled as your broader view, but it must never contradict or deny what the report "
-        "shows. For today's price or anything else that moves with the market, use the LIVE "
-        "QUOTE line or a tool result when you have one, and give the report's own figure as of "
-        "the report date. If the report data you were given does not cover something, say it "
-        "is not in what you were given — never that the report lacks it or does not mention it. "
+        "labelled as your broader view and never with a figure, but it must never contradict or "
+        "deny what the report shows. For today's price or anything else that moves with the "
+        "market, use the LIVE QUOTE line or a tool result when you have one, and give the "
+        "report's own figure as of the report date. For any other figure the report holds, lead "
+        "with the report's figure, its period and the report date; when Caydex's data has a "
+        "later-dated figure for the same item, give it next, with its own period, as the current "
+        "one. A question that goes beyond the report — a newer period, an announced plan, "
+        "investment or deal, the company's strategy, the wider market or any other topic — is "
+        "answered like any other question in this chat: Caydex's data and tools first, then a "
+        "web search when one is available on this turn, and your general knowledge only for "
+        "stable background, never for a figure. Say in a few words that this part is not from "
+        "the report (for example 'Beyond the report, …'), and never decline a question because "
+        "the report does not cover it. When the report data you were given does not cover "
+        "something about the report, say it is not in what you were given — never that the "
+        "report lacks it, does not mention it or does not provide it. "
     )
     # ── Ask Cay AI's web search (2026-10-02; tiers and "Caydex figure only" 2026-10-08) ────
     # The trusted half of the `web_search` tool, rendered ONLY on a turn whose decision granted a
@@ -3716,7 +3769,10 @@ class ChatService:
     # automatic fallback (`_AUTO_WEB_RULE`, never forced) — over ONE shared body. CAYDEX FIGURE
     # ONLY (owner decision 2026-10-08, replacing the 2026-10-02 side-by-side wording): for an item
     # Caydex's data holds, the answer is the Caydex figure and a differing web figure is never
-    # restated; the web is for what Caydex does not cover and for dated later events. Neutral
+    # restated; the web is for what Caydex does not cover and for dated later events — and an
+    # announced plan, commitment or guidance IS such an event, never "the same item" as a past
+    # filed figure (2026-11-14: with capital expenditure in Caydex's financials tool, Oracle's
+    # announced data-center commitments must not be withheld as a restated capex). Neutral
     # wording ("a web search may run"), because the trigger is also "verify" / "double-check". No
     # tool identifiers (`test_chat_capability_block`), no vendor words, none of the injection words
     # `test_chat_prompt_fencing` forbids (`test_chat_answer_scope_rules` pins all three).
@@ -3732,7 +3788,9 @@ class ChatService:
         "other figure — answer with the Caydex figure and its date, and never restate a different "
         "web figure for that item, not even beside it or as a second view. Use web results only "
         "for what Caydex's data does not cover and for "
-        "dated events after it, each attributed to its publisher and date. Never take a price, "
+        "dated events after it, each attributed to its publisher and date. A plan, commitment or "
+        "guidance the company announced is such a dated event, not the same item as a past "
+        "filed figure. Never take a price, "
         "quote, price change, volume, market capitalisation, index level, exchange rate or other "
         "market data from a web result; those come only from the LIVE QUOTE line, a DELISTED "
         "LISTING line or a market-data tool result. A web search names only the company, its "
@@ -3762,7 +3820,9 @@ class ChatService:
         "ownership stake, a dividend, a date or any other figure — answer with the Caydex figure "
         "and its date, and never restate a different web figure for that item, not even beside it "
         "or as a second view. Use web results only for what Caydex's data does not cover and for "
-        "dated events after it, each attributed to its publisher and date. Never take a price, "
+        "dated events after it, each attributed to its publisher and date. A plan, commitment or "
+        "guidance the company announced is such a dated event, not the same item as a past "
+        "filed figure. Never take a price, "
         "quote, price change, volume, market capitalisation, index level, exchange rate or other "
         "market data from a web result; those come only from the LIVE QUOTE line, a DELISTED "
         "LISTING line or a market-data tool result. A web search names only the company, its "
@@ -3802,10 +3862,11 @@ class ChatService:
     _AUTO_WEB_HEAD = (
         "\nWEB RESULTS: A web search is available on this turn only as a fallback. Answer from "
         "Caydex's data and tools first, and call the web search only after they could not "
-        "answer — for an event, a lawsuit, a product launch, what management said, a calendar, a "
-        "filing's text or a private company. Never call it for prices, quotes, market data, "
-        "exchange rates, the VIX or the DXY, never to restate or check a Caydex figure, and call "
-        "it at most once. "
+        "answer — for an event, a lawsuit, a product launch, what management said, a company's "
+        "announced plans, investments, spending commitments, deals, partnerships or strategy, a "
+        "calendar, a filing's text, a private company, or any other recent fact outside Caydex's "
+        "data. Never call it for prices, quotes, market data, exchange rates, the VIX or the DXY, "
+        "never to restate or check a Caydex figure, and call it at most once. "
     )
     _AUTO_WEB_END = (
         "; if no search ran, or it found nothing useful, follow the result's note and answer "
@@ -3815,12 +3876,17 @@ class ChatService:
     _AUTO_WEB_RULE = _AUTO_WEB_HEAD + _WEB_RESULTS_BODY + _AUTO_WEB_END
     _AUTO_WEB_RULE_GENERAL = _AUTO_WEB_HEAD + _WEB_RESULTS_BODY_GENERAL + _AUTO_WEB_END
     # WHAT YOU KNOW's absent-figure branch, on a turn the automatic tier is granted: a missing
-    # NON-figure fact may be searched instead of declined; a figure Caydex holds never is.
+    # fact may be searched instead of declined — since 2026-11-14 also an announced plan,
+    # investment or commitment, and a figure Caydex's data does NOT hold, given with its publisher
+    # and date, never as Caydex's (owner decision "Tools + web only"); a figure Caydex holds never
+    # comes from the web.
     _KNOWLEDGE_AUTO_WEB_CLAUSE = (
         "\nWHEN CAYDEX'S DATA IS SILENT: On this turn a web search is available as a fallback, so "
         "a missing fact that is not a figure Caydex's data holds — an event, a lawsuit, a product "
-        "launch, what management said, a private company's details — may be searched once "
-        "instead of declined. A figure Caydex's data holds never comes from the web. "
+        "launch, what management said, a company's announced plans, investments, spending "
+        "commitments or deals, a private company's details — may be searched once instead of "
+        "declined, and a figure found that way is given with its publisher and date, never as "
+        "Caydex's. A figure Caydex's data holds never comes from the web. "
     )
     # The other half: the user asked to search / verify, but no search can run on this call —
     # the decision closed every tier (`web_search_intent_unserved`), the automatic tier cannot run
@@ -3830,6 +3896,15 @@ class ChatService:
     _WEB_UNAVAILABLE_RULE = (
         "\nWEB SEARCH: No web search is available on this turn; never say you searched the web. "
     )
+    # The ASKED half (owner, 2026-11-14 — "Search for me, how much Oracle invest in data center?"
+    # answered as if nobody had asked): the message explicitly asked for a search or a check and
+    # no tier opened, so the user is told in one sentence, then answered. Built ON the line above,
+    # so "never say you searched the web" stays word for word and one `WEB SEARCH:` line renders.
+    # Never on a news ask (Caydex's headlines answer it), a market-data ask (the web never serves
+    # one), an automatic turn (a search nobody asked for is never announced) or a tool-less build
+    # of a GRANTED turn (its tool round or a specialist may have searched) — `_web_search_asked`.
+    _WEB_UNAVAILABLE_ASKED_TAIL = WEB_UNAVAILABLE_ASKED_TAIL
+    _WEB_UNAVAILABLE_ASKED_RULE = _WEB_UNAVAILABLE_RULE + _WEB_UNAVAILABLE_ASKED_TAIL
     # A chat where an explicit web search IS available (report chat, or every-chat search for this
     # caller), on a turn that did not ask for it: the model had no word about it and told a user
     # "I do not have the ability to browse the web" (owner test 2026-10-03). It points the user at
@@ -3869,6 +3944,7 @@ class ChatService:
         web_search_tier: Optional[str] = None,
         web_ask_kind: Optional[str] = None,
         web_search_none: bool = False,
+        web_search_asked: bool = False,
     ) -> str:
         # `include_today_line`: the date line (`_today_line`) — on by default, on every build
         # (tool-less, fallback and continuation included); off only for an answer that is
@@ -3896,6 +3972,11 @@ class ChatService:
         # `web_search_unavailable`: no search can run on this turn although one was asked for
         # (`web_search_intent_unserved`) — the one-line `_WEB_UNAVAILABLE_RULE`, so the model
         # never claims a search.
+        #
+        # `web_search_asked` (2026-11-14): read ONLY with `web_search_unavailable` on a build with
+        # no granted tier — the message explicitly asked for a search or a check
+        # (`_web_search_asked`), so `_WEB_UNAVAILABLE_ASKED_RULE` tells the user in one sentence
+        # that none can run. A tool-less build of a GRANTED turn ignores it.
         #
         # `web_search_tier` / `web_ask_kind` (the turn's `WebSearchTurn`): which granted rule —
         # the automatic fallback (`_AUTO_WEB_RULE`), a news ask (`_WEB_NEWS_RULE`) or an explicit
@@ -4159,8 +4240,13 @@ class ChatService:
                 base += self._WEB_NEWS_RULE if report_web else self._WEB_NEWS_RULE_GENERAL
             else:
                 base += self._WEB_RESULTS_RULE if report_web else self._WEB_RESULTS_RULE_GENERAL
-        elif web_search_granted or web_search_unavailable:
+        elif web_search_granted:
+            # A tool-less build of a granted turn: no results in front of it, and its tool round
+            # or a specialist may already have searched — so never "not available" (plain line).
             base += self._WEB_UNAVAILABLE_RULE
+        elif web_search_unavailable:
+            base += (self._WEB_UNAVAILABLE_ASKED_RULE if web_search_asked
+                     else self._WEB_UNAVAILABLE_RULE)
         elif web_search_on_request:
             base += self._WEB_ON_REQUEST_RULE
         elif web_search_none:

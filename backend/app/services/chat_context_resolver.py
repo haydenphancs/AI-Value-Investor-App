@@ -1998,9 +1998,13 @@ class ChatContextResolver:
         parts = list(lead)
         if dump:
             parts.append("Report data the user can see (an excerpt; long sections are shortened):\n" + dump)
+        # Scoped to the REPORT (owner 2026-11-14: report chat answers questions beyond the report
+        # too — the trusted report rule says how). The "\nAnswer grounded in THIS report" prefix
+        # is the split marker tests read.
         parts.append(
-            "Answer grounded in THIS report and never invent figures. If something is not in "
-            "this excerpt, say it was not included here, never that the report lacks it."
+            "Answer grounded in THIS report for questions about it, and never invent figures. If "
+            "part of the report is not in this excerpt, say it was not included here, never that "
+            "the report lacks it."
         )
         return "\n".join(parts)
 

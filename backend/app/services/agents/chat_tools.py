@@ -448,13 +448,15 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "`section` picks the depth: summary (the default: key stats, the latest fiscal year and "
         "quarter, margins, the last earnings result and the next report date, valuation "
         "multiples, and the balance sheet's debt and cash), growth (revenue, EPS, net income, "
-        "operating income and free cash flow by fiscal year and quarter, with year-over-year "
-        "change), margins, health (debt, cash, liquidity and leverage), earnings (results "
+        "operating income, free cash flow, operating cash flow and capital expenditure by fiscal "
+        "year and quarter, with year-over-year change), margins, health (debt, cash, liquidity "
+        "and leverage), earnings (results "
         "against analysts' estimates and the next report date), estimates (analysts' forward "
         "revenue and EPS estimates, when available), valuation (multiples and a fair-value "
         "model estimate), segments (revenue by business segment) or dividends (yield, "
         "per-share history, ex-dividend date and stock splits). Call it before answering any "
-        "question about a company's revenue, earnings, EPS, margins, growth, cash flow, debt, "
+        "question about a company's revenue, earnings, EPS, margins, growth, cash flow, capital "
+        "expenditure, debt, "
         "cash, valuation multiples, fair value, dividends, splits, earnings dates or results, "
         "or analysts' revenue or EPS estimates, and never answer those figures from memory. "
         "Only the latest periods are listed unless `period` names one (FY2019, Q3 2019): set it "
@@ -602,7 +604,8 @@ WEB_SEARCH_TIER_DESCRIPTIONS: Dict[str, str] = {
     "auto": (
         "Search the public web as a FALLBACK: call it only after Caydex's data and tools could "
         "not answer — for example an event, a lawsuit or regulatory action, a product launch, "
-        "what management said, an IPO or economic calendar, a filing's text or a private "
+        "what management said or announced (plans, investments, spending commitments, deals, "
+        "partnerships), an IPO or economic calendar, a filing's text or a private "
         "company — and at most once. Never call it to restate or check a figure Caydex's data "
         "holds. " + _WEB_QUERY_GUIDE + " " + _WEB_NEVER_MARKET
     ),

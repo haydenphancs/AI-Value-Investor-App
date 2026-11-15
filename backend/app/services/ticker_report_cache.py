@@ -389,7 +389,13 @@ TABLE_NAME = "ticker_report_cache"
 #     collections carry the GAAP timeline with that change blank. SCORER_VERSION stays. Same
 #     rule: a PAST instant, moved to the push time if the deploy lands later. This ONE bump
 #     supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 11, 14, 22, 50, 0, tzinfo=timezone.utc)
+# 2026-11-15 (00:59 UTC = 19:59 ET Saturday, after the close; the push, owner's "run the full
+#     suite and push"): moved to the push moment for the five commits it ships (report-day
+#     earnings dots, Future Forecast numbers, adjusted EPS + the price line on year-ends, and
+#     the Health / drill-down work beside them), so a collection the old code writes before
+#     the deploy is not served as fresh. The full suite ran on 3f2c5ee0 (79,879 passed); this
+#     floor-only commit adds nothing else. This ONE bump supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 11, 15, 0, 59, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

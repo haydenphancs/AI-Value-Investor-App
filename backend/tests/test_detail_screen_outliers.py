@@ -2163,6 +2163,16 @@ class _FakeCorporateActions:
         self.calls += 1
         return list(self.ex_dates)
 
+    async def get_dividend_events(self, symbol, from_date=None, to_date=None):
+        """The ETF screens read events (date + estimate); same counter, same dates."""
+        from app.services.corporate_actions_service import AdjustmentEvent
+
+        await asyncio.sleep(0)
+        self.calls += 1
+        # Four quarterly payments of $1.675 on $100 = the profile's lastDividend 6.7, so
+        # the build takes FMP's figure (the normal path); the override has its own suite.
+        return [AdjustmentEvent(d, 1 - 1.675 / 100.0, prev_close=100.0) for d in self.ex_dates]
+
 
 def _etf_svc(monkeypatch):
     """An ETFService with no __init__ (no FMP/Supabase) and no Gemini."""
@@ -2429,6 +2439,12 @@ async def test_etf_side_endpoints_reuse_the_detail_fundamentals(monkeypatch):
     # once said "Pays Quarterly" while this endpoint said "—").
     assert svc.corporate_actions.calls == 2
     assert detail.net_yield.pay_frequency == divs.pay_frequency == "Quarterly"
+    # The derived trailing total agrees with the profile, so FMP's figure stands (the
+    # override path lives in test_etf_derived_dividend_history.py).
+    from app.services.etf_service import dividend_yield_from_profile
+    assert detail.net_yield.dividend_yield == dividend_yield_from_profile(
+        {"lastDividend": 6.7}, detail.current_price
+    )[0]
 
 
 @pytest.mark.asyncio

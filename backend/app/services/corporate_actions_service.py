@@ -94,7 +94,7 @@ import asyncio
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from fractions import Fraction
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -129,8 +129,11 @@ _FACTOR_EPS = 0.005
 #:
 #: ⚠️ KNOWN FLOOR: a token dividend is undetectable this way. NVDA yields ~0.02% and only
 #: ONE of its payments (1.16e-03) clears the noise; the rest sit at ~8e-05, indistinguishable
-#: from price rounding. Ex-dividend dates are therefore best-effort for very low yielders —
-#: which is why nothing derives an AMOUNT from them (see `get_ex_dividend_dates`).
+#: from price rounding. Ex-dividend dates are therefore best-effort for very low yielders.
+#: AMOUNTS are an ESTIMATE only (`estimated_dividend_amount`): measured +0.9% .. +2.7% high
+#: against SOXX's published distributions. They are printed only on the ETF dividend
+#: history, always marked "≈" (owner decision 2026-11-14) — never as an exact figure, and
+#: never for a stock (Signal of Confidence takes its amounts from `ratios`).
 _DIVIDEND_FACTOR_EPS = 4e-4
 
 #: Relative error allowed when snapping an observed factor to a rational.
@@ -288,6 +291,12 @@ class AdjustmentEvent:
     observed: float
     numerator: Optional[int] = None
     denominator: Optional[int] = None
+    #: The ADJUSTED (`/full`) close of the session before ``date`` — what a dividend step
+    #: is a fraction of, so ``prev_close * (1 - observed)`` estimates the per-share amount
+    #: on today's share basis. In-memory only: never written to the Supabase tier, so a
+    #: stored event reads back ``None`` and its amount is "unknown", never guessed.
+    #: ``compare=False`` keeps equality on the event itself (stored vs derived rows).
+    prev_close: Optional[float] = field(default=None, compare=False)
 
     @property
     def is_split(self) -> bool:
@@ -361,7 +370,7 @@ def derive_adjustment_events(
 
     events: List[AdjustmentEvent] = []
     for i in range(1, len(factors)):
-        _, f_prev = factors[i - 1]
+        d_prev, f_prev = factors[i - 1]
         d_cur, f_cur = factors[i]
         ratio = f_prev / f_cur
         if not math.isfinite(ratio) or ratio <= 0:
@@ -378,9 +387,64 @@ def derive_adjustment_events(
                 observed=ratio,
                 numerator=frac.numerator if frac else None,
                 denominator=frac.denominator if frac else None,
+                prev_close=adjusted.get(d_prev),
             )
         )
     return events
+
+
+#: A dividend step larger than this share of the prior close is not a dividend this module
+#: will put a number on. Real distributions (including December capital-gain payouts) sit
+#: far below it; anything above is a corrupt bar or an unclassified action.
+_MAX_DIVIDEND_SHARE_OF_PRICE = 0.5
+
+
+def dividend_steps(events: Iterable[AdjustmentEvent]) -> List[AdjustmentEvent]:
+    """The steps that can be dividend payments, newest first.
+
+    * A split moves the dividend-adjusted series too: a dividend step is a fraction of a
+      percent, never a factor of 2 (``0.5 < observed``).
+    * A payment can only LOWER the factor (``observed < 1``). A rise is a data artefact.
+    * A down-step that a later step exactly reverses (product within
+      `_DIVIDEND_FACTOR_EPS` of 1, consecutive in date order) is a one-bar glitch or a
+      restatement in FMP's series, not a payment — both are dropped (review 2026-11-14).
+    """
+    ordered = sorted(
+        (ev for ev in events or [] if 0.5 < ev.observed < 2.0), key=lambda ev: ev.date
+    )
+    dropped = set()
+    for i in range(len(ordered) - 1):
+        a, b = ordered[i], ordered[i + 1]
+        if abs(a.observed * b.observed - 1.0) <= _DIVIDEND_FACTOR_EPS:
+            dropped.update((i, i + 1))
+    kept = [
+        ev for i, ev in enumerate(ordered) if i not in dropped and ev.observed < 1.0
+    ]
+    return sorted(kept, key=lambda ev: ev.date, reverse=True)
+
+
+def estimated_dividend_amount(event: AdjustmentEvent) -> Optional[float]:
+    """Per-share amount implied by a dividend step, or ``None`` when it cannot be estimated.
+
+    On the ex-date the dividend-adjusted factor moves by ``1 - D / prev_close``, so
+    ``D = prev_close * (1 - observed)``. It is an ESTIMATE — FMP stores rounded adjusted
+    prices, and measured against SOXX's published distributions it reads +0.9% .. +2.7%
+    high — so callers print it only with "≈" (see `_DIVIDEND_FACTOR_EPS`).
+
+    ``None`` (never 0, never a guess) for: a missing / non-finite / non-positive prior close,
+    a step that is not a payment (``observed >= 1``), or one implying more than
+    `_MAX_DIVIDEND_SHARE_OF_PRICE` of the price.
+    """
+    prev = _finite(getattr(event, "prev_close", None))
+    observed = _finite(getattr(event, "observed", None))
+    if prev is None or observed is None or prev <= _MIN_PRICE:
+        return None
+    amount = prev * (1.0 - observed)
+    if not math.isfinite(amount) or amount <= 0:
+        return None
+    if amount >= prev * _MAX_DIVIDEND_SHARE_OF_PRICE:
+        return None
+    return amount
 
 
 # ── Windows ─────────────────────────────────────────────────────────────────────────────
@@ -996,24 +1060,30 @@ class CorporateActionsService:
             return None
         return sorted((ev.date for ev in events if not ev.is_split), reverse=True)
 
-    async def get_ex_dividend_dates(
+    async def get_dividend_events(
         self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None
-    ) -> List[str]:
-        """Ex-dividend dates, newest first. Verified exact on AAPL (11/11).
+    ) -> List[AdjustmentEvent]:
+        """Dividend steps inside the window, newest first. A failed derivation is `[]`.
 
-        ⚠️ Dates only. The size of each step implies an AMOUNT to only ~0.04-1.2%, which is
-        not good enough to print as money — KO's half-cent dividends do not round to the
-        declared value. Per-share amounts come from ``ratios`` (period=annual), which is
-        entitled and exact.
+        Each event carries ``prev_close`` so :func:`estimated_dividend_amount` can put an
+        ESTIMATED amount on it — the ETF dividend history prints that with "≈" (owner
+        decision 2026-11-14). Stocks never print one: KO's half-cent dividends do not round
+        to the declared value, and Signal of Confidence takes exact per-share amounts from
+        ``ratios`` (period=annual).
         """
         events = await self.get_adjustment_events(
             symbol, from_date, to_date, kind="dividend"
         )
-        # A split moves the dividend-adjusted series too, so drop anything that looks like
-        # one: a dividend step is a fraction of a percent, never a factor of 2.
-        return sorted(
-            (ev.date for ev in events if 0.5 < ev.observed < 2.0), reverse=True
-        )
+        return dividend_steps(events)
+
+    async def get_ex_dividend_dates(
+        self, symbol: str, from_date: Optional[str] = None, to_date: Optional[str] = None
+    ) -> List[str]:
+        """Ex-dividend dates, newest first. Verified exact on AAPL (11/11) and SOXX (5/5).
+
+        Dates only — see :meth:`get_dividend_events` for why no amount rides with them here.
+        """
+        return [ev.date for ev in await self.get_dividend_events(symbol, from_date, to_date)]
 
 
 _service: Optional[CorporateActionsService] = None

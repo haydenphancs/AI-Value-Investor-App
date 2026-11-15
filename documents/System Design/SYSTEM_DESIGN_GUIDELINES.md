@@ -1603,7 +1603,16 @@ and a reader that finds a `trade_date` older than the previous session treats th
 change as unknown rather than serve a multi-session move. `corporate_action_cache`
 holds split / dividend events DERIVED from two entitled price series for a closed
 window; a derivation that could not be performed is stored in NEITHER tier, because a
-stored `[]` is byte-identical to "no split". `crypto_fundamentals_cache` persists only
+stored `[]` is byte-identical to "no split". The same derivation fills the ETF dividend
+history (owner decision 2026-11-14), since FMP's per-payment dividends feed is unlicensed:
+the ex-dates are exact, each amount is an ESTIMATE from the size of the step (shown with
+"≈", measured +0.9% to +2.7% high on SOXX), and the pay date is "—". The prior close
+that the estimate needs (`AdjustmentEvent.prev_close`) is kept in memory only and never
+stored, so an event read back from the table has no amount. The derived trailing total
+replaces FMP's `profile.lastDividend` in the ETF yield only when the two figures disagree
+by more than 25% AND the derived payments are complete for the fund's cadence
+(`etf_service.reconcile_dividend_yield`). FMP did not restate that figure after SOXX's
+3:1 split. Stocks never print a derived amount. `crypto_fundamentals_cache` persists only
 the DURABLE half of a coin's CoinGecko coin payload — supply, description, genesis —
 and the price half (and the rolling returns derived from it) is re-hydrated from one
 live CoinGecko markets row on every hit.

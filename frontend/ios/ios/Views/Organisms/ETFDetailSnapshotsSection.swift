@@ -344,6 +344,15 @@ struct ETFDividendHistoryRow: View {
     let dividendHistory: [ETFDividendPayment]
     @State private var showDividendHistory = false
 
+    /// A row is a payment only when its ex-date is known; "—" means nothing was found.
+    private var hasPayment: Bool { Self.isKnown(lastPayment.exDividendDate) }
+    private var hasPayDate: Bool { Self.isKnown(lastPayment.payDate) }
+
+    private static func isKnown(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        return !trimmed.isEmpty && trimmed != "—"
+    }
+
     var body: some View {
         Button(action: {
             showDividendHistory = true
@@ -369,43 +378,54 @@ struct ETFDividendHistoryRow: View {
                         .foregroundColor(AppColors.textMuted)
                 }
 
-                // Last payment details
-                HStack(spacing: AppSpacing.sm) {
-                    // Dividend Per Share
-                    VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-                        Text("Per Share")
-                            .font(AppTypography.captionSmall)
-                            .foregroundColor(AppColors.textMuted)
-                        Text(lastPayment.dividendPerShare)
-                            .font(AppTypography.caption)
-                            .fontWeight(.semibold)
-                            .foregroundColor(AppColors.bullish)
-                    }
+                // Last payment details. The backend DERIVES the history from price data
+                // (the per-payment feed is unlicensed): ex-dates are exact, amounts are
+                // estimates marked "≈", and pay dates cannot be recovered ("—") — so the
+                // Pay Date column is shown only when one actually arrives.
+                if !hasPayment {
+                    Text("No recent dividend payments found.")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                } else {
+                    HStack(spacing: AppSpacing.sm) {
+                        // Dividend Per Share
+                        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                            Text("Per Share")
+                                .font(AppTypography.captionSmall)
+                                .foregroundColor(AppColors.textMuted)
+                            Text(lastPayment.dividendPerShare)
+                                .font(AppTypography.caption)
+                                .fontWeight(.semibold)
+                                .foregroundColor(AppColors.bullish)
+                        }
 
-                    Spacer()
+                        Spacer()
 
-                    // Ex-Dividend Date
-                    VStack(alignment: .center, spacing: AppSpacing.xxs) {
-                        Text("Ex-Div Date")
-                            .font(AppTypography.captionSmall)
-                            .foregroundColor(AppColors.textMuted)
-                        Text(lastPayment.exDividendDate)
-                            .font(AppTypography.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(AppColors.textSecondary)
-                    }
-                    
-                    Spacer()
+                        // Ex-Dividend Date
+                        VStack(alignment: hasPayDate ? .center : .trailing, spacing: AppSpacing.xxs) {
+                            Text("Ex-Div Date")
+                                .font(AppTypography.captionSmall)
+                                .foregroundColor(AppColors.textMuted)
+                            Text(lastPayment.exDividendDate)
+                                .font(AppTypography.caption)
+                                .fontWeight(.medium)
+                                .foregroundColor(AppColors.textSecondary)
+                        }
 
-                    // Pay Date
-                    VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
-                        Text("Pay Date")
-                            .font(AppTypography.captionSmall)
-                            .foregroundColor(AppColors.textMuted)
-                        Text(lastPayment.payDate)
-                            .font(AppTypography.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(AppColors.textSecondary)
+                        if hasPayDate {
+                            Spacer()
+
+                            // Pay Date
+                            VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
+                                Text("Pay Date")
+                                    .font(AppTypography.captionSmall)
+                                    .foregroundColor(AppColors.textMuted)
+                                Text(lastPayment.payDate)
+                                    .font(AppTypography.caption)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(AppColors.textSecondary)
+                            }
+                        }
                     }
                 }
             }

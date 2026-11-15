@@ -87,17 +87,23 @@ def test_the_yield_context_is_also_gated():
 
 
 def test_both_screens_derive_pay_frequency_from_the_same_source():
-    """The detail card and `GET /etfs/{symbol}/dividends` must not contradict each other."""
+    """The detail card and `GET /etfs/{symbol}/dividends` must not contradict each other.
+
+    Both read `_derived_dividend_events` (one seam call over `_pay_frequency_window()`):
+    the detail build calls it once, and the endpoint's empty-feed branch calls it too.
+    """
     code = _code()
-    assert code.count("get_ex_dividend_dates(") >= 2, (
-        "only one of the two ETF pay-frequency paths derives its dates, so the detail card "
-        "and the dividend-history screen can disagree — SPY said 'Pays Quarterly' on one "
-        "and '—' on the other"
+    assert code.count("get_dividend_events(") == 1, (
+        "the derivation must have ONE call site (`_derived_dividend_events`) shared by "
+        "both screens — SPY once said 'Pays Quarterly' on one and '—' on the other"
+    )
+    assert code.count("self._derived_dividend_events(symbol)") >= 2, (
+        "only one of the two ETF screens derives its dividend events"
     )
     # ...and the endpoint's empty-feed early return must be the one that derives.
     i = code.index("total_dividends=0")
     early_return = code[max(0, i - 1600): i]
-    assert "get_ex_dividend_dates(" in early_return, (
+    assert "self._derived_dividend_events(symbol)" in early_return, (
         "the dividends endpoint returns '—' without attempting the entitled derivation"
     )
 

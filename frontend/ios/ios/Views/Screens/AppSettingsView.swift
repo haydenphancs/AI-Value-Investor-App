@@ -32,6 +32,9 @@ struct AppSettingsView: View {
     @State private var showClearCacheConfirmation = false
     @State private var isRestoring = false
     @State private var restoreMessage: String?
+    /// In-flight guard for "Manage Subscription": presenting Apple's sheet and the refresh
+    /// after it closes. See `openManageSubscription()`.
+    @State private var isOpeningSubscriptions = false
     @State private var cacheSize = "Calculating..."
     /// Set when the App Store subscriptions deep link cannot be opened (the Simulator has no
     /// App Store). An ALERT, not the global toast: `ToastView` is an `.overlay` on `RootView`
@@ -305,52 +308,36 @@ struct AppSettingsView: View {
             Button(action: openManageSubscription) {
                 actionRow(title: "Manage Subscription",
                           subtitle: "Change or cancel in the App Store",
-                          systemImage: "arrow.up.right.square")
+                          systemImage: "arrow.up.right.square",
+                          // The sheet takes a moment to present and the post-sheet refresh is
+                          // two round trips; without this the row looked dead and a second tap
+                          // queued a second sheet.
+                          isBusy: isOpeningSubscriptions)
             }
             .buttonStyle(PlainButtonStyle())
+            .disabled(isOpeningSubscriptions)
+            .opacity(isOpeningSubscriptions ? 0.5 : 1)
 
             Button {
+                guard !isRestoring else { return }
+                isRestoring = true
                 Task {
-                    isRestoring = true
-                    // TWO sweeps, and the first one is the whole point.
+                    defer { isRestoring = false }
+                    // App Store sync, then BOTH sweeps (`StoreKitService.syncAndRestore()`).
                     //
-                    // `restorePurchases()` reads `Transaction.currentEntitlements`, which by
-                    // design EXCLUDES consumables — so a credit pack the user paid for but
-                    // whose `POST /billing/verify` never landed (offline at the moment of
-                    // purchase, a 503, an app kill) was invisible to this button. It answered
-                    // "No previous purchases found for this Apple Account" to someone whose
-                    // money Apple had already taken. Apple does not restore consumables at
-                    // all: the server ledger is the restore mechanism, and
-                    // `Transaction.unfinished` is how the client reaches it. Mirrors
-                    // `BuyCreditsViewModel.restore()`.
-                    let drained = await StoreKitService.shared.drainUnfinishedTransactions()
-                    let restored = await StoreKitService.shared.restorePurchases()
-                    isRestoring = false
-
-                    let seen = drained.seen + restored.seen
-                    let applied = drained.applied + restored.applied
-                    let credits = drained.creditsGranted + restored.creditsGranted
-
-                    // FOUR outcomes. "Nothing to restore" must be reachable ONLY when both
-                    // sweeps came back empty — it used to swallow both "we found it and every
-                    // submission failed" and "there was a credit pack we never even looked at".
-                    if credits > 0 && applied > drained.applied {
-                        restoreMessage = "Restored your subscription and added \(credits) credits."
-                    } else if credits > 0 {
-                        restoreMessage = "Added \(credits) credits from a previous purchase."
-                    } else if applied > 0 {
-                        restoreMessage = "Restored your subscription."
-                    } else if seen > 0 {
-                        let err = AppError.from(
-                            restored.lastError
-                                ?? drained.lastError
-                                ?? AppError.unknown(message: "The purchase couldn't be applied. Please try again.")
-                        )
-                        restoreMessage = "We found your purchase but couldn't restore it: "
-                            + err.message
-                    } else {
-                        restoreMessage = "No previous purchases found for this Apple Account."
-                    }
+                    // The sync is what restores on a new or switched device: without it
+                    // `Transaction.currentEntitlements` holds only what this device already
+                    // knows. The unfinished sweep is the consumable restore: entitlements
+                    // EXCLUDE consumables by design, so a credit pack whose
+                    // `POST /billing/verify` never landed was invisible to this button and it
+                    // answered "No previous purchases found" to someone Apple had charged.
+                    // Mirrors `BuyCreditsViewModel.restore()` and `PaywallViewModel.restore()`.
+                    //
+                    // The copy is classified from what the backend APPLIED, not from counts:
+                    // "Restored your subscription." only when a paid tier was really applied,
+                    // and a purchase that failed beside one that worked is still reported.
+                    let result = await StoreKitService.shared.syncAndRestore()
+                    restoreMessage = result.subscriptionMessage
                 }
             } label: {
                 actionRow(
@@ -757,7 +744,11 @@ struct AppSettingsView: View {
     }
 
     private func openManageSubscription() {
+        // In-flight guard, set synchronously so a double tap cannot queue a second sheet.
+        guard !isOpeningSubscriptions else { return }
+        isOpeningSubscriptions = true
         Task { @MainActor in
+            defer { isOpeningSubscriptions = false }
             // StoreKit's own sheet first. The web page below lists only PRODUCTION
             // subscriptions, so a sandbox subscriber — App Review — tapped "Manage Subscription"
             // and found nothing to manage. The sheet shows whichever environment is live.
@@ -765,6 +756,21 @@ struct AppSettingsView: View {
                 .first(where: { $0.activationState == .foregroundActive }) as? UIWindowScene {
                 do {
                     try await AppStore.showManageSubscriptions(in: scene)
+                    // The sheet has CLOSED. An upgrade or downgrade made in it reaches us as a
+                    // transaction; if its background verify failed it sits unfinished, and the
+                    // screen kept showing the old plan until the next cold launch. Submit it
+                    // now, then re-read the tier and credits regardless — a cancellation
+                    // changes nothing on Apple's side until the period ends, but re-reading is
+                    // cheap and keeps the badge honest. Never `AppStore.sync()` here: that can
+                    // prompt for the Apple Account password, which nobody asked for.
+                    //
+                    // Only for a live session: both calls are `.signInRequired`, so without one
+                    // they fail before any I/O and log a failure that is not one. A session
+                    // still `.restoring` is drained when it authenticates (`onAuthenticated`).
+                    if appState.auth.status == .authenticated {
+                        await StoreKitService.shared.drainUnfinishedTransactions()
+                        await appState.refreshEntitlement()
+                    }
                     return
                 } catch {
                     Self.log.warning("showManageSubscriptions failed, falling back to the App Store URL: \(String(describing: type(of: error)), privacy: .public)")

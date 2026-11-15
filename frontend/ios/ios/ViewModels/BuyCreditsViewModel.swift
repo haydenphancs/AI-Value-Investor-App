@@ -42,6 +42,8 @@ final class BuyCreditsViewModel: ObservableObject {
     /// Ask to Buy / SCA — Apple will deliver later through `Transaction.updates`.
     @Published var isPendingApproval = false
     @Published var restoreMessage: String?
+    /// True while `restore()` runs — the in-flight guard against a second tap.
+    @Published private(set) var isRestoring = false
     /// Presents `PaywallView` on top of this screen.
     @Published var showPlans = false
 
@@ -236,29 +238,44 @@ final class BuyCreditsViewModel: ObservableObject {
 
     /// "Restore" for consumables is the unfinished-transaction sweep, NOT
     /// `Transaction.currentEntitlements` — Apple excludes consumables from entitlements, so
-    /// there is nothing there to restore. Also re-runs `restorePurchases()` so a user who taps
-    /// this because their SUBSCRIPTION is missing is not sent to another screen.
+    /// there is nothing there to restore. `syncAndRestore()` also runs the entitlement sweep,
+    /// so a user who taps this because their SUBSCRIPTION is missing is not sent to another
+    /// screen, and syncs with the App Store first, so it works on a new or switched device.
     func restore() async {
+        // One restore at a time: the App Store sync can show the Apple Account prompt, and a
+        // second tap would queue a second prompt and a second pair of sweeps.
+        guard !isRestoring else { return }
+        isRestoring = true
+        defer { isRestoring = false }
         purchaseError = nil
         restoreMessage = nil
-        let packs = await store.drainUnfinishedTransactions()
-        let subs = await store.restorePurchases()
+        let result = await store.syncAndRestore()
+        let packs = result.drained
+        let subs = result.restored
         let seen = packs.seen + subs.seen
         let applied = packs.applied + subs.applied
 
         if applied > 0 {
             let credits = packs.creditsGranted + subs.creditsGranted
-            restoreMessage = credits > 0
+            // A purchase that failed BESIDE one that worked is still reported: it used to be
+            // dropped whenever anything else succeeded, leaving a paid purchase unapplied
+            // with nothing on screen saying so.
+            restoreMessage = (credits > 0
                 ? "Restored your purchases and added \(credits) credits."
-                : "Restored your purchases."
+                : "Restored your purchases.") + result.partialFailureSuffix
         } else if seen > 0 {
             // THE case the old `Int` return could not express. Apple returned purchases and
             // every submission failed, and the message said "Nothing to restore" — telling a
             // user with an active subscription or an unapplied pack that they never bought
             // anything, and giving them no reason to contact support.
-            let err = AppError.from(packs.lastError ?? subs.lastError ?? AppError.unknown(message: "The purchase couldn't be applied. Please try again."))
+            let err = AppError.from(packs.lastError ?? subs.lastError ?? StoreKitService.unexplainedSweepFailure)
             restoreMessage = "We found \(seen) purchase\(seen == 1 ? "" : "s") but couldn't "
                 + "apply \(seen == 1 ? "it" : "them"): \(err.message)"
+        } else if let syncError = result.syncError {
+            // Nothing found AND the App Store could not be reached: "nothing to restore"
+            // would be a guess, so say what actually happened.
+            restoreMessage = "Couldn't check the App Store for your purchases: "
+                + AppError.from(syncError).message
         } else {
             restoreMessage = "Nothing to restore — this Apple Account has no unapplied purchases."
         }

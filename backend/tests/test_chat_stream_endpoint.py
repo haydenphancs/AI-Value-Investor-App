@@ -501,6 +501,27 @@ def test_an_ungrounded_global_turn_does_consult_the_warm_cache(harness):
     assert warm_calls == ["What's hot today?"]
 
 
+@pytest.mark.parametrize("lens_kwargs", [
+    {"block": "\n\nUSER PREFERENCES (…):\n- Topics they follow: energy.\n"},
+    # A style choice alone (no topics) is still a lens: the chip must be answered live.
+    {"answer_depth": "deep"},
+])
+def test_a_reader_with_a_lens_never_gets_the_shared_starter_answer(harness, monkeypatch, lens_kwargs):
+    """Owner decision 2026-11-15 ("Answer live"): a warmed row is ONE answer written for
+    everyone, so a reader with personalized explanations on gets their chip answered live —
+    with their preferences — not the shared replay. The lens still reaches prep."""
+    from app.services.agents.investor_profile_prompt import ReaderLens
+
+    client, db, quota, warm_calls = harness
+    lens = ReaderLens(**lens_kwargs)
+    monkeypatch.setattr(chat_mod, "_reader_lens_for_async", _async_value(lens))
+    r = _post(client, "What's hot today?")
+    assert r.status_code == 200
+    assert warm_calls == [], "a reader with a lens was served the shared starter answer"
+    prep_calls = _FakeChatService.instances[-1].prep_calls
+    assert prep_calls and prep_calls[-1]["reader_lens"] == lens
+
+
 def test_a_bad_session_is_a_json_404_not_an_sse_frame(harness):
     client, db, quota, _ = harness
 

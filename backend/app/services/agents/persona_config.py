@@ -65,7 +65,7 @@ ADVICE_BOUNDARY = (
     "hold; lay out the bull and bear arguments and the evidence, not an instruction to "
     "trade.\n"
     "Never give PERSONALIZED or suitability advice. If a USER PREFERENCES block appears "
-    "above, it states only how this reader likes to LEARN — their experience level, "
+    "in this instruction, it states only how this reader likes to LEARN — their experience level, "
     "preferred explanation style, and the topics they find interesting. Use it ONLY to "
     "choose what to cover first and how to explain it. It is not financial information "
     "about them. NEVER state or imply that any security, sector, strategy or product is "

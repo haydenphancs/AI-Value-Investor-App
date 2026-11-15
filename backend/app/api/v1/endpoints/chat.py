@@ -7,10 +7,11 @@ Frontend: POST /chat/sessions, GET /chat/sessions,
 """
 
 import asyncio
+import dataclasses
 import json
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import uuid
 
@@ -55,6 +56,9 @@ from app.integrations.gemini import GeminiTimeoutError, _is_clean_finish, is_len
 from app.integrations.gemini import truncate_tool_result
 import time as _time
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
+
+if TYPE_CHECKING:  # imported lazily at run time, inside `_reader_lens_for`
+    from app.services.agents.investor_profile_prompt import ReaderLens
 # Log-only numeric grounding audit (`CHAT_GROUNDING`): counts only, never changes an answer.
 from app.services.chat_numeric_grounding import (
     GroundingEvidence,
@@ -775,7 +779,7 @@ def _may_have_reader_lens(user: dict) -> bool:
         return False
 
 
-async def _reader_lens_for_async(user: dict) -> Optional[str]:
+async def _reader_lens_for_async(user: dict) -> Optional["ReaderLens"]:
     """`_reader_lens_for` without blocking the event loop.
 
     WHY THIS WRAPPER EXISTS. `_reader_lens_for` is synchronous and performs a Supabase
@@ -799,8 +803,8 @@ async def _reader_lens_for_async(user: dict) -> Optional[str]:
     return await asyncio.to_thread(_reader_lens_for, user)
 
 
-def _reader_lens_for(user: dict) -> Optional[str]:
-    """The reader's rendered preference block for this turn, or None. NEVER raises.
+def _reader_lens_for(user: dict) -> Optional["ReaderLens"]:
+    """The reader's lens for this turn (preference block + style choices), or None. NEVER raises.
 
     Best-effort by design: personalization is a presentation nicety, so a profile-store
     hiccup must degrade to the normal, impersonal answer rather than fail the turn. The
@@ -835,7 +839,7 @@ def _reader_lens_for(user: dict) -> Optional[str]:
             )
 
             facts = get_user_memory_facts_service().top_facts(user["id"])
-            lens += render_memory_block(facts)
+            lens = dataclasses.replace(lens, block=lens.block + render_memory_block(facts))
         return lens
     except Exception as e:  # noqa: BLE001 — never let a preference break an answer
         logger.warning(
@@ -2490,7 +2494,7 @@ async def stream_chat_message(
         #
         # `degraded: True` is the honest default: nothing was classified, so `select_model`
         # must keep the flagship model rather than downgrade an unclassified turn.
-        reader_lens: Optional[str] = None
+        reader_lens: Optional["ReaderLens"] = None
         # `warmed` is read AFTER the try (the suggestions step reuses the warmed chips), so it
         # must be bound before it: when prep or the router raises, the gather that binds it
         # never runs, the fallback still delivers and charges the turn, and an unbound name
@@ -2591,8 +2595,15 @@ async def stream_chat_message(
                 and (ctx_type or "").strip().upper() in _NO_CONTEXT
             )
 
+            # Never for a reader with a lens (owner decision 2026-11-15, "Answer live"): the
+            # warmed rows are ONE answer written for everyone, so replaying one to a reader who
+            # turned on personalized explanations ignored their preferences while Settings said
+            # "Cay AI explains things just for you". Their chip tap is answered live instead.
             async def _warm_if_ungrounded():
-                return await _warm_lookup(user_message) if ungrounded_turn else None
+                return (
+                    await _warm_lookup(user_message)
+                    if ungrounded_turn and not reader_lens else None
+                )
 
             if settings.CHAT_MULTI_AGENT_ENABLED:
                 # All three in ONE gather. Awaiting the warm lookup first to decide whether

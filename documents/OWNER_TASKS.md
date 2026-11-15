@@ -1048,7 +1048,8 @@ admin recomputes, and marketing script generation.
 - **Flags that need evidence before turning on:**
   - `CHAT_MODEL_ROUTING_ENABLED`: run `scripts/eval_model_routing.py` first.
   - `CHAT_RAG_ENABLED`: needs an ingestion pipeline.
-  - `CHAT_PERSONALIZATION_ENABLED` / `CHAT_MEMORY_FACTS_ENABLED`: need a Terms §2 carve-out.
+  - `CHAT_PERSONALIZATION_ENABLED`: its Terms §2 carve-out has been live since 2026-08-13; the 2026-11-15 fixes (one style directive, live chip answers, the Support sentence) must be deployed with it. ✅ Set to `true` on the Railway web service by you on 2026-11-15. Check once the push is live: Settings › General › Personalized Explanations no longer reads "not switched on yet" for a consented Pro/Max account (no app update needed; builds up to 1.03 (15) say "On — Cay AI tailors how it explains things", later builds "On — Cay AI explains things just for you", your wording 2026-11-15). Turn off: unset it.
+  - `CHAT_MEMORY_FACTS_ENABLED`: keep OFF. It needs its own Privacy/Terms paragraph and consent line, a way to view or clear what is remembered, and deletion on consent revoke (audit 2026-11-15).
   - `PUSH_DRY_RUN`: must stay unset on Railway.
 - **Rollback switches (on by default):**
   - `CHAT_REPORT_WEB_SEARCH_ENABLED` (web, default on, built 2026-10-02): report chat's web search (the item in §2.1). Set it to `false` — or unset `BRAVE_SEARCH_API_KEY` — on the web service to stop every web search at once; report chats then answer from the report and the model is told no search is available. Read per turn, but a variable change redeploys the web service (mind the Sunday window above). ⚠️ Before rolling back to any build older than the 1.01 deploy (marketing, peer-benchmark and the release ship as one commit), set it to `false` first: older builds have no per-version gate, so build 1.0 would get web search.

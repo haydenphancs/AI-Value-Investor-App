@@ -14,7 +14,7 @@ import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List, Tuple
+from typing import TYPE_CHECKING, Dict, Any, Optional, List, Tuple
 
 
 from app.database import get_supabase
@@ -28,6 +28,9 @@ from app.schemas.chat import MACRO_INDICATORS_BASIS, StockChartWidget, Historica
 from app.services.agents.book_voice_prompt import book_display_title, render_book_voice
 from app.services.agents.report_voice_prompt import render_report_voice, resolve_voice_key
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
+
+if TYPE_CHECKING:  # annotation only; the endpoint builds the lens
+    from app.services.agents.investor_profile_prompt import ReaderLens
 from app.services.asset_class import (
     canonical_stored_symbol,
     detect_asset_class,
@@ -575,7 +578,7 @@ class ChatService:
         context_type: Optional[str] = None,
         reference_id: Optional[str] = None,
         context_is_replayed: bool = False,
-        reader_lens: Optional[str] = None,
+        reader_lens: Optional["ReaderLens | str"] = None,
         user_id: Optional[str] = None,
         attach_base_widget: bool = True,
         web_turn: Optional[WebSearchTurn] = None,
@@ -684,12 +687,11 @@ class ChatService:
             )
 
         # Check Market Deep Dive cache for index/ETF/crypto/commodity
-        cached_report = None
         is_deep_dive = self._is_deep_dive_request(is_stock, stock_id, user_message)
-        if is_deep_dive and context:
-            cached_report = await asyncio.to_thread(
-                self._check_deep_dive_cache, stock_id, context, user_message, asset_type
-            )
+        cached_report = await self._read_deep_dive_cache(
+            is_deep_dive=is_deep_dive, context=context, stock_id=stock_id,
+            user_message=user_message, asset_type=asset_type, reader_lens=reader_lens,
+        )
 
         # The web search: the stream's turn when this is its fallback (one search per turn, its
         # tier kept); the stream's decision when it holds no turn (no search on this turn — never
@@ -1026,7 +1028,7 @@ class ChatService:
         context_type: Optional[str] = None,
         reference_id: Optional[str] = None,
         context_is_replayed: bool = False,
-        reader_lens: Optional[str] = None,
+        reader_lens: Optional["ReaderLens | str"] = None,
         user_id: Optional[str] = None,
         include_today_line: bool = True,
     ) -> Dict[str, Any]:
@@ -1075,12 +1077,9 @@ class ChatService:
         is_deep_dive = self._is_deep_dive_request(
             asset_type == "STOCK", stock_id, user_message
         )
-        cached_report = (
-            await asyncio.to_thread(
-                self._check_deep_dive_cache, stock_id, context, user_message, asset_type
-            )
-            if is_deep_dive and context and stock_id
-            else None
+        cached_report = await self._read_deep_dive_cache(
+            is_deep_dive=is_deep_dive, context=context, stock_id=stock_id,
+            user_message=user_message, asset_type=asset_type, reader_lens=reader_lens,
         )
 
         # Stock enrichment (only for STOCK — other types are grounded by the resolver).
@@ -1309,7 +1308,7 @@ class ChatService:
 
     def _today_line_allowed(
         self, include_today_line: bool, *, is_deep_dive: bool, context: Optional[str],
-        stock_id: Optional[str], cache_safe: bool, history: Any, reader_lens: Optional[str],
+        stock_id: Optional[str], cache_safe: bool, history: Any, reader_lens: Optional["ReaderLens | str"],
         asset_type: str, context_type: Optional[str], reference_id: Optional[str],
     ) -> bool:
         """Whether this turn's instruction carries the date line (`_today_line`).
@@ -1401,7 +1400,7 @@ class ChatService:
             return GroundingAudit(skipped="error").as_dict()
 
     def _deep_dive_cacheable(
-        self, *, cache_safe: bool, history: Any, reader_lens: Optional[str],
+        self, *, cache_safe: bool, history: Any, reader_lens: Optional["ReaderLens | str"],
         stock_id: Optional[str], asset_type: str, context_type: Optional[str],
         reference_id: Optional[str], log: bool = True,
     ) -> bool:
@@ -3390,6 +3389,23 @@ class ChatService:
 
     _DEEP_DIVE_TTL_HOURS = 24
 
+    async def _read_deep_dive_cache(
+        self, *, is_deep_dive: bool, context: Optional[str], stock_id: Optional[str],
+        user_message: str, asset_type: str, reader_lens: Any,
+    ) -> Optional[str]:
+        """The cached AI Analyst brief for this turn, or None. BOTH doors read through here.
+
+        Never for a reader with a lens (owner decision 2026-11-15, "Answer live"): the cached
+        brief was written once for everyone, and they turned on answers in their own style.
+        The WRITE side refuses a lens turn too (`_deep_dive_cacheable`), so one reader's style
+        never reaches the shared row either.
+        """
+        if not (is_deep_dive and context and stock_id) or reader_lens:
+            return None
+        return await asyncio.to_thread(
+            self._check_deep_dive_cache, stock_id, context, user_message, asset_type
+        )
+
     @staticmethod
     def _is_deep_dive_request(is_stock: bool, stock_id: Optional[str], user_message: str) -> bool:
         """Whether to route this message through the Market Deep Dive cache. That cache is for the
@@ -3528,15 +3544,48 @@ class ChatService:
 
     # ── Answer shape ────────────────────────────────────────────────
     #
-    # Two mutually exclusive directives. Exactly one is inserted per turn.
+    # Two mutually exclusive directives. Exactly one is inserted per turn (`_answer_style`).
+    #
+    # A reader who turned on personalized explanations may choose a different LENGTH
+    # (`answer_depth`) or LANGUAGE (`explanation_style`). Those choices REPLACE the matching
+    # sentences of the one directive; they are never a second, later "Length:" line. That
+    # second line told the model "thorough" after "SHORT, at most 2-3 bullets" with nothing
+    # saying which won (audit 2026-11-15). The house defaults (`brief`, `balanced`) select the
+    # default sentences, so `_BRIEF_STYLE` is byte-for-byte what it always was.
 
-    _BRIEF_STYLE = (
-        "STYLE: Keep every answer SHORT, direct, and friendly. Lead with a 1-2 sentence direct "
+    _STYLE_LENGTH_DEFAULT = (
+        "Keep every answer SHORT, direct, and friendly. Lead with a 1-2 sentence direct "
         "answer to what was asked, then AT MOST 2-3 brief supporting bullet points, and only when "
         "they truly add value. Never write long, multi-section essays or ## headings. Do NOT dump "
         "everything you know — answer the specific question. Only expand into full detail if the "
-        "user explicitly asks for more. Use plain, conversational language. "
+        "user explicitly asks for more. "
     )
+    # Keys = `investor_profile_prompt._DEPTH` (non-default only).
+    _STYLE_LENGTH: Dict[str, str] = {
+        "standard": (
+            "Keep answers MODERATE in length, direct, and friendly. Lead with a 1-2 sentence "
+            "direct answer to what was asked, then give the reasoning behind it in a short "
+            "paragraph or 3-5 brief bullet points. Never write long, multi-section essays or ## "
+            "headings. Answer the specific question, not everything you know. "
+        ),
+        "deep": (
+            "This reader prefers THOROUGH answers. Lead with a 1-2 sentence direct answer to "
+            "what was asked, then cover the reasoning and the main counter-arguments, in short "
+            "paragraphs or bullet points; a long answer may use up to three '## ' headings. "
+            "Stay on the question that was asked. "
+        ),
+    }
+    _STYLE_LANGUAGE_DEFAULT = "Use plain, conversational language. "
+    # Keys = `investor_profile_prompt._STYLE` (non-default only).
+    _STYLE_LANGUAGE: Dict[str, str] = {
+        "plain_language": (
+            "Use plain, conversational language with minimal jargon, and a concrete example "
+            "where it helps. "
+        ),
+        "technical": "Use precise financial terminology, without over-explaining the basics. ",
+    }
+
+    _BRIEF_STYLE = "STYLE: " + _STYLE_LENGTH_DEFAULT + _STYLE_LANGUAGE_DEFAULT
 
     # Used ONLY for the "AI Analyst" / "Deep Research" button, whose own prompt asks for a
     # comprehensive multi-topic analysis. Under `_BRIEF_STYLE` the model was told to answer that
@@ -3561,6 +3610,25 @@ class ChatService:
         "market-wide number as if it belonged to this one specific asset. Prefer fewer, "
         "well-sourced points over broad coverage. "
     )
+
+    @classmethod
+    def _answer_style(
+        cls, *, is_deep_dive: bool,
+        answer_depth: Optional[str] = None, explanation_style: Optional[str] = None,
+    ) -> str:
+        """The turn's ONE style directive.
+
+        A deep dive keeps its fixed brief format (the button asked for it), so only a LANGUAGE
+        choice applies there. An unknown key falls back to the house sentence, never to nothing.
+        """
+        if is_deep_dive:
+            language = cls._STYLE_LANGUAGE.get(explanation_style or "")
+            return cls._DEEP_DIVE_STYLE + ("LANGUAGE: " + language if language else "")
+        return (
+            "STYLE: "
+            + cls._STYLE_LENGTH.get(answer_depth or "", cls._STYLE_LENGTH_DEFAULT)
+            + cls._STYLE_LANGUAGE.get(explanation_style or "", cls._STYLE_LANGUAGE_DEFAULT)
+        )
 
     # ── Answer-scope rules (TestFlight 2026-09-16, E2 / E4 / E5) ─────────────────
     # Three dead-ends the tester hit, each a model behaviour no prompt line asked for:
@@ -3931,7 +3999,7 @@ class ChatService:
         client_context: Optional[str] = None,
         asset_type: str = "STOCK",
         context_is_replayed: bool = False,
-        reader_lens: Optional[str] = None,
+        reader_lens: Optional["ReaderLens | str"] = None,
         is_deep_dive: bool = False,
         reference_id: Optional[str] = None,
         tools_granted: bool = True,
@@ -4068,7 +4136,13 @@ class ChatService:
             # deep-dive prompt asks for fundamentals + valuation + moat + risks + outlook, and
             # the brevity rule below simultaneously forbade sections and capped the answer at
             # 2-3 bullets. The model resolved that by writing something thin and shapeless.
-            + (self._DEEP_DIVE_STYLE if is_deep_dive else self._BRIEF_STYLE)
+            # The reader's length/language choice, when they gave one, is folded into this
+            # same directive (`_answer_style`) rather than stated again below.
+            + self._answer_style(
+                is_deep_dive=is_deep_dive,
+                answer_depth=getattr(reader_lens, "answer_depth", None),
+                explanation_style=getattr(reader_lens, "explanation_style", None),
+            )
             +
             # ── Disclaimer: CONDITIONAL on trade-action intent ──
             # A note on every answer — including "Hi" — trains people to skip it. It
@@ -4102,14 +4176,21 @@ class ChatService:
         )
 
         # Reader preferences sit HERE — after the shared guards (identity rule, style,
-        # advice boundary) and BEFORE anything session- or turn-specific. Order matters
-        # twice over: the amended ADVICE_BOUNDARY above refers to "a USER PREFERENCES
-        # block ... above", and a block placed after the fenced client context would be
-        # read as part of that untrusted span. Already rendered by the caller (a
-        # server-authored string from closed enums), so it is trusted and unfenced —
-        # see agents/investor_profile_prompt for why fencing it would make it inert.
-        if reader_lens:
-            base += reader_lens
+        # advice boundary) and BEFORE anything session- or turn-specific. The ADVICE_BOUNDARY
+        # above tells the model how to read "a USER PREFERENCES block in this instruction",
+        # and a block placed after the fenced client context would be read as part of that
+        # untrusted span. Already rendered by the caller (a server-authored string from
+        # closed enums), so it is trusted and unfenced — see agents/investor_profile_prompt
+        # for why fencing it would make it inert.
+        #
+        # `reader_lens` is an `investor_profile_prompt.ReaderLens` (its `block` carries no
+        # Length/Language line: those went into the STYLE directive above). A plain string is
+        # still accepted, as a block with no style choice.
+        lens_text = (
+            reader_lens if isinstance(reader_lens, str) else getattr(reader_lens, "block", "")
+        ) or ""
+        if lens_text:
+            base += lens_text
             # Learn surfaces only (book / article / journey lesson), and only when a lens
             # actually exists — "connect this to what they follow" is meaningless for a
             # reader who stated no interests, and would invite the model to invent some.

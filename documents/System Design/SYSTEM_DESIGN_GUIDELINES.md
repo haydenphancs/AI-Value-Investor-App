@@ -5173,8 +5173,11 @@ onboarding / Settings editor          PUT /users/me/investor-profile   (.signInR
                                             → <<<CLIENT_CONTEXT>>>  (fenced, untrusted)
 ```
 
-Layer order is load-bearing twice over: `ADVICE_BOUNDARY` refers to "a USER PREFERENCES block
-… **above**", and a block placed after the fence would be read as part of that untrusted span.
+Layer order is load-bearing twice over: `ADVICE_BOUNDARY` (which comes first) tells the model how
+to read "a USER PREFERENCES block … in this instruction", and a block placed after the fence would
+be read as part of that untrusted span. The block carries no Length or Language line: a reader's
+length and language choices replace the matching sentences of the turn's ONE style directive
+(`ChatService._answer_style`), so they never contradict it (2026-11-15).
 The report-grounding rule (2026-10-01, §9.3) obeys the second half: it points the model at the
 report data in the client-context block below it, and it only works because it sits before the
 fence. Placed after it, it would be read as part of the untrusted data and ignored, like the

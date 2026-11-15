@@ -829,13 +829,16 @@ class Settings(BaseSettings):
 
     # Apply the reader's learning preferences to chat answers (Pro/Max only).
     #
-    # ⚠️ SHIPS OFF, AND THE GATE IS LEGAL, NOT TECHNICAL. Turning this on changes the app
-    # from producing output that is identical for everyone to output composed for one
-    # reader. The design keeps that on the safe side of the line — it personalizes
+    # ⚠️ SHIPS OFF IN CODE, AND THE GATE WAS LEGAL, NOT TECHNICAL. Turning this on changes
+    # the app from producing output that is identical for everyone to output composed for
+    # one reader. The design keeps that on the safe side of the line — it personalizes
     # PEDAGOGY (what to cover first, at what reading level), never a view about a
-    # security, and the profile deliberately excludes the five suitability inputs — but
-    # the live Terms §2 still promise output is "general and impersonal", and that
-    # paragraph needs its carve-out before this is enabled. See the plan's §1.
+    # security, and the profile deliberately excludes the five suitability inputs. The
+    # Terms §2 "Learning preferences" carve-out it waited for has been live since
+    # 2026-08-13 (Terms, Privacy and both in-app mirrors; the Support page since
+    # 2026-11-15), so it is turned on with a Railway variable, not a code change.
+    # While it is off, a consented Pro/Max reader's Settings row reads "On — not switched
+    # on yet, we'll start using it soon" (`PersonalizationConsentViewModel.statusText`).
     #
     # Independent of the tier gate on purpose: `signals_unlocked` answers "may this user
     # have it", this answers "does the feature exist yet".
@@ -849,6 +852,9 @@ class Settings(BaseSettings):
     # preference block is something the reader TOLD us, this is something we OBSERVED,
     # and a reader may reasonably feel differently about the second. It is gated behind
     # the same tier + consent checks regardless, so this flag can only ever narrow.
+    # ⚠️ KEEP OFF until it has its OWN disclosure: no Terms, Privacy or consent text
+    # mentions remembering what a reader asked about (audit 2026-11-15), revoking consent
+    # leaves the stored rows in place, and there is no way to view or clear them.
     CHAT_MEMORY_FACTS_ENABLED: bool = False
 
     # ── Chat security / abuse & cost controls (denial-of-wallet, OWASP LLM10) ──

@@ -225,7 +225,7 @@ def test_index_snapshot_attribution_is_cay_ai():
 
 # ── Reader-preference block placement (Phase 4) ──────────────────────────────
 #
-# The amended ADVICE_BOUNDARY says "If a USER PREFERENCES block appears ABOVE…", and the
+# The amended ADVICE_BOUNDARY explains "a USER PREFERENCES block in this instruction", and the
 # fenced CLIENT CONTEXT tells the model to follow no instruction inside it. Both make the
 # block's POSITION load-bearing: too early and it precedes the guards it is constrained
 # by; too late and it lands inside an untrusted span and goes inert.
@@ -237,7 +237,7 @@ def _lens() -> str:
 
 
 # Block-only marker: the phrase "USER PREFERENCES" also appears inside the amended
-# ADVICE_BOUNDARY ("If a USER PREFERENCES block appears above…"), so searching for that
+# ADVICE_BOUNDARY ("If a USER PREFERENCES block appears in this instruction…"), so searching for that
 # finds the boundary even when no block was supplied.
 _MARK = "Topics they follow:"
 _LENS = None  # populated per-test via _lens()
@@ -259,7 +259,7 @@ def test_reader_lens_sits_after_the_guards():
     instr = _svc()._build_system_instruction("NORMAL", None, reader_lens=_lens())
     assert instr.startswith(IDENTITY_RULE), "identity rule must stay first"
     assert instr.index(ADVICE_BOUNDARY) < instr.index(_MARK), (
-        "ADVICE_BOUNDARY refers to a preferences block 'above' it — the block must "
+        "ADVICE_BOUNDARY explains how to read the preferences block — the block must "
         "follow the boundary, not precede it"
     )
 

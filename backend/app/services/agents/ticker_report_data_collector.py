@@ -3055,6 +3055,7 @@ class TickerReportDataCollector:
             revenue_crosses_basis=_revenue_crosses_basis(out),
             # The code every annual income row agrees on (None → "$", as before).
             currency=_engine_reporting_currency(out.income, None, out.ticker),
+            earnings=getattr(out, "earnings", None),
         )
 
         # ── Fundamental metrics (4 cards) — deterministic from the
@@ -6777,6 +6778,11 @@ class _TimelineRow(NamedTuple):
     revenue_analyst_count: Optional[int]
     eps_analyst_count: Optional[int]
     period_end: str  # "yyyy-MM-dd" — the fiscal period's END date
+    # Which EPS `eps` holds: "gaap" (the income statement's `epsDiluted`) or "adjusted" (the
+    # four quarterly earnings-feed actuals summed, `_adjusted_annual_eps`) on a reported year,
+    # "consensus" on a forecast year. `gaap_eps` keeps the GAAP figure of an "adjusted" year.
+    eps_basis: str = "gaap"
+    gaap_eps: Optional[float] = None
 
 
 def _iso_day(value: Any) -> Optional[date]:
@@ -6799,8 +6805,15 @@ def _rows_symbol(*row_lists: Any) -> str:
 def _annual_timeline_rows(
     income: Optional[List[Dict[str, Any]]],
     estimates: Optional[List[Dict[str, Any]]],
+    *,
+    adjusted_eps: Optional[Dict[int, float]] = None,
 ) -> Tuple[List[_TimelineRow], List[_TimelineRow]]:
     """(actual rows, forecast rows), each ascending by FISCAL year, one row per year.
+
+    `adjusted_eps` (from `_adjusted_annual_eps`): when given, EVERY reported year's EPS is
+    that year's adjusted figure — None (→ "N/A") for a year it has none — and the GAAP figure
+    moves to `gaap_eps`. Never a mix: a year without an adjusted figure is not filled with
+    GAAP, which would put two measures on one line.
 
     Actual years come from `annual_fiscal_year` (FMP `fiscalYear`, else the period END
     minus 7 days) — NOT `date[:4]`. A 52/53-week filer that closes its year on the
@@ -6855,10 +6868,17 @@ def _annual_timeline_rows(
             if held.period_end >= end.isoformat():
                 continue
         # Reported actuals have no analyst coverage.
-        actual_by_fy[fy] = _TimelineRow(
-            fy, _num_or_none(rec.get("revenue")), _num_or_none(rec.get("epsDiluted")),
-            False, None, None, end.isoformat(),
-        )
+        gaap = _num_or_none(rec.get("epsDiluted"))
+        if adjusted_eps is not None:
+            actual_by_fy[fy] = _TimelineRow(
+                fy, _num_or_none(rec.get("revenue")), adjusted_eps.get(fy),
+                False, None, None, end.isoformat(), "adjusted", gaap,
+            )
+        else:
+            actual_by_fy[fy] = _TimelineRow(
+                fy, _num_or_none(rec.get("revenue")), gaap,
+                False, None, None, end.isoformat(),
+            )
     actuals = [actual_by_fy[k] for k in sorted(actual_by_fy)]
 
     last = actuals[-1] if actuals else None
@@ -6892,6 +6912,7 @@ def _annual_timeline_rows(
             _int_or_none(est.get("numAnalystsRevenue")),
             _int_or_none(est.get("numAnalystsEps")),
             end.isoformat(),
+            "consensus",
         )
     forecasts = [forecast_by_fy[k] for k in sorted(forecast_by_fy)]
 
@@ -6902,6 +6923,163 @@ def _annual_timeline_rows(
             "a gap is left unmeasured", ticker, years,
         )
     return actuals, forecasts
+
+
+# ── Adjusted EPS history (owner, 2026-11-14: "Switch to adjusted") ──────────────────────
+# Reported years used to plot GAAP `epsDiluted` while forecast years plot the consensus,
+# which is ADJUSTED for most companies: ORCL drew GAAP $5.83 → consensus $8.15, a "+40%" step
+# that is mostly the gap between the two measures, so the first forecast year's EPS change was
+# left blank. Every platform researched (Yahoo, stockanalysis, Finviz, Zacks, TIKR, Seeking
+# Alpha, Morningstar) measures that year against the last reported year ON THE CONSENSUS'S
+# BASIS (ORCL: 8.15 / 7.63 = +6.8%), because the data vendors record each "actual" on the
+# basis most analysts forecast. The earnings feed's quarterly actuals are those figures (ORCL
+# 1.47 + 2.26 + 1.79 + 2.11 = 7.63 = Yahoo's normalized FY2026), so a reported year's EPS is
+# the sum of its four quarters. Measured on 58 cached collections (2026-11-14): within a few
+# percent of the year's consensus for nearly every large company.
+#
+# A year's quarters: the four feed quarters whose period ends fall inside its fiscal window,
+# each consensus-comparable (`has_estimate`, a surprise was computed — a GAAP fallback or a
+# dropped-digit quarter has neither). Anything else (three quarters, a half-year filer, a
+# changed year-end) leaves that year N/A, never a GAAP figure.
+_ADJ_EPS_SLACK_DAYS = 7          # a quarter's period end vs the fiscal window's edges
+# Consecutive quarter ends. 125, not 105: a 12/12/12/16-week calendar (Costco, PepsiCo) has a
+# 112-day fourth quarter (119 in a 53-week year). Half-years are ~182 apart.
+_ADJ_EPS_QUARTER_GAP_DAYS = (75, 125)
+# A reported year carries its GAAP figure (`eps_gaap_label`, the signal iOS reads to label the
+# line "Adj. EPS") only when the two differ by more than this: Apple, Alphabet and Meta report
+# GAAP EPS alone, their feed quarters sum to it within a cent or two, and "Adj." would be false.
+_ADJ_EPS_GAAP_DIFF_SHARE = 0.02
+_ADJ_EPS_GAAP_DIFF_FLOOR = 0.03
+# The LAST reported year (the first forecast year's base) must land near that year's own
+# consensus, or the whole timeline keeps GAAP: Berkshire's feed holds GAAP-like quarters
+# ($29.21 vs a $21.48 operating consensus), Nike's $2.09 sat 39% above a $1.50 consensus.
+# Only that year: FMP's consensus rows for OLDER years are unreliable (FY2024: ORCL 3.99,
+# CSCO 2.29, AVGO 2.23 beside true adjusted 5.56 / 3.73 / 4.86) and would drop good years.
+_ADJ_EPS_CONSENSUS_TOLERANCE = 0.25
+_ADJ_EPS_CONSENSUS_FLOOR = 0.10  # per share: a near-zero EPS has no meaningful % gap
+_ADJ_EPS_CONSENSUS_MATCH_DAYS = 10
+
+
+def _eps_consensus_at(estimates: Optional[List[Dict[str, Any]]], end: date) -> Optional[float]:
+    """The analyst EPS consensus FMP keeps for the fiscal year ending `end` (the estimate row
+    whose period end is nearest, within `_ADJ_EPS_CONSENSUS_MATCH_DAYS`). None when absent; a
+    blank 0 (FMP's empty consensus) is absent too."""
+    best: Optional[Tuple[int, float]] = None
+    for est in estimates or []:
+        if not isinstance(est, dict):
+            continue
+        d = _iso_day(est.get("date"))
+        if d is None:
+            continue
+        gap = abs((d - end).days)
+        if gap > _ADJ_EPS_CONSENSUS_MATCH_DAYS:
+            continue
+        value = _num_or_none(est.get("epsAvg"))
+        if value is None:
+            value = _num_or_none(est.get("estimatedEpsAvg"))
+        if value is None or value == 0:
+            continue
+        if best is None or gap < best[0]:
+            best = (gap, value)
+    return best[1] if best is not None else None
+
+
+def _comparable_quarter(q: Any) -> Optional[Tuple[date, Optional[float]]]:
+    """(period end, actual) of one earnings-feed EPS quarter; the actual is None when the
+    quarter is not a consensus-comparable figure. None when the quarter is undatable."""
+    end = _iso_day(getattr(q, "fiscal_date", None))
+    if end is None:
+        return None
+    actual = getattr(q, "actual_value", None)
+    surprise = getattr(q, "surprise_percent", None)
+    comparable = (
+        getattr(q, "has_estimate", None) is True
+        and not isinstance(actual, bool) and _num_or_none(actual) is not None
+        and not isinstance(surprise, bool) and _num_or_none(surprise) is not None
+    )
+    return end, (float(actual) if comparable else None)
+
+
+def _adjusted_annual_eps(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+    earnings: Any,
+    *,
+    currency: Any = None,
+) -> Optional[Dict[int, float]]:
+    """{fiscal year: adjusted EPS} for the Earnings Timeline's reported years, or None when the
+    timeline keeps GAAP (see the block comment above). None when: there is no forecast year (no
+    consensus to match), the filer does not report in USD (the feed's currency and per-share
+    unit are unverified for foreign filers), the last reported year has no four comparable
+    quarters, or its sum is off its own consensus. Every None is logged with its reason."""
+    ticker = _rows_symbol(income, estimates)
+    actuals, forecasts = _annual_timeline_rows(income, estimates)
+    if not actuals or not forecasts:
+        return None
+    if currency != "USD":
+        logger.info(
+            "[report-timeline-adjusted-eps] %s: reporting currency %s — GAAP EPS kept (the "
+            "feed's currency is unverified for a non-USD filer)", ticker, currency,
+        )
+        return None
+    quarters = [
+        cq for q in (getattr(earnings, "eps_quarters", None) or [])
+        if (cq := _comparable_quarter(q)) is not None
+    ]
+    slack = timedelta(days=_ADJ_EPS_SLACK_DAYS)
+    lo_gap, hi_gap = _ADJ_EPS_QUARTER_GAP_DAYS
+    by_year: Dict[int, float] = {}
+    for i, row in enumerate(actuals):
+        end = _iso_day(row.period_end)
+        if end is None:
+            continue
+        prev = actuals[i - 1] if i > 0 and actuals[i - 1].fy == row.fy - 1 else None
+        prev_end = _iso_day(prev.period_end) if prev is not None else None
+        opens = (prev_end if prev_end is not None else end - timedelta(days=366)) + slack
+        inside = sorted(q for q in quarters if opens < q[0] <= end + slack)
+        ends = [d for d, _ in inside]
+        if (
+            len(inside) != 4 or len(set(ends)) != 4
+            or any(v is None for _, v in inside)
+            or abs((ends[-1] - end).days) > _ADJ_EPS_SLACK_DAYS
+            or any(not lo_gap <= (b - a).days <= hi_gap for a, b in zip(ends, ends[1:]))
+        ):
+            continue
+        # `+ 0.0`: quarters that cancel out (-0.05 - 0.02 + 0.03 + 0.04) round to -0.0,
+        # which printed "$-0.00".
+        by_year[row.fy] = round(sum(v for _, v in inside if v is not None), 4) + 0.0
+
+    last = actuals[-1]
+    adjusted = by_year.get(last.fy)
+    if adjusted is None:
+        logger.info(
+            "[report-timeline-adjusted-eps] %s: FY%s has no four comparable feed quarters — "
+            "GAAP EPS kept", ticker, last.fy,
+        )
+        return None
+    last_end = _iso_day(last.period_end)
+    consensus = _eps_consensus_at(estimates, last_end) if last_end is not None else None
+    if consensus is None:
+        logger.info(
+            "[report-timeline-adjusted-eps] %s: no FY%s EPS consensus to check the adjusted "
+            "%.4f against — GAAP EPS kept", ticker, last.fy, adjusted,
+        )
+        return None
+    allowed = max(_ADJ_EPS_CONSENSUS_TOLERANCE * abs(consensus), _ADJ_EPS_CONSENSUS_FLOOR)
+    if abs(adjusted - consensus) > allowed:
+        logger.warning(
+            "[report-timeline-adjusted-eps] %s: FY%s adjusted EPS %.4f is %.4f from its "
+            "consensus %.4f (allowed %.4f) — not the consensus's basis; GAAP EPS kept",
+            ticker, last.fy, adjusted, abs(adjusted - consensus), consensus, allowed,
+        )
+        return None
+    missing = [r.fy for r in actuals[-_TIMELINE_ACTUALS_SHOWN:] if r.fy not in by_year]
+    logger.info(
+        "[report-timeline-adjusted-eps] %s: adjusted EPS for %s (FY%s %.4f vs consensus "
+        "%.4f)%s", ticker, sorted(by_year), last.fy, adjusted, consensus,
+        f"; N/A for {missing}" if missing else "",
+    )
+    return by_year
 
 
 def _signed_revenue_label(rev: Optional[float], currency: Any = None) -> str:
@@ -6920,6 +7098,7 @@ def _signed_eps_label(eps: Optional[float], currency: Any = None) -> str:
     filer's code replaces the "$" ("-CNY 2.00")."""
     if eps is None:
         return "N/A"
+    eps = eps + 0.0  # -0.0 → 0.0: f"{-0.0:.2f}" is "-0.00"
     prefix = money_prefix(currency)
     if eps < 0 and round(abs(eps), 2) > 0:
         return f"-{prefix}{abs(eps):.2f}"
@@ -6935,6 +7114,8 @@ _TIMELINE_FORECASTS_SHOWN = 5
 def _timeline_window(
     income: Optional[List[Dict[str, Any]]],
     estimates: Optional[List[Dict[str, Any]]],
+    *,
+    adjusted_eps: Optional[Dict[int, float]] = None,
 ) -> Tuple[List[_TimelineRow], List[_TimelineRow]]:
     """(off-screen YoY anchor, DISPLAYED rows) of the Earnings Timeline — the one window the
     chart (`_build_annual_timeline`) and the growth rates its text cites (`_timeline_growth`)
@@ -6942,7 +7123,7 @@ def _timeline_window(
 
     The anchor is the one older actual (when present) kept only as the leftmost bar's YoY
     base, so it still gets a % chip; it is never drawn."""
-    actuals, forecasts = _annual_timeline_rows(income, estimates)
+    actuals, forecasts = _annual_timeline_rows(income, estimates, adjusted_eps=adjusted_eps)
     anchor: List[_TimelineRow] = (
         actuals[-(_TIMELINE_ACTUALS_SHOWN + 1):-_TIMELINE_ACTUALS_SHOWN]
         if len(actuals) > _TIMELINE_ACTUALS_SHOWN else []
@@ -6980,6 +7161,7 @@ def _timeline_growth(
     estimates: Optional[List[Dict[str, Any]]],
     *,
     revenue_crosses_basis: bool = False,
+    adjusted_eps: Optional[Dict[int, float]] = None,
 ) -> Dict[str, Any]:
     """The growth rates the report's TEXT cites (insight prompt, evidence, PDF, chat), measured
     over the bars the Future Forecast chart actually draws (`_timeline_window`).
@@ -6990,21 +7172,25 @@ def _timeline_growth(
     - Revenue: the last REPORTED year → the last forecast year ("Last reported → last
       forecast"). Where reported and consensus revenue are different measures (a bank,
       `revenue_crosses_basis`) or nothing is reported, the first → last forecast year.
-    - EPS: first → last forecast year only: reported EPS is GAAP and the consensus usually
-      adjusted, so a span across that boundary is not a growth rate.
+    - EPS: the same span when the reported years are ADJUSTED (`adjusted_eps`, the
+      consensus's basis — 2026-11-14). On GAAP years, first → last forecast year only: GAAP
+      against an adjusted consensus is not a growth rate.
     The SCORED rates (`c["revenue_cagr"]` / `c["eps_cagr"]`) are untouched ("Keep scores
     unchanged"). Every value is None when it cannot be measured."""
     out: Dict[str, Any] = {
         "revenue_cagr": None, "revenue_span": None, "eps_cagr": None, "eps_span": None,
     }
-    _anchor, rows = _timeline_window(income, estimates)
+    _anchor, rows = _timeline_window(income, estimates, adjusted_eps=adjusted_eps)
     n_actual = sum(1 for r in rows if not r.is_forecast)
     if not rows or n_actual == len(rows) or any(r.is_forecast for r in rows[:n_actual]):
         return out  # no forecast column, or actuals and forecasts interleaved
     last = len(rows) - 1
     rev_first = n_actual - 1 if n_actual > 0 and not revenue_crosses_basis else n_actual
     out["revenue_cagr"], out["revenue_span"] = _span_cagr(rows, rev_first, last, "revenue")
-    out["eps_cagr"], out["eps_span"] = _span_cagr(rows, n_actual, last, "eps")
+    eps_first = (
+        n_actual - 1 if n_actual > 0 and rows[n_actual - 1].eps_basis == "adjusted" else n_actual
+    )
+    out["eps_cagr"], out["eps_span"] = _span_cagr(rows, eps_first, last, "eps")
     return out
 
 
@@ -7014,10 +7200,18 @@ def _build_annual_timeline(
     *,
     revenue_crosses_basis: bool = False,
     currency: Any = None,
+    adjusted_eps: Optional[Dict[int, float]] = None,
 ) -> List[Dict[str, Any]]:
     """One continuous yearly revenue+EPS series for the Earnings Timeline view:
     the last 5 reported ACTUAL years (is_forecast=False) followed GAPLESSLY by up
     to 5 forward analyst-estimate years (is_forecast=True).
+
+    EPS since 2026-11-14 ("Switch to adjusted"): with `adjusted_eps` the reported years are
+    the ADJUSTED figures the consensus is on (`_adjusted_annual_eps`), so the first forecast
+    year's EPS change is measured like every other year's (ORCL FY2027E: 8.15 vs 7.63 =
+    +6.8%), each reported row carries its GAAP figure as `eps_gaap_label`, and `eps_basis` is
+    "adjusted". Without it (no four comparable quarters, a non-USD filer, a last year off its
+    consensus) the rules below hold unchanged.
 
     This is the industry-standard forecast window — a short, deliberate past (not a
     company's whole history: Apple/Coca-Cola back to the 1990s is noise on a forecast
@@ -7048,7 +7242,7 @@ def _build_annual_timeline(
     # Window: last 5 actuals DISPLAYED, plus one older actual (when present) kept
     # ONLY as the leftmost bar's off-screen YoY anchor (so it still gets a % chip),
     # then up to 5 forecasts. The same window `_timeline_growth` measures.
-    anchor, display_rows = _timeline_window(income, estimates)
+    anchor, display_rows = _timeline_window(income, estimates, adjusted_eps=adjusted_eps)
     if not display_rows:
         return []
     rows_for_yoy = anchor + display_rows
@@ -7082,12 +7276,22 @@ def _build_annual_timeline(
         if prior is not None and prior.fy != row.fy - 1:
             prior = None  # a gap year: no single-year change to measure
         prior_rev = prior.revenue if prior is not None else None
-        # GAAP actual → consensus forecast: not a growth rate (see the docstring).
-        crosses_basis = prior is not None and row.is_forecast and not prior.is_forecast
-        prior_eps = prior.eps if prior is not None and not crosses_basis else None
-        if crosses_basis and revenue_crosses_basis:
+        # Reported → forecast. A GAAP actual → consensus EPS change is not a growth rate (see
+        # the docstring); an ADJUSTED actual is on the consensus's basis, so it is one.
+        boundary = prior is not None and row.is_forecast and not prior.is_forecast
+        eps_crosses = boundary and prior is not None and prior.eps_basis != "adjusted"
+        prior_eps = prior.eps if prior is not None and not eps_crosses else None
+        if boundary and revenue_crosses_basis:
             prior_rev = None
         rev, eps = row.revenue, row.eps
+        # The GAAP figure beside an adjusted one only where the two really differ
+        # (`_ADJ_EPS_GAAP_DIFF_*`); never on an N/A year, which has nothing to set it beside.
+        gaap = row.gaap_eps
+        gaap_differs = (
+            not row.is_forecast and row.eps_basis == "adjusted"
+            and eps is not None and gaap is not None
+            and abs(eps - gaap) > max(_ADJ_EPS_GAAP_DIFF_SHARE * abs(gaap), _ADJ_EPS_GAAP_DIFF_FLOOR)
+        )
         series.append({
             "period": str(row.fy),
             "period_end": row.period_end,
@@ -7099,7 +7303,11 @@ def _build_annual_timeline(
             "eps": round(eps, 2) if eps else 0.0,
             "eps_label": _signed_eps_label(eps, currency),
             "eps_yoy_pct": _yoy(eps, prior_eps),
-            "eps_basis": "consensus" if row.is_forecast else "gaap",
+            "eps_basis": "consensus" if row.is_forecast else row.eps_basis,
+            # The reported GAAP figure of an adjusted year that differs from it; None otherwise
+            # (GAAP, forecast and N/A rows included). Not displayed (owner: "we don't need to
+            # show GAAP anymore"): its presence is what makes iOS label the line "Adj. EPS".
+            "eps_gaap_label": _signed_eps_label(gaap, currency) if gaap_differs else None,
             "revenue_analyst_count": row.revenue_analyst_count,
             "eps_analyst_count": row.eps_analyst_count,
             "is_forecast": row.is_forecast,
@@ -7231,7 +7439,10 @@ def _build_revenue_forecast_partial(
     *,
     revenue_crosses_basis: bool = False,
     currency: Any = None,
+    earnings: Any = None,
 ) -> Dict[str, Any]:
+    # `earnings`: the collection's EarningsResponse, whose quarterly feed actuals give the
+    # timeline's reported years their ADJUSTED EPS (`_adjusted_annual_eps`, 2026-11-14).
     # `revenue_cagr` / `eps_cagr` are the SCORED rates (the 4-estimate window below). The
     # wire's `cagr` / `eps_growth` — what the insight, the PDF and report chat print — are
     # measured over the timeline the chart draws (`_timeline_growth`) whenever it has a
@@ -7271,7 +7482,10 @@ def _build_revenue_forecast_partial(
     # estimate (`_forecast_fiscal_label`). `date[:4]` named HD's FY2026 estimate (ending
     # 2027-01-31) "2027" while the timeline bar said 2026, so the Stage B insight — built
     # from these labels — cited a year one ahead of the chart it sits under.
-    timeline_actuals, _timeline_forecasts = _annual_timeline_rows(income, estimates)
+    adjusted_eps = _adjusted_annual_eps(income, estimates, earnings, currency=currency)
+    timeline_actuals, _timeline_forecasts = _annual_timeline_rows(
+        income, estimates, adjusted_eps=adjusted_eps,
+    )
     last_actual = timeline_actuals[-1] if timeline_actuals else None
 
     projections: List[Dict[str, Any]] = []
@@ -7293,12 +7507,16 @@ def _build_revenue_forecast_partial(
             # would print a multi-year change as YoY, which the timeline refuses too). EPS
             # stays None: a GAAP actual against a consensus figure is not a growth rate
             # (`crosses_basis`), Berkshire would show about -28%. Nor does revenue where it
-            # changes basis too (`_build_annual_timeline`).
-            if (
+            # changes basis too (`_build_annual_timeline`). An ADJUSTED reported EPS is on the
+            # consensus's basis, so it is read (2026-11-14), as the timeline does.
+            follows = (
                 anchor is None and last_actual is not None
-                and period == str(last_actual.fy + 1) and not revenue_crosses_basis
-            ):
+                and period == str(last_actual.fy + 1)
+            )
+            if follows and not revenue_crosses_basis:
                 prior_rev = last_actual.revenue
+            if follows and last_actual is not None and last_actual.eps_basis == "adjusted":
+                prior_eps = last_actual.eps
         else:
             prior_est = sorted_estimates[i - 1]
             prior_rev = _est_revenue(prior_est)
@@ -7320,9 +7538,13 @@ def _build_revenue_forecast_partial(
 
     annual_timeline = _build_annual_timeline(
         income, estimates, revenue_crosses_basis=revenue_crosses_basis, currency=currency,
+        adjusted_eps=adjusted_eps,
     )
     if any(row.get("is_forecast") for row in annual_timeline):
-        growth = _timeline_growth(income, estimates, revenue_crosses_basis=revenue_crosses_basis)
+        growth = _timeline_growth(
+            income, estimates, revenue_crosses_basis=revenue_crosses_basis,
+            adjusted_eps=adjusted_eps,
+        )
         shown_rev, rev_span = growth["revenue_cagr"], growth["revenue_span"]
         shown_eps, eps_span = growth["eps_cagr"], growth["eps_span"]
     else:

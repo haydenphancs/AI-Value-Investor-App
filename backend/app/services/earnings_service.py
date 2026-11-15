@@ -73,7 +73,14 @@ _DEGRADED_CACHE_TTL = 60
 #   5 (2026-11-14): each reported quarter carries `report_date` (its announcement day), so
 #     iOS pins the dot to the report day instead of the period end. A v4 row has none,
 #     and iOS would keep drawing every report-day move weeks right of its dot.
-_EARNINGS_PAYLOAD_VERSION = 5
+#   6 (2026-11-14, "Switch to adjusted"): 28 quarterly income rows (was 20), so the report's
+#     Earnings Timeline can sum four feed quarters for each of its drawn years. A v5 row
+#     holds 20 and would leave the oldest drawn year's adjusted EPS "N/A" in every report
+#     rebuilt from it while it lives (up to 24h after the deploy).
+_EARNINGS_PAYLOAD_VERSION = 6
+# The daily price series keeps the span 20 quarters gave it before the 28-row read: the
+# extra years serve only the report's EPS sums, and no reader draws prices that far back.
+_DAILY_PRICE_QUARTERS = 20
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -1355,8 +1362,14 @@ class EarningsService:
         today_str = today.strftime("%Y-%m-%d")
 
         # Phase 1: Fetch income statements, analyst estimates, and prices in parallel
+        # 28 quarterly income rows (was 20): the report's Earnings Timeline sums four of these
+        # quarters per fiscal year into its ADJUSTED reported EPS (2026-11-14,
+        # `_adjusted_annual_eps`), and it draws 5 reported years plus one off-screen YoY
+        # anchor — up to 27 quarters once a new fiscal year has started. With 20, the oldest
+        # drawn year usually lost its EPS. Same single call; the Financials card still shows
+        # its last 12 quarters.
         income_raw, estimates_raw, prices_raw = await asyncio.gather(
-            self.fmp.get_income_statement(ticker, period="quarter", limit=20),
+            self.fmp.get_income_statement(ticker, period="quarter", limit=28),
             self.fmp.get_analyst_estimates(ticker, period="quarter", limit=20),
             self.fmp.get_historical_prices(ticker, from_date=six_years_ago, to_date=today_str),
             return_exceptions=True,
@@ -1644,7 +1657,9 @@ class EarningsService:
                 ))
 
             used_fiscal_dates.add(fiscal_key)
-            self._append_price_point(ticker, label, fiscal_key, price_lookup, price_history)
+            self._append_price_point(
+                ticker, label, fiscal_key, price_lookup, price_history, prices_from=six_years_ago,
+            )
 
         # ── Phase A2: reported quarters with no income row yet ──
         if income_sorted:
@@ -1729,7 +1744,9 @@ class EarningsService:
                 consumed.add(_row_key(rec))
                 release_periods[_row_key(rec)] = pe_key
                 used_fiscal_dates.add(pe_key)
-                self._append_price_point(ticker, label, pe_key, price_lookup, price_history)
+                self._append_price_point(
+                    ticker, label, pe_key, price_lookup, price_history, prices_from=six_years_ago,
+                )
 
         # The newest period already reported. Phase B used to emit EVERY estimate not
         # within 15 days of an income date, so when the income call failed (or the
@@ -1790,7 +1807,7 @@ class EarningsService:
         all_income_dates = {str(r["date"])[:10] for r in income_sorted if r.get("date")}
         if all_income_dates and price_list:
             sorted_dates = sorted(all_income_dates)
-            range_start = sorted_dates[0]
+            range_start = sorted_dates[-_DAILY_PRICE_QUARTERS:][0]
             range_end = today_str
             for p in price_list:
                 d = str(p.get("date") or "")[:10]
@@ -1849,12 +1866,23 @@ class EarningsService:
         fiscal_key: str,
         price_lookup: Dict[str, float],
         price_history: List[EarningsPricePointSchema],
+        prices_from: Optional[str] = None,
     ) -> None:
         """Close on the quarter's period end. OMIT the point when no close is within
         ±5 days rather than emitting a fabricated 0: a 0 is a real price on the wire, it
         entered the chart's Y domain and dragged the whole price line to the floor. iOS
         matches price points to quarters by LABEL (not by position), so a missing entry
-        is handled; a fake 0 was not."""
+        is handled; a fake 0 was not.
+
+        `prices_from`: the first day the price read covers. A quarter ending before it has
+        no close by design (the 28-row income read reaches past the price window), so it is
+        omitted quietly; a gap inside the window is still a WARNING."""
+        if prices_from is not None and fiscal_key[:10] < prices_from:
+            logger.debug(
+                "earnings %s: %s ends before the price window (%s) — no price point",
+                ticker, fiscal_key, prices_from,
+            )
+            return
         close_price = _find_close_price(fiscal_key, price_lookup)
         if close_price is None:
             logger.warning(

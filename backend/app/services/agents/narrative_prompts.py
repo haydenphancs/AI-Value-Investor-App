@@ -2189,6 +2189,20 @@ def _revenue_forecast_insight_prompt(
         f'\nMANAGEMENT GUIDANCE QUOTE: "{guidance_quote}"'
         if guidance_quote and guidance_known else ""
     )
+    # Since 2026-11-14 ("Switch to adjusted") the chart's REPORTED years can plot adjusted EPS,
+    # the consensus's basis, while EVIDENCE's EPS lines are GAAP. Unsaid, the read could set a
+    # GAAP figure beside the adjusted forecast: the mixed "+40%" the chart now avoids. Only
+    # where a reported year's two figures differ (`eps_gaap_label`): a GAAP-only reporter's
+    # sums ARE its GAAP figures, and "non-GAAP" would be false for it.
+    if any(
+        isinstance(row, dict) and not row.get("is_forecast") and row.get("eps_basis") == "adjusted"
+        and row.get("eps_gaap_label") not in (None, "", "N/A")
+        for row in (rf.get("annual_timeline") or [])
+    ):
+        quote_line += (
+            "\nEPS BASIS: the chart's EPS, reported years included, is ADJUSTED (non-GAAP), the "
+            "basis analysts forecast. Never set it beside a GAAP EPS figure from EVIDENCE."
+        )
     stance_line = (
         f"MANAGEMENT GUIDANCE STANCE: {guidance} (raised / maintained / lowered)"
         if guidance_known else

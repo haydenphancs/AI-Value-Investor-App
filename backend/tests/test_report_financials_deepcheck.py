@@ -837,7 +837,9 @@ def test_price_window_falls_back_to_the_calendar_floor_without_period_ends():
 
 def _ios_price_columns(timeline, prices):
     """Python port of `EarningsTimelineChart.priceColumnsByPeriodEnd` (no lead-in trim):
-    column i spans (end[i-1], end[i]]; the first spans 365 days before its end."""
+    column i spans (end[i-1], end[i]]; the first spans 365 days before its end. A close at
+    fraction f of column i is drawn at i - 0.5 + f (`yearEndShift`, owner 2026-11-14: "Shift
+    the price line"), so each period END lands on its own bar and EPS dot (centre i + 0.5)."""
     edges = [date.fromisoformat(r["period_end"]) for r in timeline]
     assert all(b > a for a, b in zip(edges, edges[1:]))
     first_start = edges[0] - timedelta(days=365)
@@ -848,19 +850,50 @@ def _ios_price_columns(timeline, prices):
             continue
         i = next(k for k, e in enumerate(edges) if d <= e)
         start = first_start if i == 0 else edges[i - 1]
-        out.append((i + (d - start).days / max((edges[i] - start).days, 1), price))
+        out.append((i - 0.5 + (d - start).days / max((edges[i] - start).days, 1), price))
     return out
 
 
-def test_ios_mapping_puts_a_close_in_its_fiscal_column():
+def test_ios_mapping_puts_a_close_between_the_year_end_bars_around_it():
     cols = _ios_price_columns(_NVDA_TIMELINE, [("2025-06-16", 140.0), ("2026-09-30", 180.0),
                                                ("2021-02-16", 150.0), ("2027-02-01", 1.0)])
-    # Calendar-2025 June is FY2026 (column 4), ~40% through it — not FY2025 (column 3).
-    assert int(cols[0][0]) == 4 and 0.35 < cols[0][0] - 4 < 0.45
-    # Today's price sits in the in-progress FORECAST column (FY2027), not the last actual.
-    assert int(cols[1][0]) == 5
-    assert int(cols[2][0]) == 0
-    assert len(cols) == 3  # past the last column's end → dropped
+    # Calendar-2025 June is ~40% into FY2026: between the FY2025 bar (3.5 = Jan 2025) and the
+    # FY2026 bar (4.5 = Jan 2026) — never on or past FY2026's bar.
+    assert 3.5 < cols[0][0] < 4.5 and abs(cols[0][0] - (3.5 + 0.389)) < 0.02
+    # The latest close sits before the in-progress FORECAST year's bar (FY2027, 5.5).
+    assert 4.5 < cols[1][0] < 5.5
+    assert cols[2][0] < 0.5   # FY2022's lead-in: left of the first bar (the chart trims it)
+    assert len(cols) == 3     # past the last column's end → dropped
+
+
+def test_each_period_end_lands_on_its_own_bar():
+    ends = [(r["period_end"], 0.0) for r in _NVDA_TIMELINE]
+    xs = [x for x, _ in _ios_price_columns(_NVDA_TIMELINE, ends)]
+    assert xs == [pytest.approx(k + 0.5) for k in range(len(_NVDA_TIMELINE))]
+
+
+_ORCL_TIMELINE = [
+    {"period": str(fy), "period_end": f"{fy}-05-31", "is_forecast": fy >= 2027}
+    for fy in range(2022, 2030)
+]
+_DEC_TIMELINE = [
+    {"period": str(fy), "period_end": f"{fy}-12-31", "is_forecast": fy >= 2026}
+    for fy in range(2021, 2029)
+]
+
+
+def test_oracle_price_stops_between_its_fy2026_and_fy2027_bars():
+    # The owner's case (2026-11-14): Nov 13 2026 is 45% into FY2027 (Jun 2026 - May 2027).
+    (x, _), = _ios_price_columns(_ORCL_TIMELINE, [("2026-11-13", 125.35)])
+    fy2026_bar, fy2027_bar = 4 + 0.5, 5 + 0.5
+    assert fy2026_bar < x < fy2027_bar
+    assert x == pytest.approx(fy2026_bar + 166 / 365, abs=1e-3)
+
+
+def test_a_december_filers_price_no_longer_runs_past_the_current_years_bar():
+    # Before the shift, Nov 13 2026 sat at 5.87 — past the in-progress FY2026 bar (5.5).
+    (x, _), = _ios_price_columns(_DEC_TIMELINE, [("2026-11-13", 100.0)])
+    assert 4.5 < x < 5.5
 
 
 def test_ios_mapping_matches_the_swift_source():
@@ -870,9 +903,13 @@ def test_ios_mapping_matches_the_swift_source():
     swift = (Path(__file__).resolve().parents[2] / "frontend/ios/ios/Views/Molecules/"
              "EarningsTimelineChart.swift").read_text()
     code = "\n".join(ln.split("//", 1)[0] for ln in swift.splitlines())
-    # Internal since 2026-11-14: ReportEarningsTimelinePanel's price-cutoff caption reads it.
     assert "static let firstColumnDays = 365" in code
     assert C._TIMELINE_FIRST_COLUMN_DAYS == 365
+    assert "static let yearEndShift: Double = 0.5" in code
+    # Both mappings shift (the legacy calendar path too), and the first-bar trim stays.
+    assert "Double(lo) - Self.yearEndShift + frac" in code
+    assert "Double(idx) - Self.yearEndShift + frac" in code
+    assert "cols.filter { $0.colX >= 0.5 }" in code
 
 
 def test_report_altman_z_is_not_applicable_to_a_bank():

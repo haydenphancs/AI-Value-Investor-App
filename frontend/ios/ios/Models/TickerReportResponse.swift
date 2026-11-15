@@ -275,8 +275,12 @@ struct RevenueProjectionDTO: Codable {
     /// FISCAL year, so the price overlay places closes by period window when this is present.
     /// Optional: `projections` rows and reports generated before it omit the key.
     let periodEnd: String?
-    /// "gaap" on reported years, "consensus" on forecast years; nil on older reports.
+    /// "adjusted" or "gaap" on reported years, "consensus" on forecast years; nil on older reports.
     let epsBasis: String?
+    /// The reported GAAP EPS label ("$5.83") on an "adjusted" reported year whose figures
+    /// differ; nil otherwise and on reports generated before 2026-11-14. Not displayed: its
+    /// presence is what labels the line "Adj. EPS".
+    let epsGaapLabel: String?
 
     enum CodingKeys: String, CodingKey {
         case period, revenue
@@ -290,6 +294,7 @@ struct RevenueProjectionDTO: Codable {
         case isForecast = "is_forecast"
         case periodEnd = "period_end"
         case epsBasis = "eps_basis"
+        case epsGaapLabel = "eps_gaap_label"
     }
 }
 
@@ -1021,7 +1026,8 @@ extension TickerReportAPIResponse {
                     epsAnalystCount: $0.epsAnalystCount,
                     isForecast: $0.isForecast,
                     periodEnd: $0.periodEnd,
-                    epsBasis: $0.epsBasis
+                    epsBasis: $0.epsBasis,
+                    epsGaapLabel: $0.epsGaapLabel
                 )
             },
             forecastAnalystCount: revenueForecast.forecastAnalystCount,

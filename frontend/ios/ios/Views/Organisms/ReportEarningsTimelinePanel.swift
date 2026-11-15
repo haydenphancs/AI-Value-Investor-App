@@ -59,7 +59,6 @@ struct ReportEarningsTimelinePanel: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.top, AppSpacing.xs)
             }
-
             // Off-calendar filers only (Planet Labs, NVDA, Apple…): says which months the
             // "FY" columns cover, so the year in progress isn't read as a future year.
             if let note = timeline.fiscalYearNote {
@@ -84,8 +83,9 @@ struct ReportEarningsTimelinePanel: View {
 
     /// "Price shown to Dec 31, 2025." — only when no column is a forecast, the frozen price
     /// series runs past the last column's period end, AND the chart actually draws a line.
-    /// EarningsTimelineChart places a close only inside some column's fiscal window (the first
-    /// opens `firstColumnDays` before its end), so the later closes are not drawn (owner,
+    /// EarningsTimelineChart draws a close only from the first column's period END (its
+    /// first bar: `yearEndShift` puts each year-end on its bar, and the lead-in before it is
+    /// trimmed) through the last column's, so the later closes are not drawn (owner,
     /// 2026-11-14: "Caption", not an extra column). A listing that began after the last
     /// year-end has no drawn close at all, and "shown to" would describe a line that is not
     /// there; nor is one drawn from a single close or a flat series. nil whenever the chart is
@@ -105,13 +105,12 @@ struct ReportEarningsTimelinePanel: View {
         guard let firstEnd = ends.first, let lastEnd = ends.last,
               let firstEndDay = EarningsPriceTimeline.dayNumber(firstEnd),
               let lastEndDay = EarningsPriceTimeline.dayNumber(lastEnd) else { return nil }
-        let windowOpensAfter: Int = firstEndDay - EarningsTimelineChart.firstColumnDays
         var drawn: [Double] = []
         var latestDay: Int? = nil
         for point in prices {
             guard let day = EarningsPriceTimeline.dayNumber(point.date) else { continue }
             latestDay = max(latestDay ?? day, day)
-            if day > windowOpensAfter, day <= lastEndDay, point.price.isFinite {
+            if day >= firstEndDay, day <= lastEndDay, point.price.isFinite {
                 drawn.append(point.price)
             }
         }
@@ -140,12 +139,20 @@ struct ReportEarningsTimelinePanel: View {
         return bases.contains("gaap") && bases.contains("consensus")
     }
 
+    /// True when the reported years plot ADJUSTED EPS that differs from GAAP somewhere: the
+    /// legend then reads "Adj. EPS". That label is the only marker — no note and no GAAP figure
+    /// (owner, 2026-11-14: "we don't need to show GAAP anymore", then "Remove the note").
+    private var showsAdjustedEPS: Bool {
+        RevenueProjection.showsAdjustedEPS(timeline)
+    }
+
     private enum LegendShape { case bar, dot, line }
 
     private var legend: some View {
         HStack(spacing: AppSpacing.lg) {
             legendItem(color: AppColors.primaryBlue, shape: .bar, label: "Revenue")
-            legendItem(color: AppColors.accentYellow, shape: .dot, label: "EPS")
+            legendItem(color: AppColors.accentYellow, shape: .dot,
+                       label: showsAdjustedEPS ? "Adj. EPS" : "EPS")
             if showPrice {
                 legendItem(color: AppColors.accentCyan, shape: .line, label: "Price")
             }

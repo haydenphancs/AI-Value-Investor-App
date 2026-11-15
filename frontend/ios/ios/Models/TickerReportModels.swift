@@ -719,8 +719,27 @@ struct RevenueProjection: Identifiable {
     /// each close by period window when every column has one. nil on `projections` rows
     /// and older reports. `var` with a default so existing memberwise inits compile.
     var periodEnd: String? = nil
-    /// "gaap" (reported EPS) or "consensus" (analyst forecast); nil on older reports.
+    /// "adjusted" or "gaap" (a reported year) or "consensus" (analyst forecast); nil on
+    /// older reports. "adjusted" (2026-11-14): the reported year is on the consensus's basis.
     var epsBasis: String? = nil
+    /// The reported GAAP EPS label of an "adjusted" reported year ("$5.83"), sent only where
+    /// the two figures differ (a GAAP-only reporter such as Apple has none); nil otherwise.
+    /// Never displayed (owner, 2026-11-14: "we don't need to show GAAP anymore").
+    var epsGaapLabel: String? = nil
+
+    /// `epsGaapLabel` on an adjusted REPORTED year, when it is a real figure ("N/A" and "" are not).
+    var adjustedYearGAAPLabel: String? {
+        guard !isForecast, epsBasis == "adjusted",
+              let label = epsGaapLabel, !label.isEmpty, label != "N/A" else { return nil }
+        return label
+    }
+
+    /// True when the timeline's EPS line is ADJUSTED in a way the reader must be told: some
+    /// reported year's adjusted figure differs from its GAAP one. The legend and the popup's
+    /// "Adj. EPS" title key on this one rule, so they never disagree.
+    static func showsAdjustedEPS(_ timeline: [RevenueProjection]) -> Bool {
+        timeline.contains { $0.adjustedYearGAAPLabel != nil }
+    }
 
     /// Compact YoY string for the bar/dot annotations. Returns nil when
     /// we have no anchor — the view should hide the row entirely.
@@ -2192,10 +2211,10 @@ extension TickerReportData {
             ],
             beatSummary: "Beat 7 of 10 · 1 met",
             annualTimeline: [
-                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2023-05-31", epsBasis: "gaap"),
-                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2024-05-31", epsBasis: "gaap"),
-                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2025-05-31", epsBasis: "gaap"),
-                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67.3B",  revenueYoyPct: 17,  eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: nil, revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true, periodEnd: "2026-05-31", epsBasis: "consensus"),
+                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2023-05-31", epsBasis: "adjusted", epsGaapLabel: "$3.07"),
+                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2024-05-31", epsBasis: "adjusted", epsGaapLabel: "$3.71"),
+                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2025-05-31", epsBasis: "adjusted", epsGaapLabel: "$4.34"),
+                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67.3B",  revenueYoyPct: 17,  eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: 25,  revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true, periodEnd: "2026-05-31", epsBasis: "consensus"),
                 RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$88.8B",  revenueYoyPct: 32,  eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,   revenueAnalystCount: 28, epsAnalystCount: 27, isForecast: true, periodEnd: "2027-05-31", epsBasis: "consensus"),
                 RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130.0B", revenueYoyPct: 46,  eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35,  revenueAnalystCount: 22, epsAnalystCount: 20, isForecast: true, periodEnd: "2028-05-31", epsBasis: "consensus")
             ],

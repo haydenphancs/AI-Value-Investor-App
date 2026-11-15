@@ -240,8 +240,9 @@ def _swift_cutoff_note(timeline, prices):
     def num(text):
         return _d.fromisoformat(text[:10]).toordinal()
 
-    opens_after, last_end = num(ends[0]) - 365, num(ends[-1])
-    drawn = [p for d, p in prices if opens_after < num(d) <= last_end]
+    # Drawn from the first column's period END (its bar: `yearEndShift`, 2026-11-14).
+    first_end, last_end = num(ends[0]), num(ends[-1])
+    drawn = [p for d, p in prices if first_end <= num(d) <= last_end]
     latest = max((num(d) for d, _ in prices), default=None)
     if len(drawn) < 2 or not max(drawn) > min(drawn) or latest is None or latest <= last_end:
         return None
@@ -263,6 +264,10 @@ _IN = [("2025-03-03", 10.0), ("2025-09-01", 12.0)]      # inside FY2024..FY2025'
     ([("2024-12-31", False)], [], None),
     # Review 2026-11-14: listed AFTER the last year-end — no drawn line, so no "shown to".
     ([("2024-12-31", False), ("2025-12-31", False)], [("2026-03-02", 5.0), ("2026-11-13", 9.0)], None),
+    # Closes only inside the FIRST fiscal year, before its end: since the price line moved
+    # onto year-ends (2026-11-14) they sit left of the first bar, trimmed — nothing drawn.
+    ([("2024-12-31", False), ("2025-12-31", False)],
+     [("2024-03-01", 5.0), ("2024-09-02", 8.0), ("2026-11-13", 9.0)], None),
     # One drawn close, or a flat drawn series: the chart draws no line either.
     ([("2024-12-31", False), ("2025-12-31", False)], [("2025-06-02", 5.0), ("2026-11-13", 9.0)], None),
     ([("2024-12-31", False), ("2025-12-31", False)],
@@ -282,8 +287,9 @@ def test_no_forecast_column_gets_a_price_cutoff_caption():
     assert "!timeline.contains(where: { $0.isForecast })" in note
     assert "if let previous = ends.last, day <= previous { return nil }" in note
     # Only when a line is drawn: >= 2 closes inside the windows, not flat, and a later close.
-    assert "firstEndDay - EarningsTimelineChart.firstColumnDays" in note
-    assert "if day > windowOpensAfter, day <= lastEndDay, point.price.isFinite" in note
+    # Drawn closes start at the first year's END (`yearEndShift` + the first-bar trim).
+    assert "if day >= firstEndDay, day <= lastEndDay, point.price.isFinite" in note
+    assert "windowOpensAfter" not in note
     assert "drawn.count >= 2" in note and "high > low" in note and "latest > lastEndDay" in note
     assert '"Price shown to \\(shown)."' in note
     short = _decl_body(src, r"static func shortDate\(_ ymd: String\)\s*->\s*String\?\s*\{")
@@ -306,3 +312,16 @@ def test_boundary_anchor_id_is_applied_before_position():
     assert ".frame(width: 1, height: 1)" in chain
     assert chain.index(".id(boundaryAnchorID)") < chain.index(".position(x: anchorX, y: topPad)")
     assert ".position(" not in chain[:chain.index(".id(boundaryAnchorID)")]
+
+
+def test_no_dashed_actual_forecast_divider_is_drawn():
+    """Owner 2026-11-14 ("we remove the dash line at the middle"): with the price line on
+    fiscal year-ends, a divider in the gap sat beside the last close and read as a date. The
+    invisible scroll anchor at that spot stays (the chart still opens centred on it)."""
+    src = _code(_TIMELINE_CHART)
+    assert "let bx = sidePad + CGFloat(fi) * colW" not in src
+    # The only dashed stroke left is the tapped column's highlight, drawn at its centre.
+    assert src.count("dash: [3, 3]") == 1
+    highlight = src[src.index("if let sel = selectedIndex, points.indices.contains(sel)"):]
+    assert highlight.index("dash: [3, 3]") < highlight.index("let months")
+    assert ".id(boundaryAnchorID)" in src and "firstForecastIndex.map" in src

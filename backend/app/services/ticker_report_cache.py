@@ -382,7 +382,14 @@ TABLE_NAME = "ticker_report_cache"
 #     c["revenue_cagr"] / c["eps_cagr"] did not change. Same rule: a PAST instant, moved to the
 #     push time if the deploy lands later. Targeted suites ran on this change; run the full
 #     suite on the exact commit before pushing. This ONE bump supersedes every instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 11, 14, 20, 49, 0, tzinfo=timezone.utc)
+# 2026-11-14 (22:50 UTC = 17:50 ET, a Saturday; owner: "Switch to adjusted"): the Earnings
+#     Timeline's reported years plot ADJUSTED EPS (the four quarterly feed actuals summed, the
+#     consensus's basis) with `eps_basis` "adjusted" and `eps_gaap_label`, so the first forecast
+#     year's EPS change and an EPS CAGR from the last reported year are measured. Cached
+#     collections carry the GAAP timeline with that change blank. SCORER_VERSION stays. Same
+#     rule: a PAST instant, moved to the push time if the deploy lands later. This ONE bump
+#     supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 11, 14, 22, 50, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

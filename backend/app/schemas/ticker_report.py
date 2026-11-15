@@ -151,10 +151,16 @@ class RevenueProjectionResponse(BaseModel):
     # year, which is not the calendar year for an off-calendar filer (NVDA's "2025" runs
     # Feb 2024 – Jan 2025), so the price overlay places each close by period window.
     period_end: Optional[str] = None
-    # "gaap" (reported `epsDiluted`) on actual years, "consensus" (analyst `epsAvg`,
-    # adjusted for most filers) on forecast years. The first forecast year's EPS YoY is
-    # None because it would compare the two bases.
+    # "consensus" (analyst `epsAvg`, adjusted for most filers) on forecast years. On actual
+    # years "adjusted" (since 2026-11-14: the four quarterly earnings-feed actuals summed, the
+    # consensus's own basis, so the first forecast year's EPS YoY is measured) or "gaap"
+    # (reported `epsDiluted`, when no adjusted history passes its checks; that first forecast
+    # year's EPS YoY is then None because it would compare the two bases).
     eps_basis: Optional[str] = None
+    # The reported GAAP EPS label ("$5.83") on an "adjusted" actual year whose adjusted and
+    # GAAP figures differ by more than max(2%, $0.03); None otherwise (a GAAP-only reporter
+    # such as Apple has none). iOS does not display it: its presence labels the line "Adj. EPS".
+    eps_gaap_label: Optional[str] = None
 
 
 class EarningsTrackRecordPointResponse(BaseModel):

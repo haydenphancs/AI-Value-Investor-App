@@ -1078,6 +1078,17 @@ def _projection_growth(rows: List[_ProjRow], field: str, stored: Optional[float]
     return (rate, p0, p1) if math.isfinite(rate) and abs(rate) < _CAGR_MAX_ABS else None
 
 
+def _timeline_eps_adjusted(rf: Dict[str, Any]) -> bool:
+    """True when the report's Earnings Timeline plots a reported year on ADJUSTED EPS that
+    differs from its GAAP figure (the collector sets `eps_gaap_label` only then)."""
+    rows = rf.get("annual_timeline")
+    return isinstance(rows, list) and any(
+        isinstance(r, dict) and not r.get("is_forecast") and r.get("eps_basis") == "adjusted"
+        and isinstance(r.get("eps_gaap_label"), str) and r["eps_gaap_label"] not in ("", "N/A")
+        for r in rows
+    )
+
+
 def _forecast_figures(report: Dict[str, Any]) -> List[_FigSpec]:
     """The forward analyst forecast, labelled as the analysts' estimate, with its growth rate:
     the stored one the card shows, or one recomputed from the projections when the collector
@@ -1113,7 +1124,10 @@ def _forecast_figures(report: Dict[str, Any]) -> List[_FigSpec]:
         if bits:
             years.append(f"{period} {', '.join(bits)}")
     growth: List[str] = []
-    for field, label in (("revenue", "revenue"), ("eps", "EPS")):
+    # Since 2026-11-14 the EPS rate can start at a reported year plotted on ADJUSTED EPS, while
+    # this chat's financials tool gives GAAP EPS: named, so the two are never mixed.
+    eps_word = "adjusted EPS" if _timeline_eps_adjusted(rf) else "EPS"
+    for field, label in (("revenue", "revenue"), ("eps", eps_word)):
         stored = _stored_growth(rf.get(_STORED_GROWTH_KEY[field]))
         span = _fig_label(rf.get(_STORED_SPAN_KEY[field]), 24)
         measured = _fig_float(rf.get(_STORED_GROWTH_KEY[field])) if span else None

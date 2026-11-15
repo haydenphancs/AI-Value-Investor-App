@@ -1783,6 +1783,15 @@ out to compute peer medians per request:
   Biotechnology counted that way pinned its net-margin median at 0.0% (revenue-backed: −76.9%).
   SG&A / revenue drops FMP's exact 0 the same way (`app.utils.margins.sga_reading`, the scorer's
   rule too): it is a blank line, not a figure. R&D keeps its 0, which both sides read as a figure.
+  Free cash flow drops FMP's exact 0 too (`app.utils.margins.free_cash_flow_reading`): FMP
+  zero-fills a cash-flow statement it does not have (HSBC's every quarter, JPM's not-yet-filed
+  newest quarter). The FCF margin has read it so since 2026-10-21; since 2026-11-14 the FCF
+  **growth** median does as well (`fcf_yoy`, the per-metric `reading` in `METRIC_CONFIGS`,
+  applied by `_compute_yoy_for_records` to the current period AND its year-ago base: a blank on
+  either side gives that company no figure for the period, never a comparison with an older
+  row). It is the rule the company's own Growth series uses (owner "Fix it too"); before it, a
+  zero-filled peer voted −100% into the median that series is drawn against. A real negative FCF
+  is kept. Stored rows change only when the owner next runs the fiscal recompute.
 - **Peer floor watch** (`industry_benchmark_service._PeerFloorWatch`, 2026-11-05; cells kept
   since 2026-11-06, owner decision "Keep same-year cell"): a financial industry rests on one
   ticker. Financial - Data & Stock Exchanges pools exactly 10 companies, Insurance - Specialty 11,

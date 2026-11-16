@@ -627,6 +627,11 @@ class Settings(BaseSettings):
     # excluded them. It now has its own setting, same semantics as the two above,
     # and the loop emits GEMINI_USAGE per round so the deep door can be measured.
     # Re-run scripts/eval_report_thinking.py on the deep path before moving it.
+    #
+    # 0 MEANS "off", NOT a literal wire value (2026-11-15): gemini-3.5-flash-lite answers
+    # thinking_budget=0 with 400 INVALID_ARGUMENT, and Google routes every gemini-2.5-flash
+    # request to it from 2026-12-01. `gemini._wire_budget` sends 1 (measured: 0 thought tokens on
+    # both models) to those two models and 0 to every other. Every 0 below and elsewhere is safe.
     REPORT_NARRATIVE_THINKING_BUDGET: int = 0
     REPORT_STAGE_A_THINKING_BUDGET: int = 0
     REPORT_AGENTIC_THINKING_BUDGET: int = 0

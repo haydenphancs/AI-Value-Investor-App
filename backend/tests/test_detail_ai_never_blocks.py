@@ -359,7 +359,9 @@ async def test_thinking_budget_is_part_of_the_gemini_cache_key(monkeypatch):
 
     # The budget actually reaches the SDK as a ThinkingConfig, and is absent by default.
     assert calls[0]["config"].thinking_config is not None
-    assert calls[0]["config"].thinking_config.thinking_budget == 0
+    # gemini-2.5-flash refuses 0 after the 2026-12-01 reroute, so "off" goes out as 1.
+    from app.integrations.gemini import _BUDGET_OFF_ON_REFUSING_MODELS
+    assert calls[0]["config"].thinking_config.thinking_budget == _BUDGET_OFF_ON_REFUSING_MODELS
     assert calls[1]["config"].thinking_config is None
 
 

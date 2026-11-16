@@ -34,19 +34,24 @@ ANSWER_METHODS = {"stream_text", "stream_agentic", "generate_with_tools"}
 def test_stream_encoder_keeps_thoughts_on_and_forwards_the_ceiling():
     """The streaming pair renders thought summaries as the thinking card; `_thinking_config`
     (no `include_thoughts`) would blank it, hence a dedicated encoder."""
-    none = gem._stream_thinking_config(None)
-    assert none.include_thoughts is True and none.thinking_budget is None
-    off = gem._stream_thinking_config(0)
+    for model in ("gemini-2.5-flash", "gemini-3.8-flash"):
+        none = gem._stream_thinking_config(None, model=model)
+        assert none.include_thoughts is True and none.thinking_budget is None
+        capped = gem._stream_thinking_config(1024, model=model)
+        assert capped.include_thoughts is True and capped.thinking_budget == 1024
+    # 0 = "off": 0 where the model takes it, 1 where it refuses 0 (thoughts flag kept either way).
+    off = gem._stream_thinking_config(0, model="gemini-3.8-flash")
     assert off.include_thoughts is True and off.thinking_budget == 0
-    capped = gem._stream_thinking_config(1024)
-    assert capped.include_thoughts is True and capped.thinking_budget == 1024
+    off = gem._stream_thinking_config(0, model="gemini-2.5-flash")
+    assert off.include_thoughts is True and off.thinking_budget == gem._BUDGET_OFF_ON_REFUSING_MODELS
 
 
 def test_the_report_encoder_is_untouched():
     """`test_report_thinking_budget.py` pins `_thinking_config`; the chat encoder is a
     sibling, not a change to it."""
-    assert gem._thinking_config(None) is None
-    assert gem._thinking_config(0).thinking_budget == 0
+    assert gem._thinking_config(None, model="gemini-3.8-flash") is None
+    assert gem._thinking_config(0, model="gemini-3.8-flash").thinking_budget == 0
+    assert gem._thinking_config(0, model="gemini-3.8-flash").include_thoughts is None
 
 
 # ── the resolver ─────────────────────────────────────────────────────────────
@@ -125,7 +130,8 @@ async def test_stream_text_forwards_the_budget_with_thoughts_on(budget):
         pass
     tc = models.config.thinking_config
     assert tc.include_thoughts is True
-    assert tc.thinking_budget == budget
+    # gemini-2.5-flash refuses 0 after the reroute: "off" goes out as 1.
+    assert tc.thinking_budget == (gem._BUDGET_OFF_ON_REFUSING_MODELS if budget == 0 else budget)
 
 
 @pytest.mark.asyncio
@@ -145,7 +151,8 @@ async def test_stream_agentic_forwards_the_budget_with_thoughts_on(budget):
         pass
     tc = captured["config"].thinking_config
     assert tc.include_thoughts is True
-    assert tc.thinking_budget == budget
+    # gemini-2.5-flash refuses 0 after the reroute: "off" goes out as 1.
+    assert tc.thinking_budget == (gem._BUDGET_OFF_ON_REFUSING_MODELS if budget == 0 else budget)
 
 
 class _FC:

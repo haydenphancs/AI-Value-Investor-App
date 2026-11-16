@@ -822,18 +822,62 @@ class _StreamUsage:
         return dict(self._committed)
 
 
-def _thinking_config(budget: Optional[int]) -> Optional[Any]:
+#: Models that answer `thinking_budget=0` with a bare 400 INVALID_ARGUMENT ("Request contains
+#: an invalid argument") on EVERY request shape: plain, JSON, schema, tools, cached content,
+#: streaming. Measured live 2026-11-15 on gemini-3.5-flash-lite. gemini-2.5-flash is listed too:
+#: Google deprecated it and from 2026-12-01 routes every request that names it to
+#: gemini-3.5-flash-lite, so a 0 sent under that name would start failing the same way. Neither
+#: model accepts a thinking_level that the other does (2.5-flash refuses every level), so the one
+#: value valid under both names is a positive budget. Budget 1 measured as "off" on both: 0
+#: thought tokens. Before adding a model here, probe it live: gemini-3.8-flash ACCEPTS 0 (the
+#: judges rely on it) and gemini-2.5-flash-lite is not deprecated.
+_BUDGET_ZERO_REFUSED_MODELS = frozenset({"gemini-2.5-flash", "gemini-3.5-flash-lite"})
+#: The wire value that means "no thinking" on those models.
+_BUDGET_OFF_ON_REFUSING_MODELS = 1
+_budget_zero_remap_logged: set = set()
+
+
+def _wire_budget(budget: Optional[int], model: Optional[str]) -> Optional[int]:
+    """The budget to put on the wire for `model`: 0 becomes 1 where the model refuses 0.
+
+    Callers keep meaning "0 = thinking off" (every setting and literal in the app says 0); only
+    the encoding changes. Any other value, and every model outside the refusing set, passes
+    through unchanged, so requests to gemini-3.8-flash and gemini-2.5-flash-lite stay
+    byte-identical.
+    """
+    if budget != 0 or isinstance(budget, bool):
+        return budget
+    name = str(model or "").strip().lower()
+    if name.startswith("models/"):
+        name = name[len("models/"):]
+    if name not in _BUDGET_ZERO_REFUSED_MODELS:
+        return budget
+    if name not in _budget_zero_remap_logged:
+        _budget_zero_remap_logged.add(name)
+        logger.info(
+            "Gemini thinking_budget 0 sent as %d for model=%s (it refuses 0; %d = no thinking)",
+            _BUDGET_OFF_ON_REFUSING_MODELS, name, _BUDGET_OFF_ON_REFUSING_MODELS,
+        )
+    return _BUDGET_OFF_ON_REFUSING_MODELS
+
+
+def _thinking_config(budget: Optional[int], *, model: Optional[str]) -> Optional[Any]:
     """Encode a thinking budget as a ThinkingConfig, or None to send NONE at all.
 
     ONE encoder for all three generation helpers so they are provably identical.
     `None` means "attach no thinking_config", which is byte-identical on the wire
     to a pre-cap request — that is what makes it a safe rollback value. `0`
     disables thinking; a positive value is a ceiling in tokens.
+
+    `model` is the model the request goes to, and it is required (keyword-only) so a new
+    call site cannot forget it: on a model that refuses budget 0, `_wire_budget` sends 1.
     """
-    return None if budget is None else types.ThinkingConfig(thinking_budget=budget)
+    if budget is None:
+        return None
+    return types.ThinkingConfig(thinking_budget=_wire_budget(budget, model))
 
 
-def _stream_thinking_config(budget: Optional[int]) -> Any:
+def _stream_thinking_config(budget: Optional[int], *, model: Optional[str]) -> Any:
     """The STREAMING twin of `_thinking_config`: always asks for thought summaries.
 
     The two chat stream methods render `include_thoughts=True` parts as the thinking
@@ -841,10 +885,11 @@ def _stream_thinking_config(budget: Optional[int]) -> Any:
     the card). `None` keeps today's request byte-identical (thoughts on, no ceiling —
     the rollback value); `0` disables thinking, which also empties the card; a
     positive value is the ceiling. Encoded here once so both methods stay identical.
+    `model` is required for the same reason as in `_thinking_config`.
     """
     if budget is None:
         return types.ThinkingConfig(include_thoughts=True)
-    return types.ThinkingConfig(include_thoughts=True, thinking_budget=budget)
+    return types.ThinkingConfig(include_thoughts=True, thinking_budget=_wire_budget(budget, model))
 
 
 #: `generate_with_tools` runs a forced turn's extra tool round only this early: the send door wraps
@@ -1470,7 +1515,8 @@ class GeminiClient:
                     config=self._config(
                         system_instruction=system_instruction,
                         max_output_tokens=max_output_tokens,
-                        thinking_config=_thinking_config(thinking_budget),
+                        thinking_config=_thinking_config(
+                            thinking_budget, model=model_name or self.model_name),
                     ),
                 ),
                 what="generate_text",
@@ -1538,12 +1584,12 @@ class GeminiClient:
         is_trial = _quota_circuit.half_open
         trial_stamp = _quota_circuit.trial_stamp if is_trial else 0.0
         verdict = False
+        resolved_model = model_name or self.model_name
         config = self._config(
             system_instruction=system_instruction,
             max_output_tokens=max_output_tokens,
-            thinking_config=_stream_thinking_config(thinking_budget),
+            thinking_config=_stream_thinking_config(thinking_budget, model=resolved_model),
         )
-        resolved_model = model_name or self.model_name
         usage = _StreamUsage()
         # Bound BEFORE the try: the `finally` logs it, and a request that raises
         # before the first chunk would otherwise NameError inside the logger.
@@ -1676,7 +1722,7 @@ class GeminiClient:
                 contents=prompt,
                 config=self._config(
                     cached_content=cache.name,
-                    thinking_config=_thinking_config(thinking_budget),
+                    thinking_config=_thinking_config(thinking_budget, model=self.model_name),
                 ),
             ),
             what="generate_text_cached",
@@ -1776,7 +1822,8 @@ class GeminiClient:
                         temperature=temperature,
                         response_mime_type="application/json",
                         response_schema=response_schema,
-                        thinking_config=_thinking_config(thinking_budget),
+                        thinking_config=_thinking_config(
+                            thinking_budget, model=model_name or self.model_name),
                         service_tier=service_tier,
                     ),
                 ),
@@ -2017,7 +2064,7 @@ class GeminiClient:
         config = self._config(
             system_instruction=system_instruction, tools=tools,
             max_output_tokens=max_output_tokens,
-            thinking_config=_thinking_config(thinking_budget),
+            thinking_config=_thinking_config(thinking_budget, model=model),
         )
         first_config = _forced_tool_config(config, force_first_tool, tool_handlers) or config
         forced = first_config is not config
@@ -2175,7 +2222,7 @@ class GeminiClient:
                         config=self._config(
                             system_instruction=system_instruction, tools=None,
                             max_output_tokens=max_output_tokens,
-                            thinking_config=_thinking_config(thinking_budget),
+                            thinking_config=_thinking_config(thinking_budget, model=model),
                         ),
                         what="generate_with_tools final answer",
                     )
@@ -2245,7 +2292,7 @@ class GeminiClient:
             "system_instruction": system_instruction or None,
             "tools": list(tools),
         }
-        thinking = _thinking_config(thinking_budget)
+        thinking = _thinking_config(thinking_budget, model=self.model_name)
         if thinking is not None:
             kwargs["thinking_config"] = thinking
         return self._client.aio.chats.create(
@@ -2312,15 +2359,15 @@ class GeminiClient:
         is_trial = _quota_circuit.half_open
         trial_stamp = _quota_circuit.trial_stamp if is_trial else 0.0
         verdict = False
+        resolved_model = model_name or self.model_name
         config = self._config(
             system_instruction=system_instruction,
             tools=tools,
             max_output_tokens=max_output_tokens,
-            thinking_config=_stream_thinking_config(thinking_budget),
+            thinking_config=_stream_thinking_config(thinking_budget, model=resolved_model),
         )
         # Manual function calling — we run handlers ourselves (AFC-while-streaming is buggy upstream).
         config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
-        resolved_model = model_name or self.model_name
         chat = self._client.aio.chats.create(model=resolved_model, config=config)
         # A per-message config REPLACES the chat's for that request (google-genai), hence a full copy.
         forced_config = _forced_tool_config(config, force_first_tool, tool_handlers)

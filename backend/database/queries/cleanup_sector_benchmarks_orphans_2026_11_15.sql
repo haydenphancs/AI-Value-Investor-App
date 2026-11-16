@@ -58,10 +58,10 @@
 -- ═══ WHEN ═══
 -- Any time EXCEPT while a benchmark job runs: not Sunday 02:00-08:00 UTC (weekly TTM), not
 -- during the quarterly chain (first Sunday of Jan/Apr/Jul/Oct) or a manual recompute. Block 3
--- refuses to delete a row that changed after block 1.
+-- refuses to delete a row that changed after block 2 (the backup).
 --
 -- ═══ BACKUP ═══
--- Block 1 copies every row to be deleted into public.sector_benchmarks_orphans_20261115 (RLS on,
+-- Block 2 copies every row to be deleted into public.sector_benchmarks_orphans_20261115 (RLS on,
 -- no anon/authenticated access). Block 5 restores from it. Drop it with block 6 after a week,
 -- and ALWAYS before the next `scripts/dump_schema.sh` (the schema atlas and the grants tests
 -- fail on an uncurated public table).

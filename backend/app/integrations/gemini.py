@@ -745,6 +745,22 @@ def _response_usage(response: Any) -> Dict[str, Optional[int]]:
     return {key: _coerce_token_count(getattr(um, attr, None)) for key, attr in _USAGE_FIELDS}
 
 
+def _response_served_model(response: Any) -> Optional[str]:
+    """The model that SERVED a response (`model_version`), or None. NEVER raises.
+
+    The request names a model; Google may serve another one (from 2026-12-01 every
+    gemini-2.5-flash request is routed to gemini-3.5-flash-lite). GEMINI_USAGE logs both so a
+    reroute, and the thought tokens it really bills, can be seen in the logs.
+    """
+    try:
+        value = getattr(response, "model_version", None)
+    except Exception:  # pragma: no cover — a hostile proxy object
+        return None
+    if isinstance(value, str) and value.strip():
+        return value.strip()[:80]
+    return None
+
+
 def _response_tokens(response: Any) -> Optional[int]:
     """Total tokens for a response. Thin wrapper — six call sites depend on it."""
     return _response_usage(response)["total"]
@@ -757,6 +773,7 @@ def _log_gemini_usage(
     model: str,
     tag: Optional[str] = None,
     finish: Optional[str] = None,
+    served: Optional[str] = None,
 ) -> None:
     """Emit ONE greppable line per Gemini call. Best-effort, never raises.
 
@@ -769,6 +786,10 @@ def _log_gemini_usage(
     cut answer can be found in the logs next to the `thoughts_tok` that caused it —
     the TestFlight "answer cut off" report was diagnosed from exactly that pairing,
     and before this field the reason had to be inferred from the token arithmetic.
+
+    `served` is the response's `model_version` — the model Google actually ran, which can
+    differ from the `model` requested (a server-side reroute). Last on the line, so every
+    existing reader of the earlier fields is unaffected; "-" when the response carries none.
     """
     try:
         prompt = usage.get("prompt") or 0
@@ -776,11 +797,11 @@ def _log_gemini_usage(
         cached_pct = round(100.0 * cached / prompt, 1) if prompt > 0 else 0.0
         logger.info(
             "GEMINI_USAGE call_site=%s model=%s tag=%s prompt_tok=%s cached_tok=%s "
-            "cached_pct=%s output_tok=%s thoughts_tok=%s total_tok=%s finish=%s",
+            "cached_pct=%s output_tok=%s thoughts_tok=%s total_tok=%s finish=%s served=%s",
             call_site, model, tag or "-",
             usage.get("prompt"), usage.get("cached"), cached_pct,
             usage.get("output"), usage.get("thoughts"), usage.get("total"),
-            finish or "-",
+            finish or "-", served or "-",
         )
     except Exception as e:  # pragma: no cover — telemetry must never break a call
         logger.warning("GEMINI_USAGE log failed (%s: %s)", type(e).__name__, e)
@@ -796,17 +817,22 @@ class _StreamUsage:
     would over-report by roughly the chunk count.
     """
 
-    __slots__ = ("_committed", "_round")
+    __slots__ = ("_committed", "_round", "served")
 
     def __init__(self) -> None:
         self._committed: Dict[str, int] = {key: 0 for key, _ in _USAGE_FIELDS}
         self._round: Dict[str, Optional[int]] = dict(_EMPTY_USAGE)
+        #: The last `model_version` any chunk carried (the model that served the stream).
+        self.served: Optional[str] = None
 
     def observe(self, chunk: Any) -> None:
         """Record a chunk's usage if it carries any. Never raises."""
         usage = _response_usage(chunk)
         if any(value is not None for value in usage.values()):
             self._round = usage
+        served = _response_served_model(chunk)
+        if served:
+            self.served = served
 
     def commit_round(self) -> None:
         """Fold the current round's last reading into the running total."""
@@ -835,6 +861,14 @@ _BUDGET_ZERO_REFUSED_MODELS = frozenset({"gemini-2.5-flash", "gemini-3.5-flash-l
 #: The wire value that means "no thinking" on those models.
 _BUDGET_OFF_ON_REFUSING_MODELS = 1
 _budget_zero_remap_logged: set = set()
+
+#: The user-turn text of the tool-less FINAL answer round, shared by both tool doors
+#: (generate_with_tools and stream_agentic), each of which sends it with a config that declares
+#: no tools, so a model that keeps asking for tools still has to answer.
+_FINAL_ANSWER_INSTRUCTION = (
+    "Answer the user's question now using the tool results you already have. "
+    "Do not call any more tools."
+)
 
 
 def _wire_budget(budget: Optional[int], model: Optional[str]) -> Optional[int]:
@@ -1525,7 +1559,7 @@ class GeminiClient:
             finish = _response_finish(response)
             _log_gemini_usage(
                 usage, call_site="generate_text", model=model_name or self.model_name,
-                finish=finish,
+                finish=finish, served=_response_served_model(response),
             )
             result = {
                 "text": _response_text(response),
@@ -1638,7 +1672,7 @@ class GeminiClient:
             # that cost money without delivering an answer.
             _log_gemini_usage(
                 usage.totals(), call_site="stream_text", model=resolved_model, tag=usage_tag,
-                finish=finish,
+                finish=finish, served=usage.served,
             )
 
     # ── Context caching (Stage-B narratives) ──────────────────────────
@@ -1689,10 +1723,13 @@ class GeminiClient:
             logger.info("Gemini context cache created (ttl=%dm)", ttl)
             return {"cache": cache}
         except Exception as e:
-            # Below-min-token (2.5 Flash min ~1024), quota, or hung → inline.
-            logger.info(
-                "Gemini context cache unavailable (%s: %s) — using inline prompts",
-                type(e).__name__, e,
+            # Below-min-token (2.5 Flash min ~1024), quota, or hung → inline. WARNING, not INFO:
+            # every Stage B job then pays the full evidence prefix, and a cause that repeats on
+            # EVERY report (a model the cache API refuses after a reroute, a changed minimum)
+            # was invisible at INFO — a silent cost regression (CLAUDE.md: degraded = warning).
+            logger.warning(
+                "[gemini-context-cache-unavailable] model=%s %s: %s — using inline prompts",
+                self.model_name, type(e).__name__, str(e)[:300],
             )
             return None
 
@@ -1731,6 +1768,7 @@ class GeminiClient:
         finish = _response_finish(response)
         _log_gemini_usage(
             usage, call_site="generate_text_cached", model=self.model_name, finish=finish,
+            served=_response_served_model(response),
         )
         return {
             "text": _response_text(response),
@@ -1833,7 +1871,7 @@ class GeminiClient:
             finish = _response_finish(response)
             _log_gemini_usage(
                 usage, call_site="generate_json", model=model_name or self.model_name,
-                tag=usage_tag, finish=finish,
+                tag=usage_tag, finish=finish, served=_response_served_model(response),
             )
             result = {
                 "text": _response_text(response),
@@ -1966,7 +2004,8 @@ class GeminiClient:
                 logger.warning("Gemini image: attempt %d/%d failed (%s)", attempt, attempts, last)
             else:
                 _log_gemini_usage(_response_usage(response), call_site="generate_image",
-                                  model=model_name, tag=usage_tag, finish=_response_finish(response))
+                                  model=model_name, tag=usage_tag, finish=_response_finish(response),
+                                  served=_response_served_model(response))
                 cands = getattr(response, "candidates", None) or []
                 if not cands:
                     feedback = getattr(response, "prompt_feedback", None)
@@ -2152,11 +2191,11 @@ class GeminiClient:
                 )
                 _log_gemini_usage(
                     _response_usage(response), call_site="generate_with_tools", model=model,
-                    finish=_response_finish(response),
+                    finish=_response_finish(response), served=_response_served_model(response),
                 )
                 _log_gemini_usage(
                     _response_usage(follow_up), call_site="generate_with_tools:follow_up", model=model,
-                    finish=_response_finish(follow_up),
+                    finish=_response_finish(follow_up), served=_response_served_model(follow_up),
                 )
                 text = _response_text(follow_up)
                 extra_ran = False
@@ -2199,6 +2238,7 @@ class GeminiClient:
                     _log_gemini_usage(
                         _response_usage(follow_up), call_site="generate_with_tools:follow_up_2",
                         model=model, finish=_response_finish(follow_up),
+                        served=_response_served_model(follow_up),
                     )
                     text = _response_text(follow_up)
                 if _has_function_call(follow_up) and (not text or forced or extra_ran):
@@ -2214,10 +2254,7 @@ class GeminiClient:
                     final = await self._generate_content_retried(
                         model=model,
                         contents=history + [follow_up.candidates[0].content, types.Content(
-                            role="user", parts=[types.Part(text=(
-                                "Answer the user's question now using the tool results you already "
-                                "have. Do not call any more tools."
-                            ))],
+                            role="user", parts=[types.Part(text=_FINAL_ANSWER_INSTRUCTION)],
                         )],
                         config=self._config(
                             system_instruction=system_instruction, tools=None,
@@ -2228,7 +2265,7 @@ class GeminiClient:
                     )
                     _log_gemini_usage(
                         _response_usage(final), call_site="generate_with_tools:final", model=model,
-                        finish=_response_finish(final),
+                        finish=_response_finish(final), served=_response_served_model(final),
                     )
                     follow_up = final
                     text = _response_text(follow_up)
@@ -2244,7 +2281,7 @@ class GeminiClient:
             # No function call — return normal text response.
             _log_gemini_usage(
                 _response_usage(response), call_site="generate_with_tools", model=model,
-                finish=_response_finish(response),
+                finish=_response_finish(response), served=_response_served_model(response),
             )
             return {
                 "text": _response_text(response),
@@ -2479,9 +2516,18 @@ class GeminiClient:
                     ))
                 message = response_parts
 
-            # max_rounds exhausted while still calling tools — one final answer round (tools ignored)
-            # so the user always gets a reply.
-            final_stream = await chat.send_message_stream(message)
+            # max_rounds exhausted while still calling tools — one final answer round so the user
+            # always gets a reply. It used to resend the function responses under the chat's own
+            # config, which still DECLARES the tools: a model that asks for yet another tool there
+            # streamed no answer at all (its function-call parts are skipped below), so the main
+            # door raised "empty stream result" and refunded a turn whose tool data was in hand.
+            # Same fix as generate_with_tools' final round: an explicit instruction, and a
+            # per-message config with NO tools (a per-message config REPLACES the chat's, so it
+            # is a full copy — thinking, output cap and the disabled AFC carry over).
+            if isinstance(message, list):
+                message = list(message) + [types.Part(text=_FINAL_ANSWER_INSTRUCTION)]
+            final_config = config.model_copy(update={"tools": None, "tool_config": None})
+            final_stream = await chat.send_message_stream(message, config=final_config)
             finish = None
             async for chunk in final_stream:
                 usage.observe(chunk)
@@ -2516,7 +2562,7 @@ class GeminiClient:
             # exception all land here, and all three spent tokens.
             _log_gemini_usage(
                 usage.totals(), call_site="stream_agentic", model=resolved_model, tag=usage_tag,
-                finish=finish,
+                finish=finish, served=usage.served,
             )
 
 

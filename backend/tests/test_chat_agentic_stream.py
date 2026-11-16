@@ -47,14 +47,19 @@ def _chunk(*parts):
 
 
 class _FakeChat:
-    """Returns one canned stream (list of chunks) per send_message_stream call."""
+    """Returns one canned stream (list of chunks) per send_message_stream call.
+
+    Mirrors the SDK signature (`send_message_stream(message, config=None)`): a per-message config
+    REPLACES the chat's for that request, and `configs` records each one (None = the chat's own)."""
     def __init__(self, rounds):
         self._rounds = rounds
         self._i = 0
         self.sent = []
+        self.configs = []
 
-    async def send_message_stream(self, message):
+    async def send_message_stream(self, message, config=None):
         self.sent.append(message)
+        self.configs.append(config)
         chunks = self._rounds[min(self._i, len(self._rounds) - 1)]
         self._i += 1
 
@@ -178,6 +183,93 @@ async def test_stream_agentic_final_round_when_rounds_exhausted():
         "prompt", tools=[_TOOL], tool_handlers={"get_x": handler}, max_rounds=2)]
     assert ("answer", "final answer") in events
     assert len(chat.sent) == 3  # 2 tool rounds + 1 final answer round
+
+
+class _ToolHungryChat(_FakeChat):
+    """A model that asks for a tool whenever the request OFFERS tools — the behaviour that left
+    the final round answerless — and answers only when the per-message config declares none."""
+
+    async def send_message_stream(self, message, config=None):
+        self.sent.append(message)
+        self.configs.append(config)
+        offers_tools = config is None or bool(getattr(config, "tools", None))
+        part = (_FakePart(function_call=_FakeFC("get_x", {"ticker": "AAPL"})) if offers_tools
+                else _FakePart(text="Answer from the data in hand."))
+
+        async def _gen():
+            yield _chunk(part)
+        return _gen()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_rounds", [1, 2, 4])
+async def test_the_final_round_offers_no_tools_and_says_so(max_rounds):
+    """The final round used to resend the function responses under the chat's own config, which
+    still declared the tools: a model that kept calling tools streamed NO answer (its function-call
+    parts are skipped), so the main door raised "empty stream result" and refunded a turn whose
+    tool data was in hand. It now sends a tool-less config plus the explicit instruction."""
+    chat = _ToolHungryChat(rounds=[])
+    c = _client(chat)
+
+    async def handler(args):
+        return {"ok": True}
+
+    events = [ev async for ev in c.stream_agentic(
+        "prompt", tools=[_TOOL], tool_handlers={"get_x": handler}, max_rounds=max_rounds,
+        thinking_budget=0)]
+    assert ("answer", "Answer from the data in hand.") in events
+    assert len(chat.sent) == max_rounds + 1
+    final_cfg, final_msg = chat.configs[-1], chat.sent[-1]
+    # Every tool round ran on the chat's own config; only the final one replaced it.
+    assert chat.configs[:-1] == [None] * max_rounds
+    assert final_cfg is not None and not final_cfg.tools and final_cfg.tool_config is None
+    # The replacement is a FULL copy: the remapped thinking setting (2.5-flash refuses 0 after the
+    # reroute → 1), the output cap and the disabled AFC all carry over.
+    assert final_cfg.thinking_config.thinking_budget == gem._BUDGET_OFF_ON_REFUSING_MODELS
+    assert final_cfg.thinking_config.include_thoughts is True
+    assert final_cfg.max_output_tokens == 128
+    assert final_cfg.automatic_function_calling.disable is True
+    # The function responses still go back, followed by the instruction.
+    texts = [getattr(p, "text", None) for p in final_msg]
+    assert texts[-1] == gem._FINAL_ANSWER_INSTRUCTION
+    assert sum(1 for p in final_msg if getattr(p, "function_response", None)) >= 1
+
+
+@pytest.mark.asyncio
+async def test_the_final_round_with_no_rounds_sends_the_prompt_without_the_instruction():
+    """max_rounds=0 makes the final round the FIRST request: no tool results exist, so the prompt
+    goes alone (no "using the tool results you already have"), still tool-less."""
+    chat = _ToolHungryChat(rounds=[])
+    c = _client(chat)
+    events = [ev async for ev in c.stream_agentic("prompt", tools=[_TOOL], tool_handlers={}, max_rounds=0)]
+    assert ("answer", "Answer from the data in hand.") in events
+    assert chat.sent == ["prompt"]
+    assert not chat.configs[0].tools
+
+
+@pytest.mark.asyncio
+async def test_a_final_round_that_still_calls_a_tool_yields_no_answer_but_does_not_raise():
+    """Defence in depth: if a model calls a tool even with none declared, the function-call part is
+    skipped and the loop ends without an answer (the door then reports it); it never raises here."""
+    class _Stubborn(_FakeChat):
+        async def send_message_stream(self, message, config=None):
+            self.sent.append(message)
+            self.configs.append(config)
+
+            async def _gen():
+                yield _chunk(_FakePart(function_call=_FakeFC("get_x", {"ticker": "AAPL"})))
+            return _gen()
+
+    chat = _Stubborn(rounds=[])
+    c = _client(chat)
+
+    async def handler(args):
+        return {"ok": True}
+
+    events = [ev async for ev in c.stream_agentic("p", tools=[_TOOL], tool_handlers={"get_x": handler},
+                                                  max_rounds=1)]
+    assert not [e for e in events if e[0] == "answer"]
+    assert len(chat.sent) == 2
 
 
 @pytest.mark.asyncio

@@ -239,3 +239,99 @@ def test_the_status_splitter_redacts_a_legacy_plain_string():
     code, msg = _split_structured_error(json.dumps(
         {"error_code": "FMP_UNAVAILABLE", "user_message": f"see {_fmp_403()}"}))
     assert code == "FMP_UNAVAILABLE" and _KEY not in msg
+
+
+# ── Invariant 7: no AI vendor or model name in a client error body (2026-11-15 review) ───────
+#
+# Both builders serialised `<Class>: <text>` into `message` and `details.underlying`, and both
+# fields reach the client verbatim (and `research_reports.error_message`). For an AI-engine failure
+# that read "GeminiQuotaError: Gemini quota circuit open (resource_exhausted)" or "ClientError: 404
+# NOT_FOUND … models/gemini-2.5-flash is not found …" — naming the vendor and the model the agent
+# must never reveal ("Cay AI by Caydex"). The server log still carries the full text.
+
+import re as _re
+
+from google.genai.errors import ClientError, ServerError
+
+from app.api.error_response import client_error_text
+from app.integrations.gemini import GeminiQuotaError, GeminiTimeoutError
+
+_VENDOR = _re.compile(r"(?i)gemini|google|genai|vertex|anthropic|claude|openai")
+
+
+def _text_fields(body: dict) -> str:
+    """Everything a person could read: every field but `error_code`, the contract IDENTIFIER iOS
+    decodes (`GEMINI_UNAVAILABLE` is a fixed enum name, never shown — renaming it would break the
+    `AppError.mapAPIError` contract, invariant 3)."""
+    return json.dumps({k: v for k, v in body.items() if k != "error_code"})
+
+
+def _ai_failures():
+    return [
+        GeminiQuotaError("Gemini quota circuit open (resource_exhausted) — failing fast"),
+        GeminiTimeoutError("generate_with_tools exceeded 90s on gemini-2.5-flash"),
+        ClientError(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                    "message": "Request contains an invalid argument."}}),
+        ClientError(404, {"error": {"code": 404, "status": "NOT_FOUND",
+                                    "message": "models/gemini-2.5-flash is not found for API version v1beta"}}),
+        ServerError(503, {"error": {"code": 503, "status": "UNAVAILABLE",
+                                    "message": "The model is overloaded. Google is on it."}}),
+    ]
+
+
+@pytest.mark.parametrize("exc", _ai_failures(), ids=lambda e: type(e).__name__)
+def test_an_ai_engine_failure_body_names_no_vendor_and_no_model(exc):
+    resp = error_response_from_exception(exc, ticker="AAPL", step="stage_a")
+    body = json.loads(resp.body)
+    assert body["error_code"] in ("GEMINI_UNAVAILABLE", "GEMINI_QUOTA_EXCEEDED")
+    assert not _VENDOR.search(_text_fields(body)), body
+    persisted = error_body_from_exception(exc, ticker="AAPL", step="stage_a")
+    assert not _VENDOR.search(_text_fields(persisted)), persisted
+    # Still debuggable: the kind and the HTTP status survive, ticker/step untouched.
+    assert body["details"]["ticker"] == "AAPL" and body["details"]["step"] == "stage_a"
+    assert body["message"].startswith("AIEngineError: ")
+
+
+def test_the_ai_summary_keeps_the_status_and_the_kind():
+    quota, timeout, bad, missing, overloaded = (client_error_text(e, classify_exception(e)[0], limit=300)
+                                                for e in _ai_failures())
+    assert quota == "AIEngineError: quota"
+    assert timeout == "AIEngineError: timeout"
+    assert bad == "AIEngineError: unavailable (400 INVALID_ARGUMENT)"
+    assert missing == "AIEngineError: unavailable (404 NOT_FOUND)"
+    assert overloaded == "AIEngineError: unavailable (503 UNAVAILABLE)"
+
+
+def test_a_non_ai_failure_keeps_its_text_with_any_vendor_word_scrubbed():
+    exc = RuntimeError("collector failed after models/gemini-2.5-flash said google.genai was busy")
+    body = json.loads(error_response_from_exception(exc).body)
+    assert body["message"].startswith("RuntimeError: collector failed after ")
+    assert not _VENDOR.search(_text_fields(body)), body
+
+
+def test_the_vendor_scrub_runs_after_the_secret_redaction_and_both_hold():
+    exc = _fmp_403()
+    text = client_error_text(exc, classify_exception(exc)[0], limit=300)
+    assert _KEY not in text and "apikey=***" in text
+
+
+@pytest.mark.parametrize("limit", [0, 1, 15, 40])
+def test_the_limit_is_respected_for_every_kind(limit):
+    for exc in _ai_failures() + [RuntimeError("x" * 500)]:
+        assert len(client_error_text(exc, classify_exception(exc)[0], limit=limit)) <= limit
+
+
+def test_hostile_status_attributes_never_leak_or_raise():
+    class _Weird(ClientError):
+        def __init__(self):
+            Exception.__init__(self, "models/gemini-x")
+            self.code = True                         # a bool is not a status code
+            self.status = "not upper case; gemini"   # not a status token → dropped
+    # As an AI-engine failure: the bad status attributes are dropped, nothing raises, and a class
+    # name that names no vendor is kept for debugging (the SDK's own names become AIEngineError).
+    text = client_error_text(_Weird(), ErrorCode.GEMINI_UNAVAILABLE, limit=300)
+    assert text == "_Weird: unavailable" and not _VENDOR.search(text)
+    # Classified on its own (a test-module subclass is not in a google module → a plain error),
+    # the generic path still scrubs the vendor word out of the text.
+    generic = client_error_text(_Weird(), classify_exception(_Weird())[0], limit=300)
+    assert not _VENDOR.search(generic), generic

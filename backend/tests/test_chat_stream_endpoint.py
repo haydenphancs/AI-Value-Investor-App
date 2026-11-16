@@ -4791,3 +4791,104 @@ def test_a_stream_deep_dive_on_a_web_sourced_card_never_enters_the_shared_cache(
     assert (writes == []) is web_card, writes
     if web_card:
         assert _assistant_row(db)["rich_content"]["thinking"].get("web_assisted_card") is True
+
+
+# ── A PERMANENT AI-engine error is GEMINI_UNAVAILABLE on both doors (2026-11-15 review) ─────────
+#
+# A google.genai ClientError — 400 INVALID_ARGUMENT on a request shape we build wrong, 404 for a
+# retired model — is not "transient" (no quota / overload text), so the stream door labelled it
+# INTERNAL_ERROR. iOS reads INTERNAL_ERROR as "couldn't be saved" and RE-SENDS the turn through
+# POST /messages, which failed the same way (two full failed generations per turn), and that door
+# answered a bare 500 {"detail"} — no APIErrorResponse body (invariant #3). Both now answer
+# GEMINI_UNAVAILABLE, which iOS treats as terminal (`terminalPreflightCodes`), and no body names
+# the vendor or the model (invariant 7).
+
+import re as _re  # noqa: E402
+
+from google.genai.errors import ClientError  # noqa: E402
+
+_VENDOR_RE = _re.compile(r"(?i)gemini|google|genai|anthropic|claude|openai")
+
+
+def _permanent_ai_errors():
+    return [
+        ClientError(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                    "message": "Request contains an invalid argument."}}),
+        ClientError(404, {"error": {"code": 404, "status": "NOT_FOUND",
+                                    "message": "models/gemini-2.5-flash is not found for API version v1beta"}}),
+    ]
+
+
+def _readable(body: dict) -> str:
+    return json.dumps({k: v for k, v in body.items() if k != "error_code"})
+
+
+@pytest.mark.parametrize("exc", _permanent_ai_errors(), ids=["400", "404"])
+def test_a_permanent_ai_error_on_the_stream_fallback_is_terminal_not_internal(harness, monkeypatch, exc):
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("thought", "Let me check.")]     # no answer → the fallback runs
+
+    async def _raise(self, **kw):
+        raise exc
+    monkeypatch.setattr(_FakeChatService, "generate_response", _raise)
+    r = _post(client)
+    assert r.status_code == 200
+    frames = _parse_sse(r.text)
+    errors = [d for name, d in frames if name == "error"]
+    assert len(errors) == 1 and "done" not in [f[0] for f in frames]
+    assert errors[0]["error_code"] == "GEMINI_UNAVAILABLE", errors[0]
+    assert not _VENDOR_RE.search(_readable(errors[0]))
+    assert quota.refunds == ["chat_stream_fallback_failed"], quota.every_call
+    assert quota.delivered == 0 and db.inserted_messages == []
+
+
+def test_an_unrelated_fallback_failure_is_still_internal_error(harness):
+    """Only AI-engine failures changed: a bug in our own code keeps INTERNAL_ERROR (the iOS
+    "couldn't be saved" path, where a re-send can actually help)."""
+    client, db, quota, _ = harness
+    _FakeChatService.events = [("thought", "Let me check.")]
+    _FakeChatService.fallback_result = None                        # RuntimeError("no fallback…")
+    errors = [d for name, d in _parse_sse(_post(client).text) if name == "error"]
+    assert errors and errors[0]["error_code"] == "INTERNAL_ERROR"
+    assert quota.refunds == ["chat_stream_fallback_failed"]
+
+
+@pytest.mark.parametrize("exc", _permanent_ai_errors(), ids=["400", "404"])
+def test_the_send_door_answers_a_permanent_ai_error_with_the_contract_body(harness, monkeypatch, exc):
+    client, db, quota, _ = harness
+
+    async def _raise(self, *a, **k):
+        raise exc
+    monkeypatch.setattr(_FakeChatService, "generate_response", _raise)
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 502, r.text
+    body = r.json()
+    assert set(body) >= {"error_code", "message", "user_message", "action", "details"}, body
+    assert body["error_code"] == "GEMINI_UNAVAILABLE"
+    assert body["details"] == {"session_id": _SESSION, "step": "chat_generate"}
+    assert all(isinstance(v, (str, int, float, bool)) for v in body["details"].values())
+    assert not _VENDOR_RE.search(_readable(body)), body
+    assert quota.refunds == ["chat_undelivered"] and db.inserted_messages == []
+
+
+def test_the_send_door_quota_message_names_no_vendor(harness, monkeypatch):
+    from app.integrations.gemini import GeminiQuotaError
+    client, db, quota, _ = harness
+
+    async def _quota(self, *a, **k):
+        raise GeminiQuotaError("Gemini quota circuit open (resource_exhausted) — failing fast")
+    monkeypatch.setattr(_FakeChatService, "generate_response", _quota)
+    body = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"}).json()
+    assert body["error_code"] == "GEMINI_QUOTA_EXCEEDED"
+    assert not _VENDOR_RE.search(_readable(body)), body
+
+
+def test_the_send_door_keeps_a_500_for_a_non_ai_failure(harness, monkeypatch):
+    client, db, quota, _ = harness
+
+    async def _bug(self, *a, **k):
+        raise KeyError("prep")
+    monkeypatch.setattr(_FakeChatService, "generate_response", _bug)
+    r = client.post(f"/api/v1/chat/sessions/{_SESSION}/messages", json={"message": "hi"})
+    assert r.status_code == 500
+    assert quota.refunds == ["chat_undelivered"]

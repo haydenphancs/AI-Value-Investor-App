@@ -231,7 +231,8 @@ def test_create_tool_chat_forwards_the_thinking_budget():
     client._client = _C()
     client.create_tool_chat("sys", [], thinking_budget=0)
     client.create_tool_chat("sys", [], thinking_budget=None)
-    assert seen[0].thinking_config is not None and seen[0].thinking_config.thinking_budget == 0
+    # gemini-2.5-flash refuses 0 after the 2026-12-01 reroute, so 0 ("off") goes out as 1.
+    assert seen[0].thinking_config is not None and seen[0].thinking_config.thinking_budget == gem._BUDGET_OFF_ON_REFUSING_MODELS
     assert seen[1].thinking_config is None, "None must attach NO thinking_config (byte-identical to pre-cap)"
 
 
@@ -559,7 +560,7 @@ def test_forced_tool_config_is_a_full_copy_with_mode_any_on_that_one_name():
     base._temperature = 0.7
     base._max_tokens = 8192
     cfg = base._config(system_instruction="SYS", tools=_real_tools(), max_output_tokens=777,
-                       thinking_config=gem._stream_thinking_config(256))
+                       thinking_config=gem._stream_thinking_config(256, model="gemini-2.5-flash"))
     cfg.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)
     forced = gem._forced_tool_config(cfg, "web_search", {"web_search": h})
     assert forced is not cfg

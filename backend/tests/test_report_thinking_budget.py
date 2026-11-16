@@ -22,6 +22,10 @@ import pytest
 
 from app.config import settings
 from app.integrations.gemini import GeminiClient, _TTLCache, _thinking_config
+# The client under test is gemini-2.5-flash, which (via Google's 2026-12-01 reroute to
+# gemini-3.5-flash-lite) refuses thinking_budget=0: the encoder sends 1 = no thinking.
+# test_gemini_budget_zero_refused.py pins that remap; here it is only the expected wire value.
+from app.integrations.gemini import _BUDGET_OFF_ON_REFUSING_MODELS as _OFF
 
 
 # ── A GeminiClient wired to a recording fake SDK ──────────────────────────────
@@ -83,7 +87,7 @@ async def test_generate_text_cached_forwards_the_thinking_budget():
 
     cfg = calls[0]["config"]
     assert cfg.thinking_config is not None
-    assert cfg.thinking_config.thinking_budget == 0
+    assert cfg.thinking_config.thinking_budget == _OFF
     # The OTHER cost optimisation on this exact line. Losing the cached prefix
     # while gaining the thinking cap would be a net loss, and silent.
     assert cfg.cached_content == _HANDLE_NAME
@@ -109,7 +113,7 @@ async def test_generate_json_forwards_the_thinking_budget():
 
     cfg = calls[0]["config"]
     assert cfg.thinking_config is not None
-    assert cfg.thinking_config.thinking_budget == 0
+    assert cfg.thinking_config.thinking_budget == _OFF
     assert cfg.response_mime_type == "application/json"
 
 
@@ -128,7 +132,7 @@ async def test_generate_json_thinking_budget_is_part_of_the_cache_key():
     await client.generate_json(prompt="same prompt", thinking_budget=0)
     assert len(calls) == 2, "an identical call must still hit the cache"
 
-    assert calls[0]["config"].thinking_config.thinking_budget == 0
+    assert calls[0]["config"].thinking_config.thinking_budget == _OFF
     assert calls[1]["config"].thinking_config is None
 
 
@@ -151,9 +155,12 @@ def test_none_sends_no_thinking_config_at_all():
     is byte-identical on the wire to a pre-cap request. Passing Gemini's own
     `-1` ("dynamic thinking") instead would send a field today's requests do not,
     and would depend on AUTOMATIC and the model default being the same thing."""
-    assert _thinking_config(None) is None
-    assert _thinking_config(0).thinking_budget == 0
-    assert _thinking_config(512).thinking_budget == 512
+    for model in ("gemini-2.5-flash", "gemini-3.8-flash"):
+        assert _thinking_config(None, model=model) is None
+        assert _thinking_config(512, model=model).thinking_budget == 512
+    # 0 = "off": sent as 0 where the model takes it, as 1 where it refuses 0.
+    assert _thinking_config(0, model="gemini-3.8-flash").thinking_budget == 0
+    assert _thinking_config(0, model="gemini-2.5-flash").thinking_budget == _OFF
 
 
 # ── Stage A passes its budget on BOTH report doors ────────────────────────────

@@ -3110,6 +3110,15 @@ and is deliberately *not* shown there, because it is not what Apple would charge
 > mapped to "send no `thinking_config` at all", which is byte-identical on the wire to a pre-cap
 > request, rather than passing Gemini's `-1` ("dynamic thinking") through.
 >
+> **0 means "off", not a wire value (2026-11-15).** Google routes every `gemini-2.5-flash` request
+> to `gemini-3.5-flash-lite` from 2026-12-01, and `gemini-3.5-flash-lite` answers
+> `thinking_budget=0` with 400 INVALID_ARGUMENT on every request shape (measured live). The thinking
+> encoders in `integrations/gemini.py` take the model the request goes to and send **1** to
+> `gemini-2.5-flash` and `gemini-3.5-flash-lite` (measured: 0 thought tokens on both), and 0 to every
+> other model (`gemini-3.8-flash` accepts 0; `gemini-2.5-flash-lite` is not deprecated). This is a
+> stopgap that works on both sides of the cutover. It does not choose the replacement model, and it
+> does not restore the thinking that calls without a `thinking_config` lose on 3.5-flash-lite.
+>
 > Measured with `backend/scripts/eval_report_thinking.py` on the real prompts
 > (MSFT / warren_buffett, `gemini-2.5-flash`), per report:
 >

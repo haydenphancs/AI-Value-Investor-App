@@ -1100,6 +1100,16 @@ the 23 modules (`stocks.py` 29, `chat.py` 13, `admin.py` 11, `auth.py` 10, `port
 `indices.py`, `widget.py` 1 each) — still raise a plain-string `HTTPException`, which `main.py`'s handler
 deliberately leaves as `{"detail": …}` (§10).
 
+**AI-engine failures name no vendor (2026-11-15).** `message` and `details.underlying` reach the
+client verbatim (and `research_reports.error_message`), so both builders take their text from
+`client_error_text`: a `GEMINI_UNAVAILABLE` / `GEMINI_QUOTA_EXCEEDED` failure gets a vendor-free
+summary (`AIEngineError: unavailable (404 NOT_FOUND)`), never the provider's own text, and every other
+code has vendor and model names scrubbed (invariant 7: the agent is "Cay AI by Caydex"). The full
+exception stays in the server log. `error_code` keeps its symbolic name, since iOS decodes it. Both chat
+doors classify a **permanent** AI-engine error (a google.genai `ClientError` 400/404) as
+`GEMINI_UNAVAILABLE`, which iOS treats as terminal, instead of `INTERNAL_ERROR` (stream) or a bare
+`{"detail"}` 500 (send). The `INTERNAL_ERROR` frame made iOS re-send the turn, which failed the same way.
+
 Run `/list-error-codes` to verify every backend code has an iOS `AppError` branch.
 
 ### 6.3 iOS error handling

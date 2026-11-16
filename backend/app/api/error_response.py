@@ -25,6 +25,8 @@ helper stays cheap to import and resilient to dependency changes.
 
 from __future__ import annotations
 
+import re
+
 from app.log_redaction import redact_secrets
 
 from datetime import date
@@ -1278,6 +1280,49 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     )
 
 
+#: Error codes that mean "the AI engine failed". Their client-facing `message` /
+#: `details.underlying` never carry the exception's own text: a provider error names the vendor
+#: and the model ("GeminiQuotaError: Gemini quota circuit open", "models/gemini-2.5-flash is not
+#: found…"), and these bodies reach the client verbatim — CLAUDE.md invariant 7 (the agent is
+#: "Cay AI by Caydex"; never reveal Gemini/Google/the model). The full text stays in the server
+#: log and Sentry, which every door writes before it answers.
+_AI_ENGINE_CODES = frozenset({ErrorCode.GEMINI_UNAVAILABLE, ErrorCode.GEMINI_QUOTA_EXCEEDED})
+#: Vendor and model names, for the text of every OTHER code (a stray mention in an unrelated
+#: exception). `models/gemini-2.5-flash`, `GeminiTimeoutError`, `google.genai`, `Claude…`.
+_AI_VENDOR_RE = re.compile(
+    r"(?i)(?:models/)?(?:gemini|claude)[\w.\-]*|\b(?:google(?:\.genai)?|genai|vertex ?ai|anthropic|openai)\b"
+)
+
+
+def _ai_engine_summary(exc: BaseException, code: ErrorCode) -> str:
+    """A vendor-free description of an AI-engine failure: kind + the HTTP status, if any."""
+    cls = type(exc).__name__
+    label = "AIEngineError" if _AI_VENDOR_RE.search(cls) or cls in ("ClientError", "ServerError", "APIError") else cls
+    if code is ErrorCode.GEMINI_QUOTA_EXCEEDED:
+        kind = "quota"
+    elif "timeout" in cls.lower():
+        kind = "timeout"
+    else:
+        kind = "unavailable"
+    bits = []
+    status_code = getattr(exc, "code", None)
+    if isinstance(status_code, int) and not isinstance(status_code, bool):
+        bits.append(str(status_code))
+    status = getattr(exc, "status", None)
+    if isinstance(status, str) and re.fullmatch(r"[A-Z_]{1,40}", status):
+        bits.append(status)
+    return f"{label}: {kind}" + (f" ({' '.join(bits)})" if bits else "")
+
+
+def client_error_text(exc: BaseException, code: ErrorCode, *, limit: int) -> str:
+    """`<Class>: <message>` for a client-facing error field: secrets redacted BEFORE truncating,
+    no AI vendor or model name. An AI-engine code gets `_ai_engine_summary` (no upstream text)."""
+    if code in _AI_ENGINE_CODES:
+        return _ai_engine_summary(exc, code)[:limit]
+    text = f"{type(exc).__name__}: {redact_secrets(exc)}"
+    return _AI_VENDOR_RE.sub("ai-engine", text)[:limit]
+
+
 def error_response_from_exception(
     exc: BaseException,
     *,
@@ -1302,9 +1347,10 @@ def error_response_from_exception(
     # the twin builder, into `research_reports.error_message` in Supabase). The repo's
     # redaction stopped at the log/Sentry boundary. Slicing first would leave a usable key
     # prefix, so the order matters.
-    safe = redact_secrets(exc)
+    # `client_error_text` also keeps every AI vendor / model name out of both fields
+    # (invariant 7): an AI-engine code gets a vendor-free summary, never the provider's text.
     details: Dict[str, Any] = {
-        "underlying": f"{type(exc).__name__}: {safe[:200]}",
+        "underlying": client_error_text(exc, code, limit=200),
     }
     if ticker is not None:
         details["ticker"] = ticker
@@ -1318,7 +1364,7 @@ def error_response_from_exception(
     return make_error_response(
         code,
         status_code=status_code,
-        message=f"{type(exc).__name__}: {safe[:300]}",
+        message=client_error_text(exc, code, limit=300),
         details=details,
     )
 
@@ -1385,9 +1431,10 @@ def error_body_from_exception(
     # the twin builder, into `research_reports.error_message` in Supabase). The repo's
     # redaction stopped at the log/Sentry boundary. Slicing first would leave a usable key
     # prefix, so the order matters.
-    safe = redact_secrets(exc)
+    # `client_error_text` also keeps every AI vendor / model name out of both fields
+    # (invariant 7): an AI-engine code gets a vendor-free summary, never the provider's text.
     details: Dict[str, Any] = {
-        "underlying": f"{type(exc).__name__}: {safe[:200]}",
+        "underlying": client_error_text(exc, code, limit=200),
     }
     if ticker is not None:
         details["ticker"] = ticker
@@ -1400,6 +1447,6 @@ def error_body_from_exception(
 
     return make_error_body(
         code,
-        message=f"{type(exc).__name__}: {safe[:300]}",
+        message=client_error_text(exc, code, limit=300),
         details=details,
     )

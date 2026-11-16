@@ -27,7 +27,13 @@ from app.dependencies import (
     ChatRateLimit,
     chat_identity_key,
 )
-from app.api.error_response import make_error_body, make_error_response, ErrorCode
+from app.api.error_response import (
+    ErrorCode,
+    classify_exception,
+    client_error_text,
+    make_error_body,
+    make_error_response,
+)
 from app.utils.supabase_errors import is_transient_supabase_error
 from app.services.chat_security import (
     validate_message,
@@ -2267,13 +2273,19 @@ async def send_chat_message(
         # a quota outage used to be a bare 500 "Failed to generate response" here, and
         # iOS rendered its generic "technical difficulties" copy for what is a known,
         # retry-later condition with its own user_message.
-        from app.integrations.gemini import _is_quota_error, is_transient_gemini_error
-        if is_transient_gemini_error(e):
-            code = ErrorCode.GEMINI_QUOTA_EXCEEDED if _is_quota_error(e) else ErrorCode.GEMINI_UNAVAILABLE
-            logger.warning("Chat response failed (%s: %s) — %s", type(e).__name__, e, code.value)
+        code, transient = _ai_engine_failure(e)
+        if code is not None:
+            if transient:
+                logger.warning("Chat response failed (%s: %s) — %s", type(e).__name__, e, code.value)
+            else:
+                # A permanent AI-engine error is a request we build wrong (or a retired model):
+                # ERROR with the stack, but the client still gets the typed, terminal code.
+                logger.error("Chat response failed, permanent AI-engine error (%s) session=%s — %s",
+                             type(e).__name__, session_id, code.value, exc_info=True)
             return make_error_response(
                 code,
-                message=f"{type(e).__name__}: {e}"[:300],
+                # Never the provider's own text: it names the vendor and model (invariant 7).
+                message=client_error_text(e, code, limit=300),
                 details={"session_id": session_id, "step": "chat_generate"},
             )
         logger.error(f"Chat response failed: {e}", exc_info=True)
@@ -2297,6 +2309,27 @@ async def send_chat_message(
             else:
                 await settle_off_loop(lambda: quota.refund_once("chat_undelivered"),
                                       what=f"chat_undelivered {session_id}")
+
+
+def _ai_engine_failure(e: BaseException) -> "tuple[Optional[ErrorCode], bool]":
+    """(code, transient) for a failed chat generation, or (None, False) when it is not an AI
+    engine failure at all.
+
+    A transient Gemini condition (quota, overload, timeout) keeps its retry-later code. A
+    PERMANENT AI-engine error — a google.genai ClientError 400 INVALID_ARGUMENT, a 404 for a
+    retired model — used to fall to INTERNAL_ERROR on the stream door (iOS reads that as
+    "couldn't be saved" and RE-SENDS the turn through the send door, which fails the same way:
+    two full failed generations) and to a bare 500 `{"detail"}` on the send door (no
+    APIErrorResponse body at all, invariant #3). Both now answer GEMINI_UNAVAILABLE — the code
+    `classify_exception` already gives the report doors, and one iOS treats as terminal.
+    """
+    from app.integrations.gemini import _is_quota_error, is_transient_gemini_error
+    if is_transient_gemini_error(e):
+        return (ErrorCode.GEMINI_QUOTA_EXCEEDED if _is_quota_error(e) else ErrorCode.GEMINI_UNAVAILABLE), True
+    code, _status = classify_exception(e)
+    if code in (ErrorCode.GEMINI_UNAVAILABLE, ErrorCode.GEMINI_QUOTA_EXCEEDED):
+        return code, False
+    return None, False
 
 
 @router.post("/sessions/{session_id}/messages/stream")
@@ -3194,9 +3227,16 @@ async def stream_chat_message(
             except Exception as e2:
                 # A transient Gemini condition (quota or "high demand" overload) is
                 # a retry-later, not a code bug — WARNING, not an ERROR Sentry page.
-                if is_transient_gemini_error(e2):
+                ai_code, transient = _ai_engine_failure(e2)
+                if ai_code is not None and transient:
                     logger.warning("Chat stream fallback degraded (transient): %s", e2)
-                    code = "GEMINI_QUOTA_EXCEEDED" if _is_quota_error(e2) else "GEMINI_UNAVAILABLE"
+                    code = ai_code.value
+                elif ai_code is not None:
+                    # Permanent AI-engine error: terminal on iOS (no re-send through the send
+                    # door, which would fail the same way), still an ERROR with the stack.
+                    logger.error("Chat stream fallback failed, permanent AI-engine error (%s) "
+                                 "session=%s", type(e2).__name__, session_id, exc_info=True)
+                    code = ai_code.value
                 else:
                     logger.error("Chat stream fallback failed: %s", e2, exc_info=True)
                     code = "INTERNAL_ERROR"

@@ -1507,6 +1507,9 @@ class NewsInsightService:
         then refuses the card (fail closed). Never raises; logs carry no page or card text.
         """
         prompt = _judge_prompt(scope, card, pages, now)
+        # Read at CALL time. Unset (the default) sends no `thinking_level` keyword at all, so the
+        # request and its response-cache key stay exactly what they were before the setting.
+        level = settings.INSIGHT_WEB_ONLY_JUDGE_THINKING_LEVEL
         try:
             response = await self.gemini.generate_json(
                 prompt=prompt,
@@ -1515,6 +1518,7 @@ class NewsInsightService:
                 response_schema=_JUDGE_SCHEMA,
                 temperature=0.0,
                 usage_tag=_USAGE_TAG_JUDGE,
+                **({"thinking_level": level} if level else {}),
             )
             parsed = json.loads(response.get("text", ""))
         except Exception as e:

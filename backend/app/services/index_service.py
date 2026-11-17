@@ -16,6 +16,7 @@ from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableExcept
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp_entitlements import INDEX_CONSTITUENT_PATHS, is_entitled
 from app.services.agents.persona_config import neutral_system_instruction
+from app.config import settings
 from app.integrations.gemini import get_gemini_client
 from app.schemas.index import (
     ChartDataPointResponse,
@@ -2254,7 +2255,9 @@ Write in a conversational, confident tone. Be specific and data-driven."""
                     "You are a senior market strategist providing concise, insightful commentary. "
                     "Keep stories to 2-3 sentences. Use the placeholder tokens exactly as given."
                 ),
-                model_name="gemini-2.5-flash",
+                # Read per call (Railway variable, default "gemini-2.5-flash" = the string
+                # that was hard-coded here until 2026-11-16).
+                model_name=settings.INDEX_AI_MODEL,
                 # No thinking. The output is two 2-3 sentence templates whose every
                 # number is a placeholder token the caller substitutes — there is
                 # nothing here to reason about. Measured on this exact prompt:

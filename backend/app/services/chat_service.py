@@ -236,6 +236,31 @@ def _chat_thinking_budget(model_name: Optional[str] = None) -> Optional[int]:
     return None if value < 0 else int(value)
 
 
+def _chat_thinking_level(model_name: Optional[str] = None) -> Optional[str]:
+    """Gemini `thinking_level` for a chat model call, or None to send no level (today's request).
+
+    The twin of `_chat_thinking_budget`, resolved the same way and from the same `model_name`:
+    the CHEAP route keeps None whatever the setting says (it never thinks), every other call
+    reads `settings.CHAT_THINKING_LEVEL` at CALL time (validated at start-up to minimal / low /
+    medium / high). The encoder (`gemini._thinking_fields`) sends a level only to a model that
+    accepts it; on any other model the budget above still applies.
+    """
+    if model_name and model_name == settings.CHAT_CHEAP_MODEL:
+        return None
+    return settings.CHAT_THINKING_LEVEL or None
+
+
+def _chat_thinking_level_kwargs(model_name: Optional[str] = None) -> Dict[str, str]:
+    """`{"thinking_level": level}` when `_chat_thinking_level(model_name)` names one, else `{}`.
+
+    Splatted beside every `thinking_budget=_chat_thinking_budget(<model>)` with the SAME model
+    argument, so an unset `CHAT_THINKING_LEVEL` sends no new keyword at all: the request, the
+    response-cache key and every test fake with an explicit signature stay exactly as before.
+    """
+    level = _chat_thinking_level(model_name)
+    return {"thinking_level": level} if level else {}
+
+
 def _day_range(
     quote: Dict[str, Any], historical_data: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -833,6 +858,7 @@ class ChatService:
                 # green with the hole open. Reports keep 8192; chat does not.
                 max_output_tokens=_chat_output_cap(is_deep_dive),
                 thinking_budget=_chat_thinking_budget(),
+                **_chat_thinking_level_kwargs(),
                 # An explicit ask: the first request MUST call the search; a news ask: Caydex's
                 # licensed news first (`web_force_first`); the automatic tier is forced only for a
                 # news ask. On the stream→non-stream fallback the turn REPLAYS its one search.
@@ -887,6 +913,7 @@ class ChatService:
                 system_instruction=used_instruction,
                 max_output_tokens=_chat_output_cap(is_deep_dive),
                 thinking_budget=_chat_thinking_budget(),
+                **_chat_thinking_level_kwargs(),
             )
         else:
             web_used = web_turn is not None and any(
@@ -1495,6 +1522,7 @@ class ChatService:
                     system_instruction=sys, max_rounds=2,
                     max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
                     thinking_budget=_chat_thinking_budget(),
+                    **_chat_thinking_level_kwargs(),
                 ):
                     if kind == "answer":
                         texts.append(payload)
@@ -1555,6 +1583,7 @@ class ChatService:
                 system_instruction=prep["system_instruction"],
                 max_output_tokens=deep_dive_cap,
                 thinking_budget=_chat_thinking_budget(),
+                **_chat_thinking_level_kwargs(),
             ):
                 yield ev
             return
@@ -1587,6 +1616,7 @@ class ChatService:
                 system_instruction=prep.get("system_instruction_no_tools") or prep["system_instruction"],
                 max_output_tokens=deep_dive_cap,
                 thinking_budget=_chat_thinking_budget(),
+                **_chat_thinking_level_kwargs(),
             ):
                 if kind == "answer" and text:
                     merge_yielded = True

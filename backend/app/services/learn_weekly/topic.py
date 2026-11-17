@@ -324,6 +324,20 @@ class _Run:
         return self.llm_failures + self.sec_failures
 
 
+def _topic_thinking_level() -> Optional[str]:
+    """`LEARN_TOPIC_THINKING_LEVEL` (minimal / low / medium / high, validated at start-up), read at
+    call time, or None = send no level. A non-text value (only a test or a code edit can make one) is
+    ignored, logged."""
+    value = settings.LEARN_TOPIC_THINKING_LEVEL
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        logger.warning("[learn-topic-llm] LEARN_TOPIC_THINKING_LEVEL=%r is not text — no thinking "
+                       "level sent", value)
+        return None
+    return value.strip().lower() or None
+
+
 async def _llm_json(run: _Run, *, prompt: str, body: str, usage_tag: str,
                     ids: str) -> Optional[Dict[str, Any]]:
     """One model call under the run's budget, through the identity + advice guards. None on any
@@ -339,6 +353,10 @@ async def _llm_json(run: _Run, *, prompt: str, body: str, usage_tag: str,
         run.budget_exhausted = True
         return None
     run.llm_calls += 1
+    # This one call serves BOTH the peg (`learn_topic_peg`) and the label (`learn_topic_label`), so
+    # LEARN_TOPIC_THINKING_LEVEL applies to both. Sent only when set: unset, the call is today's byte
+    # for byte (no new keyword); the encoder sends a level only to a model that accepts one.
+    level = _topic_thinking_level()
     try:
         result = await run.llm.generate_json(
             prompt,
@@ -348,6 +366,7 @@ async def _llm_json(run: _Run, *, prompt: str, body: str, usage_tag: str,
             usage_tag=usage_tag,
             temperature=0.0,
             cache=False,
+            **({"thinking_level": level} if level else {}),
         )
     except Exception as e:
         run.llm_failures += 1

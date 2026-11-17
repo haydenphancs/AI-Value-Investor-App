@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from app.config import settings
 from app.schemas.marketing import AUDIO_WORD_MAX_CHARS
 from app.services.agents.persona_config import neutral_system_instruction
 from app.services.marketing import judge as jd
@@ -61,7 +62,11 @@ from app.services.marketing.selection import Template
 
 logger = logging.getLogger(__name__)
 
-WRITER_MODEL = "gemini-2.5-flash"
+#: The Gemini model of the writer call (Claude first when MARKETING_WRITER_PROVIDER=claude; this on
+#: any Claude failure). Read ONCE, at import, from MARKETING_WRITER_GEMINI_MODEL (default
+#: "gemini-2.5-flash", the string hard-coded here until 2026-11-16): `WriterResult.model`
+#: defaults to it, so a change needs a deploy/restart, never a mid-process flip.
+WRITER_MODEL = settings.MARKETING_WRITER_GEMINI_MODEL
 #: 0 = no thinking. Thought tokens bill at the output rate and this is template prose; the
 #: validators, not the model's reasoning, are what keep it honest.
 WRITER_THINKING_BUDGET = 0

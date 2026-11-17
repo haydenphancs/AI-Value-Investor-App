@@ -1720,6 +1720,10 @@ class ThemeInsightsService:
             return _carry(why)
 
         prompt = build_summary_prompt(theme, perf, corpus, window_hours, as_of)
+        # Read at CALL time. Unset (the default) sends no `thinking_level` keyword at all, so the
+        # request stays exactly what it was; set, the encoder sends the level to a model that
+        # takes one and THEME_INSIGHTS_THINKING_BUDGET to any other (never both).
+        level = settings.THEME_INSIGHTS_THINKING_LEVEL
         try:
             response = await self.gemini.generate_json(
                 prompt,
@@ -1728,6 +1732,7 @@ class ThemeInsightsService:
                 response_schema=_response_schema(theme.tickers),
                 thinking_budget=settings.THEME_INSIGHTS_THINKING_BUDGET,
                 usage_tag="theme_insights",
+                **({"thinking_level": level} if level else {}),
             )
             tokens = response.get("tokens_used") if isinstance(response, Mapping) else None
             if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens > 0:

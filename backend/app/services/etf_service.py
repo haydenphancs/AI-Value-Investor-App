@@ -17,6 +17,7 @@ from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableExcept
 from app.utils.inflight import fail_shared_future
 from app.services.agents.persona_config import neutral_system_instruction
 from app.services.benchmark_math import format_since, overlapping_cagrs
+from app.config import settings
 from app.integrations.gemini import get_gemini_client
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
@@ -3363,7 +3364,9 @@ RULES:
                     system_instruction=neutral_system_instruction(
                         "You are a concise financial writer. Output only the requested sentence."
                     ),
-                    model_name="gemini-2.5-flash",
+                    # Read per call (Railway variable, default "gemini-2.5-flash" = the
+                    # string that was hard-coded here until 2026-11-16).
+                    model_name=settings.ETF_AI_MODEL,
                     # No thinking — the output is ONE sentence of at most 120 characters.
                     # See index_service for the measurement behind this.
                     thinking_budget=0,

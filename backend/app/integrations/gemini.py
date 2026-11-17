@@ -20,7 +20,7 @@ from google import genai
 from google.genai import types
 from google.genai import errors as genai_errors
 
-from app.config import settings
+from app.config import GEMINI_THINKING_LEVELS, settings
 
 logger = logging.getLogger(__name__)
 
@@ -853,14 +853,47 @@ class _StreamUsage:
 #: streaming. Measured live 2026-11-15 on gemini-3.5-flash-lite. gemini-2.5-flash is listed too:
 #: Google deprecated it and from 2026-12-01 routes every request that names it to
 #: gemini-3.5-flash-lite, so a 0 sent under that name would start failing the same way. Neither
-#: model accepts a thinking_level that the other does (2.5-flash refuses every level), so the one
-#: value valid under both names is a positive budget. Budget 1 measured as "off" on both: 0
-#: thought tokens. Before adding a model here, probe it live: gemini-3.8-flash ACCEPTS 0 (the
-#: judges rely on it) and gemini-2.5-flash-lite is not deprecated.
+#: model accepts a thinking_level that the other does (2.5-flash refuses every level), so the only
+#: kind of value valid under both names is a positive budget, and 1 is the smallest. Before adding a
+#: model here, probe it live: gemini-3.8-flash ACCEPTS 0 (the judges rely on it) and
+#: gemini-2.5-flash-lite is not deprecated.
+#:
+#: Budget 1 is NOT "off" on gemini-3.5-flash-lite (re-measured 2026-11-15/16). It is 0 thought
+#: tokens on gemini-2.5-flash and on short 3.5-flash-lite prompts, but on real prompts
+#: 3.5-flash-lite reads any budget from 1 to 512 like thinking_level "low": a Stage B narrative
+#: thought ~450-900 tokens per call (~16k per report, cached or inline), and the 256-token Learn
+#: cover-subject call stopped at MAX_TOKENS on 17 of 22 calls. So a request that NAMES
+#: gemini-3.5-flash-lite gets its real off switch instead (`_LEVEL_OFF_MODELS` below); budget 1
+#: stays only for requests that still name gemini-2.5-flash, where it is the smallest value that
+#: works on both sides of the cutover.
 _BUDGET_ZERO_REFUSED_MODELS = frozenset({"gemini-2.5-flash", "gemini-3.5-flash-lite"})
-#: The wire value that means "no thinking" on those models.
+#: The smallest budget those models accept. NOT a guaranteed "off" (see above).
 _BUDGET_OFF_ON_REFUSING_MODELS = 1
 _budget_zero_remap_logged: set = set()
+
+#: The `thinking_level` values each model ACCEPTS, live-probed 2026-11-15 (every one of minimal /
+#: low / medium / high sent to each model). A level is only ever put on the wire for a model listed
+#: here, by exact name. gemini-2.5-flash refuses ANY level (400 "Thinking level is not supported
+#: for this model"), so it must never be added; gemini-3.8-flash refuses "minimal" (400). A model
+#: that is not listed (2.5-flash, 2.5-flash-lite, any unprobed 3.x) gets the caller's BUDGET
+#: instead — see `_thinking_fields`. Probe a model live before adding it.
+_LEVELS_BY_MODEL: Dict[str, frozenset] = {
+    "gemini-3.5-flash-lite": frozenset({"minimal", "low", "medium", "high"}),
+    "gemini-3.8-flash": frozenset({"low", "medium", "high"}),
+}
+#: Models whose real "thinking off" is `thinking_level="minimal"` (0 thought tokens on every
+#: prompt measured, 2026-11-15/16), so a caller's budget 0 is sent as that level and no budget at
+#: all: a budget AND a level in one config is a 400 on every model. Derived from the table above.
+_LEVEL_OFF_MODELS = frozenset(m for m, levels in _LEVELS_BY_MODEL.items() if "minimal" in levels)
+_LEVEL_OFF = types.ThinkingLevel.MINIMAL
+_LEVEL_ENUM = {
+    "minimal": types.ThinkingLevel.MINIMAL,
+    "low": types.ThinkingLevel.LOW,
+    "medium": types.ThinkingLevel.MEDIUM,
+    "high": types.ThinkingLevel.HIGH,
+}
+_level_off_logged: set = set()
+_level_ignored_logged: set = set()
 
 #: The user-turn text of the tool-less FINAL answer round, shared by both tool doors
 #: (generate_with_tools and stream_agentic), each of which sends it with a config that declares
@@ -871,32 +904,113 @@ _FINAL_ANSWER_INSTRUCTION = (
 )
 
 
+def _model_key(model: Optional[str]) -> str:
+    """`model` as the tables above spell it: lower case, trimmed, no `models/` prefix."""
+    name = str(model or "").strip().lower()
+    if name.startswith("models/"):
+        name = name[len("models/"):]
+    return name
+
+
 def _wire_budget(budget: Optional[int], model: Optional[str]) -> Optional[int]:
     """The budget to put on the wire for `model`: 0 becomes 1 where the model refuses 0.
 
     Callers keep meaning "0 = thinking off" (every setting and literal in the app says 0); only
     the encoding changes. Any other value, and every model outside the refusing set, passes
     through unchanged, so requests to gemini-3.8-flash and gemini-2.5-flash-lite stay
-    byte-identical.
+    byte-identical. The encoders below never reach this for a 0 sent to a `_LEVEL_OFF_MODELS`
+    model (they send its level instead); it stays in the refusing set so a direct caller can
+    still never put 0 on the wire to it.
     """
     if budget != 0 or isinstance(budget, bool):
         return budget
-    name = str(model or "").strip().lower()
-    if name.startswith("models/"):
-        name = name[len("models/"):]
+    name = _model_key(model)
     if name not in _BUDGET_ZERO_REFUSED_MODELS:
         return budget
     if name not in _budget_zero_remap_logged:
         _budget_zero_remap_logged.add(name)
         logger.info(
-            "Gemini thinking_budget 0 sent as %d for model=%s (it refuses 0; %d = no thinking)",
+            "Gemini thinking_budget 0 sent as %d for model=%s (it refuses 0; %d is the smallest "
+            "budget it accepts, not a guaranteed off)",
             _BUDGET_OFF_ON_REFUSING_MODELS, name, _BUDGET_OFF_ON_REFUSING_MODELS,
         )
     return _BUDGET_OFF_ON_REFUSING_MODELS
 
 
-def _thinking_config(budget: Optional[int], *, model: Optional[str]) -> Optional[Any]:
-    """Encode a thinking budget as a ThinkingConfig, or None to send NONE at all.
+def _off_level(budget: Optional[int], model: Optional[str]) -> Optional[Any]:
+    """`thinking_level` "minimal" when the caller means off (0) and `model` is a
+    `_LEVEL_OFF_MODELS` model; otherwise None (encode the budget as before)."""
+    if budget != 0 or isinstance(budget, bool):
+        return None
+    name = _model_key(model)
+    if name not in _LEVEL_OFF_MODELS:
+        return None
+    if name not in _level_off_logged:
+        _level_off_logged.add(name)
+        logger.info(
+            "Gemini thinking_budget 0 sent as thinking_level=minimal for model=%s (its off switch)",
+            name,
+        )
+    return _LEVEL_OFF
+
+
+def _normalize_level(level: Any) -> Optional[str]:
+    """A caller's thinking level as one of GEMINI_THINKING_LEVELS, or None (no level asked).
+
+    Settings are validated at start-up (`config._thinking_level`); this is the encoder's own
+    guard, so a wrong value from any other caller degrades to "no level" with a WARNING instead
+    of a 400 on every request."""
+    if level is None:
+        return None
+    text = level.strip().lower() if isinstance(level, str) else None
+    if not text:
+        if text is None:
+            logger.warning("Gemini thinking_level %r ignored (not a string)", level)
+        return None
+    if text not in GEMINI_THINKING_LEVELS:
+        logger.warning("Gemini thinking_level %r ignored (not one of %s)", level,
+                       "/".join(GEMINI_THINKING_LEVELS))
+        return None
+    return text
+
+
+def _thinking_fields(budget: Optional[int], level: Any, model: Optional[str]) -> Dict[str, Any]:
+    """The ThinkingConfig fields to send for (budget, level) on `model`: EXACTLY ONE of
+    `thinking_level` / `thinking_budget`, or none at all. Never both (a 400 on every model).
+
+    1. A level the model ACCEPTS (`_LEVELS_BY_MODEL`) is sent alone; the budget is not.
+    2. "minimal" on a model that refuses it means "off": it is encoded as budget 0 by rule 3
+       (gemini-2.5-flash → 1, gemini-3.8-flash → 0).
+    3. Otherwise the budget is encoded as before: None → nothing; 0 → level "minimal" on a
+       `_LEVEL_OFF_MODELS` model, 1 on a model that refuses 0, else 0; any other value as is.
+       A low / medium / high the model refuses is IGNORED here (logged once per model and
+       level), so a level setting can never break a model that does not take levels.
+    """
+    name = _model_key(model)
+    asked = _normalize_level(level)
+    if asked is not None:
+        if asked in _LEVELS_BY_MODEL.get(name, frozenset()):
+            return {"thinking_level": _LEVEL_ENUM[asked]}
+        if asked == "minimal":
+            budget = 0
+        elif (name, asked) not in _level_ignored_logged:
+            _level_ignored_logged.add((name, asked))
+            logger.warning(
+                "Gemini thinking_level=%s is not accepted by model=%s; using thinking_budget=%s "
+                "instead", asked, name or "-", budget,
+            )
+    if budget is None:
+        return {}
+    off = _off_level(budget, model)
+    if off is not None:
+        return {"thinking_level": off}
+    return {"thinking_budget": _wire_budget(budget, model)}
+
+
+def _thinking_config(budget: Optional[int], *, model: Optional[str],
+                     level: Optional[str] = None) -> Optional[Any]:
+    """Encode a thinking budget (and an optional level) as a ThinkingConfig, or None to send
+    NONE at all.
 
     ONE encoder for all three generation helpers so they are provably identical.
     `None` means "attach no thinking_config", which is byte-identical on the wire
@@ -904,14 +1018,20 @@ def _thinking_config(budget: Optional[int], *, model: Optional[str]) -> Optional
     disables thinking; a positive value is a ceiling in tokens.
 
     `model` is the model the request goes to, and it is required (keyword-only) so a new
-    call site cannot forget it: on a model that refuses budget 0, `_wire_budget` sends 1.
+    call site cannot forget it: a 0 sent to gemini-3.5-flash-lite goes out as
+    thinking_level "minimal" (its real off), and a 0 sent to gemini-2.5-flash as budget 1
+    (`_wire_budget`). `level` (minimal / low / medium / high) is sent only to a model that
+    accepts it; the rules are in `_thinking_fields`. The config never carries both a budget
+    and a level (a 400 everywhere).
     """
-    if budget is None:
+    fields = _thinking_fields(budget, level, model)
+    if not fields:
         return None
-    return types.ThinkingConfig(thinking_budget=_wire_budget(budget, model))
+    return types.ThinkingConfig(**fields)
 
 
-def _stream_thinking_config(budget: Optional[int], *, model: Optional[str]) -> Any:
+def _stream_thinking_config(budget: Optional[int], *, model: Optional[str],
+                            level: Optional[str] = None) -> Any:
     """The STREAMING twin of `_thinking_config`: always asks for thought summaries.
 
     The two chat stream methods render `include_thoughts=True` parts as the thinking
@@ -919,11 +1039,10 @@ def _stream_thinking_config(budget: Optional[int], *, model: Optional[str]) -> A
     the card). `None` keeps today's request byte-identical (thoughts on, no ceiling —
     the rollback value); `0` disables thinking, which also empties the card; a
     positive value is the ceiling. Encoded here once so both methods stay identical.
-    `model` is required for the same reason as in `_thinking_config`.
+    `model` is required for the same reason as in `_thinking_config`, and a budget and a
+    level are encoded by the same rules (`_thinking_fields`).
     """
-    if budget is None:
-        return types.ThinkingConfig(include_thoughts=True)
-    return types.ThinkingConfig(include_thoughts=True, thinking_budget=_wire_budget(budget, model))
+    return types.ThinkingConfig(include_thoughts=True, **_thinking_fields(budget, level, model))
 
 
 #: `generate_with_tools` runs a forced turn's extra tool round only this early: the send door wraps
@@ -1507,6 +1626,7 @@ class GeminiClient:
         model_name: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate text using Gemini.  Results are cached by (prompt, system_instruction,
@@ -1535,6 +1655,7 @@ class GeminiClient:
         key = _cache_key(
             prompt, system_instruction or "", model_name or "", str(max_output_tokens or ""),
             "" if thinking_budget is None else f"tb={thinking_budget}",
+            *(() if thinking_level is None else (f"tl={thinking_level}",)),
         )
         cached = self._response_cache.get(key)
         if cached is not None:
@@ -1550,7 +1671,8 @@ class GeminiClient:
                         system_instruction=system_instruction,
                         max_output_tokens=max_output_tokens,
                         thinking_config=_thinking_config(
-                            thinking_budget, model=model_name or self.model_name),
+                            thinking_budget, model=model_name or self.model_name,
+                            level=thinking_level),
                     ),
                 ),
                 what="generate_text",
@@ -1592,6 +1714,7 @@ class GeminiClient:
         usage_tag: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
     ):
         """Yield ``(kind, text)`` chunks as Gemini generates.
 
@@ -1622,7 +1745,8 @@ class GeminiClient:
         config = self._config(
             system_instruction=system_instruction,
             max_output_tokens=max_output_tokens,
-            thinking_config=_stream_thinking_config(thinking_budget, model=resolved_model),
+            thinking_config=_stream_thinking_config(thinking_budget, model=resolved_model,
+                                                    level=thinking_level),
         )
         usage = _StreamUsage()
         # Bound BEFORE the try: the `finally` logs it, and a request that raises
@@ -1739,6 +1863,7 @@ class GeminiClient:
         prompt: str,
         handle: Dict[str, Any],
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
     ) -> Dict[str, Any]:
         """generate_text variant that runs against a CachedContent prefix.
 
@@ -1759,7 +1884,8 @@ class GeminiClient:
                 contents=prompt,
                 config=self._config(
                     cached_content=cache.name,
-                    thinking_config=_thinking_config(thinking_budget, model=self.model_name),
+                    thinking_config=_thinking_config(thinking_budget, model=self.model_name,
+                                                     level=thinking_level),
                 ),
             ),
             what="generate_text_cached",
@@ -1805,6 +1931,7 @@ class GeminiClient:
         temperature: Optional[float] = None,
         cache: bool = True,
         service_tier: Optional[str] = None,
+        thinking_level: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate structured JSON using Gemini with response_mime_type.
@@ -1842,6 +1969,8 @@ class GeminiClient:
             "" if response_schema is None else f"schema={response_schema!r}",
             "" if thinking_budget is None else f"tb={thinking_budget}",
         ]
+        if thinking_level is not None:
+            parts.append(f"tl={thinking_level}")
         if temperature is not None:
             parts.append(f"temp={float(temperature)!r}")
         key = _cache_key(*parts)
@@ -1861,7 +1990,8 @@ class GeminiClient:
                         response_mime_type="application/json",
                         response_schema=response_schema,
                         thinking_config=_thinking_config(
-                            thinking_budget, model=model_name or self.model_name),
+                            thinking_budget, model=model_name or self.model_name,
+                            level=thinking_level),
                         service_tier=service_tier,
                     ),
                 ),
@@ -2061,6 +2191,7 @@ class GeminiClient:
         extra_round_tools: Optional[Any] = None,
         on_tool_round: Optional[Callable[[Tuple[str, ...]], Any]] = None,
         deadline: Optional[float] = None,
+        thinking_level: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate a response using Gemini Function Calling (single-round).
@@ -2103,7 +2234,7 @@ class GeminiClient:
         config = self._config(
             system_instruction=system_instruction, tools=tools,
             max_output_tokens=max_output_tokens,
-            thinking_config=_thinking_config(thinking_budget, model=model),
+            thinking_config=_thinking_config(thinking_budget, model=model, level=thinking_level),
         )
         first_config = _forced_tool_config(config, force_first_tool, tool_handlers) or config
         forced = first_config is not config
@@ -2259,7 +2390,8 @@ class GeminiClient:
                         config=self._config(
                             system_instruction=system_instruction, tools=None,
                             max_output_tokens=max_output_tokens,
-                            thinking_config=_thinking_config(thinking_budget, model=model),
+                            thinking_config=_thinking_config(thinking_budget, model=model,
+                                                             level=thinking_level),
                         ),
                         what="generate_with_tools final answer",
                     )
@@ -2310,6 +2442,7 @@ class GeminiClient:
         temperature: float = 0.7,
         max_output_tokens: int = 8192,
         thinking_budget: Optional[int] = None,
+        thinking_level: Optional[str] = None,
     ):
         """Create a stateful async chat session bound to function-calling tools
         (for the agentic research loop). Returns a google-genai AsyncChat; drive
@@ -2329,7 +2462,7 @@ class GeminiClient:
             "system_instruction": system_instruction or None,
             "tools": list(tools),
         }
-        thinking = _thinking_config(thinking_budget, model=self.model_name)
+        thinking = _thinking_config(thinking_budget, model=self.model_name, level=thinking_level)
         if thinking is not None:
             kwargs["thinking_config"] = thinking
         return self._client.aio.chats.create(
@@ -2350,6 +2483,7 @@ class GeminiClient:
         thinking_budget: Optional[int] = None,
         force_first_tool: Any = None,
         on_tool_round: Optional[Callable[[Tuple[str, ...]], Any]] = None,
+        thinking_level: Optional[str] = None,
     ):
         """Stream a MULTI-ROUND agentic answer: the model can call function-calling tools
         mid-stream (manual FC), while reasoning + answer stream throughout.
@@ -2401,7 +2535,8 @@ class GeminiClient:
             system_instruction=system_instruction,
             tools=tools,
             max_output_tokens=max_output_tokens,
-            thinking_config=_stream_thinking_config(thinking_budget, model=resolved_model),
+            thinking_config=_stream_thinking_config(thinking_budget, model=resolved_model,
+                                                    level=thinking_level),
         )
         # Manual function calling — we run handlers ourselves (AFC-while-streaming is buggy upstream).
         config.automatic_function_calling = types.AutomaticFunctionCallingConfig(disable=True)

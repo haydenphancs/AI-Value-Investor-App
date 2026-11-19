@@ -509,6 +509,14 @@ from app.services.index_service import _strip_story_headers  # noqa: E402
     ("2. MACRO ITEMS\n[{\"description\": \"CPI rose 2.4% in Q2.\"}]", "[{\"description\": \"CPI rose 2.4% in Q2.\"}]"),
     ("the sector story today", "the sector story today"),              # lower-case prose is not the label
     ("", ""), ("   ", ""),
+    # Header on its own line, the NEXT line opening on a figure.
+    ("1. SECTOR STORY\n1.9% gains led the day", "1.9% gains led the day"),
+    ("1. SECTOR STORY\r\n{TOP_SECTOR} up 1.9%.", "{TOP_SECTOR} up 1.9%."),   # CRLF
+    ("1.\n{TOP_SECTOR} led", "{TOP_SECTOR} led"),                        # a bare marker line
+    ("**SECTOR STORY**\n{TOP_SECTOR} gained 12.1%", "{TOP_SECTOR} gained 12.1%"),
+    # Macro JSON with no header at all, and a pretty-printed array whose line opens on 2.4.
+    ('[{"description": "GDP grew 2.1% and 1.2%"}]', '[{"description": "GDP grew 2.1% and 1.2%"}]'),
+    ('2. MACRO ITEMS:\n[\n  2.4,\n  {"title": "CPI"}\n]', '[\n  2.4,\n  {"title": "CPI"}\n]'),
 ])
 def test_story_header_cleanup_keeps_every_figure(raw, expected):
     assert _strip_story_headers(raw) == expected

@@ -1,7 +1,15 @@
 """
-Growth service — fetches income statements from FMP, computes YoY growth
-percentages for EPS & Revenue, and looks up pre-computed sector median YoY
-from the sector_benchmarks table.
+Growth service — fetches the income and cash-flow statements from FMP (five calls: the
+profile plus annual and quarterly income and cash flow), computes YoY growth for EPS,
+revenue, net income, operating income and free cash flow, and looks up the pre-computed
+peer median YoY from the sector_benchmarks table.
+
+The same cash-flow rows also feed two CHAT-ONLY series (2026-11-14, owner decision "Yes, add
+capex"): operating cash flow and capital expenditure (the cash spent, a positive amount). No
+chart draws them and they have no peer median; Ask Cay AI's financials tool reads them.
+
+A cash-flow figure FMP zero-fills (a statement it does not have) is no point at all — a gap,
+never 0.00 with a -100% YoY (`app.utils.margins`'s readings; owner decision "Fix it too").
 
 Matches the iOS GrowthSectionData struct.
 """
@@ -11,7 +19,7 @@ import logging
 import math
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
@@ -44,6 +52,11 @@ from app.services.sector_benchmark_lookup import (
     series_peer_level,
 )
 from app.services.sector_benchmark_service import _normalize_sector
+from app.utils.margins import (
+    capital_expenditure_reading,
+    free_cash_flow_reading,
+    operating_cash_flow_reading,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +96,11 @@ _CACHE_TTL = 300  # 5 minutes
 #     `score_excluded_rows`. A v7 row has none, so a bank's would count FCF growth for 24 h.
 #     Its FCF series is also empty for a company with `score_excluded_rows`: a bank's FCF
 #     growth is a deposit swing, and the chart must not show what the row calls N/M.
-_GROWTH_PAYLOAD_VERSION = 8
+# 9 (2026-11-14, owner decisions "Yes, add capex" / "Fix it too" / "Hide, say why"): the
+#     chat-only operating cash flow and capital expenditure series and `series_not_meaningful`;
+#     an FCF row FMP zero-filled is a GAP (no point, and the next year's YoY is None), never
+#     0.00 with a -100% YoY. A v8 row carries the zero point and none of the new series.
+_GROWTH_PAYLOAD_VERSION = 9
 _VERSION_KEY = "payload_version"
 
 
@@ -147,8 +164,9 @@ def _with_degraded(response: GrowthResponse, degraded: List[str]) -> GrowthRespo
 
 
 # ── In-flight deduplication ───────────────────────────────────────
-# One growth MISS costs TEN FMP calls. Without this, N concurrent viewers of the
-# same cold ticker each fired the whole fan-out.
+# One growth MISS costs FIVE FMP calls (the profile, plus annual and quarterly income and
+# cash flow — `_build_growth`). Without this, N concurrent viewers of the same cold ticker
+# each fired the whole fan-out.
 _inflight: Dict[str, asyncio.Future] = {}
 
 
@@ -162,9 +180,12 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     a non-finite value would otherwise break serialization — Postgres JSONB rejects
     bare ``NaN`` / ``Infinity``, so the conditional report write would raise and the
     whole report would flip to ``status="failed"`` rather than degrading the point.
-    A None value is skipped by the callers (``if current_val is None: continue``)."""
+    A None value is skipped by the callers (``if current_val is None: continue``).
+
+    A bool is no figure either (2026-11-14): ``float(True)`` is 1.0, so a malformed
+    ``true`` in a statement row used to chart as $1."""
     val = record.get(key)
-    if val is None:
+    if val is None or isinstance(val, bool):
         return None
     try:
         result = float(val)
@@ -180,15 +201,19 @@ def _compute_yoy(current: Optional[float], previous: Optional[float]) -> Optiona
     improvement (current > previous) reads positive and a deterioration reads
     negative, even when the base is negative (a deepening loss correctly reads
     negative instead of the +% that naive negative÷negative would give). The
-    magnitude can be large across a sign change (e.g. +$0.4B → -$23.7B ≈ -5900%);
-    that value is still CORRECT and is shown verbatim — the chart's YoY line uses
-    a robust/compressed scale so one outlier doesn't flatten the rest. Matches
-    the collector's _safe_pct_change convention. None only when an endpoint is
-    missing or the base is exactly zero (undefined).
+    magnitude can be huge on a small base: Oracle's free cash flow went from
+    -$0.39B to -$23.7B, a deepening NEGATIVE base, which reads -5911.7% (owner
+    decision 2026-11-13: "Keep the exact figure"). That value is CORRECT and is
+    shown verbatim — the chart's YoY line uses a robust/compressed scale so one
+    outlier doesn't flatten the rest. Matches the collector's _safe_pct_change
+    convention. None for a missing value or a zero base (undefined) — never for a
+    large magnitude or a sign change — and for a result that is not finite (2026-11-14):
+    a near-zero base (1e-305) overflows to inf, which Postgres JSONB rejects.
     """
     if current is None or previous is None or previous == 0:
         return None
-    return round((current - previous) / abs(previous) * 100, 2)
+    result = round((current - previous) / abs(previous) * 100, 2)
+    return result if math.isfinite(result) else None
 
 
 def _as_list(payload: Any) -> List[Dict[str, Any]]:
@@ -333,10 +358,28 @@ def _quarterly_join_key(record: Dict[str, Any]) -> str:
     return calendar_quarter_label(record)
 
 
+#: Maps a finite raw statement value to the value a series charts, or None (no reading).
+Reading = Callable[[float], Optional[float]]
+
+
+def _read(record: Optional[Dict[str, Any]], metric_key: str,
+          reading: Optional[Reading]) -> Optional[float]:
+    """The charted value of ``metric_key`` in ``record``: ``_safe_float``, then ``reading``
+    when given. None = no point (and no base for a YoY)."""
+    if record is None:
+        return None
+    value = _safe_float(record, metric_key)
+    if value is None or reading is None:
+        return value
+    return reading(value)
+
+
 def _compute_growth_points(
     records: List[Dict[str, Any]],
     metric_key: str,
     is_quarterly: bool,
+    *,
+    reading: Optional[Reading] = None,
 ) -> List[Dict[str, Any]]:
     """
     Compute YoY growth data points from sorted income statement records.
@@ -345,6 +388,12 @@ def _compute_growth_points(
     by year label — see ``_YOY_MIN_DAYS``. Quarterly additionally requires the same
     fiscal ``period`` ("Q1"). No qualifying base → the bar still charts with a null
     YoY (a gap or a fiscal-year-end change is a discontinuity, not zero growth).
+
+    ``reading`` (2026-11-14, `app.utils.margins`) maps each finite raw value — the
+    current one AND its year-ago base — to the charted value, or None: no point, and a
+    YoY whose base reads None is None. The base is still the row 350-385 days earlier;
+    a blank base never sends the comparison to an older row. Without it every value is
+    charted as filed (every income-statement series).
 
     Returns list of dicts with period, value, yoy_change_percent.
     """
@@ -373,7 +422,7 @@ def _compute_growth_points(
             except ValueError:
                 continue  # no year at all → no label; unchanged from before
 
-            current_val = _safe_float(rec, metric_key)
+            current_val = _read(rec, metric_key, reading)
             if current_val is None:
                 continue  # no chartable value for this quarter
 
@@ -385,7 +434,7 @@ def _compute_growth_points(
                 _year_ago_row(rec, end, by_period.get(period, []))
                 if end is not None else None
             )
-            prev_val = _safe_float(prev_rec, metric_key) if prev_rec is not None else None
+            prev_val = _read(prev_rec, metric_key, reading)
 
             results.append({
                 # period = fiscal label for DISPLAY; _match_period = the CALENDAR
@@ -407,9 +456,9 @@ def _compute_growth_points(
             (end, rec) for rec in sorted_recs if (end := _period_end(rec)) is not None
         ]
         for rec in sorted_recs:
-            current_val = _safe_float(rec, metric_key)
+            current_val = _read(rec, metric_key, reading)
             if current_val is None:
-                continue  # non-finite / missing value: genuinely unchartable
+                continue  # non-finite / missing value / no reading: genuinely unchartable
 
             yoy: Optional[float] = None
             end = _period_end(rec)
@@ -433,7 +482,7 @@ def _compute_growth_points(
                             rec.get("date"),
                         )
                     else:
-                        yoy = _compute_yoy(current_val, _safe_float(prev_rec, metric_key))
+                        yoy = _compute_yoy(current_val, _read(prev_rec, metric_key, reading))
 
             results.append({
                 # period = FISCAL year for display; _match_period = the benchmark join
@@ -448,6 +497,24 @@ def _compute_growth_points(
             })
 
     return results
+
+
+def _log_positive_capex(ticker: str, span: str, records: Any) -> None:
+    """One WARNING per span for the capitalExpenditure rows filed POSITIVE (the statement
+    files capex as a negative outflow): `capital_expenditure_reading` gives them no point —
+    a sign anomaly or netted disposals is never shown as spending — and that must not be
+    silent."""
+    dates = [
+        str(rec.get("date") or "?")
+        for rec in _as_list(records)
+        if (v := _safe_float(rec, "capitalExpenditure")) is not None and v > 0
+    ]
+    if dates:
+        logger.warning(
+            "[growth-capex-sign] ticker=%s span=%s: %d capitalExpenditure row(s) are positive "
+            "(%s) - no reading, never shown as spending",
+            ticker, span, len(dates), ", ".join(sorted(dates)[:4]),
+        )
 
 
 # ── Service ───────────────────────────────────────────────────────
@@ -639,7 +706,7 @@ class GrowthService:
     def _next_earnings_date_safe(self, ticker: str) -> EarningsStamp:
         """Reuse the profit-power cache's next-earnings date when present.
 
-        Growth doesn't fetch the earnings calendar itself (it would be an 11th
+        Growth doesn't fetch the earnings calendar itself (it would be a sixth
         FMP call); the sibling cache for the same ticker already stores it, so
         read it opportunistically. None just means "expire on the 24h TTL".
 
@@ -662,7 +729,7 @@ class GrowthService:
         A date BEFORE today is still rejected: that profit_power row is old (its
         date only refreshes when someone hits the profit-power path), and a
         growth row carrying it would be born stale — the Supabase tier would
-        never hit and every 5-minute window would re-run the 10-call FMP
+        never hit and every 5-minute window would re-run the 5-call FMP
         fan-out for as long as the stale date stayed in profit_power_cache.
         """
         try:
@@ -723,7 +790,16 @@ class GrowthService:
             logger.warning(f"Growth Supabase upsert failed for {ticker}: {e}")
 
     async def _build_growth(self, ticker: str) -> Tuple[GrowthResponse, list]:
-        """Fetch income + cash flow statements, compute YoY growth, look up sector benchmarks."""
+        """Fetch income + cash flow statements, compute YoY growth, look up sector benchmarks.
+
+        FIVE FMP calls (the profile, annual and quarterly income, annual and quarterly cash
+        flow). The cash-flow rows feed free cash flow and the two chat-only series —
+        operating cash flow and capital expenditure (cash spent, positive) — with no extra
+        call; each reads its rows through an `app.utils.margins` reading, so FMP's zero-filled
+        cash-flow row is a gap, never a 0.00 point with a -100% YoY. For a company whose
+        `score_excluded_rows` holds "fcf_growth" (banks, insurers, lenders, brokers) FCF and
+        operating cash flow are emptied and named in `series_not_meaningful`; capex stays.
+        """
 
         # Phase 1: parallel fetch — profile + income + cash flow (5 FMP calls)
         (
@@ -776,7 +852,7 @@ class GrowthService:
         # the benchmark table directly, so no normalization is needed.
         industry = profile.get("industry", "") if isinstance(profile, dict) else ""
 
-        # Phase 3: compute target ticker's YoY growth for all 5 metrics
+        # Phase 3: compute target ticker's YoY growth for the 5 charted metrics (+2 chat-only)
         # EPS & Revenue (from income statement)
         eps_annual_points = _compute_growth_points(annual_income, "epsDiluted", is_quarterly=False)
         eps_quarterly_points = _compute_growth_points(quarterly_income, "epsDiluted", is_quarterly=True)
@@ -787,9 +863,36 @@ class GrowthService:
         ni_quarterly_points = _compute_growth_points(quarterly_income, "netIncome", is_quarterly=True)
         op_annual_points = _compute_growth_points(annual_income, "operatingIncome", is_quarterly=False)
         op_quarterly_points = _compute_growth_points(quarterly_income, "operatingIncome", is_quarterly=True)
-        # Free Cash Flow (from cash flow statement)
-        fcf_annual_points = _compute_growth_points(annual_cashflow, "freeCashFlow", is_quarterly=False)
-        fcf_quarterly_points = _compute_growth_points(quarterly_cashflow, "freeCashFlow", is_quarterly=True)
+        # Free Cash Flow (from cash flow statement). FMP zero-fills a cash-flow statement it
+        # does not have: that 0 is no point (a gap), never 0.00 with a -100% YoY (owner
+        # decision 2026-11-14, "Fix it too").
+        fcf_annual_points = _compute_growth_points(
+            annual_cashflow, "freeCashFlow", is_quarterly=False, reading=free_cash_flow_reading,
+        )
+        fcf_quarterly_points = _compute_growth_points(
+            quarterly_cashflow, "freeCashFlow", is_quarterly=True, reading=free_cash_flow_reading,
+        )
+        # Chat-only (2026-11-14, "Yes, add capex"): operating cash flow and capital
+        # expenditure from the SAME cash-flow rows — no new FMP call, no peer median, no chart.
+        # Capex is the cash SPENT (FMP files it negative); a positive row is no reading, logged.
+        ocf_annual_points = _compute_growth_points(
+            annual_cashflow, "operatingCashFlow", is_quarterly=False,
+            reading=operating_cash_flow_reading,
+        )
+        ocf_quarterly_points = _compute_growth_points(
+            quarterly_cashflow, "operatingCashFlow", is_quarterly=True,
+            reading=operating_cash_flow_reading,
+        )
+        capex_annual_points = _compute_growth_points(
+            annual_cashflow, "capitalExpenditure", is_quarterly=False,
+            reading=capital_expenditure_reading,
+        )
+        capex_quarterly_points = _compute_growth_points(
+            quarterly_cashflow, "capitalExpenditure", is_quarterly=True,
+            reading=capital_expenditure_reading,
+        )
+        _log_positive_capex(ticker, "annual", annual_cashflow)
+        _log_positive_capex(ticker, "quarterly", quarterly_cashflow)
 
         # Phase 4: look up pre-computed sector benchmarks (fast DB lookup, cached) — only
         # for the metrics this company may be compared on at all (`financials_metric_gate`):
@@ -799,8 +902,15 @@ class GrowthService:
         network = resolve_payment_network(
             ticker, industry, trailing_interest_row(quarterly_income), source="growth",
         )
+        # A bank's, insurer's, lender's or broker's cash flows swing with deposits, loans and
+        # claims: its FCF and operating cash flow are not shown, and the response SAYS so
+        # (`series_not_meaningful`, owner decision 2026-11-14 "Hide, say why") so chat never
+        # reads the empty series as missing data. Capex is a real figure and stays.
+        series_not_meaningful: List[str] = []
         if "fcf_growth" in score_excluded_rows(industry, network=network, ticker=ticker):
             fcf_annual_points, fcf_quarterly_points = [], []
+            ocf_annual_points, ocf_quarterly_points = [], []
+            series_not_meaningful = ["free_cash_flow", "operating_cash_flow"]
         all_yoy_metrics = comparable_peer_metrics(
             [
                 "eps_yoy", "revenue_yoy", "net_income_yoy",
@@ -931,6 +1041,19 @@ class GrowthService:
             free_cash_flow_quarterly=_to_schemas(
                 fcf_quarterly_points, "fcf_yoy", benchmarks_quarterly,
             ),
+            # Chat-only: no benchmark metric, so never a peer value (`{}`) and no
+            # `peer_group_levels` key (not in `series_specs`).
+            operating_cash_flow_annual=_to_schemas(ocf_annual_points, "operating_cash_flow", {}),
+            operating_cash_flow_quarterly=_to_schemas(
+                ocf_quarterly_points, "operating_cash_flow", {},
+            ),
+            capital_expenditure_annual=_to_schemas(
+                capex_annual_points, "capital_expenditure", {},
+            ),
+            capital_expenditure_quarterly=_to_schemas(
+                capex_quarterly_points, "capital_expenditure", {},
+            ),
+            series_not_meaningful=series_not_meaningful,
             degraded=list(degraded),
             peer_group_levels=peer_group_levels,
         )

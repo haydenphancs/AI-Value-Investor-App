@@ -250,7 +250,9 @@ struct MoversWidgetView: View {
     /// - Market mode → the Updates tab on its Market chip, the Market Insight card first
     ///   (owner, 2026-10-22). The WHOLE Market tile: its asset rows carry no `Link` of their own,
     ///   because on Medium/Large they cover most of the tile and would take the tap.
-    /// - Holdings → the headline mover's detail screen (unchanged; its rows link one by one).
+    /// - Holdings → the headline mover's `deepLink`: its detail screen, or its Updates card when
+    ///   its cause came from that card (`cause_card`) and the snapshot is from today's ET day
+    ///   (`cardLinksLive`); its rows link one by one the same way.
     ///
     /// nil, so the app opens at its root, when signed out (the app shows the sign-in wall
     /// either way), on WidgetKit's placeholder render (sample data whose mode is only the
@@ -265,7 +267,7 @@ struct MoversWidgetView: View {
               let snap = entry.snapshot, snap.mode == "portfolio",
               let headline = snap.headlineMover
         else { return nil }
-        return headline.deepLink
+        return headline.deepLink(cardLinksLive: snap.cardLinksLive(now: entry.date))
     }
 
     @ViewBuilder
@@ -739,13 +741,15 @@ private struct HoldingsView: View {
         let aged: Bool = m.isRolling24h
             ? WidgetSessionLabel.isPriorETDay(asOf: snap.asOf, now: entry.date)
             : WidgetSessionLabel.isPriorSession(sessionDate: snap.sessionDate, now: entry.date)
+        // Whether a card-backed row may still open its Updates card (`cardLinksLive`).
+        let cardLinksLive = snap.cardLinksLive(now: entry.date)
         switch family {
         case .systemSmall:
             HoldingsSmall(snapshot: snap, headline: m)
         case .systemLarge:
-            HoldingsLarge(snapshot: snap, headline: m, aged: aged)
+            HoldingsLarge(snapshot: snap, headline: m, aged: aged, cardLinksLive: cardLinksLive)
         default:
-            HoldingsMedium(snapshot: snap, headline: m, aged: aged)
+            HoldingsMedium(snapshot: snap, headline: m, aged: aged, cardLinksLive: cardLinksLive)
         }
     }
 }
@@ -801,6 +805,7 @@ private struct HoldingsMedium: View {
     let snapshot: WidgetMoverSnapshot
     let headline: WidgetMover
     let aged: Bool
+    let cardLinksLive: Bool
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -813,7 +818,7 @@ private struct HoldingsMedium: View {
 
             if !typeSize.isAccessibilitySize {
                 Divider()
-                SidePanel(snapshot: snapshot)
+                SidePanel(snapshot: snapshot, cardLinksLive: cardLinksLive)
                     .frame(width: 104, alignment: .topLeading)
             }
         }
@@ -823,6 +828,7 @@ private struct HoldingsMedium: View {
 /// "▲8 ▼5", then the top riser and the top faller (both excluding the headline).
 private struct SidePanel: View {
     let snapshot: WidgetMoverSnapshot
+    let cardLinksLive: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -842,7 +848,7 @@ private struct SidePanel: View {
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
                 CompactMoverRow(mover: riser)
-                    .tapThrough(riser.deepLink)
+                    .tapThrough(riser.deepLink(cardLinksLive: cardLinksLive))
             }
             if let faller = snapshot.fallers.first {
                 Text("Falling")
@@ -850,7 +856,7 @@ private struct SidePanel: View {
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
                 CompactMoverRow(mover: faller)
-                    .tapThrough(faller.deepLink)
+                    .tapThrough(faller.deepLink(cardLinksLive: cardLinksLive))
             }
         }
     }
@@ -858,10 +864,10 @@ private struct SidePanel: View {
     private var glyphs: some View {
         VStack(alignment: .leading, spacing: 1) {
             if let riser = snapshot.risers.first {
-                CompactMoverRow(mover: riser, glyph: "▲").tapThrough(riser.deepLink)
+                CompactMoverRow(mover: riser, glyph: "▲").tapThrough(riser.deepLink(cardLinksLive: cardLinksLive))
             }
             if let faller = snapshot.fallers.first {
-                CompactMoverRow(mover: faller, glyph: "▼").tapThrough(faller.deepLink)
+                CompactMoverRow(mover: faller, glyph: "▼").tapThrough(faller.deepLink(cardLinksLive: cardLinksLive))
             }
         }
     }
@@ -908,6 +914,7 @@ private struct HoldingsLarge: View {
     let snapshot: WidgetMoverSnapshot
     let headline: WidgetMover
     let aged: Bool
+    let cardLinksLive: Bool
 
     private var rowLimit: Int { typeSize.isAccessibilitySize ? 2 : 5 }
 
@@ -921,8 +928,10 @@ private struct HoldingsLarge: View {
             CountsLine(snapshot: snapshot, showsDetail: true)
             Divider()
             HStack(alignment: .top, spacing: 12) {
-                MoverColumn(title: "Rising", movers: snapshot.risers, limit: rowLimit)
-                MoverColumn(title: "Falling", movers: snapshot.fallers, limit: rowLimit)
+                MoverColumn(title: "Rising", movers: snapshot.risers, limit: rowLimit,
+                            cardLinksLive: cardLinksLive)
+                MoverColumn(title: "Falling", movers: snapshot.fallers, limit: rowLimit,
+                            cardLinksLive: cardLinksLive)
             }
             if let basket = snapshot.basket {
                 Divider()
@@ -939,6 +948,7 @@ private struct MoverColumn: View {
     let title: String
     let movers: [WidgetMover]
     var limit: Int
+    let cardLinksLive: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -954,7 +964,7 @@ private struct MoverColumn: View {
             } else {
                 ForEach(movers.prefix(limit), id: \.ticker) {
                     CompactMoverRow(mover: $0, font: .caption)
-                        .tapThrough($0.deepLink)
+                        .tapThrough($0.deepLink(cardLinksLive: cardLinksLive))
                 }
             }
         }
@@ -1457,7 +1467,8 @@ private struct InlineHoldings: View {
 /// Every widget tap used to open the app at its root. These send it somewhere specific
 /// instead, through `CaydexDeepLink` (shared with the app, which parses the link, gates it
 /// behind sign-in and opens it): a Holdings tap → `caydex://ticker/<SYMBOL>`, the asset's
-/// detail screen; a Market tap → `caydex://updates/market`, the Updates tab's Market chip.
+/// detail screen, or `caydex://updates/<SYMBOL>` when the row's cause came from its Insights
+/// card; a Market tap → `caydex://updates/market`, the Updates tab's Market chip.
 ///
 /// TWO MECHANISMS, because WidgetKit gives each family different tap rules:
 /// - `.widgetURL` is the tile-wide target, and the ONLY one a Small or Lock Screen tile
@@ -1468,11 +1479,35 @@ private struct InlineHoldings: View {
 ///
 /// A ticker URL carries the ticker and its class, nothing else. That keeps it as safe to hold
 /// behind `.privacySensitive()` Holdings rows as the ticker printed on them.
+private extension WidgetMoverSnapshot {
+    /// Whether this snapshot's card-backed rows may still open their Insights card on Updates:
+    /// only while `now` is on the ET day the snapshot was built (`asOf`), the same earlier-ET-day
+    /// notion `isPriorETDay` gives the aged wording. Only the app writes the Holdings snapshot, so
+    /// it can sit on the Home Screen past midnight ET — and a web-only card is shown on Updates
+    /// only on the ET day it was written, so after that the tap would land on a chip with no card
+    /// and no sources. The ticker's detail screen is the honest target then.
+    func cardLinksLive(now: Date) -> Bool {
+        !WidgetSessionLabel.isPriorETDay(asOf: asOf, now: now)
+    }
+}
+
 private extension WidgetMover {
-    /// The class when the quote supplied one. Otherwise the app resolves from the symbol,
-    /// which is right for stocks and for crypto pairs.
-    var deepLink: URL? {
-        CaydexDeepLink.tickerURL(symbol: ticker, assetClass: CaydexDeepLink.AssetClass(wire: assetType))
+    /// A row whose cause came from the ticker's Insights card (`cause_card`, 2026-11-12) opens
+    /// that card on Updates (`caydex://updates/<SYMBOL>`), where its sources and "Ask Cay AI"
+    /// are, while its snapshot is from today's ET day (`cardLinksLive`); the app falls back to
+    /// the detail when the ticker is not a chip, on the screen `type` names (an ETF holding keeps
+    /// the ETF screen). Every other row — and every row of an aged snapshot — opens the ticker's
+    /// detail, with the class when the quote supplied one (otherwise the app resolves from the
+    /// symbol, which is right for stocks and for crypto pairs). Rows and the Holdings `tileURL`
+    /// both read this, so the headline and its row always agree.
+    func deepLink(cardLinksLive: Bool) -> URL? {
+        if cardLinksLive, linksToInsightCard,
+           let updates = CaydexDeepLink.updatesTickerURL(
+               symbol: ticker, assetClass: CaydexDeepLink.AssetClass(wire: assetType)
+           ) {
+            return updates
+        }
+        return CaydexDeepLink.tickerURL(symbol: ticker, assetClass: CaydexDeepLink.AssetClass(wire: assetType))
     }
 }
 

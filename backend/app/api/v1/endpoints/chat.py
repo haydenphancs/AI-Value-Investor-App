@@ -7,10 +7,11 @@ Frontend: POST /chat/sessions, GET /chat/sessions,
 """
 
 import asyncio
+import dataclasses
 import json
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 
 import uuid
 
@@ -26,7 +27,13 @@ from app.dependencies import (
     ChatRateLimit,
     chat_identity_key,
 )
-from app.api.error_response import make_error_body, make_error_response, ErrorCode
+from app.api.error_response import (
+    ErrorCode,
+    classify_exception,
+    client_error_text,
+    make_error_body,
+    make_error_response,
+)
 from app.utils.supabase_errors import is_transient_supabase_error
 from app.services.chat_security import (
     validate_message,
@@ -55,6 +62,9 @@ from app.integrations.gemini import GeminiTimeoutError, _is_clean_finish, is_len
 from app.integrations.gemini import truncate_tool_result
 import time as _time
 from app.services.agents.chat_guardrails import scan_answer, enforce_answer
+
+if TYPE_CHECKING:  # imported lazily at run time, inside `_reader_lens_for`
+    from app.services.agents.investor_profile_prompt import ReaderLens
 # Log-only numeric grounding audit (`CHAT_GROUNDING`): counts only, never changes an answer.
 from app.services.chat_numeric_grounding import (
     GroundingEvidence,
@@ -775,7 +785,7 @@ def _may_have_reader_lens(user: dict) -> bool:
         return False
 
 
-async def _reader_lens_for_async(user: dict) -> Optional[str]:
+async def _reader_lens_for_async(user: dict) -> Optional["ReaderLens"]:
     """`_reader_lens_for` without blocking the event loop.
 
     WHY THIS WRAPPER EXISTS. `_reader_lens_for` is synchronous and performs a Supabase
@@ -799,8 +809,8 @@ async def _reader_lens_for_async(user: dict) -> Optional[str]:
     return await asyncio.to_thread(_reader_lens_for, user)
 
 
-def _reader_lens_for(user: dict) -> Optional[str]:
-    """The reader's rendered preference block for this turn, or None. NEVER raises.
+def _reader_lens_for(user: dict) -> Optional["ReaderLens"]:
+    """The reader's lens for this turn (preference block + style choices), or None. NEVER raises.
 
     Best-effort by design: personalization is a presentation nicety, so a profile-store
     hiccup must degrade to the normal, impersonal answer rather than fail the turn. The
@@ -835,7 +845,7 @@ def _reader_lens_for(user: dict) -> Optional[str]:
             )
 
             facts = get_user_memory_facts_service().top_facts(user["id"])
-            lens += render_memory_block(facts)
+            lens = dataclasses.replace(lens, block=lens.block + render_memory_block(facts))
         return lens
     except Exception as e:  # noqa: BLE001 — never let a preference break an answer
         logger.warning(
@@ -1073,7 +1083,14 @@ async def _continue_cut_answer(
     signals["continuation"] = "failed"
     got_text = False
     cut_again: Optional[str] = None
-    from app.services.chat_service import _chat_thinking_budget
+    from app.services.chat_service import (
+        WEB_UNAVAILABLE_ASKED_TAIL, _chat_thinking_budget, _chat_thinking_level_kwargs,
+    )
+    # The continuation never re-asks for the "a web search is not available right now" sentence
+    # (2026-11-14): the partial answer already said it, and asking again would repeat it mid-answer
+    # against "add no preamble". The plain unavailable line (never claim a search) stays.
+    instruction = (prep.get("system_instruction_no_tools") or prep.get("system_instruction") or "")
+    instruction = instruction.replace(WEB_UNAVAILABLE_ASKED_TAIL, "")
     prompt = (
         f"{prep.get('prompt') or ''}\n\n"
         "Your answer to the USER MESSAGE above was cut off by a length limit. What "
@@ -1094,10 +1111,11 @@ async def _continue_cut_answer(
     try:
         async for kind, text in chat_service.gemini.stream_text(
             prompt,
-            system_instruction=prep.get("system_instruction_no_tools") or prep.get("system_instruction"),
+            system_instruction=instruction or None,
             model_name=model_name,
             max_output_tokens=max_output_tokens,
             thinking_budget=_chat_thinking_budget(model_name),
+            **_chat_thinking_level_kwargs(model_name),
             usage_tag=usage_tag,
         ):
             if kind == "answer" and text:
@@ -2258,13 +2276,19 @@ async def send_chat_message(
         # a quota outage used to be a bare 500 "Failed to generate response" here, and
         # iOS rendered its generic "technical difficulties" copy for what is a known,
         # retry-later condition with its own user_message.
-        from app.integrations.gemini import _is_quota_error, is_transient_gemini_error
-        if is_transient_gemini_error(e):
-            code = ErrorCode.GEMINI_QUOTA_EXCEEDED if _is_quota_error(e) else ErrorCode.GEMINI_UNAVAILABLE
-            logger.warning("Chat response failed (%s: %s) — %s", type(e).__name__, e, code.value)
+        code, transient = _ai_engine_failure(e)
+        if code is not None:
+            if transient:
+                logger.warning("Chat response failed (%s: %s) — %s", type(e).__name__, e, code.value)
+            else:
+                # A permanent AI-engine error is a request we build wrong (or a retired model):
+                # ERROR with the stack, but the client still gets the typed, terminal code.
+                logger.error("Chat response failed, permanent AI-engine error (%s) session=%s — %s",
+                             type(e).__name__, session_id, code.value, exc_info=True)
             return make_error_response(
                 code,
-                message=f"{type(e).__name__}: {e}"[:300],
+                # Never the provider's own text: it names the vendor and model (invariant 7).
+                message=client_error_text(e, code, limit=300),
                 details={"session_id": session_id, "step": "chat_generate"},
             )
         logger.error(f"Chat response failed: {e}", exc_info=True)
@@ -2288,6 +2312,27 @@ async def send_chat_message(
             else:
                 await settle_off_loop(lambda: quota.refund_once("chat_undelivered"),
                                       what=f"chat_undelivered {session_id}")
+
+
+def _ai_engine_failure(e: BaseException) -> "tuple[Optional[ErrorCode], bool]":
+    """(code, transient) for a failed chat generation, or (None, False) when it is not an AI
+    engine failure at all.
+
+    A transient Gemini condition (quota, overload, timeout) keeps its retry-later code. A
+    PERMANENT AI-engine error — a google.genai ClientError 400 INVALID_ARGUMENT, a 404 for a
+    retired model — used to fall to INTERNAL_ERROR on the stream door (iOS reads that as
+    "couldn't be saved" and RE-SENDS the turn through the send door, which fails the same way:
+    two full failed generations) and to a bare 500 `{"detail"}` on the send door (no
+    APIErrorResponse body at all, invariant #3). Both now answer GEMINI_UNAVAILABLE — the code
+    `classify_exception` already gives the report doors, and one iOS treats as terminal.
+    """
+    from app.integrations.gemini import _is_quota_error, is_transient_gemini_error
+    if is_transient_gemini_error(e):
+        return (ErrorCode.GEMINI_QUOTA_EXCEEDED if _is_quota_error(e) else ErrorCode.GEMINI_UNAVAILABLE), True
+    code, _status = classify_exception(e)
+    if code in (ErrorCode.GEMINI_UNAVAILABLE, ErrorCode.GEMINI_QUOTA_EXCEEDED):
+        return code, False
+    return None, False
 
 
 @router.post("/sessions/{session_id}/messages/stream")
@@ -2422,7 +2467,9 @@ async def stream_chat_message(
     async def event_gen():
         nonlocal delivered, unanswered_task, unanswered_judged
         import time as _time
-        from app.services.chat_service import ChatService, _chat_thinking_budget
+        from app.services.chat_service import (
+            ChatService, _chat_thinking_budget, _chat_thinking_level_kwargs,
+        )
         from app.integrations.gemini import (
             _is_quota_error,
             is_transient_gemini_error,
@@ -2485,7 +2532,7 @@ async def stream_chat_message(
         #
         # `degraded: True` is the honest default: nothing was classified, so `select_model`
         # must keep the flagship model rather than downgrade an unclassified turn.
-        reader_lens: Optional[str] = None
+        reader_lens: Optional["ReaderLens"] = None
         # `warmed` is read AFTER the try (the suggestions step reuses the warmed chips), so it
         # must be bound before it: when prep or the router raises, the gather that binds it
         # never runs, the fallback still delivers and charges the turn, and an unbound name
@@ -2586,8 +2633,15 @@ async def stream_chat_message(
                 and (ctx_type or "").strip().upper() in _NO_CONTEXT
             )
 
+            # Never for a reader with a lens (owner decision 2026-11-15, "Answer live"): the
+            # warmed rows are ONE answer written for everyone, so replaying one to a reader who
+            # turned on personalized explanations ignored their preferences while Settings said
+            # "Cay AI explains things just for you". Their chip tap is answered live instead.
             async def _warm_if_ungrounded():
-                return await _warm_lookup(user_message) if ungrounded_turn else None
+                return (
+                    await _warm_lookup(user_message)
+                    if ungrounded_turn and not reader_lens else None
+                )
 
             if settings.CHAT_MULTI_AGENT_ENABLED:
                 # All three in ONE gather. Awaiting the warm lookup first to decide whether
@@ -2800,6 +2854,9 @@ async def stream_chat_message(
                     # the model spent 1150 of 1200 thinking and the answer got 40 tokens.
                     # Resolved per model: the cheap route must not have thinking switched ON.
                     thinking_budget=_chat_thinking_budget(answer_model),
+                    # The same per-model rule for the level (CHAT_THINKING_LEVEL; none on the
+                    # cheap route, and no keyword at all while the setting is unset).
+                    **_chat_thinking_level_kwargs(answer_model),
                     # Correlates the GEMINI_USAGE line to a turn: without the route you
                     # cannot tell which lens (and so which model) served this answer.
                     usage_tag=f"{session_id}:{route['specialists'][0]}",
@@ -3178,9 +3235,16 @@ async def stream_chat_message(
             except Exception as e2:
                 # A transient Gemini condition (quota or "high demand" overload) is
                 # a retry-later, not a code bug — WARNING, not an ERROR Sentry page.
-                if is_transient_gemini_error(e2):
+                ai_code, transient = _ai_engine_failure(e2)
+                if ai_code is not None and transient:
                     logger.warning("Chat stream fallback degraded (transient): %s", e2)
-                    code = "GEMINI_QUOTA_EXCEEDED" if _is_quota_error(e2) else "GEMINI_UNAVAILABLE"
+                    code = ai_code.value
+                elif ai_code is not None:
+                    # Permanent AI-engine error: terminal on iOS (no re-send through the send
+                    # door, which would fail the same way), still an ERROR with the stack.
+                    logger.error("Chat stream fallback failed, permanent AI-engine error (%s) "
+                                 "session=%s", type(e2).__name__, session_id, exc_info=True)
+                    code = ai_code.value
                 else:
                     logger.error("Chat stream fallback failed: %s", e2, exc_info=True)
                     code = "INTERNAL_ERROR"

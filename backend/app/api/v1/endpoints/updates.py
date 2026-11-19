@@ -18,7 +18,9 @@ authorship nor waits forever.
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from pydantic import ValidationError
 
 from fastapi import APIRouter, Depends, Query
 
@@ -65,9 +67,11 @@ from app.services.news_cache_service import (
     is_crypto_scope,
 )
 from app.services.news_insight_service import (
+    WEB_ONLY_BADGE,
     cited_window_floor,
     select_recent_corpus,
     get_news_insight_service,
+    web_only_card_visible,
 )
 from app.services.news_sentiment_trend_service import (
     TREND_DAYS,
@@ -77,6 +81,72 @@ from app.services.news_sentiment_trend_service import (
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
+
+# Server-only markers `NewsInsightService._row_to_card` puts on a card: chat's audit skip
+# (`web_assisted`) and the same-day web-only rule (`web_only`). Stripped before the response
+# model, so neither ever reaches the wire.
+_SERVER_ONLY_CARD_KEYS = frozenset({"web_assisted", "web_only"})
+
+
+def _card_age_hours(card: Dict[str, Any], now: datetime) -> Optional[float]:
+    """Hours since a card's ``generated_at``, for a log line only. None when unreadable."""
+    raw = card.get("generated_at")
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, str) and raw.strip():
+        try:
+            dt = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (now - dt).total_seconds() / 3600.0
+
+
+# One WARNING per hidden web-only card, keyed (scope, generated_at): the card stays readable
+# until its hard expiry (~96 h) and every page-0 load (iOS re-polls included) would otherwise
+# re-log it. Bounded like `news_insight_service._price_net_logged`.
+_web_only_hide_logged: Set[Tuple[str, str]] = set()
+_WEB_ONLY_HIDE_LOG_CAP = 5000
+
+
+def _first_web_only_hide(scope: str, card: Dict[str, Any]) -> bool:
+    """True the first time this process hides this card (by scope + generated_at)."""
+    key = (scope, str(card.get("generated_at")))
+    if key in _web_only_hide_logged:
+        return False
+    if len(_web_only_hide_logged) >= _WEB_ONLY_HIDE_LOG_CAP:
+        _web_only_hide_logged.clear()
+    _web_only_hide_logged.add(key)
+    return True
+
+
+def _insight_failure_detail(e: BaseException) -> str:
+    """A log-safe description of an insight read failure: NEVER ``str(e)``.
+
+    A pydantic ``ValidationError`` prints each failing ``input_value`` — the card's headline
+    and bullets, which for a web-only card are drawn from third-party pages. So: the class
+    name, the error count and the failing field locations, plus where it was raised.
+    """
+    parts = [type(e).__name__]
+    if isinstance(e, ValidationError):
+        try:
+            locs = sorted({
+                ".".join(str(p) for p in err.get("loc", ()))
+                for err in e.errors(include_url=False, include_context=False, include_input=False)
+            })
+            parts.append(f"errors={e.error_count()} fields={locs}")
+        except Exception as detail_err:  # never let the log line itself fail the read
+            parts.append(f"errors=unreadable ({type(detail_err).__name__})")
+    tb = e.__traceback__
+    if tb is not None:
+        while tb.tb_next is not None:
+            tb = tb.tb_next
+        code = tb.tb_frame.f_code
+        parts.append(f"at {code.co_filename.rsplit('/', 1)[-1]}:{tb.tb_lineno} in {code.co_name}")
+    return " ".join(parts)
 
 # 🔒 ACCOUNT-ONLY. Every route on this router requires a real account.
 #
@@ -498,6 +568,7 @@ async def get_updates_feed(
     # and — worse — a page-2 fallback card would be built from page 2's
     # articles, i.e. a summary of yesterday's news replacing today's.
     insight: Optional[AIInsightCardResponse] = None
+    insight_web_only = False
     if offset == 0:
         now = datetime.now(timezone.utc)
 
@@ -532,11 +603,39 @@ async def get_updates_feed(
             # securities whose tickers collide with coin names.
             company_name=crypto_display_name(scope) if is_crypto_scope(scope) else None,
         )
-        if feed_recent and not isinstance(cards_res, Exception):
+        # Entered over an EMPTY window too (2026-11-12, "Web search fills it"): a jumper
+        # with no FMP news in its window may hold a card written from the jump search's
+        # web pages ALONE, and that card is the one thing served over an empty feed.
+        if not isinstance(cards_res, Exception):
             try:
                 cards = cards_res or {}       # read above, beside the timeline
                 card = cards.get(scope)
-                if card is None:
+                if not isinstance(card, dict):
+                    card = None
+                web_only = card is not None and card.get("web_only") is True
+                if web_only and not web_only_card_visible(card, now):
+                    # Shown on the ET day it was written ONLY (owner, 2026-11-12): its
+                    # pages explain one day's move in one direction. Never a silent hide.
+                    # Scope and age only — never the card's text or its pages.
+                    age_h = _card_age_hours(card, now)
+                    age_txt = f"{age_h:.1f}" if age_h is not None else "unknown"
+                    if _first_web_only_hide(scope, card):
+                        logger.warning(
+                            "Updates insight: hiding web-only card for scope=%s age_h=%s "
+                            "(not written on today's ET date)", scope, age_txt,
+                        )
+                    else:
+                        logger.debug(
+                            "Updates insight: still hiding web-only card for scope=%s "
+                            "age_h=%s", scope, age_txt,
+                        )
+                    card = None
+                    web_only = False
+                if not feed_recent and not web_only:
+                    # An empty window shows no card (as before 2026-11-12) — a plain or
+                    # MIXED card included, and no headline fallback (nothing to list).
+                    card = None
+                elif card is None and feed_recent:
                     # No AI card yet (cold scope, or the sweeper hasn't reached
                     # it). Serve the honest headline list, built ONLY from the
                     # in-window articles so it cannot claim a longer lookback over
@@ -567,7 +666,12 @@ async def get_updates_feed(
                     # stand. Badging it from the FEED window instead would print
                     # "24h" over a brief written days ago, on the strength of peer
                     # articles that were never in it.
-                    if card.get("ai_generated", True) and subject_recent:
+                    if web_only:
+                        # Its pages were at most ~24 h old when kept, and it is shown on
+                        # its ET day only: never the recomputed corpus window (the FMP
+                        # corpus is not what it summarised, and may be empty).
+                        card = {**card, "badge": WEB_ONLY_BADGE}
+                    elif card.get("ai_generated", True) and subject_recent:
                         # The recompute can under-claim once a thin day fills in:
                         # a brief written over 48h (yesterday's story cited) must
                         # not read "24h" because three fresh articles landed while
@@ -576,15 +680,23 @@ async def get_updates_feed(
                         cited = cited_window_floor(card.get("sources"), raw_articles, now)
                         window_hours = max(subject_window, cited or 0)
                         card = {**card, "badge": f"{window_hours}h"}
-                    # `web_assisted` (a card written with the jump search's web pages) is a
-                    # server-only marker for chat's audits: never on the wire.
-                    card = {k: v for k, v in card.items() if k != "web_assisted"}
+                    # `web_assisted` (a card written with the jump search's web pages) and
+                    # `web_only` (written from those pages alone) are server-only markers
+                    # for chat and the widget: never on the wire. `is_stale` stays as read.
+                    card = {
+                        k: v for k, v in card.items()
+                        if k not in _SERVER_ONLY_CARD_KEYS
+                    }
                     insight = AIInsightCardResponse(**card)
+                    insight_web_only = web_only
             except Exception as e:
-                # An unavailable insight must never take down the timeline.
+                # An unavailable insight must never take down the timeline. Logged without
+                # `str(e)` or a traceback: a card's text (web pages, for a web-only card)
+                # would ride in either — `_insight_failure_detail` names the class, the
+                # failing fields and the raising line instead.
                 logger.warning(
-                    "Updates insight read failed for scope=%s: %s: %s",
-                    scope, type(e).__name__, e,
+                    "Updates insight read failed for scope=%s: %s",
+                    scope, _insight_failure_detail(e),
                 )
 
     # A full page implies there may be another; a short page is provably the
@@ -604,7 +716,8 @@ async def get_updates_feed(
     logger.info(
         "Updates feed scope=%s articles=%d offset=%d has_more=%s cached=%s insight=%s",
         scope, len(articles), offset, has_more, feed.get("cached"),
-        "ai" if (insight and insight.ai_generated)
+        "ai_web_only" if (insight and insight_web_only)
+        else "ai" if (insight and insight.ai_generated)
         else "fallback" if insight else "none",
     )
     return UpdatesFeedResponse(

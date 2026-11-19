@@ -17,7 +17,7 @@ how the mock repository built those strings.
 """
 
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from app.schemas.trillion_club import TrillionClubGroupResponse
 
@@ -56,6 +56,14 @@ class MarketPulseItemResponse(BaseModel):
     # loses nothing.
     spark_from: float = 0.0
     spark_to: float = 1.0
+    # The "Delisted" label (`app/schemas/listing_status.py`), set only on a Your Watchlist
+    # tile: all four together for a CONFIRMED delisting, else all None (every Market Pulse
+    # index tile is None). Optional and last — a required key here would blank the whole
+    # Home dashboard on a shipped build.
+    listing_status: Optional[Literal["delisted"]] = None
+    delisted_date: Optional[str] = None       # "YYYY-MM-DD" (US Eastern calendar)
+    delisted_exchange: Optional[str] = None   # "NASDAQ"; None when FMP's row names none
+    last_trade_date: Optional[str] = None     # "YYYY-MM-DD", newest session with volume > 0
 
 
 # ── Daily Scanners ─────────────────────────────────────────────────────

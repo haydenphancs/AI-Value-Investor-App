@@ -91,12 +91,13 @@ def test_the_frequency_window_spans_at_least_four_years():
 
 
 def test_both_etf_call_sites_derive_over_the_wide_window():
-    """Anti-vacuity for the constant: the two `get_ex_dividend_dates` calls in
-    etf_service must use `_pay_frequency_window()`, not the 400-day default."""
+    """Anti-vacuity for the constant: the ONE `get_dividend_events` call in etf_service
+    (shared by the detail card and the endpoint) must use `_pay_frequency_window()`, not the
+    400-day default."""
     src = inspect.getsource(etf_service)
     code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
-    calls = [m.start() for m in re.finditer(r"get_ex_dividend_dates\(", code)]
-    assert len(calls) >= 2, "the two ETF call sites moved — re-point this test"
+    calls = [m.start() for m in re.finditer(r"get_dividend_events\(", code)]
+    assert len(calls) == 1, "the ETF derivation call site moved — re-point this test"
     for i in calls:
         window = code[i:i + 200]
         assert "_pay_frequency_window()" in window, window

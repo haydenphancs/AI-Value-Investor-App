@@ -75,16 +75,19 @@ struct WhaleProfileView: View {
                             // previews the paid detail instead of substituting for it.
                             WhaleSectorExposureSection(sectors: profile.sectorExposure)
 
-                            // Current Picks (13F only) — PAID.
+                            // 13F picks (13F only) — PAID. Titled by the filing quarter
+                            // ("Picks · Q3 2026 13F"), locked or not: a 13F is a quarter-end
+                            // snapshot filed up to 45 days later, never "current".
                             if profile.isLocked {
                                 lockedSection(
-                                    title: "Current Picks",
+                                    title: WhaleCurrentPicksSection.picksTitle(filingQuarter: profile.portfolioAsOf),
                                     message: "See every position this investor holds, and how much of the book each one is."
                                 )
                             } else {
                                 WhaleCurrentPicksSection(
                                     holdings: viewModel.displayedHoldings,
                                     behaviorSummary: profile.behaviorSummary,
+                                    filingQuarter: profile.portfolioAsOf,
                                     onHoldingTapped: { viewModel.viewHolding($0) },
                                     onTopTenTapped: { viewModel.viewMoreHoldings() }
                                 )
@@ -943,19 +946,34 @@ struct WhaleBulletPoint: View {
     }
 }
 
-// MARK: - Current Picks Section
+// MARK: - 13F Picks Section
 struct WhaleCurrentPicksSection: View {
     let holdings: [WhaleHolding]
     let behaviorSummary: WhaleBehaviorSummary
+    /// The 13F quarter the holdings are as of ("Q3 2026") — `WhaleProfile.portfolioAsOf`,
+    /// read from the SAME snapshot as `holdings_data` on the backend
+    /// (`whale_service._stat_disclosure` → `filing_period_display`). nil when the
+    /// snapshot carried no parseable filing period.
+    var filingQuarter: String? = nil
     var isCongressional: Bool = false
     var onHoldingTapped: ((WhaleHolding) -> Void)?
     var onTopTenTapped: (() -> Void)?
+
+    /// "Picks · Q3 2026 13F". A 13F is a quarter-end snapshot filed up to 45 days
+    /// later, so it is named by its quarter and never called "Current" (owner,
+    /// 2026-11-13). With no quarter it still names the source rather than claiming
+    /// the picks are current. Shared with the locked card's title so the two agree.
+    static func picksTitle(filingQuarter: String?) -> String {
+        let quarter = (filingQuarter ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !quarter.isEmpty else { return "Picks · Latest 13F" }
+        return "Picks · \(quarter) 13F"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppSpacing.md) {
             // Header
             HStack {
-                Text(isCongressional ? "Recently Traded" : "Current Picks")
+                Text(isCongressional ? "Recently Traded" : Self.picksTitle(filingQuarter: filingQuarter))
                     .font(AppTypography.headingSmall)
                     .foregroundColor(AppColors.textPrimary)
 

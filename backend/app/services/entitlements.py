@@ -110,7 +110,7 @@ FREE_TIER_WHALE_NAME = "Bill Gates"
 #
 # FREE keeps: header, bio, risk badge, portfolio stats, and Sector Exposure — enough to
 # judge an investor and to see the shape of their book.
-# PAID:       Current Picks (holdings + behaviour summary), Recent Trades (trade groups and
+# PAID:       13F picks (holdings + behaviour summary), Recent Trades (trade groups and
 #             their drill-down), and the AI Sentiment Summary — the position-level detail.
 WHALE_DETAIL_UNLOCKED_TIERS = SIGNALS_UNLOCKED_TIERS
 

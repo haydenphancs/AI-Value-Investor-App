@@ -22,6 +22,12 @@ struct EarningsChartView: View {
     var dailyPriceHistory: [EarningsDailyPricePoint] = []
     let showPriceLine: Bool
     var dataType: EarningsDataType = .eps
+    /// The next report day (`EarningsData.nextEarningsDate`). It ends the price line's time
+    /// axis at the first gray estimate dot, so the line stops where today sits between the
+    /// last report and the next one. Ignored unless it belongs to that quarter (see
+    /// `EarningsPriceTimeline.placement`). The LAST stored property, so every existing
+    /// memberwise call keeps compiling.
+    var nextEarningsDate: Date? = nil
 
     // Calculate chart bounds based ONLY on EPS/Revenue data (NOT price).
     // Finite values only — a NaN poisons min()/max() — and no estimate for a quarter
@@ -309,92 +315,50 @@ struct EarningsChartView: View {
         }
     }
 
-    // MARK: - Quarter Label → Approximate Date
-
-    /// Converts "Q1 '24" → approximate fiscal quarter end date.
-    /// Q1→Mar 31, Q2→Jun 30, Q3→Sep 30, Q4→Dec 31.
-    private func estimatedDate(from quarterLabel: String) -> Date? {
-        // Expected format: "Q1 '24"
-        let parts = quarterLabel.components(separatedBy: " '")
-        guard parts.count == 2,
-              let qNum = Int(String(parts[0].dropFirst())),   // "Q1" → 1
-              let yr = Int(parts[1]) else { return nil }      // "24" → 24
-
-        let year = yr < 50 ? 2000 + yr : 1900 + yr
-        let quarterEndMonths = [3, 6, 9, 12]   // Q1→Mar, Q2→Jun, Q3→Sep, Q4→Dec
-        guard qNum >= 1, qNum <= 4 else { return nil }
-        let month = quarterEndMonths[qNum - 1]
-        let day = (month == 6 || month == 9) ? 30 : 31
-
-        var components = DateComponents()
-        components.year = year
-        components.month = month
-        components.day = day
-        return Calendar.current.date(from: components)
-    }
-
     // MARK: - Continuous Daily Price Line
 
-    /// Resolves the actual fiscal date for a quarter, using the backend-provided
-    /// fiscal_date when available, falling back to label-based estimation.
-    private func actualFiscalDate(for quarter: EarningsQuarterData) -> Date? {
-        if let fd = quarter.fiscalDate {
-            return _dailyPriceDateFormatter.date(from: fd)
-        }
-        return estimatedDate(from: quarter.quarter)
-    }
-
+    /// The daily closes on the dots' time axis (`EarningsPriceTimeline`). Each reported dot
+    /// sits on the day the quarter was ANNOUNCED, so a jump just right of a dot is the
+    /// market's answer to that report. The dots used to sit on the quarter's period END,
+    /// which drew every report-day move 1-11 weeks right of its own dot: two days after
+    /// CSCO's 2026-11-12 report the line already ran 20 days past the newest dot.
     private func dailyPriceLine(width: CGFloat, height: CGFloat, stepX: CGFloat) -> some View {
-        // Find historical quarter indices and their fiscal dates
-        let historicalWithDates: [(index: Int, date: Date)] = quarters.enumerated()
-            .filter { $0.element.actualValue != nil }
-            .compactMap { (offset, element) in
-                guard let d = actualFiscalDate(for: element) else { return nil }
-                return (index: offset, date: d)
+        // Day numbers, never device-calendar Dates: a "yyyy-MM-dd" is one calendar day in
+        // every zone, and day arithmetic has no 23- or 25-hour daylight-saving days.
+        let closes: [(day: Int, price: Double)] = dailyPriceHistory
+            .compactMap { point -> (day: Int, price: Double)? in
+                guard let day = EarningsPriceTimeline.dayNumber(point.date), point.price.isFinite else {
+                    return nil
+                }
+                return (day: day, price: point.price)
             }
+            .sorted { $0.day < $1.day }
 
-        guard historicalWithDates.count >= 2 else {
+        guard closes.count >= 2 else {
             return AnyView(EmptyView())
         }
 
-        // Parse daily prices
-        let datesAndPrices: [(Date, Double)] = dailyPriceHistory.compactMap { dp in
-            guard let d = _dailyPriceDateFormatter.date(from: dp.date) else { return nil }
-            return (d, dp.price)
-        }.sorted { $0.0 < $1.0 }
-
-        guard datesAndPrices.count >= 2 else {
+        // The card's next-report Date was parsed by a POSIX, device-zone "yyyy-MM-dd"
+        // formatter; the same formatter turns it back into exactly that calendar day.
+        let nextDay: Int? = nextEarningsDate.flatMap { date -> Int? in
+            EarningsPriceTimeline.dayNumber(_dailyPriceDateFormatter.string(from: date))
+        }
+        guard let timeline = EarningsPriceTimeline.placement(
+            quarters: quarters,
+            nextEarningsDay: nextDay,
+            lastCloseDay: closes.last?.day
+        ) else {
             return AnyView(EmptyView())
         }
-
-        // Find the best two anchor quarters that have daily price data coverage
-        // Use the earliest and latest historical quarters whose fiscal dates
-        // fall within (or close to) the daily price data range
-        let priceStart = datesAndPrices.first!.0
-        _ = datesAndPrices.last!.0
-
-        // Find first anchor: earliest historical quarter with fiscal date >= priceStart (or closest)
-        let firstAnchor = historicalWithDates.first { $0.date >= priceStart } ?? historicalWithDates.first!
-        // Last anchor: always use the last historical quarter
-        let lastAnchor = historicalWithDates.last!
-
-        guard lastAnchor.date > firstAnchor.date else {
-            return AnyView(EmptyView())
-        }
-
-        let xFirst = CGFloat(firstAnchor.index) * stepX + stepX / 2
-        let xLast = CGFloat(lastAnchor.index) * stepX + stepX / 2
-        let anchorInterval = lastAnchor.date.timeIntervalSince(firstAnchor.date)
-        let rate = (xLast - xFirst) / CGFloat(anchorInterval)
 
         // Place every close FIRST, then scale on the VISIBLE window. The backend sends
         // ~5 years of closes while 1Y shows ~15 months, and the old scale (the whole
         // series' min/max) squeezed a stock that fell $60 → $20-25 into the bottom ~11%
         // of the plot: the reaction around each earnings dot — the reason the Price
         // toggle exists — was a flat line.
-        let placed: [(x: CGFloat, price: Double)] = datesAndPrices.compactMap { pair in
-            guard pair.1.isFinite else { return nil }
-            return (x: xFirst + rate * CGFloat(pair.0.timeIntervalSince(firstAnchor.date)), price: pair.1)
+        let placed: [(x: CGFloat, price: Double)] = closes.map { close -> (x: CGFloat, price: Double) in
+            let slot: Double = timeline.slot(forDay: close.day)
+            return (x: CGFloat(slot + 0.5) * stepX, price: close.price)
         }
         let visible = Self.visiblePriceWindow(placed, width: width)
         guard visible.drawn.count >= 2 else {
@@ -467,7 +431,8 @@ struct EarningsChartView: View {
     /// plot plus the nearest one on each side, so the line still reaches both edges (the
     /// path is clipped). The band comes from the IN-WINDOW closes only, falling back to the
     /// whole series when fewer than two are inside. `placed` is in date order and x grows
-    /// with date (the anchors guarantee a positive rate), so the in-window run is contiguous.
+    /// with date (`EarningsPriceTimeline` keeps only strictly rising anchors and a positive
+    /// rate outside them), so the in-window run is contiguous.
     static func visiblePriceWindow(
         _ placed: [(x: CGFloat, price: Double)],
         width: CGFloat
@@ -534,6 +499,226 @@ struct EarningsChartView: View {
     }
 }
 
+// MARK: - Price line time axis
+
+/// Where the Earnings card's price line puts a calendar day. The dots are evenly spaced
+/// slots (they must stay lined up with the surprise row and bars), so the line's time axis
+/// is pinned to them — dot i (centre = slot i) on its quarter's day — and runs
+/// piecewise-linearly between consecutive pinned dots.
+///
+/// Report mode (the normal case): each reported dot is pinned to the day it was ANNOUNCED
+/// (`reportDate`), and the first gray estimate dot to the next report day, so the line ends
+/// where today sits between the last report and the next. Period-end mode (`fiscalDate`):
+/// only when fewer than two reported dots carry a usable report day — a build whose earnings
+/// feed failed, or an older backend — and never with the next report day, which would mix
+/// announcement days into a period-end axis and could run backwards.
+///
+/// Pure: `test_ios_earnings_price_timeline.py` ports it line for line, and the source-scan
+/// guards pin the constants and branches the port relies on.
+enum EarningsPriceTimeline {
+    /// A dot pinned to a calendar day (`day` = days since 1970-01-01).
+    struct Anchor: Equatable {
+        let slot: Int
+        let day: Int
+    }
+
+    enum Mode: Equatable {
+        case reportDay
+        case periodEnd
+    }
+
+    struct Placement {
+        /// At least two; `slot` and `day` both strictly rising.
+        let anchors: [Anchor]
+        /// The median days per slot between the pinned dots (> 0): the rate before the
+        /// first anchor and after the last one.
+        let daysPerSlot: Double
+        let mode: Mode
+
+        /// The fractional slot of a day (dot i's centre is `Double(i)`).
+        func slot(forDay day: Int) -> Double {
+            guard let first = anchors.first, let last = anchors.last, daysPerSlot > 0 else {
+                return 0
+            }
+            if day <= first.day {
+                return Double(first.slot) - Double(first.day - day) / daysPerSlot
+            }
+            if day >= last.day {
+                return Double(last.slot) + Double(day - last.day) / daysPerSlot
+            }
+            var lower: Int = 0
+            var upper: Int = anchors.count - 1
+            while upper - lower > 1 {
+                let middle: Int = (lower + upper) / 2
+                if anchors[middle].day <= day {
+                    lower = middle
+                } else {
+                    upper = middle
+                }
+            }
+            let from: Anchor = anchors[lower]
+            let to: Anchor = anchors[upper]
+            let fraction: Double = Double(day - from.day) / Double(to.day - from.day)
+            return Double(from.slot) + fraction * Double(to.slot - from.slot)
+        }
+    }
+
+    /// A report day this many days after its own period end may pin its dot: the client's
+    /// own bound on a malformed payload. The backend sends 7-110 days, and up to
+    /// `_A2_REPORT_MAX_LAG_DAYS` (200) for a late Q4 its pairing gave the earlier quarter.
+    static let reportLagDays: ClosedRange<Int> = 1...200
+    /// The next report day pins the first gray dot only this many days after that
+    /// quarter's period end — the backend's `_MIN_ANNOUNCE_LAG_DAYS`..`_LATE_RELEASE_MAX_DAYS`.
+    /// A next date outside it belongs to some other quarter (a rescheduled leftover, or the
+    /// quarter after an overdue one) and would stretch the line over the wrong slot.
+    static let nextLagDays: ClosedRange<Int> = 7...110
+    /// ...and only within this many days of the pinned dots' own median lag (report day −
+    /// period end). The report one quarter LATER is ~91 days further out, so half a quarter
+    /// tells them apart. Without it a fast reporter's next date for the FOLLOWING quarter
+    /// (CSCO: 109 days, inside 7-110) was accepted the morning after an after-close report,
+    /// while FMP had not filled the actual yet, and the report-day move drew half a slot
+    /// left of its gray dot for the 24 h that build is cached.
+    static let nextLagToleranceDays: Int = 45
+
+    /// Days since 1970-01-01 of a strict "yyyy-MM-dd" (a longer string's first 10
+    /// characters), or nil. Proleptic Gregorian arithmetic, no `Calendar`: neither the
+    /// device calendar (Buddhist, Japanese) nor the time zone can move a day.
+    static func dayNumber(_ text: String?) -> Int? {
+        guard let text = text else { return nil }
+        let parts: [Substring] = text.prefix(10).split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2 else {
+            return nil
+        }
+        for part in parts where !part.allSatisfy({ $0 >= "0" && $0 <= "9" }) {
+            return nil
+        }
+        guard let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]),
+              (1...12).contains(month), day >= 1 else {
+            return nil
+        }
+        let isLeap: Bool = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+        let monthLengths: [Int] = [31, isLeap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        guard day <= monthLengths[month - 1] else { return nil }
+        // days_from_civil (H. Hinnant); year >= 0 here.
+        let shiftedYear: Int = month <= 2 ? year - 1 : year
+        let era: Int = shiftedYear / 400
+        let yearOfEra: Int = shiftedYear - era * 400
+        let shiftedMonth: Int = (month + 9) % 12
+        let dayOfYear: Int = (153 * shiftedMonth + 2) / 5 + day - 1
+        let dayOfEra: Int = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear
+        return era * 146_097 + dayOfEra - 719_468
+    }
+
+    /// The candidates (in rising slot order) whose day is strictly later than EVERY earlier
+    /// candidate's and strictly earlier than EVERY later one's. An inverted or shared pair
+    /// loses both — nothing says which day is wrong — and never greedily: one early outlier
+    /// must not unpin every dot after it.
+    static func orderedAnchors(_ candidates: [Anchor]) -> [Anchor] {
+        let count: Int = candidates.count
+        guard count >= 2 else { return candidates }
+        var latestBefore: [Int?] = Array(repeating: nil, count: count)
+        var earliestAfter: [Int?] = Array(repeating: nil, count: count)
+        var running: Int? = nil
+        for index in 0..<count {
+            latestBefore[index] = running
+            running = max(running ?? candidates[index].day, candidates[index].day)
+        }
+        running = nil
+        for index in stride(from: count - 1, through: 0, by: -1) {
+            earliestAfter[index] = running
+            running = min(running ?? candidates[index].day, candidates[index].day)
+        }
+        var kept: [Anchor] = []
+        for index in 0..<count {
+            let day: Int = candidates[index].day
+            if let before = latestBefore[index], day <= before { continue }
+            if let after = earliestAfter[index], day >= after { continue }
+            kept.append(candidates[index])
+        }
+        return kept
+    }
+
+    /// The median of `values`, or nil when there are none.
+    static func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted: [Double] = values.sorted()
+        let middle: Int = sorted.count / 2
+        if sorted.count % 2 == 1 {
+            return sorted[middle]
+        }
+        return (sorted[middle - 1] + sorted[middle]) / 2
+    }
+
+    /// The median days per slot over consecutive anchors, or nil if any segment is not
+    /// strictly rising in both slot and day.
+    static func medianDaysPerSlot(_ anchors: [Anchor]) -> Double? {
+        guard anchors.count >= 2 else { return nil }
+        var rates: [Double] = []
+        for index in 1..<anchors.count {
+            let slots: Int = anchors[index].slot - anchors[index - 1].slot
+            let days: Int = anchors[index].day - anchors[index - 1].day
+            guard slots > 0, days > 0 else { return nil }
+            rates.append(Double(days) / Double(slots))
+        }
+        return median(rates)
+    }
+
+    /// The time axis for `quarters` (the displayed dots, historical first), or nil when
+    /// fewer than two dots can be pinned (no line is drawn — never a guessed one).
+    static func placement(
+        quarters: [EarningsQuarterData],
+        nextEarningsDay: Int?,
+        lastCloseDay: Int?
+    ) -> Placement? {
+        let historicalSlots: [Int] = quarters.indices.filter { quarters[$0].actualValue != nil }
+
+        // Report mode: every reported dot whose report day is a plausible lag after its own
+        // period end; the rest are interpolated between their neighbours.
+        var reportCandidates: [Anchor] = []
+        for slot in historicalSlots {
+            guard let reportDay = dayNumber(quarters[slot].reportDate),
+                  let periodEndDay = dayNumber(quarters[slot].fiscalDate),
+                  reportLagDays.contains(reportDay - periodEndDay) else { continue }
+            reportCandidates.append(Anchor(slot: slot, day: reportDay))
+        }
+        let reportAnchors: [Anchor] = orderedAnchors(reportCandidates)
+        if reportAnchors.count >= 2, let rate = medianDaysPerSlot(reportAnchors), let last = reportAnchors.last {
+            var anchors: [Anchor] = reportAnchors
+            // This company's usual report lag, from the dots just pinned.
+            let ownLags: [Double] = reportAnchors.compactMap { anchor -> Double? in
+                guard let periodEndDay = dayNumber(quarters[anchor.slot].fiscalDate) else { return nil }
+                return Double(anchor.day - periodEndDay)
+            }
+            // The first gray dot on the next report day: only when that day is still ahead
+            // of the line and plausibly THIS quarter's release — inside the pairing window
+            // AND near the company's usual lag (a later quarter's is ~91 days further out).
+            if let nextDay = nextEarningsDay,
+               let typicalLag = median(ownLags),
+               let futureSlot = quarters.indices.first(where: { $0 > last.slot && quarters[$0].actualValue == nil }),
+               let futurePeriodEnd = dayNumber(quarters[futureSlot].fiscalDate),
+               nextDay > last.day,
+               nextDay >= (lastCloseDay ?? nextDay),
+               nextLagDays.contains(nextDay - futurePeriodEnd),
+               abs(Double(nextDay - futurePeriodEnd) - typicalLag) <= Double(nextLagToleranceDays) {
+                anchors.append(Anchor(slot: futureSlot, day: nextDay))
+            }
+            return Placement(anchors: anchors, daysPerSlot: rate, mode: .reportDay)
+        }
+
+        // Period-end mode: no next-report anchor, ever.
+        var periodCandidates: [Anchor] = []
+        for slot in historicalSlots {
+            guard let periodEndDay = dayNumber(quarters[slot].fiscalDate) else { continue }
+            periodCandidates.append(Anchor(slot: slot, day: periodEndDay))
+        }
+        let periodAnchors: [Anchor] = orderedAnchors(periodCandidates)
+        guard periodAnchors.count >= 2, let rate = medianDaysPerSlot(periodAnchors) else {
+            return nil
+        }
+        return Placement(anchors: periodAnchors, daysPerSlot: rate, mode: .periodEnd)
+    }
+}
+
 #Preview {
     ZStack {
         AppColors.background
@@ -544,7 +729,9 @@ struct EarningsChartView: View {
                 quarters: EarningsData.sampleData.epsQuarters,
                 priceHistory: EarningsData.sampleData.priceHistory,
                 dailyPriceHistory: EarningsData.sampleData.dailyPriceHistory,
-                showPriceLine: true
+                showPriceLine: true,
+                // The sample's next date predates its last report: exercises "ignored".
+                nextEarningsDate: EarningsData.sampleData.nextEarningsDate?.date
             )
             .padding()
         }

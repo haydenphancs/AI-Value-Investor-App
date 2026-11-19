@@ -128,3 +128,26 @@ def test_compute_growth_points_skips_non_finite_value_quarterly():
     assert len(pts) == 1
     assert pts[0]["value"] == 50.0
     assert pts[0]["yoy_change_percent"] is None
+
+
+# ── 2026-11-14: a bool is no figure; a non-finite YoY is no YoY ──────────────────
+
+
+def test_safe_float_reads_a_bool_as_no_figure():
+    """``float(True)`` is 1.0: a malformed ``true`` in a statement row charted as $1."""
+    assert _safe_float({"v": True}, "v") is None
+    assert _safe_float({"v": False}, "v") is None
+    # Controls: real numbers (and numeric strings) are unchanged.
+    assert _safe_float({"v": 1}, "v") == 1.0
+    assert _safe_float({"v": "-3000000000"}, "v") == -3_000_000_000.0
+
+
+def test_compute_yoy_that_overflows_is_none_never_inf():
+    """A near-zero base overflows the % to inf, which the report's JSONB write rejects."""
+    assert _compute_yoy(1e10, 1e-305) is None
+    assert _compute_yoy(-1e10, 1e-305) is None
+    assert _compute_yoy(1.7e308, -1.7e308) is None        # the subtraction overflows
+    # Large FINITE results are still shown verbatim (owner decision 2026-11-13).
+    assert _compute_yoy(-23.7e9, -0.39e9) == round((-23.7e9 + 0.39e9) / 0.39e9 * 100, 2)
+    big = _compute_yoy(1e12, 1.0)
+    assert big is not None and math.isfinite(big) and big > 1e13

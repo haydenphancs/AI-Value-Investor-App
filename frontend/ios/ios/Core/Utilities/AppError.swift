@@ -149,6 +149,17 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// unconditionally `.retry`, and retrying a contractual refusal can never succeed.
     case featureUnavailable(message: String)
 
+    /// The ticker is CONFIRMED delisted, so the thing asked for cannot exist for it: a new AI
+    /// report (both report doors) or a new price alert (`TICKER_DELISTED`, HTTP 409; owner
+    /// decision 2026-11-13, delisting Phase 2).
+    ///
+    /// Carries the backend's `user_message` verbatim — it names the ticker, the exchange, the
+    /// date and, on the report doors, that nothing was charged — so iOS never words it.
+    /// PERMANENT: `.goBack`, never `.retry` (a second tap meets the same refusal). Not
+    /// `.notFound` either: the ticker exists, and the reports a user already has stay free to
+    /// open. Not an auth error, and never a reason to refresh a token.
+    case tickerDelisted(message: String)
+
     // API errors (from backend)
     case apiError(code: String, message: String)
 
@@ -179,6 +190,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .purchaseUnverified: return "purchase_unverified"
         case .noAppToOpenURL: return "no_app_to_open_url"
         case .featureUnavailable: return "feature_unavailable"
+        case .tickerDelisted: return "ticker_delisted"
         case .apiError(let code, _): return "api_\(code)"
         case .unknown: return "unknown"
         }
@@ -228,6 +240,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Can’t Open That Here"
         case .featureUnavailable:
             return "Not Available"
+        case .tickerDelisted:
+            return "No Longer Listed"
         case .apiError:
             return "Error"
         case .unknown:
@@ -296,6 +310,11 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "This device has no app set up to open \(what)."
         case .featureUnavailable(let message):
             return message
+        // The backend's sentence. The fallback is reached only by a body with an empty
+        // `user_message`, and it claims nothing the server did not say (no ticker, no date,
+        // no "you haven't been charged").
+        case .tickerDelisted(let message):
+            return message.isEmpty ? "This stock is no longer listed." : message
         case .rateLimited(let seconds):
             return "Please wait \(seconds) seconds before trying again."
         case .apiError(_, let msg):
@@ -359,6 +378,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // NOT .retry: a licence refusal is permanent, so an identical request can never
         // succeed. Same reasoning as .noAppToOpenURL directly above.
         case .featureUnavailable:
+            return .goBack
+        // NOT .retry: a delisting does not clear on a second tap, and the refusal came before
+        // any charge, so there is nothing to retry. Back to the screen the user came from.
+        case .tickerDelisted:
             return .goBack
         case .apiError, .unknown:
             return .retry
@@ -794,6 +817,14 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "REPORT_NOT_FOUND" {
                 return .notFound(resource: "report")
             }
+            // 409 TICKER_DELISTED (owner, 2026-11-13): a new AI report or price alert on a
+            // ticker the backend confirmed is delisted, refused BEFORE any charge. Its own case,
+            // carrying the backend's sentence: `.apiError` would offer a Retry that meets the
+            // same refusal, and `.notFound` would say "could not be found" about a ticker that
+            // exists and whose existing reports still open.
+            if code == "TICKER_DELISTED" {
+                return .tickerDelisted(message: message)
+            }
             // 422s. The caller sent something the backend won't accept — `.fixInput`, not a
             // retry of the identical request.
             if code == "INVALID_INPUT" || code == "INVALID_PERSONA" {
@@ -987,6 +1018,7 @@ extension AppError {
         case .purchaseUnverified:     return "purchase_unverified"
         case .noAppToOpenURL:      return "no_app_to_open_url"
         case .featureUnavailable:  return "feature_unavailable"
+        case .tickerDelisted:      return "ticker_delisted"
         // The backend's ErrorCode enum is already a stable machine-readable
         // vocabulary, so it is safe as a dimension. The message is not.
         case .apiError(let code, _): return code

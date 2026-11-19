@@ -335,13 +335,18 @@ class UserInvestorProfileService:
         # this file's raw-SDK style; two truly simultaneous PUTs can lose one side's
         # bookkeeping, which costs a re-ask at worst and never loses a stored VALUE.
         submitted = answered_fields_in(raw)
+        # The stored row BEFORE this write, read once. Two readers: the union below, and the
+        # read-back fallback at the end, which needs every field this payload does NOT carry
+        # (a consent toggle carries no preference; a preference edit carries no consent).
+        # None when the read failed — a read blip must not block the write.
+        try:
+            before: Optional[Dict[str, Any]] = self.get_profile(user_id)
+        except ProfileUnreadable:
+            before = None
         if submitted:
-            try:
-                existing = self.get_profile(user_id).get("answered_fields") or []
-            except ProfileUnreadable:
-                # A read blip must not block the write. The union degrades to just this
-                # payload's fields — a later edit re-adds the rest.
-                existing = []
+            # On a failed read the union degrades to just this payload's fields — a later
+            # edit re-adds the rest.
+            existing = (before or {}).get("answered_fields") or []
             payload["answered_fields"] = sorted(set(existing) | set(submitted))
         # Matches every other service in the repo (iap_service, price_alert_service,
         # updates_insight_sweeper). PostgREST posts this as JSON, so Postgres casts the
@@ -408,11 +413,29 @@ class UserInvestorProfileService:
                 "(%s: %s) — returning the written values rather than reporting a failure",
                 user_id, type(e).__name__, e,
             )
-            echoed = sanitize_profile(payload)
-            echoed["profile_version"] = 1
-            echoed["consented_at"] = payload.get("consented_at")
+            # The row as it was before the write, with this payload's fields laid over it.
+            # Echoing the payload ALONE filled every field it did not carry with its default:
+            # a consent toggle came back "no preferences" ("On — add your preferences") and a
+            # preference edit came back with consent cleared ("Off"), until the next load.
+            echoed = dict(before) if before is not None else sanitize_profile({})
+            echoed.update(sanitize_updates(payload))
+            if "consented_at" in payload:
+                echoed["consented_at"] = payload["consented_at"]
+            elif before is None:
+                # Both reads failed: consent is UNKNOWN, and None reads as "never consented".
+                # The client re-reads when the row reappears; say so in the log.
+                logger.warning(
+                    "Investor profile read-back for user=%s: consent unknown (both reads "
+                    "failed) — echoing it as unset", user_id,
+                )
+                echoed["consented_at"] = None
+            echoed["profile_version"] = (before or {}).get("profile_version", 1)
             echoed["has_profile"] = True
-            echoed["answered_fields"] = payload.get("answered_fields") or submitted
+            echoed["answered_fields"] = (
+                payload.get("answered_fields")
+                or (before or {}).get("answered_fields")
+                or submitted
+            )
             return echoed
 
 

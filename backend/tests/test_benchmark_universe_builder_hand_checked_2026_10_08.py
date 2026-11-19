@@ -78,6 +78,12 @@ _DROPPED = [
     ("AOMN", "Angel Oak Mortgage REIT, Inc. 9"),          # AOMR's notes
     ("TVC", "Tennessee Valley Authority"),                # TVA bonds: no stock exists
     ("TVE", "Tennessee Valley Authority PARRS A 2029"),
+    # Added 2026-11-15 after a read-only sweep of the live floor-0 industry file (captured
+    # from FMP profiles that day):
+    ("BEPJ", "Brookfield BRP Holdings (Canada"),            # BRP Holdings sub notes, BEP's CIK
+    ("BEPI", "Brookfield Renewable Partners L.P."),         # 11259P208 note, BEP's exact ratios
+    ("EMP", "Entergy Mississippi, Inc. 1M BD 66"),          # subsidiary first mortgage bonds
+    ("ENO", "Entergy New Orleans, LLC"),                    # subsidiary bonds, no listed common
 ]
 
 # The operating commons beside them (captured), which must keep their vote.
@@ -101,6 +107,9 @@ _KEPT = [
     ("DCOM", "Dime Community Bancshares, Inc."),
     ("AOMR", "Angel Oak Mortgage, Inc."),
     ("EIC", "Eagle Point Income Company Inc."),   # a different issuer key
+    ("BEP", "Brookfield Renewable Partners L.P."),   # the LP units: the exempt common
+    ("BEPC", "Brookfield Renewable Corporation"),     # key "brookfield renewable": votes
+    ("ETR", "Entergy Corporation"),                   # key "entergy": votes
 ]
 
 
@@ -312,6 +321,137 @@ def test_no_other_captured_name_collides_with_the_new_keys():
                 "resolution minerals sponsored adr", "first phosphate sponsored adr",
                 "scorpio gold american"}
     owners = {"CRBD", "CRBG", "SPME", "RML", "PHOS", "SGLD"}
+    for sym, name in _DROPPED + _KEPT:
+        if sym not in owners:
+            assert bu._issuer_key(name) not in new_keys, (sym, name)
+
+
+# ── the 2026-11-15 additions: debt listings left in the live floor-0 industry file ────
+#
+# A read-only sweep after the 2026-11-15 moat refresh (screener per industry + profiles)
+# found three issuers' $25-par debt listings still voting in the moat peer averages:
+# BEPJ in Real Estate - Development (NE 5.8, Brand Power 2.4, Cost Advantage 2.1), EMP in
+# Regulated Electric and ENO in Regulated Gas (each NE ~4.5, Brand Power 5.2, Cost
+# Advantage 5.0). Rows below are as FMP served them that day (profile price, cap,
+# averageVolume).
+
+_BROOKFIELD_RENEWABLE = [
+    _row("BEP", "Brookfield Renewable Partners L.P.", industry="Renewable Utilities",
+         cap=9_077_404_360, price=29.98, avg_volume=900_000),
+    _row("BEPC", "Brookfield Renewable Corporation", industry="Renewable Utilities",
+         cap=4_633_511_810, price=30.71, avg_volume=800_000),
+    _row("BEPI", "Brookfield Renewable Partners L.P.", industry="Renewable Utilities",
+         cap=9_123_052_817, price=14.15, avg_volume=26_317),
+    _row("BEPJ", "Brookfield BRP Holdings (Canada", industry="Renewable Utilities",
+         cap=130_500_000, price=21.75, avg_volume=13_799),
+    _row("BEPH", "Brookfield BRP Holdings (Canada) Inc 4.625 % Notes 2021-Without Fixed "
+         "Maturity Global Sub", industry="Renewable Utilities", cap=8_941_179_339,
+         price=13.49, avg_volume=28_771),
+]
+
+
+def test_brookfield_renewable_votes_through_bep_and_bepc_only():
+    """BEP (the LP units) and BEPC (the corporation, its own key) vote; the BRP Holdings
+    notes leave. BEPH already went on its name. Mutation: delete "brookfield brp holdings
+    canada" → BEPJ kept."""
+    result = bu._filter_market({"Renewable Utilities": _BROOKFIELD_RENEWABLE}, 0)
+    assert sorted(r["symbol"] for r in result.kept["Renewable Utilities"]) == ["BEP", "BEPC"]
+    assert result.dropped == {"hand_checked": 2, "not_common_share": 1}
+
+
+def test_bepj_leaves_from_the_industry_the_live_file_held_it_in():
+    """The 2026-10-08 file had BEPJ under Real Estate - Development, away from BEP: no
+    twin or one-vote rule could reach it there."""
+    market = {
+        "Renewable Utilities": [_BROOKFIELD_RENEWABLE[0]],
+        "Real Estate - Development": [
+            {**_BROOKFIELD_RENEWABLE[3], "industry": "Real Estate - Development"},
+            _row("HHH", "Howard Hughes Holdings Inc.", industry="Real Estate - Development",
+                 cap=4.2e9, price=75.0),
+        ],
+    }
+    result = bu._filter_market(market, 0)
+    assert [r["symbol"] for r in result.kept["Real Estate - Development"]] == ["HHH"]
+    assert [r["symbol"] for r in result.kept["Renewable Utilities"]] == ["BEP"]
+
+
+def test_bepi_leaves_from_a_build_that_holds_no_bep():
+    """While the build also holds BEP, the root-twin rule (market-wide directory) drops BEPI
+    in any industry. A screener answer WITHOUT BEP — the 2026-11-15 sweep came back without
+    FOXA, NWSA, Z and UAA — leaves no base to pair it with, and BEPI would vote BEP's exact
+    statements alone. Mutation: delete "brookfield renewable partners" → BEPI kept."""
+    market = {"Diversified Utilities": [{**_BROOKFIELD_RENEWABLE[2],
+                                         "industry": "Diversified Utilities"}]}
+    result = bu._filter_market(market, 0)
+    assert result.kept["Diversified Utilities"] == []
+    assert result.dropped == {"hand_checked": 1}
+
+
+def test_bepi_leaves_and_bep_votes_whatever_industry_or_liquidity():
+    """Beside BEP, in BEP's industry or another, and even when the note trades far more
+    than the units, BEP is the one vote. (The table and the twin rule both reach BEPI here;
+    this pins the outcome, the test above pins the table's own reach.)"""
+    noisy = {**_BROOKFIELD_RENEWABLE[2], "avgVolume": 50_000_000, "volume": 50_000_000}
+    assert _kept([_BROOKFIELD_RENEWABLE[0], noisy]) == ["BEP"]
+    result = bu._filter_market({
+        "Renewable Utilities": [_BROOKFIELD_RENEWABLE[0]],
+        "Diversified Utilities": [{**noisy, "industry": "Diversified Utilities"}],
+    }, 0)
+    assert {i: [r["symbol"] for r in rows] for i, rows in result.kept.items()} == {
+        "Diversified Utilities": [], "Renewable Utilities": ["BEP"]}
+
+
+def test_the_entergy_subsidiaries_bonds_leave_and_etr_votes():
+    """Both subsidiaries' listings carry identical TTM ratios and no listed common; FMP
+    filed them under two industries (Regulated Electric / Regulated Gas) on 2026-10-08 and
+    under one on 2026-11-15 — the table drops both either way. Mutation: delete either
+    entry → that row kept."""
+    etr = _row("ETR", "Entergy Corporation", industry="Regulated Electric",
+               cap=53_110_471_050, price=111.15, avg_volume=3_000_000)
+    emp = _row("EMP", "Entergy Mississippi, Inc. 1M BD 66", industry="Regulated Electric",
+               cap=156_427_780, price=18.05, avg_volume=13_548)
+    eno = _row("ENO", "Entergy New Orleans, LLC", industry="Regulated Gas",
+               cap=160_282_100, price=19.0, avg_volume=6_790)
+    split = bu._filter_market({"Regulated Electric": [etr, emp], "Regulated Gas": [eno]}, 0)
+    assert {i: [r["symbol"] for r in rows] for i, rows in split.kept.items()} == {
+        "Regulated Electric": ["ETR"], "Regulated Gas": []}
+    assert split.dropped == {"hand_checked": 2}
+    together = bu._filter_market(
+        {"Regulated Electric": [etr, emp, {**eno, "industry": "Regulated Electric"}]}, 0)
+    assert [r["symbol"] for r in together.kept["Regulated Electric"]] == ["ETR"]
+
+
+@pytest.mark.parametrize("sym, name", [
+    ("EMP", "Entergy Mississippi, LLC"),                 # the issuer's own legal name
+    ("EMP", "Entergy Mississippi, Inc."),                # FMP's form, uncut
+    ("ENO", "Entergy New Orleans, LLC 5.50% Bonds"),     # a fuller cut still drops (name rule)
+    ("BEPJ", "Brookfield BRP Holdings (Canada) Inc."),   # the uncut name
+    ("BEPJ", "Brookfield BRP Holdings (Canada), Inc."),
+])
+def test_other_cuts_of_the_new_names_still_drop(sym, name):
+    """FMP cuts names at ~31-40 characters and the cut moves between builds; the issuer key
+    stops at the corporate suffix, so each cut reaches the same entry (or a debt word)."""
+    assert bu._drop_reason(_row(sym, name, industry="Regulated Electric"), 0) in (
+        "hand_checked", "not_common_share")
+
+
+@pytest.mark.parametrize("sym, name", [
+    ("ETR", "Entergy Corporation"),
+    ("ETRX", "Entergy Texas, Inc."),                     # another subsidiary: not this entry
+    ("BEPC", "Brookfield Renewable Corporation"),
+    ("BAM", "Brookfield Asset Management Ltd."),
+    ("BN", "Brookfield Corporation"),
+    ("NOLA", "New Orleans Holdings, Inc."),
+    ("MSB", "Mississippi Bancshares Inc."),
+])
+def test_the_new_keys_do_not_reach_neighbouring_names(sym, name):
+    assert bu._drop_reason(_row(sym, name), 0) is None
+
+
+def test_no_other_captured_name_collides_with_the_2026_11_15_keys():
+    new_keys = {"brookfield brp holdings canada", "brookfield renewable partners",
+                "entergy mississippi", "entergy new orleans"}
+    owners = {"BEPJ", "BEPI", "BEP", "EMP", "ENO"}
     for sym, name in _DROPPED + _KEPT:
         if sym not in owners:
             assert bu._issuer_key(name) not in new_keys, (sym, name)

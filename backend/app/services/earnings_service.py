@@ -70,7 +70,17 @@ _DEGRADED_CACHE_TTL = 60
 #     next_earnings_date; the projection (or None) replaces it
 #     (`_reschedule_leftovers`). A v3 row keyed on the leftover served "Expected
 #     <leftover>" until that date passed.
-_EARNINGS_PAYLOAD_VERSION = 4
+#   5 (2026-11-14): each reported quarter carries `report_date` (its announcement day), so
+#     iOS pins the dot to the report day instead of the period end. A v4 row has none,
+#     and iOS would keep drawing every report-day move weeks right of its dot.
+#   6 (2026-11-14, "Switch to adjusted"): 28 quarterly income rows (was 20), so the report's
+#     Earnings Timeline can sum four feed quarters for each of its drawn years. A v5 row
+#     holds 20 and would leave the oldest drawn year's adjusted EPS "N/A" in every report
+#     rebuilt from it while it lives (up to 24h after the deploy).
+_EARNINGS_PAYLOAD_VERSION = 6
+# The daily price series keeps the span 20 quarters gave it before the 28-row read: the
+# extra years serve only the report's EPS sums, and no reader draws prices that far back.
+_DAILY_PRICE_QUARTERS = 20
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -1027,6 +1037,8 @@ def _quarter(
     surprise: Optional[float],
     fiscal_key: str,
     has_estimate: bool,
+    *,
+    report_date: Optional[str] = None,
 ) -> EarningsQuarterSchema:
     return EarningsQuarterSchema(
         quarter=label,
@@ -1035,7 +1047,99 @@ def _quarter(
         surprise_percent=surprise,
         fiscal_date=fiscal_key,
         has_estimate=has_estimate,
+        report_date=report_date,
     )
+
+
+# ── Report days (the price line's anchors on iOS) ──────────────────
+
+# Phase A2's widest pairing: a release 7..80 days after an estimate quarter that
+# `_late_release_owner` hands to the EARLIER, still-unreported quarter ("this") — an NT
+# 10-K Q4 at day ~100-170, deliberately not capped at `_LATE_RELEASE_MAX_DAYS`. The pairing
+# has already decided whose release it is; capping its report day at 110 only dropped a
+# correct anchor (the move then drew beside the NEXT quarter's gray dot).
+_A2_REPORT_MAX_LAG_DAYS = _ANNOUNCE_WINDOW_DAYS + _MAX_QUARTER_SPAN_DAYS
+
+
+def _report_date_for(
+    rec: Any, period_key: str, today_str: str, *, ticker: str = "",
+    max_lag_days: int = _LATE_RELEASE_MAX_DAYS,
+) -> Optional[str]:
+    """The announcement day of the quarter ending ``period_key``, from the feed row the
+    pairing gave it — or None.
+
+    Only a REPORTED row counts (a pending placeholder's date is a plan, not a fact), and
+    only a day ``_MIN_ANNOUNCE_LAG_DAYS``..``max_lag_days`` after the period end (Phase A's
+    pairing cap by default; Phase A2 passes its own wider one) and not after today: iOS
+    pins the dot to this day, so a stray date would drag the whole price line with it.
+    A None leaves the dot to be interpolated between its neighbours, which is always
+    safe; `_drop_unordered_report_dates` then guards the order."""
+    if not isinstance(rec, dict) or not has_reported_actual(rec):
+        return None
+    report_dt = _parse_day(rec.get("date"))
+    period_dt = _parse_day(period_key)
+    if report_dt is None or period_dt is None:
+        logger.warning(
+            "earnings %s step=report_date: unparseable date (release %r, period %r) — "
+            "no report day for this quarter", ticker, rec.get("date"), period_key,
+        )
+        return None
+    report_key = report_dt.strftime("%Y-%m-%d")
+    lag = (report_dt - period_dt).days
+    if report_key > today_str:
+        logger.warning(
+            "earnings %s step=report_date: reported row dated %s is after today %s "
+            "(period %s) — no report day for this quarter",
+            ticker, report_key, today_str, period_key,
+        )
+        return None
+    if not (_MIN_ANNOUNCE_LAG_DAYS <= lag <= max_lag_days):
+        logger.warning(
+            "earnings %s step=report_date: release %s is %sd after period end %s, outside "
+            "%s-%sd — no report day for this quarter",
+            ticker, report_key, lag, period_key, _MIN_ANNOUNCE_LAG_DAYS, max_lag_days,
+        )
+        return None
+    return report_key
+
+
+def _drop_unordered_report_dates(
+    quarters: List[EarningsQuarterSchema], *, ticker: str, series: str,
+) -> None:
+    """In place: clear every ``report_date`` that is not strictly later than every dated
+    quarter before it AND strictly earlier than every dated quarter after it
+    (``quarters`` sorted by period end).
+
+    iOS draws the price line piecewise between report days, so two report days out of
+    order would fold the line back on itself. A pairing can in principle invert two
+    neighbours (an ambiguous day-98-110 release) or give two quarters one day (a repeated
+    income row); with no way to tell which date is wrong, BOTH lose it and the dots are
+    interpolated. Never greedy ("keep it if later than the last kept one"): one bad early
+    date would then wipe out every good one after it."""
+    dated = [(i, q.report_date) for i, q in enumerate(quarters) if q.report_date]
+    if len(dated) < 2:
+        return
+    n = len(dated)
+    prefix_max: List[Optional[str]] = [None] * n
+    suffix_min: List[Optional[str]] = [None] * n
+    running: Optional[str] = None
+    for k in range(n):
+        prefix_max[k] = running
+        running = dated[k][1] if running is None else max(running, dated[k][1])
+    running = None
+    for k in range(n - 1, -1, -1):
+        suffix_min[k] = running
+        running = dated[k][1] if running is None else min(running, dated[k][1])
+    for k, (i, day) in enumerate(dated):
+        before, after = prefix_max[k], suffix_min[k]
+        if (before is not None and day <= before) or (after is not None and day >= after):
+            logger.warning(
+                "earnings %s step=report_date series=%s: %s (period %s) report day %s is "
+                "out of order (latest earlier %s, earliest later %s) — cleared, the dot "
+                "is interpolated", ticker, series, quarters[i].quarter,
+                quarters[i].fiscal_date, day, before, after,
+            )
+            quarters[i].report_date = None
 
 
 def _checked_leg(ticker: str, leg: str, payload: Any, degraded: List[str]) -> List[dict]:
@@ -1258,8 +1362,14 @@ class EarningsService:
         today_str = today.strftime("%Y-%m-%d")
 
         # Phase 1: Fetch income statements, analyst estimates, and prices in parallel
+        # 28 quarterly income rows (was 20): the report's Earnings Timeline sums four of these
+        # quarters per fiscal year into its ADJUSTED reported EPS (2026-11-14,
+        # `_adjusted_annual_eps`), and it draws 5 reported years plus one off-screen YoY
+        # anchor — up to 27 quarters once a new fiscal year has started. With 20, the oldest
+        # drawn year usually lost its EPS. Same single call; the Financials card still shows
+        # its last 12 quarters.
         income_raw, estimates_raw, prices_raw = await asyncio.gather(
-            self.fmp.get_income_statement(ticker, period="quarter", limit=20),
+            self.fmp.get_income_statement(ticker, period="quarter", limit=28),
             self.fmp.get_analyst_estimates(ticker, period="quarter", limit=20),
             self.fmp.get_historical_prices(ticker, from_date=six_years_ago, to_date=today_str),
             return_exceptions=True,
@@ -1440,6 +1550,11 @@ class EarningsService:
             # _match_announcement for the Oracle (lagging Q4 10-K) and Disney (very late
             # 10-K) failure modes that filing-date matching got wrong.
             ec_match = assignments.get(fiscal_key)
+            # The day it was ANNOUNCED (None without a reported row): where iOS pins the dot.
+            report_key = (
+                _report_date_for(ec_match, fiscal_key, today_str, ticker=ticker)
+                if ec_match else None
+            )
             matched_est = self._find_matching_estimate(fiscal_key, est_by_date)
             analyst_rev_avg = _safe_float(matched_est, "revenueAvg") if matched_est else None
             filed_rev = _safe_float(rec, "revenue")
@@ -1474,11 +1589,13 @@ class EarningsService:
                     eps_quarters.append(_quarter(
                         label, ec_eps_actual, ec_eps_estimate,
                         _compute_surprise(ec_eps_actual, ec_eps_estimate), fiscal_key, True,
+                        report_date=report_key,
                     ))
                 elif ec_eps_actual is not None:
                     # Has actual but no estimate — show actual without surprise
                     eps_quarters.append(_quarter(
                         label, ec_eps_actual, ec_eps_actual, None, fiscal_key, False,
+                        report_date=report_key,
                     ))
                 elif gaap_eps is not None:
                     # Matched announcement lacks a usable EPS actual (a not-yet-reported
@@ -1499,6 +1616,7 @@ class EarningsService:
                         )
                     eps_quarters.append(_quarter(
                         label, gaap_eps, gaap_eps, None, fiscal_key, False,
+                        report_date=report_key,
                     ))
 
                 revenue = _reconcile_revenue(
@@ -1524,6 +1642,7 @@ class EarningsService:
                         )
                     eps_quarters.append(_quarter(
                         label, gaap_eps, gaap_eps, None, fiscal_key, False,
+                        report_date=report_key,
                     ))
 
                 revenue = _reconcile_revenue(
@@ -1534,11 +1653,13 @@ class EarningsService:
             if revenue is not None:
                 revenue_quarters.append(_quarter(
                     label, revenue.actual, revenue.estimate, revenue.surprise,
-                    fiscal_key, revenue.has_estimate,
+                    fiscal_key, revenue.has_estimate, report_date=report_key,
                 ))
 
             used_fiscal_dates.add(fiscal_key)
-            self._append_price_point(ticker, label, fiscal_key, price_lookup, price_history)
+            self._append_price_point(
+                ticker, label, fiscal_key, price_lookup, price_history, prices_from=six_years_ago,
+            )
 
         # ── Phase A2: reported quarters with no income row yet ──
         if income_sorted:
@@ -1556,6 +1677,10 @@ class EarningsService:
                 if newest_end is not None else []
             )
             for pe_key, rec in synthesized:
+                report_key = _report_date_for(
+                    rec, pe_key, today_str, ticker=ticker,
+                    max_lag_days=_A2_REPORT_MAX_LAG_DAYS,
+                )
                 label = _forecast_label(pe_key, forecast_anchor, fiscal_month_map)
                 est_row = self._find_matching_estimate(pe_key, est_by_date)
                 eps_actual = _safe_float(rec, "epsActual")
@@ -1583,10 +1708,12 @@ class EarningsService:
                         eps_quarters.append(_quarter(
                             label, eps_actual, eps_est,
                             _compute_surprise(eps_actual, eps_est), pe_key, True,
+                            report_date=report_key,
                         ))
                     else:
                         eps_quarters.append(_quarter(
                             label, eps_actual, eps_actual, None, pe_key, False,
+                            report_date=report_key,
                         ))
                 # No filed revenue exists yet to corroborate the feed, so a revenue more
                 # than 50% off consensus is OMITTED until the 10-Q lands (Phase A then
@@ -1605,7 +1732,7 @@ class EarningsService:
                 if revenue is not None:
                     revenue_quarters.append(_quarter(
                         label, revenue.actual, revenue.estimate, revenue.surprise,
-                        pe_key, revenue.has_estimate,
+                        pe_key, revenue.has_estimate, report_date=report_key,
                     ))
                 logger.info(
                     "earnings %s: %s (%s) reported %s, before its income row — built from "
@@ -1617,7 +1744,9 @@ class EarningsService:
                 consumed.add(_row_key(rec))
                 release_periods[_row_key(rec)] = pe_key
                 used_fiscal_dates.add(pe_key)
-                self._append_price_point(ticker, label, pe_key, price_lookup, price_history)
+                self._append_price_point(
+                    ticker, label, pe_key, price_lookup, price_history, prices_from=six_years_ago,
+                )
 
         # The newest period already reported. Phase B used to emit EVERY estimate not
         # within 15 days of an income date, so when the income call failed (or the
@@ -1667,6 +1796,9 @@ class EarningsService:
         # Sort everything by actual fiscal date (correct for all fiscal year types)
         eps_quarters.sort(key=lambda q: q.fiscal_date or "9999-99-99")
         revenue_quarters.sort(key=lambda q: q.fiscal_date or "9999-99-99")
+        # Report days must rise with the period ends, or iOS folds the price line back.
+        _drop_unordered_report_dates(eps_quarters, ticker=ticker, series="eps")
+        _drop_unordered_report_dates(revenue_quarters, ticker=ticker, series="revenue")
         price_history.sort(key=lambda p: p.fiscal_date or "9999-99-99")
 
         # ── Daily Price History (continuous line data) ──
@@ -1675,7 +1807,7 @@ class EarningsService:
         all_income_dates = {str(r["date"])[:10] for r in income_sorted if r.get("date")}
         if all_income_dates and price_list:
             sorted_dates = sorted(all_income_dates)
-            range_start = sorted_dates[0]
+            range_start = sorted_dates[-_DAILY_PRICE_QUARTERS:][0]
             range_end = today_str
             for p in price_list:
                 d = str(p.get("date") or "")[:10]
@@ -1734,12 +1866,23 @@ class EarningsService:
         fiscal_key: str,
         price_lookup: Dict[str, float],
         price_history: List[EarningsPricePointSchema],
+        prices_from: Optional[str] = None,
     ) -> None:
         """Close on the quarter's period end. OMIT the point when no close is within
         ±5 days rather than emitting a fabricated 0: a 0 is a real price on the wire, it
         entered the chart's Y domain and dragged the whole price line to the floor. iOS
         matches price points to quarters by LABEL (not by position), so a missing entry
-        is handled; a fake 0 was not."""
+        is handled; a fake 0 was not.
+
+        `prices_from`: the first day the price read covers. A quarter ending before it has
+        no close by design (the 28-row income read reaches past the price window), so it is
+        omitted quietly; a gap inside the window is still a WARNING."""
+        if prices_from is not None and fiscal_key[:10] < prices_from:
+            logger.debug(
+                "earnings %s: %s ends before the price window (%s) — no price point",
+                ticker, fiscal_key, prices_from,
+            )
+            return
         close_price = _find_close_price(fiscal_key, price_lookup)
         if close_price is None:
             logger.warning(

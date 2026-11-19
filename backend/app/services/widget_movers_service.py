@@ -124,6 +124,7 @@ from app.services.news_insight_service import (
     get_news_insight_service,
     normalize_card_sentiment,
     price_terms,
+    web_only_card_visible,
 )
 from app.services.updates_materiality import classify_move, finite, move_z
 from app.services.volatility_cache_service import get_volatility_cache_service
@@ -1192,9 +1193,69 @@ def _market_payload_is_cacheable(payload: WidgetMoverPayload) -> bool:
     return bool(payload.market_assets) or payload.market_brief is not None
 
 
+# Appended to a payload's cache key when the CALLER can link a web-only cause (see
+# `cards_for_caller`). Never a character a ticker can hold (`widget._valid_ticker`: alnum and
+# ".-^="), so `_payload_card_scopes` can always strip it back off.
+_LINKS_WEB_ONLY_KEY_SUFFIX = "#web"
+
+
+def _payload_key(base: str, links_web_only: bool) -> str:
+    """The cache key for one gate result. A payload built for a caller that can link a web-only
+    cause and one built for a caller that cannot are DIFFERENT payloads (the cause itself
+    differs), so they never share a cache entry or an in-flight build."""
+    return base + _LINKS_WEB_ONLY_KEY_SUFFIX if links_web_only else base
+
+
+def cards_for_caller(
+    cards: Any, *, links_web_only: bool, now: datetime,
+) -> Dict[str, Optional[Dict[str, Any]]]:
+    """`cards` with every WEB-ONLY Insights card this caller may not use replaced by None.
+
+    A web-only card (`news_insight_service._row_to_card` marks it `web_only`, server-only) was
+    written from the Updates jump search's web pages alone, for a jumper with no FMP news
+    (owner, 2026-11-12, "Web search fills it"). Its only sources are those pages, reachable
+    from the Updates card. So it may back a widget cause only when (a) the caller can LINK the
+    row to that card (`X-App-Version` >= `WEB_ONLY_CAUSE_MIN_APP_VERSION`, fail closed: "Hold
+    for old builds") and (b) the Updates feed still shows it (`web_only_card_visible`: written
+    on today's ET date). Otherwise the ticker is served exactly as if it had no card at all,
+    the same None `get_cards` returns for a scope it never stored.
+
+    Pure: a new dict, never the caller's (it may be shared). Anything that is not a dict reads
+    as no cards; a malformed entry is passed through for the existing gates to refuse."""
+    if not isinstance(cards, dict):
+        if cards is not None:
+            logger.warning(
+                "widget: card map was %s, not a dict — serving every mover as uncarded",
+                type(cards).__name__,
+            )
+        return {}
+    out: Dict[str, Optional[Dict[str, Any]]] = {}
+    held = 0
+    for scope, card in cards.items():
+        if (
+            isinstance(card, dict)
+            and card.get("web_only") is True
+            and not (links_web_only and web_only_card_visible(card, now))
+        ):
+            out[scope] = None
+            held += 1
+        else:
+            out[scope] = card
+    if held:
+        # Counts only: a web-only card's text comes from third-party pages.
+        logger.info(
+            "widget: held %d web-only card(s) of %d (caller links=%s) — served as uncarded",
+            held, len(cards), links_web_only,
+        )
+    return out
+
+
 def _payload_card_scopes(key: str) -> frozenset:
     """The Insights card scopes a cached payload's TEXT comes from: the market roll-up for
-    the Market tile (its brief), the holdings for a `portfolio:<user>:<T1,T2,…>` key."""
+    the Market tile (its brief), the holdings for a `portfolio:<user>:<T1,T2,…>` key. Either
+    may carry the `#web` gate suffix (`_payload_key`)."""
+    if key.endswith(_LINKS_WEB_ONLY_KEY_SUFFIX):
+        key = key[: -len(_LINKS_WEB_ONLY_KEY_SUFFIX)]
     if key == "market":
         return frozenset({MARKET_SCOPE})
     if key.startswith("portfolio:"):
@@ -1325,6 +1386,12 @@ def detect_basket(
     )
 
 
+def _utc_now() -> datetime:
+    """The wall clock for the web-only card hold (`cards_for_caller`). A seam, so a test can pin
+    the ET day the hold judges a card against."""
+    return datetime.now(timezone.utc)
+
+
 def _iso_now() -> str:
     """No fractional seconds — Swift's `.iso8601` strategy rejects them."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1363,15 +1430,26 @@ class WidgetMoversService:
 
     # ── public ───────────────────────────────────────────────────────
 
-    async def get_market_mover(self) -> WidgetMoverPayload:
+    async def get_market_mover(self, *, links_web_only: bool = False) -> WidgetMoverPayload:
         # A payload with neither assets nor a brief is the Market tile with nothing to draw
         # — every leg failed. Pinning that for 60 s would serve a blank tile to every
         # WidgetKit wake in the window; the next caller retries instead.
+        #
+        # `links_web_only`: the caller can link a web-only cause (`cards_for_caller`). The
+        # hold changes the CAUSE, which cannot be undone on a cached payload after the fact,
+        # so the gate is part of the key: each gate result has its own entry and build.
+        build = (
+            (lambda: self._build_market(links_web_only=True))
+            if links_web_only else self._build_market
+        )
         return await self._cached(
-            "market", self._build_market, cacheable=_market_payload_is_cacheable,
+            _payload_key("market", links_web_only), build,
+            cacheable=_market_payload_is_cacheable,
         )
 
-    async def get_portfolio_mover(self, user_id: str, tickers: Sequence[str]) -> WidgetMoverPayload:
+    async def get_portfolio_mover(
+        self, user_id: str, tickers: Sequence[str], *, links_web_only: bool = False,
+    ) -> WidgetMoverPayload:
         # KEYED ON THE USER, not just the ticker set.
         #
         # The build is not a pure function of the tickers: `_build_portfolio` calls
@@ -1383,9 +1461,17 @@ class WidgetMoversService:
         #
         # The cost is losing cross-user dedup for portfolio mode; collision on an exact
         # 30-ticker set is vanishingly rare, so in practice nothing is lost.
-        key = "portfolio:" + user_id + ":" + ",".join(
-            sorted({t.upper() for t in tickers if t})
+        #
+        # And keyed on the web-only gate (`get_market_mover`): an old build and a new one on
+        # the same account in the same minute must not trade payloads.
+        key = _payload_key(
+            "portfolio:" + user_id + ":" + ",".join(sorted({t.upper() for t in tickers if t})),
+            links_web_only,
         )
+        if links_web_only:
+            return await self._cached(
+                key, lambda: self._build_portfolio(user_id, tickers, links_web_only=True),
+            )
         return await self._cached(key, lambda: self._build_portfolio(user_id, tickers))
 
     async def attribute_ticker_move(self, ticker: str) -> Optional["MoveExplanation"]:
@@ -1417,6 +1503,12 @@ class WidgetMoversService:
                 "attribution: rank/read failed for %s (%s: %s)", sym, type(e).__name__, e
             )
             raise QuoteSourceUnavailable(f"{type(e).__name__}: {e}") from e
+        # The same web-only hold the widget builders apply, with `links_web_only=True`: chat
+        # needs no link, only the SAME-ET-DAY rule. Without it Ask Cay AI's explain_price_move
+        # could cite yesterday's web-only card overnight (`_classified_today_news` still
+        # accepts the previous session's card) while the Updates feed and chat's own context
+        # (`chat_context_resolver`, the same `web_only_card_visible`) already hide it.
+        cards = cards_for_caller(cards, links_web_only=True, now=_utc_now())
         if not ranked:
             if not index_rows:
                 # `price_service.get_quotes` folds a universe failure into `{}`, so the
@@ -1629,13 +1721,16 @@ class WidgetMoversService:
 
     # ── builders ─────────────────────────────────────────────────────
 
-    async def _build_market(self) -> WidgetMoverPayload:
+    async def _build_market(self, *, links_web_only: bool = False) -> WidgetMoverPayload:
         tickers = await self._swept_universe()
         # The legacy z-ranked universe movers stay: every INSTALLED build renders
         # `headline_mover` / `runners_up` in Market mode. The current tile draws
         # `market_assets` instead, which ride the same batch quote (`index_rows`).
         ranked, cards, news_ok, index_rows = await self._rank_and_read(
             tickers, phase=session_phase(),
+        )
+        cards = cards_for_caller(
+            cards, links_web_only=links_web_only, now=_utc_now(),
         )
         # A failed universe read leaves `ranked` empty, and `_session_of` then falls back to
         # the LIVE session — pre-market that is TODAY, while every band and pulse row is still
@@ -1730,7 +1825,7 @@ class WidgetMoversService:
             return None
 
     async def _build_portfolio(
-        self, user_id: str, tickers: Sequence[str]
+        self, user_id: str, tickers: Sequence[str], *, links_web_only: bool = False,
     ) -> WidgetMoverPayload:
         # The tile's denominator — every holding asked about, whether or not it prices.
         requested = len({str(t).upper().strip() for t in tickers if t and str(t).strip()})
@@ -1739,6 +1834,10 @@ class WidgetMoversService:
         # SPY wants to see SPY. The self-attribution guard lives in `_build_mover`.
         ranked, cards, news_ok, index_rows = await self._rank_and_read(
             tickers, basis="abs_change", exclude_band=False, phase=session_phase(),
+        )
+        # The web-only hold, BEFORE anything reads a card (`cards_for_caller`).
+        cards = cards_for_caller(
+            cards, links_web_only=links_web_only, now=_utc_now(),
         )
         # DEGRADED, as opposed to "your holdings have no price today": the quote leg failed.
         # `index_rows` rides the same batch as the holdings, so a batch that returned no
@@ -2226,6 +2325,14 @@ class WidgetMoversService:
         # `attribute` returns None only for an unreadable move, which `rank_movers`
         # has already filtered out — but degrade rather than crash if that changes.
         mc = a.context if a else None
+        # The cause came from the Insights card: its headline (`company_news`, classified or
+        # leaned) or its lean on the NONE path — `attribute_ticker_move`'s `web_assisted` rule.
+        # A held web-only card is None in `cards` by now, so it can never set this.
+        cause_card = bool(
+            a is not None
+            and isinstance(cards.get(m.ticker), dict)
+            and (a.kind == CauseKind.COMPANY_NEWS or a.lean is not None)
+        )
 
         # The SAME attribution, worded for a reader on a later day. Pure and I/O-free, so
         # the second pass costs nothing; HEADLINE only (the one line the tile spells out).
@@ -2278,6 +2385,7 @@ class WidgetMoversService:
             ),
             rolling_24h=rolling,
             asset_type=m.asset_type,
+            cause_card=cause_card,
         )
 
     @staticmethod

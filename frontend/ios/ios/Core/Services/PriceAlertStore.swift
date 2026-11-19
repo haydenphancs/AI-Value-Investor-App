@@ -146,8 +146,10 @@ final class PriceAlertStore: ObservableObject {
 
     /// What the detail-header bell renders off. ACTIVE only: a rule the user has toggled off
     /// will not fire, so badging for it would promise a notification that is not coming.
+    /// The same holds for a rule the server paused because its ticker is delisted — and the
+    /// row draws that rule's glyph muted, so the bell must not badge for it either.
     func hasActiveAlerts(ticker: String, assetType: String? = nil) -> Bool {
-        alerts(for: ticker, assetType: assetType).contains(where: \.isActive)
+        alerts(for: ticker, assetType: assetType).contains { $0.isActive && !$0.isPausedForDelisting }
     }
 
     /// Active count — for one ticker, or for the whole account when `ticker` is nil.

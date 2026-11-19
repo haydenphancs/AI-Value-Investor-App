@@ -182,7 +182,8 @@ def test_forecast_annual_timeline_continuity():
     # One shared 1e9 divisor across actuals + forecast → comparable billions.
     assert [t["revenue"] for t in tl] == [50.0, 53.0, 57.0, 65.0, 88.0, 130.0]
     assert tl[0]["revenue_yoy_pct"] is None     # oldest, no prior
-    assert tl[3]["revenue_yoy_pct"] == 14.0     # 2026 vs 2025: (65-57)/57*100
+    # 2026 vs 2025: (65-57)/57*100 = 14.035 (3 dp on the wire since 2026-11-14)
+    assert tl[3]["revenue_yoy_pct"] == pytest.approx(14.035, abs=0.001)
     # Per-year analyst coverage rides each FORECAST row (FMP numAnalysts*);
     # actuals carry None, and forecast years without counts stay None.
     assert tl[2]["revenue_analyst_count"] is None and tl[2]["eps_analyst_count"] is None  # 2025 actual
@@ -284,7 +285,7 @@ def test_annual_timeline_negative_eps_yoy_is_signed():
     tl = _build_annual_timeline(income, [])
     by_year = {t["period"]: t for t in tl}
     # 2024: (-1.41 - (-2.00)) / |−2.00| * 100 = +29.5 (loss narrowed → positive)
-    assert by_year["2024"]["eps_yoy_pct"] == 29.5
+    assert by_year["2024"]["eps_yoy_pct"] == pytest.approx(29.5, abs=0.05)
     # 2025: (-1.80 - (-1.41)) / |−1.41| * 100 ≈ -27.7 (loss widened → negative)
     assert by_year["2025"]["eps_yoy_pct"] == pytest.approx(-27.7, abs=0.1)
 

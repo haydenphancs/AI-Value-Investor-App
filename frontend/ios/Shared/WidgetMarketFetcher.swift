@@ -27,6 +27,15 @@ import OSLog
 public enum WidgetMarketFetcher {
     private static let log = Logger(subsystem: "com.phan.caydex", category: "widget")
 
+    /// This bundle's `CFBundleShortVersionString` (the extension's, equal to the app's), or nil
+    /// when it is missing or blank — the header is then omitted, never sent empty.
+    /// `AppInfo`'s `Bundle.appVersion` lives in the app target only.
+    static var appVersion: String? {
+        let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     /// The freshest Market payload, or nil.
     ///
     /// nil is an ordinary outcome — no signal, aeroplane mode, a cold radio, the request
@@ -55,6 +64,13 @@ public enum WidgetMarketFetcher {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue(token, forHTTPHeaderField: WidgetAPIConfig.tokenHeader)
+        // The version, as the app's `APIClient` sends it, so the server can tell this build can
+        // LINK a cause taken from an Insights card (`caydex://updates/<SYMBOL>`, 2026-11-12). An
+        // extension's marketing version always equals its app's. Without it the server holds a
+        // web-only cause (fail closed), which is exactly how older extensions are served.
+        if let version = Self.appVersion {
+            request.setValue(version, forHTTPHeaderField: "X-App-Version")
+        }
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)

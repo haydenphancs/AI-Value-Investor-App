@@ -395,8 +395,8 @@ extension PlanFeature {
                 key: "whale_detail",
                 title: "Holdings, trades & AI sentiment",
                 detail: paid
-                    ? "Current Picks, Recent Trades and the AI sentiment summary on every investor you open."
-                    : "Free shows each investor's profile, risk badge and sector exposure. Current Picks, Recent Trades and the AI sentiment summary are paid.",
+                    ? "13F picks, Recent Trades and the AI sentiment summary on every investor you open."
+                    : "Free shows each investor's profile, risk badge and sector exposure. 13F picks, Recent Trades and the AI sentiment summary are paid.",
                 symbol: validatedSymbol("chart.pie.fill"),
                 accentKey: "whales",
                 included: paid
@@ -558,7 +558,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .whaleFollowLimit:
             return "Free tracks one preset investor. Browsing every investor stays free either way."
         case .whaleDetail:
-            return "Current Picks, Recent Trades and the AI sentiment summary on any investor."
+            return "13F picks, Recent Trades and the AI sentiment summary on any investor."
         case .learnAudio:
             return "Narration and read-along for Money Moves and the book library. Investor Journey narration is already free on every plan."
         case .congressHolders:
@@ -584,7 +584,7 @@ enum PaywallContext: String, Sendable, CaseIterable {
         case .learnAudio:            return "learn_audio"
         case .congressHolders:       return "signals"
         // Same paid floor and the same thing unlocked — a filer's full 13F holdings and its
-        // history — as the whale profile's Current Picks, so the same feature row.
+        // history — as the whale profile's 13F picks, so the same feature row.
         case .trillionClub:          return "whale_detail"
         case .themeCompanies:        return "theme_companies"
         case .caydexFairValue:       return "caydex_fair_value"

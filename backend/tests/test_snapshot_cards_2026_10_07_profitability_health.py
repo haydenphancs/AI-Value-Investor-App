@@ -412,19 +412,23 @@ def _row(json_data, age=timedelta(hours=2)):
     return {"response_json": json_data, "cached_at": cached_at.isoformat()}, cached_at
 
 
-@pytest.mark.parametrize("modname,clsname,category,current", [
+@pytest.mark.parametrize("modname,clsname,category,current,extra", [
     # 4 (2026-10-09, NET-4): a listed non-lender member is never compared with lenders.
     # 5 (2026-10-21): the Financial Services peer rule (own industry from 10, else none).
     # 6 (2026-11-05): `score_excluded_rows`.
+    # 7 (2026-11-13): `numeric_value` / `peer_median` on each row.
     ("app.services.profitability_snapshot_service", "ProfitabilitySnapshotService",
-     "Profitability", 6),
+     "Profitability", 7, {}),
     # 7 (2026-10-08): payment networks keep their liquidity rows, on absolute bands.
     # 8 (2026-10-09, NET-5): TREE / PMTS join; WU's curated withheld rows.
     # 9 (2026-10-21): the Financial Services peer rule.
-    ("app.services.health_snapshot_service", "HealthSnapshotService", "Financial Health", 9),
+    # 10 (2026-11-13): `numeric_value` / `peer_median` on each row.
+    # 11 (2026-11-14): the row carries the Health Check's earnings stamp (`extra`).
+    ("app.services.health_snapshot_service", "HealthSnapshotService", "Financial Health", 11,
+     {"_next_earnings": None}),
 ])
 def test_version_bump_rebuilds_old_rows_and_keeps_the_build_time(
-    modname, clsname, category, current,
+    modname, clsname, category, current, extra,
 ):
     import importlib
 
@@ -435,15 +439,15 @@ def test_version_bump_rebuilds_old_rows_and_keeps_the_build_time(
                                 computed_at="2026-10-07T09:15:00Z").model_dump()
     svc = cls.__new__(cls)
     for old in (None, current - 1):
-        stale = dict(body) if old is None else {**body, mod._VERSION_KEY: old}
+        stale = dict(body) if old is None else {**body, mod._VERSION_KEY: old, **extra}
         svc.supabase = _Supabase([_row(stale)[0]])
         assert svc._check_supabase_cache("MCD") is None, f"{category} v{old} row was served"
-    svc.supabase = _Supabase([_row({**body, mod._VERSION_KEY: current})[0]])
+    svc.supabase = _Supabase([_row({**body, mod._VERSION_KEY: current, **extra})[0]])
     got = svc._check_supabase_cache("MCD")
     assert got is not None and got.computed_at == "2026-10-07T09:15:00Z"
     # a current row from a build without the key: its cached_at
     no_key = {k: v for k, v in body.items() if k != "computed_at"}
-    row, cached_at = _row({**no_key, mod._VERSION_KEY: current})
+    row, cached_at = _row({**no_key, mod._VERSION_KEY: current, **extra})
     svc.supabase = _Supabase([row])
     assert svc._check_supabase_cache("MCD").computed_at == snapshot_build_time(cached_at)
 
@@ -466,6 +470,9 @@ def _health_service(monkeypatch, health, *, profile=None, bs=None, income=None, 
             if isinstance(health, BaseException):
                 raise health
             return health
+
+        def next_earnings_for(self, ticker, *, served):
+            return None     # a build with no pending report: the plain 24h row
 
     monkeypatch.setattr(health_check_service, "get_health_check_service", lambda: _HealthCheck())
     monkeypatch.setattr(hs, "get_sector_benchmark_lookup", lambda: _RichLookup(bench or {}))

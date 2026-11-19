@@ -369,8 +369,9 @@ async def test_the_unrated_bank_card_survives_both_cache_tiers(monkeypatch, de_s
     again, degraded2 = await svc.get_health_snapshot_with_status("C")
     assert again is snap and degraded2 == []
 
-    # Tier 2 round trip through the REAL writer and reader.
-    hs.HealthSnapshotService._upsert_supabase_cache(svc, "C", snap)
+    # Tier 2 round trip through the REAL writer and reader (with the Health Check's earnings
+    # stamp the getter stores since 2026-11-14; None = no pending report).
+    hs.HealthSnapshotService._upsert_supabase_cache(svc, "C", snap, None)
     assert table.row["response_json"]["weighted_score"] is None
     assert table.row["response_json"]["rating"] == 0
     read = hs.HealthSnapshotService._check_supabase_cache(svc, "C")

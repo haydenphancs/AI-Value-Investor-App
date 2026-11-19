@@ -334,6 +334,44 @@ def stage_a_thinking_budget() -> Optional[int]:
     return _resolve_budget(settings.REPORT_STAGE_A_THINKING_BUDGET)
 
 
+def _text_setting(name: str) -> Optional[str]:
+    """A model / thinking-level setting as text, read at CALL time (a test or a Railway change
+    takes effect without a re-import). None when unset or blank. A non-text value cannot pass
+    `config.Settings`' validation; if one appears anyway (a hand-patched settings object), it is
+    ignored with a warning and the call goes out exactly as it does with the setting unset."""
+    value = getattr(settings, name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        logger.warning("[report-model-setting] %s=%r ignored (not text)", name, value)
+        return None
+    return value.strip() or None
+
+
+def stage_a_model_kwargs() -> Dict[str, Any]:
+    """Stage A's model override for `generate_json`: `{"model_name": REPORT_STAGE_A_MODEL}` when
+    set, else `{}` — so the default call is byte-identical to before the setting existed (the
+    client default, GEMINI_MODEL), and a strict test fake without `model_name` still works."""
+    model = _text_setting("REPORT_STAGE_A_MODEL")
+    return {"model_name": model} if model else {}
+
+
+def synthesis_model_kwargs() -> Dict[str, Any]:
+    """The two post-assembly syntheses' (`synthesize_core_thesis`, `synthesize_critical_factors`)
+    overrides: `model_name=REPORT_SYNTHESIS_MODEL` and `thinking_level=
+    REPORT_SYNTHESIS_THINKING_LEVEL`, each only when set. `{}` by default, so neither the request
+    nor the response-cache key changes until the owner sets one. The level reaches the wire only
+    on a model that accepts it (`gemini._thinking_config`); these calls send no budget."""
+    kwargs: Dict[str, Any] = {}
+    model = _text_setting("REPORT_SYNTHESIS_MODEL")
+    if model:
+        kwargs["model_name"] = model
+    level = _text_setting("REPORT_SYNTHESIS_THINKING_LEVEL")
+    if level:
+        kwargs["thinking_level"] = level
+    return kwargs
+
+
 def agentic_thinking_budget() -> Optional[int]:
     """The deep-research tool loop (`ResearchAgent._agentic_research`) — up to five
     calls per deep report that had no budget knob at all until 2026-09-11."""
@@ -1997,6 +2035,34 @@ Use the YoY numbers above — don't invent them, don't restate them as a list.{n
 Name what is shifting (or what is concentrated) and what it means for the business."""
 
 
+def _signed_pct(value: float) -> str:
+    """A whole-percent change with its sign, taken from the ROUNDED value, so a -0.4% change
+    reads "0%", never "-0%" (INTC FY2025, 2026-11-14)."""
+    rounded = round(float(value))
+    if rounded == 0:
+        return "0%"
+    return f"{rounded:+d}%"
+
+
+def _finite_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _stored_rate(rf: Dict[str, Any], key: str, span_key: str) -> Optional[Tuple[float, Optional[str]]]:
+    """(rate, span) the report PRINTS for `cagr` / `eps_growth`, or None for "no rate".
+
+    A stored span ("FY2025–FY2030E", reports from 2026-11-14) means the rate was MEASURED over
+    those years, so 0.0 is a flat outlook and is stated. Without a span (older reports) the
+    wire's required float uses 0.0 for "no rate"."""
+    value, span = rf.get(key), rf.get(span_key)
+    if not _finite_number(value):
+        return None
+    if isinstance(span, str) and span:
+        return float(value), span
+    return (float(value), None) if value else None
+
+
 def _latest_vs_forward_rule(rf: Dict[str, Any]) -> str:
     """Which two years "accelerates or decelerates" is read from, "" when the first forecast
     year has no comparable change. Left to the three recent actuals, the model compared with the
@@ -2012,9 +2078,9 @@ def _latest_vs_forward_rule(rf: Dict[str, Any]) -> str:
                for c in changes):
         return ""
     return (
-        f"Judge that from the latest actual year ({latest.get('period')}: {changes[0]:+.0f}%) "
-        f"against the first forecast year ({first.get('period')}: {changes[1]:+.0f}%), not from "
-        "older years."
+        f"Judge that from the latest actual year ({latest.get('period')}: "
+        f"{_signed_pct(changes[0])}) against the first forecast year ({first.get('period')}: "
+        f"{_signed_pct(changes[1])}), not from older years."
     )
 
 
@@ -2035,33 +2101,51 @@ def _revenue_forecast_insight_prompt(
     # the user cannot see — and must not narrate its absence either.
     guidance_known = guidance in ("raised", "maintained", "lowered")
 
-    # Compact the chart-visible projections so the model anchors on the same
-    # numbers the user sees on the bars (no re-deriving arithmetic). Defensive
-    # against the fallback-shell path where projections is empty.
-    if projections:
-        proj_str = "; ".join(
+    # The forecast bars the chart DRAWS — the timeline's forecast columns with their own chips
+    # (2026-11-14). The old list came from the legacy 4-bar `projections`: its first year was
+    # measured against the reported year's CONSENSUS while the chip uses the reported actual
+    # (PLUG "+17%" in the prompt beside "+16%" on the bar), it gave an EPS change the chart
+    # leaves blank (GAAP → consensus), and it stopped at 4 of the 5 bars. `projections` is
+    # only the fallback for a report without a timeline, and is then not called "as charted".
+    timeline_forecast = [
+        row for row in (rf.get("annual_timeline") or [])
+        if isinstance(row, dict) and row.get("is_forecast")
+    ]
+
+    def _projection_text(p: Dict[str, Any]) -> str:
+        rev_yoy, eps_yoy = p.get("revenue_yoy_pct"), p.get("eps_yoy_pct")
+        return (
             f"{p.get('period')}: rev {p.get('revenue_label')}"
-            + (
-                f" ({p.get('revenue_yoy_pct'):+.0f}% YoY)"
-                if p.get("revenue_yoy_pct") is not None else ""
-            )
+            + (f" ({_signed_pct(rev_yoy)} YoY)" if _finite_number(rev_yoy) else "")
             + f", EPS {p.get('eps_label')}"
-            + (
-                f" ({p.get('eps_yoy_pct'):+.0f}% YoY)"
-                if p.get("eps_yoy_pct") is not None else ""
-            )
-            for p in projections[:4]
+            + (f" ({_signed_pct(eps_yoy)} YoY)" if _finite_number(eps_yoy) else "")
         )
+
+    if timeline_forecast:
+        proj_label = "FORWARD PROJECTIONS (as charted)"
+        proj_str = "; ".join(_projection_text(p) for p in timeline_forecast[:5])
+    elif projections:
+        proj_label = "FORWARD PROJECTIONS"
+        proj_str = "; ".join(_projection_text(p) for p in projections[:4])
     else:
+        proj_label = "FORWARD PROJECTIONS"
         proj_str = "no analyst projections available"
 
     # The wire's `cagr` and `eps_growth` are required floats, so 0.0 is how "no rate" arrives
     # (one forward year, or a sign change): it must never read as a measured flat outlook.
-    # `chat_context_resolver._stored_growth` reads them the same way.
-    cagr_str = f"{cagr:+.0f}%" if cagr and isinstance(cagr, (int, float)) else "n/a"
-    eps_str = (
-        f"{eps_growth:+.0f}%" if eps_growth and isinstance(eps_growth, (int, float)) else "n/a"
-    )
+    # `chat_context_resolver._stored_growth` reads them the same way. Each carries the fiscal
+    # years it spans (`cagr_span`), so the model can never present it as a different horizon.
+    def _rate_text(key: str, span_key: str) -> str:
+        stored = _stored_rate(rf, key, span_key)
+        if stored is None:
+            return "n/a"
+        rate, span = stored
+        # One decimal, as the PDF strip and report chat print it (20.5, never "+20%" here).
+        per_year = f"{rate:+.1f}% a year"
+        return f"{per_year} over {span}" if span else per_year
+
+    cagr_str = _rate_text("cagr", "cagr_span")
+    eps_str = _rate_text("eps_growth", "eps_growth_span")
 
     # EPS beat/miss history (the EPS Track Record) → lets the read weigh the
     # forecast's CREDIBILITY, not just its shape: steady beats back an
@@ -2090,13 +2174,24 @@ def _revenue_forecast_insight_prompt(
     actuals = [t for t in (rf.get("annual_timeline") or []) if not t.get("is_forecast")]
     hist_yoys = [t.get("revenue_yoy_pct") for t in actuals if t.get("revenue_yoy_pct") is not None]
     hist_str = (
-        "recent actual revenue YoY " + ", ".join(f"{y:+.0f}%" for y in hist_yoys[-3:])
-        if hist_yoys else "recent actual history unavailable"
+        "recent actual revenue YoY " + ", ".join(
+            _signed_pct(y) for y in hist_yoys[-3:] if _finite_number(y)
+        )
+        if any(_finite_number(y) for y in hist_yoys) else "recent actual history unavailable"
     )
     hist_line = f"HISTORICAL TREND (for contrast): {hist_str}\n"
     anchor_line = (
         "Anchor on ONE concrete projected number; you may sharpen it against the track record "
         "or the historical trend. Do NOT just list the projections back."
+    )
+    # PLUG (2026-11-14): "forecast to grow at 22% annually, a notable acceleration from the
+    # recent 13% year over year growth" — a multi-year average set against one year.
+    cagr_rule = (
+        "- A CAGR is a yearly average over the years it names: never call it an acceleration "
+        "or a slowdown against a single year's YoY, and never cite it for other years. Compare "
+        "one year's change with another year's change. The revenue and EPS CAGRs can cover "
+        "different years: never set one against the other (no margin or leverage reading "
+        "from them)."
     )
     curve_line = (
         "- Whether the forward curve accelerates or decelerates — and how that reads against "
@@ -2132,6 +2227,20 @@ def _revenue_forecast_insight_prompt(
         f'\nMANAGEMENT GUIDANCE QUOTE: "{guidance_quote}"'
         if guidance_quote and guidance_known else ""
     )
+    # Since 2026-11-14 ("Switch to adjusted") the chart's REPORTED years can plot adjusted EPS,
+    # the consensus's basis, while EVIDENCE's EPS lines are GAAP. Unsaid, the read could set a
+    # GAAP figure beside the adjusted forecast: the mixed "+40%" the chart now avoids. Only
+    # where a reported year's two figures differ (`eps_gaap_label`): a GAAP-only reporter's
+    # sums ARE its GAAP figures, and "non-GAAP" would be false for it.
+    if any(
+        isinstance(row, dict) and not row.get("is_forecast") and row.get("eps_basis") == "adjusted"
+        and row.get("eps_gaap_label") not in (None, "", "N/A")
+        for row in (rf.get("annual_timeline") or [])
+    ):
+        quote_line += (
+            "\nEPS BASIS: the chart's EPS, reported years included, is ADJUSTED (non-GAAP), the "
+            "basis analysts forecast. Never set it beside a GAAP EPS figure from EVIDENCE."
+        )
     stance_line = (
         f"MANAGEMENT GUIDANCE STANCE: {guidance} (raised / maintained / lowered)"
         if guidance_known else
@@ -2154,10 +2263,10 @@ def _revenue_forecast_insight_prompt(
 
     return f"""Write the Future Forecast insight — explain WHY the forward revenue and earnings trajectory looks the way it does.
 
-PROJECTED REVENUE CAGR: {cagr_str}    PROJECTED EPS GROWTH: {eps_str}
+PROJECTED REVENUE CAGR: {cagr_str}    PROJECTED EPS CAGR: {eps_str}
 {stance_line}
 EPS BEAT/MISS TRACK RECORD: {track_str}
-{hist_line}FORWARD PROJECTIONS (as charted): {proj_str}{quote_line}
+{hist_line}{proj_label}: {proj_str}{quote_line}
 {related}
 EVIDENCE:
 {evidence}
@@ -2169,6 +2278,7 @@ LENGTH: Write 3-4 sentences, total under 70 words. Density over length — every
 Focus on the WHY and on whether to BELIEVE it, not just the numbers:
 - What is driving the projected growth (or the slowdown) — name the actual driver, and when the RELATED CONTEXT shows a segment leading or dragging the mix, say what it did (e.g. "cloud grew 33% last year"). That is a past result: there is no segment estimate, so never say a segment is expected to lead, contribute to or carry the forecast. Think demand, mix shift, margin leverage, pricing, a maturing base, or headwinds.
 {curve_line}
+{cagr_rule}
 {trust_line}
 {anchor_line}"""
 
@@ -3378,6 +3488,7 @@ async def generate_stage_a_shell(
                     f"report_stage_a{'' if attempt == 1 else '_retry'}:{ticker}:{persona.key}"
                 ),
                 cache=False,
+                **stage_a_model_kwargs(),
             )
             text = result.get("text") or ""
             finish = result.get("finish_reason")
@@ -3680,13 +3791,25 @@ def _digest_forecast(report: Dict[str, Any]) -> List[str]:
     out: List[str] = []
     rf = report.get("revenue_forecast") or {}
     bits: List[str] = []
-    cagr = _f_num(rf.get("cagr"), "{:+.1f}")
-    eps = _f_num(rf.get("eps_growth"), "{:+.1f}")
-    # 0.0 is the required float's "no rate", never a measured flat outlook.
-    if cagr is not None and rf.get("cagr"):
-        bits.append(f"revenue CAGR {cagr}%")
-    if eps is not None and rf.get("eps_growth"):
-        bits.append(f"EPS CAGR {eps}%")
+    # Each rate with the fiscal years it spans (2026-11-14): revenue runs from the last
+    # reported year and EPS from the first forecast year, so side by side and unlabelled the
+    # thesis read "+12.8% revenue vs +5.0% EPS" as margin compression when both grew 5% a
+    # year over the same years. Without a span (older reports) 0.0 is the wire's "no rate".
+    rates = [
+        (label, _stored_rate(rf, key, span_key))
+        for label, key, span_key in (("revenue CAGR", "cagr", "cagr_span"),
+                                     ("EPS CAGR", "eps_growth", "eps_growth_span"))
+    ]
+    for label, stored in rates:
+        if stored is None:
+            continue
+        rate, span = stored
+        text = _f_num(rate, "{:+.1f}")
+        if text is not None:
+            bits.append(f"{label} {text}%" + (f" over {span}" if span else ""))
+    spans = {stored[1] for _label, stored in rates if stored is not None and stored[1]}
+    if len(spans) > 1:
+        bits.append("the two CAGRs cover different years: never compare them")
     # "unknown" (no transcript on file) is not a stance — the card hides it.
     if rf.get("management_guidance") in ("raised", "maintained", "lowered"):
         bits.append(f"guidance {rf['management_guidance']}")
@@ -4274,6 +4397,7 @@ async def _synthesize_core_thesis(
             prompt=prompt,
             system_instruction=persona.system_prompt,
             usage_tag=f"report_thesis:{ticker}:{persona.key}",
+            **synthesis_model_kwargs(),
         )
         parsed = parse_stage_a_response(
             result.get("text") or "",
@@ -4461,6 +4585,7 @@ async def synthesize_critical_factors(
             prompt=prompt,
             system_instruction=persona.system_prompt,
             usage_tag=f"report_factors:{ticker}:{persona.key}",
+            **synthesis_model_kwargs(),
         )
         parsed = parse_stage_a_response(
             result.get("text") or "",

@@ -74,8 +74,30 @@ class DeepDiveMetricResponse(BaseModel):
     sector_quarterly_level: Optional[str] = None
     # Whose median the "sector avg" in `label` is ("industry" | "sector"; the wire label
     # keeps the word "sector" for shipped iOS builds). Lets the report's model prompts name
-    # an industry median as the industry's (2026-10-08). Optional; iOS ignores it.
+    # an industry median as the industry's (2026-10-08), and is the peer word of the
+    # drill-down's "Current" legend line (iOS 1.03 build 15+; older builds ignore it).
     peer_level: Optional[str] = None
+    # The card row's OWN comparison, as numbers (owner decision 2026-11-13): the drill-down
+    # legend's second line, "Current (TTM) 18.21x · Industry 29.32x · 0.62× vs industry",
+    # coloured by `current_score` exactly as the card judged the row. Display units (a
+    # percent row in percentage points). `current_value` is None where the row prints no
+    # comparable number ("—", "Neg.", "N/A", "N/M"); `current_peer_median` is the median the
+    # row was judged against (the one `label` prints; a Growth row's name prints none, so it
+    # is the same fiscal year's peer YoY, None while that year is not reported). `current_score`
+    # is the row's own score whenever either number is present (Earnings Yield: the P/E
+    # row's, and only beside a median); None = unscored, drawn neutral. Present only on a
+    # charted row (one with history). Optional and additive: legacy reports and older app
+    # builds decode unchanged — a report without them shows the period line only.
+    current_value: Optional[float] = None
+    current_peer_median: Optional[float] = None
+    current_score: Optional[int] = None
+    # The CLOSED period `current_value` covers, as displayed ("FY2026"), when it is not "now"
+    # (Growth owner decision 2026-11-13, "Name the periods": the Growth sheet never says
+    # "Current"), or the fiscal year a Price row shown on a LAST-FISCAL-YEAR basis divides by
+    # (a P/FCF or EV/EBITDA reconstruction; that row has no `current_value`, and the sheet
+    # names the year instead of "TTM"). None on a TTM / current row (Valuation, Health),
+    # which keeps its "Current (TTM)" wording. Optional and additive.
+    current_period: Optional[str] = None
 
 
 class DeepDiveMetricCardResponse(BaseModel):
@@ -129,10 +151,16 @@ class RevenueProjectionResponse(BaseModel):
     # year, which is not the calendar year for an off-calendar filer (NVDA's "2025" runs
     # Feb 2024 – Jan 2025), so the price overlay places each close by period window.
     period_end: Optional[str] = None
-    # "gaap" (reported `epsDiluted`) on actual years, "consensus" (analyst `epsAvg`,
-    # adjusted for most filers) on forecast years. The first forecast year's EPS YoY is
-    # None because it would compare the two bases.
+    # "consensus" (analyst `epsAvg`, adjusted for most filers) on forecast years. On actual
+    # years "adjusted" (since 2026-11-14: the four quarterly earnings-feed actuals summed, the
+    # consensus's own basis, so the first forecast year's EPS YoY is measured) or "gaap"
+    # (reported `epsDiluted`, when no adjusted history passes its checks; that first forecast
+    # year's EPS YoY is then None because it would compare the two bases).
     eps_basis: Optional[str] = None
+    # The reported GAAP EPS label ("$5.83") on an "adjusted" actual year whose adjusted and
+    # GAAP figures differ by more than max(2%, $0.03); None otherwise (a GAAP-only reporter
+    # such as Apple has none). iOS does not display it: its presence labels the line "Adj. EPS".
+    eps_gaap_label: Optional[str] = None
 
 
 class EarningsTrackRecordPointResponse(BaseModel):
@@ -155,8 +183,15 @@ class TimelinePricePointResponse(BaseModel):
 
 
 class RevenueForecastResponse(BaseModel):
+    # The growth rates the report PRINTS (insight, PDF, report chat), measured over the
+    # bars the Future Forecast chart draws; 0.0 = not measurable. Not the scored rates.
     cagr: float
     eps_growth: float
+    # Which fiscal years each rate spans ("FY2025–FY2030E": reported → consensus;
+    # "FY2026E–FY2030E": consensus only). None on older reports and on the fallback to
+    # the scored rate. Backend-only: iOS does not decode it.
+    cagr_span: Optional[str] = None
+    eps_growth_span: Optional[str] = None
     # "raised" | "maintained" | "lowered" — a READ of the latest earnings-call
     # transcript — or "unknown" when no transcript was available to read (the
     # transcripts package is off the Order Form, so that is every report today).

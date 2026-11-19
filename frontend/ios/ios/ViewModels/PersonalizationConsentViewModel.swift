@@ -163,6 +163,9 @@ final class PersonalizationConsentViewModel: ObservableObject {
             }
             return "On — not switched on yet, we'll start using it soon"
         }
-        return "On — Cay AI tailors how it explains things"
+        // Owner's wording, 2026-11-15 ("Cay AI personal for only you"). It keeps "explains":
+        // personalization changes HOW things are explained (Terms §2), never a view about a
+        // security, so the row must not read as personal advice.
+        return "On — Cay AI explains things just for you"
     }
 }

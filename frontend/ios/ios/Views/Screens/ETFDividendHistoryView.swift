@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import OSLog
 
 struct ETFDividendHistoryView: View {
     @Environment(\.dismiss) private var dismiss
@@ -21,6 +22,12 @@ struct ETFDividendHistoryView: View {
     @State private var errorMessage: String?
 
     private let repository: StockRepository = .shared
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "etf-dividends")
+
+    /// Amounts derived from price data arrive marked "≈" — they are estimates.
+    private var hasEstimatedAmounts: Bool {
+        dividends.contains { $0.dividendPerShare.hasPrefix("≈") }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -122,13 +129,31 @@ struct ETFDividendHistoryView: View {
                                 .frame(height: 1)
                         }
 
+                        if dividends.isEmpty && !isLoading {
+                            Text("No dividend payments found for \(symbol).")
+                                .font(AppTypography.caption)
+                                .foregroundColor(AppColors.textMuted)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: .infinity)
+                                .padding(AppSpacing.xl)
+                        }
+
                         // Total count footer
                         if !dividends.isEmpty {
-                            Text("\(dividends.count) dividend payments")
-                                .font(AppTypography.captionSmall)
-                                .foregroundColor(AppColors.textMuted)
-                                .padding(.top, AppSpacing.lg)
-                                .padding(.bottom, AppSpacing.xxxl)
+                            VStack(spacing: AppSpacing.xs) {
+                                Text("\(dividends.count) dividend payments")
+                                    .font(AppTypography.captionSmall)
+                                    .foregroundColor(AppColors.textMuted)
+                                if hasEstimatedAmounts {
+                                    Text("≈ Amounts are estimates calculated from price data.")
+                                        .font(AppTypography.captionSmall)
+                                        .foregroundColor(AppColors.textMuted)
+                                        .multilineTextAlignment(.center)
+                                }
+                            }
+                            .padding(.horizontal, AppSpacing.lg)
+                            .padding(.top, AppSpacing.lg)
+                            .padding(.bottom, AppSpacing.xxxl)
                         }
                     }
                 }
@@ -160,9 +185,9 @@ struct ETFDividendHistoryView: View {
                 self.payFrequency = response.payFrequency
                 self.isLoading = false
             }
-            print("[DividendHistory] Loaded \(fullDividends.count) dividends for \(symbol)")
+            Self.log.info("Loaded \(fullDividends.count, privacy: .public) dividends for \(symbol, privacy: .public)")
         } catch {
-            print("[DividendHistory] Failed for \(symbol): \(error)")
+            Self.log.error("Dividend history failed for \(symbol, privacy: .public): \(String(describing: error), privacy: .public)")
             await MainActor.run {
                 // Keep preloaded data if API fails
                 if self.dividends.isEmpty {

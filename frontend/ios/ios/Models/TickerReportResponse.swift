@@ -190,6 +190,19 @@ struct DeepDiveMetricDTO: Codable {
     // the drill-down keeps the card-wide word.
     let sectorAnnualLevel: String?
     let sectorQuarterlyLevel: String?
+    // The card row's OWN comparison, as numbers (2026-11-13): the drill-down legend's
+    // "Current" line. Display units (a percent row in percentage points). `peerLevel` is the
+    // level of `currentPeerMedian` ("industry" | "sector"). All optional — reports generated
+    // before 2026-11-13 have none, and the drill-down then shows the period line only.
+    let currentValue: Double?
+    let currentPeerMedian: Double?
+    let currentScore: Int?
+    let peerLevel: String?
+    // The closed period `currentValue` covers, as a display label ("FY2026"), when the row
+    // is a closed period's figure rather than a TTM / today reading (the Growth card's
+    // fiscal-year rates). nil for TTM rows and on reports generated before 2026-11-13: the
+    // Growth drill-down then draws no card line (it never calls a closed year "Current").
+    let currentPeriod: String?
 
     enum CodingKeys: String, CodingKey {
         case label, value, trend
@@ -201,6 +214,11 @@ struct DeepDiveMetricDTO: Codable {
         case sectorQuarterlyHistory = "sector_quarterly_history"
         case sectorAnnualLevel = "sector_annual_level"
         case sectorQuarterlyLevel = "sector_quarterly_level"
+        case currentValue = "current_value"
+        case currentPeerMedian = "current_peer_median"
+        case currentScore = "current_score"
+        case peerLevel = "peer_level"
+        case currentPeriod = "current_period"
     }
 }
 
@@ -257,8 +275,12 @@ struct RevenueProjectionDTO: Codable {
     /// FISCAL year, so the price overlay places closes by period window when this is present.
     /// Optional: `projections` rows and reports generated before it omit the key.
     let periodEnd: String?
-    /// "gaap" on reported years, "consensus" on forecast years; nil on older reports.
+    /// "adjusted" or "gaap" on reported years, "consensus" on forecast years; nil on older reports.
     let epsBasis: String?
+    /// The reported GAAP EPS label ("$5.83") on an "adjusted" reported year whose figures
+    /// differ; nil otherwise and on reports generated before 2026-11-14. Not displayed: its
+    /// presence is what labels the line "Adj. EPS".
+    let epsGaapLabel: String?
 
     enum CodingKeys: String, CodingKey {
         case period, revenue
@@ -272,6 +294,7 @@ struct RevenueProjectionDTO: Codable {
         case isForecast = "is_forecast"
         case periodEnd = "period_end"
         case epsBasis = "eps_basis"
+        case epsGaapLabel = "eps_gaap_label"
     }
 }
 
@@ -920,7 +943,12 @@ extension TickerReportAPIResponse {
                         sectorAnnualHistory: mapPoints(m.sectorAnnualHistory),
                         sectorQuarterlyHistory: mapPoints(m.sectorQuarterlyHistory),
                         sectorAnnualLevel: m.sectorAnnualLevel,
-                        sectorQuarterlyLevel: m.sectorQuarterlyLevel
+                        sectorQuarterlyLevel: m.sectorQuarterlyLevel,
+                        currentValue: m.currentValue,
+                        currentPeerMedian: m.currentPeerMedian,
+                        currentScore: m.currentScore,
+                        peerLevel: m.peerLevel,
+                        currentPeriod: m.currentPeriod
                     )
                 },
                 qualityLabel: card.qualityLabel,
@@ -998,7 +1026,8 @@ extension TickerReportAPIResponse {
                     epsAnalystCount: $0.epsAnalystCount,
                     isForecast: $0.isForecast,
                     periodEnd: $0.periodEnd,
-                    epsBasis: $0.epsBasis
+                    epsBasis: $0.epsBasis,
+                    epsGaapLabel: $0.epsGaapLabel
                 )
             },
             forecastAnalystCount: revenueForecast.forecastAnalystCount,

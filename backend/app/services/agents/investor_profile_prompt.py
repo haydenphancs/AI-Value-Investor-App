@@ -30,6 +30,7 @@ the block's own trailer, because the model reads the trailer closest to the data
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.services.user_investor_profile_service import DEFAULTS
@@ -107,12 +108,21 @@ def _render_list(raw: Any, table: Dict[str, str]) -> Optional[str]:
     return _join(labels) if labels else None
 
 
-def render_profile_block(profile: Optional[Dict[str, Any]]) -> str:
+def render_profile_block(
+    profile: Optional[Dict[str, Any]], *, include_style_lines: bool = True,
+) -> str:
     """Structured profile → a fixed preference block. PURE. Returns "" when empty.
 
     An empty string for an empty profile matters: an all-default profile carries no
     information, and emitting a block that says "balanced / brief / no topics" would
     spend tokens telling the model nothing while implying the reader chose it.
+
+    `include_style_lines=False` leaves out the Language and Length lines. The chat path
+    asks for that (`resolve_reader_lens`): it folds those two choices into its ONE STYLE
+    directive instead (`ChatService._answer_style`), because a second, later "Length:" line
+    contradicted the house "SHORT, at most 2-3 bullets, plain language" rule with nothing
+    saying which one wins. The default (True) is the full statement of what the reader
+    chose, which is what `may_apply_profile` and `would_personalize` ask about.
     """
     if not isinstance(profile, dict):
         return ""
@@ -137,13 +147,14 @@ def render_profile_block(profile: Optional[Dict[str, Any]]) -> str:
     if experience:
         lines.append(f"- Experience: {experience}.")
 
-    style = _scalar("explanation_style", _STYLE)
-    if style:
-        lines.append(f"- Language: use {style}.")
+    if include_style_lines:
+        style = _scalar("explanation_style", _STYLE)
+        if style:
+            lines.append(f"- Language: use {style}.")
 
-    depth = _scalar("answer_depth", _DEPTH)
-    if depth:
-        lines.append(f"- Length: keep answers {depth}.")
+        depth = _scalar("answer_depth", _DEPTH)
+        if depth:
+            lines.append(f"- Length: keep answers {depth}.")
 
     topics = _render_list(profile.get("topics"), _TOPICS)
     if topics:
@@ -244,8 +255,55 @@ def may_apply_profile(profile: Optional[Dict[str, Any]], tier: Optional[str]) ->
     return bool(render_profile_block(profile))
 
 
-def resolve_reader_lens(profile: Optional[Dict[str, Any]], tier: Optional[str]) -> Optional[str]:
-    """The rendered block for this turn, or None. The single seam the endpoints use."""
+@dataclass(frozen=True)
+class ReaderLens:
+    """What one reader's preferences change about a chat turn. Built only by `resolve_reader_lens`.
+
+    Two parts, kept apart on purpose:
+
+    * `block` — the USER PREFERENCES text (experience, topics, goals), appended to the system
+      instruction as it always was. It carries NO Length or Language line.
+    * `answer_depth` / `explanation_style` — the reader's NON-default choice keys (None = the
+      house default). `ChatService._answer_style` turns them into the turn's ONE STYLE
+      directive. As two separate lines they contradicted the house STYLE rule in the same
+      prompt ("SHORT, at most 2-3 bullets, plain language" vs "thorough", "precise
+      terminology") and nothing said which won.
+
+    Falsy only when nothing would change. `in` and `str()` read the block, so a caller that
+    only needs the text keeps working.
+    """
+
+    block: str = ""
+    answer_depth: Optional[str] = None
+    explanation_style: Optional[str] = None
+
+    def __bool__(self) -> bool:
+        return bool(self.block or self.answer_depth or self.explanation_style)
+
+    def __contains__(self, item: object) -> bool:
+        return isinstance(item, str) and item in self.block
+
+    def __str__(self) -> str:
+        return self.block
+
+
+def _style_key(profile: Dict[str, Any], field: str, table: Dict[str, str]) -> Optional[str]:
+    """The reader's NON-default key for a style scalar, or None (default, unknown or missing)."""
+    value = profile.get(field)
+    if not isinstance(value, str) or value == DEFAULTS.get(field) or value not in table:
+        return None
+    return value
+
+
+def resolve_reader_lens(
+    profile: Optional[Dict[str, Any]], tier: Optional[str],
+) -> Optional[ReaderLens]:
+    """This turn's lens, or None. The single seam the endpoints use."""
     if not may_apply_profile(profile, tier):
         return None
-    return render_profile_block(profile) or None
+    lens = ReaderLens(
+        block=render_profile_block(profile, include_style_lines=False),
+        answer_depth=_style_key(profile, "answer_depth", _DEPTH),
+        explanation_style=_style_key(profile, "explanation_style", _STYLE),
+    )
+    return lens or None

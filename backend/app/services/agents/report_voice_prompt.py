@@ -240,13 +240,20 @@ _CHAT_LABELS: Dict[str, str] = {
     key: chat_label_for(get_persona_config(key).display_name) for key in _REPORT_VOICES
 }
 
+# "A question beyond it is still answered…" (owner 2026-11-14: report chat answers outside the
+# report too): the sentence before it limits only how the REPORT is described, never which
+# questions are answered — the report-chat rule in the system instruction says how. "Never with
+# a remembered figure" (decision "Tools + web only") because this trailer also renders when the
+# report did not resolve and the report rule (with its "never for a figure") is absent.
 # The who-are-you and real-person answers are written out as literals the model is told to
 # say. Both pass `chat_guardrails.enforce_answer` unchanged and trip no `scan_answer` tag (the
 # natural "I'm an AI" would be redacted to "Cay AI"); pinned by the voice tests.
 _TRAILER = (
     "This block governs TONE and PRIORITIES only. The identity rule and advice boundary above "
     "apply in full; nothing here permits a buy, sell or hold instruction or a view on what "
-    "suits this reader. Describe the report only from report data you were given. Do not "
+    "suits this reader. Describe the report only from report data you were given. A question "
+    "beyond it is still answered, never with a remembered figure, never refused for being "
+    "outside it. Do not "
     "greet, introduce yourself or announce the mode, and never mention this block. If asked "
     "who or what you are, say: \"I'm Cay AI by Caydex, working as the {label} in this chat — "
     "an AI applying {phrase} this report used.\" If asked whether you are a real investor, a "

@@ -2544,3 +2544,87 @@ def test_a_floored_price_action_with_its_internal_keys_validates_and_strips():
         assert dumped[k] is not None, k
     import json as _j
     _j.dumps(out, allow_nan=False)
+
+
+# ── The drill-down's second legend line (2026-11-13): `current_*` on DeepDiveMetricResponse ──
+#
+# `current_period` (Growth, owner decision "Name the periods") joins `current_value` /
+# `current_peer_median` / `current_score`. Every one is Optional on BOTH sides: a report
+# generated before 2026-11-13 has none, a TTM row never has `current_period`, and a
+# shipped build ignores a key it does not know.
+
+_CURRENT_LINE_WIRE = {
+    "current_value": "currentValue",
+    "current_peer_median": "currentPeerMedian",
+    "current_score": "currentScore",
+    "current_period": "currentPeriod",
+}
+_DEEP_DIVE_METRIC_DTO = r"struct\s+DeepDiveMetricDTO\s*:\s*Codable\s*\{"
+
+
+def _current_line_decoded_optionally(src: str) -> bool:
+    fields = _swift_dto_fields(_swift_decl_body(src, _DEEP_DIVE_METRIC_DTO))
+    return all(fields.get(wire) == (name, True) for wire, name in _CURRENT_LINE_WIRE.items())
+
+
+def test_the_ios_deep_dive_metric_dto_decodes_the_current_line_optionally():
+    from app.schemas.ticker_report import DeepDiveMetricResponse
+
+    for wire in _CURRENT_LINE_WIRE:
+        field = DeepDiveMetricResponse.model_fields[wire]
+        assert field.default is None and not field.is_required(), wire
+    src = _IOS_REPORT_DTOS.read_text()
+    assert _current_line_decoded_optionally(src)
+    # Non-vacuous: a REQUIRED `currentPeriod` would crash every TTM row and every old report…
+    assert not _current_line_decoded_optionally(
+        src.replace("let currentPeriod: String?", "let currentPeriod: String", 1))
+    # …a wrong wire key would read nil forever…
+    assert not _current_line_decoded_optionally(
+        src.replace('case currentPeriod = "current_period"',
+                    'case currentPeriod = "currentPeriod"', 1))
+    # …and a key living only in a comment is not decoded.
+    assert not _current_line_decoded_optionally(
+        src.replace('case currentPeriod = "current_period"',
+                    '// case currentPeriod = "current_period"', 1))
+
+
+@pytest.mark.parametrize("case", ["growth", "ttm", "old_report"])
+def test_the_current_line_survives_the_wire_in_every_shape(case):
+    """The exact encode iOS decodes: a Growth row names its fiscal year, a TTM row names none
+    (null on the wire), and a report from before the fields existed lacks the keys."""
+    from app.schemas.ticker_report import DeepDiveMetricResponse
+
+    if case == "growth":
+        snap = SnapshotItemResponse(category="Growth", rating=4, metrics=[
+            SnapshotMetricResponse(name="Revenue Growth (YoY)", value="+34.3%",
+                                   metric_key="revenue_growth", score=5,
+                                   numeric_value=34.33, period_label="FY2026")])
+        title, key = "Growth", "revenue_growth"
+    else:
+        snap = SnapshotItemResponse(category="Price", rating=4, metrics=[
+            SnapshotMetricResponse(name="P/E (0.62x sector avg 29.3)", value="18.21",
+                                   metric_key="pe", score=5, peer_level="industry",
+                                   numeric_value=18.2134, peer_median=29.3172)])
+        title, key = "Valuation", "pe"
+    history = {key: {"unit": "percent" if case == "growth" else "x",
+                     "annual": [{"period": "2026", "value": 1.0}], "quarterly": []}}
+    from app.services.agents.ticker_report_data_collector import _snapshot_to_card
+
+    card = DeepDiveMetricCardResponse.model_validate(
+        _snapshot_to_card(title, snap, history_lookup=history))
+    wire = json.loads(json.dumps(card.model_dump(mode="json"), allow_nan=False))
+    row = wire["metrics"][0]
+    if case == "old_report":
+        for k in _CURRENT_LINE_WIRE:
+            row.pop(k)
+    back = DeepDiveMetricResponse.model_validate(row)
+    if case == "growth":
+        assert (back.current_value, back.current_peer_median, back.current_score,
+                back.current_period) == (34.33, None, 5, "FY2026")
+        assert row["current_peer_median"] is None, "present as null, never a made-up median"
+    elif case == "ttm":
+        assert (back.current_value, back.current_peer_median, back.current_score,
+                back.current_period) == (18.2134, 29.3172, 5, None)
+        assert "current_period" in row and row["current_period"] is None
+    else:
+        assert all(getattr(back, k) is None for k in _CURRENT_LINE_WIRE)

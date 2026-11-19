@@ -151,7 +151,7 @@ _VM_CLASS = {
 _GATED_LOADS = {
     "Home": (_HOME_VM, "private func performLoad() async",
              "isReconnecting", "requiresSignIn"),
-    "Updates": (_UPDATES_VM, "private func loadFeed(for tab: NewsFilterTab, force: Bool) async",
+    "Updates": (_UPDATES_VM, "private func loadFeed(for tab: NewsFilterTab, force: Bool, fresh: Bool = false) async",
                 "isReconnecting", "requiresSignIn"),
     "Tracking/Assets": (_TRACKING_VM, "private func loadTrackingFeed() async -> Bool",
                         "assetsIsReconnecting", "assetsRequiresSignIn"),

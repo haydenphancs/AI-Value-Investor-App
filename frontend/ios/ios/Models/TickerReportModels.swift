@@ -374,6 +374,18 @@ struct DeepDiveMetric: Identifiable {
     // older reports → the drill-down uses the card's `peerGroupLevel`.
     let sectorAnnualLevel: String?
     let sectorQuarterlyLevel: String?
+    // The card row's own comparison (2026-11-13), for the drill-down's "Current" legend
+    // line: the value and the exact median the card printed, and the score it gave the row
+    // (>= 4 good, <= 2 bad, else in line). `peerLevel` names that median's group. nil on
+    // older reports → the drill-down shows the period line only.
+    let currentValue: Double?
+    let currentPeerMedian: Double?
+    let currentScore: Int?
+    let peerLevel: String?
+    // The closed period `currentValue` covers ("FY2026"), set only for a closed period's
+    // figure (the Growth card's fiscal-year rates); nil for TTM / today readings and on
+    // older reports. The Growth drill-down names its card line by it and draws none without it.
+    let currentPeriod: String?
 
     init(
         label: String,
@@ -386,7 +398,12 @@ struct DeepDiveMetric: Identifiable {
         sectorAnnualHistory: [MetricHistoryPoint]? = nil,
         sectorQuarterlyHistory: [MetricHistoryPoint]? = nil,
         sectorAnnualLevel: String? = nil,
-        sectorQuarterlyLevel: String? = nil
+        sectorQuarterlyLevel: String? = nil,
+        currentValue: Double? = nil,
+        currentPeerMedian: Double? = nil,
+        currentScore: Int? = nil,
+        peerLevel: String? = nil,
+        currentPeriod: String? = nil
     ) {
         self.label = label
         self.value = value
@@ -399,6 +416,11 @@ struct DeepDiveMetric: Identifiable {
         self.sectorQuarterlyHistory = sectorQuarterlyHistory
         self.sectorAnnualLevel = sectorAnnualLevel
         self.sectorQuarterlyLevel = sectorQuarterlyLevel
+        self.currentValue = currentValue
+        self.currentPeerMedian = currentPeerMedian
+        self.currentScore = currentScore
+        self.peerLevel = peerLevel
+        self.currentPeriod = currentPeriod
     }
 
     /// True when a sector-average series exists for this metric (the "*"
@@ -697,31 +719,59 @@ struct RevenueProjection: Identifiable {
     /// each close by period window when every column has one. nil on `projections` rows
     /// and older reports. `var` with a default so existing memberwise inits compile.
     var periodEnd: String? = nil
-    /// "gaap" (reported EPS) or "consensus" (analyst forecast); nil on older reports.
+    /// "adjusted" or "gaap" (a reported year) or "consensus" (analyst forecast); nil on
+    /// older reports. "adjusted" (2026-11-14): the reported year is on the consensus's basis.
     var epsBasis: String? = nil
+    /// The reported GAAP EPS label of an "adjusted" reported year ("$5.83"), sent only where
+    /// the two figures differ (a GAAP-only reporter such as Apple has none); nil otherwise.
+    /// Never displayed (owner, 2026-11-14: "we don't need to show GAAP anymore").
+    var epsGaapLabel: String? = nil
+
+    /// `epsGaapLabel` on an adjusted REPORTED year, when it is a real figure ("N/A" and "" are not).
+    var adjustedYearGAAPLabel: String? {
+        guard !isForecast, epsBasis == "adjusted",
+              let label = epsGaapLabel, !label.isEmpty, label != "N/A" else { return nil }
+        return label
+    }
+
+    /// True when the timeline's EPS line is ADJUSTED in a way the reader must be told: some
+    /// reported year's adjusted figure differs from its GAAP one. The legend and the popup's
+    /// "Adj. EPS" title key on this one rule, so they never disagree.
+    static func showsAdjustedEPS(_ timeline: [RevenueProjection]) -> Bool {
+        timeline.contains { $0.adjustedYearGAAPLabel != nil }
+    }
 
     /// Compact YoY string for the bar/dot annotations. Returns nil when
     /// we have no anchor — the view should hide the row entirely.
     var revenueYoYText: String? {
         guard let pct = revenueYoyPct else { return nil }
-        return String(format: "%@%.0f%%", pct >= 0 ? "+" : "", pct)
+        return Self.yoyChipText(pct)
     }
 
     var epsYoYText: String? {
         guard let pct = epsYoyPct else { return nil }
-        return String(format: "%@%.0f%%", pct >= 0 ? "+" : "", pct)
+        return Self.yoyChipText(pct)
     }
 
     /// Color for the YoY chip: green for growth, red for decline, gray
-    /// when missing (caller should also gate on the *Text property).
-    var revenueYoYColor: Color {
-        guard let pct = revenueYoyPct else { return AppColors.textMuted }
-        return pct >= 0 ? AppColors.bullish : AppColors.bearish
+    /// when missing (caller should also gate on the *Text property) or when it rounds to 0.
+    var revenueYoYColor: Color { Self.yoyChipColor(revenueYoyPct) }
+
+    var epsYoYColor: Color { Self.yoyChipColor(epsYoyPct) }
+
+    /// A whole percent whose sign and colour come from the ROUNDED value, half-to-even like
+    /// "%.0f": a -0.47% change read as a red "-0%" (INTC FY2025, 2026-11-14). It is "0%", gray.
+    static func yoyChipText(_ pct: Double) -> String {
+        let rounded: Double = pct.rounded(.toNearestOrEven)
+        if rounded == 0 { return "0%" }
+        return String(format: "%@%.0f%%", rounded > 0 ? "+" : "", rounded)
     }
 
-    var epsYoYColor: Color {
-        guard let pct = epsYoyPct else { return AppColors.textMuted }
-        return pct >= 0 ? AppColors.bullish : AppColors.bearish
+    static func yoyChipColor(_ pct: Double?) -> Color {
+        guard let pct = pct else { return AppColors.textMuted }
+        let rounded: Double = pct.rounded(.toNearestOrEven)
+        if rounded == 0 { return AppColors.textMuted }
+        return rounded > 0 ? AppColors.bullish : AppColors.bearish
     }
 }
 
@@ -2161,10 +2211,10 @@ extension TickerReportData {
             ],
             beatSummary: "Beat 7 of 10 · 1 met",
             annualTimeline: [
-                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2023-05-31", epsBasis: "gaap"),
-                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2024-05-31", epsBasis: "gaap"),
-                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2025-05-31", epsBasis: "gaap"),
-                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67.3B",  revenueYoyPct: 17,  eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: nil, revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true, periodEnd: "2026-05-31", epsBasis: "consensus"),
+                RevenueProjection(period: "2023", revenue: 50,  revenueLabel: "$50.0B",  revenueYoyPct: nil, eps: 5.10,  epsLabel: "$5.10",  epsYoyPct: nil, revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2023-05-31", epsBasis: "adjusted", epsGaapLabel: "$3.07"),
+                RevenueProjection(period: "2024", revenue: 53,  revenueLabel: "$53.0B",  revenueYoyPct: 6,   eps: 5.50,  epsLabel: "$5.50",  epsYoyPct: 8,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2024-05-31", epsBasis: "adjusted", epsGaapLabel: "$3.71"),
+                RevenueProjection(period: "2025", revenue: 57,  revenueLabel: "$57.4B",  revenueYoyPct: 8,   eps: 6.00,  epsLabel: "$6.00",  epsYoyPct: 9,   revenueAnalystCount: nil, epsAnalystCount: nil, isForecast: false, periodEnd: "2025-05-31", epsBasis: "adjusted", epsGaapLabel: "$4.34"),
+                RevenueProjection(period: "2026", revenue: 67,  revenueLabel: "$67.3B",  revenueYoyPct: 17,  eps: 7.48,  epsLabel: "$7.48",  epsYoyPct: 25,  revenueAnalystCount: 31, epsAnalystCount: 30, isForecast: true, periodEnd: "2026-05-31", epsBasis: "consensus"),
                 RevenueProjection(period: "2027", revenue: 89,  revenueLabel: "$88.8B",  revenueYoyPct: 32,  eps: 7.99,  epsLabel: "$7.99",  epsYoyPct: 7,   revenueAnalystCount: 28, epsAnalystCount: 27, isForecast: true, periodEnd: "2027-05-31", epsBasis: "consensus"),
                 RevenueProjection(period: "2028", revenue: 130, revenueLabel: "$130.0B", revenueYoyPct: 46,  eps: 10.76, epsLabel: "$10.76", epsYoyPct: 35,  revenueAnalystCount: 22, epsAnalystCount: 20, isForecast: true, periodEnd: "2028-05-31", epsBasis: "consensus")
             ],

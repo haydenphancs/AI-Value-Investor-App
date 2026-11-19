@@ -260,6 +260,9 @@ def test_row_marked_degraded_is_a_miss():
 @pytest.mark.asyncio
 async def test_upsert_round_trips_with_the_current_version():
     built = await _svc(_FakeFMP())._build_earnings("AVGO")
+    # The round trip must carry the report days (v5), not just the v4 fields.
+    assert [q.report_date for q in built.eps_quarters if q.actual_value is not None] == [
+        "2026-03-05", "2026-06-03"]
     sb = _FakeSupabase()
     svc = _svc(None, sb)
     svc._upsert_supabase_cache_safe("AVGO", built, None)

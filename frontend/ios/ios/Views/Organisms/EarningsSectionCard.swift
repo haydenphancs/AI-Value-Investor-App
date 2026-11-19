@@ -118,7 +118,9 @@ struct EarningsSectionCard: View {
                     priceHistory: displayPriceHistory,
                     dailyPriceHistory: earningsData.dailyPriceHistory,
                     showPriceLine: showPriceLine,
-                    dataType: selectedDataType
+                    dataType: selectedDataType,
+                    // Ends the line's time axis at the first gray dot on its report day.
+                    nextEarningsDate: earningsData.nextEarningsDate?.date
                 )
 
                 // Surprise bar chart (3Y only). `dataType` sets its y-axis gutter, which

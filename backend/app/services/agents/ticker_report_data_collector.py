@@ -52,12 +52,9 @@ import httpx
 # here under the original names so `_build_price_action` is unchanged.
 from app.services.sector_benchmark_lookup import (
     CALENDAR_QUARTER_PERIOD_TYPE,
-    MATURE_SAMPLE_FLOOR,
-    TTM_PERIOD_TYPE,
     BenchmarkLookupFailed,
     fs_industry_only,
     lookup_failed,
-    peer_floor,
 )
 from app.utils.margins import revenue_backed_margin
 from app.utils.period_labels import annual_benchmark_key, calendar_quarter_key
@@ -121,7 +118,7 @@ from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
-from app.schemas.growth import GrowthResponse
+from app.schemas.growth import GROWTH_CHAT_ONLY_SERIES, GrowthResponse
 from app.schemas.profit_power import ProfitPowerResponse
 from app.schemas.dcf_fair_value import DcfFairValueResponse
 from app.services._insider_common import (
@@ -945,10 +942,18 @@ _GROWTH_LEG_SERIES: Dict[str, Tuple[str, ...]] = {
         "eps_quarterly", "revenue_quarterly", "net_income_quarterly",
         "operating_profit_quarterly",
     ),
-    "annual_cashflow": ("free_cash_flow_annual",),
-    "quarterly_cashflow": ("free_cash_flow_quarterly",),
+    "annual_cashflow": (
+        "free_cash_flow_annual", "operating_cash_flow_annual", "capital_expenditure_annual",
+    ),
+    "quarterly_cashflow": (
+        "free_cash_flow_quarterly", "operating_cash_flow_quarterly",
+        "capital_expenditure_quarterly",
+    ),
 }
 _GROWTH_SERIES: Tuple[str, ...] = tuple(s for v in _GROWTH_LEG_SERIES.values() for s in v)
+# Series only Ask Cay AI reads (`app.schemas.growth.GROWTH_CHAT_ONLY_SERIES`, imported above,
+# 2026-11-14): no chart draws them, so they are never what keeps a narrowed build alive and the
+# frozen `growth_chart` leaves them out (~25 KB per report, data the report never shows).
 # `peer_group_levels` key of each series (GrowthService names FCF "fcf_*").
 _GROWTH_LEVEL_KEY = {
     "free_cash_flow_annual": "fcf_annual", "free_cash_flow_quarterly": "fcf_quarterly",
@@ -983,7 +988,8 @@ def _narrow_growth_chart(resp: Any, blocking: List[str]) -> Optional[Any]:
                 for p in points
             ]
     if not any(
-        (update[s] if s in update else (getattr(resp, s, None) or [])) for s in _GROWTH_SERIES
+        (update[s] if s in update else (getattr(resp, s, None) or []))
+        for s in _GROWTH_SERIES if s not in GROWTH_CHAT_ONLY_SERIES
     ):
         return None
     levels = dict(getattr(resp, "peer_group_levels", None) or {})
@@ -1302,88 +1308,11 @@ def _read_sector_history(
     return flat, failed
 
 
-def _read_ttm_peer_cells(
-    lookup: Any, industry: str, sector: str, metrics: List[str],
-) -> Tuple[Dict[str, Dict[str, Any]], bool]:
-    """The merged TTM peer cell per metric (``{metric: {value, level, n, ...}}``) and
-    whether the read FAILED. Rich cells, not `_read_sector_history`'s flat values: the
-    drill-down injects a TTM median only when it is mature, and only the cell knows its
-    sample size. A lookup exposing only the flat reader (a test double) cannot say, so it
-    yields no cell — nothing is injected — while its failure flag is still honoured.
-    Synchronous: run it via `to_thread`."""
-    rich_reader = getattr(lookup, "get_benchmarks", None)
-    if not callable(rich_reader):
-        raw = lookup.get_benchmark_values(industry, sector, metrics, TTM_PERIOD_TYPE)
-        return {}, (not isinstance(raw, dict)) or lookup_failed(raw)
-    raw = rich_reader(industry, sector, metrics, TTM_PERIOD_TYPE)
-    if not isinstance(raw, dict):
-        return {}, True
-    cells: Dict[str, Dict[str, Any]] = {}
-    for metric, periods in raw.items():
-        if not isinstance(periods, dict):
-            continue
-        # One TTM cell per metric (period_label "TTM"); tolerate another label spelling.
-        cell = periods.get("TTM")
-        if not isinstance(cell, dict):
-            cell = next((c for c in periods.values() if isinstance(c, dict)), None)
-        if cell is not None:
-            cells[metric] = cell
-    return cells, lookup_failed(raw)
-
-
-# Drill-down metrics that must never take the TTM point: a growth rate's TTM median is
-# not the same quantity as a fiscal-year YoY (and the TTM job computes none today).
-_NO_TTM_POINT_SUFFIXES = ("_yoy", "_qoq", "_growth")
-
-
-def _mature_ttm_value(
-    metric: str, cell: Any, floor: int = MATURE_SAMPLE_FLOOR,
-) -> Optional[float]:
-    """The TTM median the drill-down pins as the current year's peer point, or None.
-
-    Exactly the first two tiers of `SectorBenchmarkLookup.get_current_benchmarks` (the
-    merged TTM cell, used only when it holds at least `floor` companies — the lookup's
-    `peer_floor`: MATURE_SAMPLE_FLOOR, or 10 for a Financial Services industry), so the
-    chart's newest peer point is the Overview card's value whenever the card shows a TTM
-    median. A thin TTM cell (KO: Beverages, n=13) is never injected; the card then falls
-    back to a complete annual year, which the chart already draws at that year.
-    """
-    if any(metric.endswith(suffix) for suffix in _NO_TTM_POINT_SUFFIXES):
-        return None
-    if not isinstance(cell, dict):
-        return None
-    value = _finite_or_none(cell.get("value"))
-    n = _finite_or_none(cell.get("n"))
-    if value is None or n is None:
-        return None
-    return value if n >= floor else None
-
-
-def _ttm_point_fits_line(
-    ttm_cell: Any, line: Any, line_level: Optional[str],
-) -> bool:
-    """Whether the mature TTM median may be drawn as the current year's point of a peer
-    line, so the line stays ONE population (decision 2026-10-07):
-
-      * the line draws nothing yet → yes: the point is the whole line, one peer group;
-      * else only when the TTM cell's level ("industry"/"sector") is the line's level.
-        An industry TTM point is never put on a sector line (a thin industry's line
-        whose TTM job reached 20 companies) nor a sector TTM point on an industry line
-        (a mature industry whose TTM cell is thin); an unknown level on either side is
-        not drawn. The line then simply ends at its last complete year.
-    """
-    values = line.values() if isinstance(line, dict) else ()
-    if not any(_finite_or_none(v) is not None for v in values):
-        return True
-    ttm_level = ttm_cell.get("level") if isinstance(ttm_cell, dict) else None
-    return ttm_level in ("industry", "sector") and ttm_level == line_level
-
-
 def _withheld_peer_line_reason(
     metric: str, line_level: Optional[str], industry: Any, sector: Any,
     *, network: bool = False,
 ) -> Optional[str]:
-    """Why a drill-down peer line (or TTM point) of ``metric`` is never drawn, or None.
+    """Why a drill-down peer line of ``metric`` is never drawn, or None.
 
     ``network`` is the company's `financials_metric_gate.resolve_payment_network` verdict
     (True only for a listed non-lender member — `NON_LENDER_MEMBERS`: a payment network or
@@ -1436,8 +1365,7 @@ def _withhold_payment_network_lines(
     history: Any, *, network: bool, industry: Any, sector: Any, ticker: str,
 ) -> None:
     """Withhold, IN PLACE, every drill-down peer line a listed non-lender member's cards
-    never compare — since 2026-10-09 (NET-4) EVERY line and every TTM point injected into
-    one, on top of the liquidity / coverage lines `_fetch_sector_benchmark_history` already
+    never compare — since 2026-10-09 (NET-4) EVERY line, on top of the liquidity / coverage lines `_fetch_sector_benchmark_history` already
     withheld for the whole mixed industry (the Credit Services median is a lenders'
     yardstick). Pass 2 applies it after that fetch, which gates without a company verdict
     (it knows no ticker). ``network`` is
@@ -2463,8 +2391,19 @@ class TickerReportDataCollector:
         fail-closed default: not a non-lender member). A listed non-lender member
         (`NON_LENDER_MEMBERS`) is never read at all: `_fetch_dependent` asks
         `comparable_peer_metrics` first, which leaves it nothing to compare; should a read
-        land for one, pass 2's `_withhold_payment_network_lines` withholds every line and
-        TTM point of it (this method knows no ticker)."""
+        land for one, pass 2's `_withhold_payment_network_lines` withholds every line of it
+        (this method knows no ticker).
+
+        No TTM point (owner decision 2026-11-13, "Replace it", superseding 2026-06-24's "keep
+        fiscal history line + TTM current point"): every line ends at its last served
+        complete period. The TTM median used to be drawn as the current calendar year's
+        annual point; a stored current-year row is never served before year end + 75 days,
+        so the only company that ever had a point there was an off-calendar filer whose
+        fiscal year had already CLOSED (ORCL May, MSFT June, AAPL September, NVDA January),
+        and the legend compared that closed year's ratio with today's median (ORCL: "1.42×
+        vs industry" in red, against 0.62× TTM to TTM, the card's own verdict). The current
+        comparison is now the drill-down legend's second line, carried on each card row as
+        `current_value` / `current_peer_median` (`_snapshot_to_card`)."""
         from app.services.sector_benchmark_lookup import get_sector_benchmark_lookup
         from app.services.sector_benchmark_service import _normalize_sector
 
@@ -2475,13 +2414,11 @@ class TickerReportDataCollector:
         lookup = get_sector_benchmark_lookup()
         metrics = list(_SECTOR_HISTORY_METRIC_NAMES)
         # Annual and calendar-quarter LINES (`_read_peer_line`: one peer group per metric;
-        # an incomplete period is never served), plus the TTM current-snapshot cells
-        # (`_read_ttm_peer_cells`: the merged single value the Overview card shows) to pin
-        # the chart's current-year point. Each read reports whether it FAILED, which the
-        # flat `get_benchmark_values` view cannot: it rebuilt a plain dict and dropped the
-        # `BenchmarkLookupFailed` flag, so a Supabase error read like "no rows" and the
+        # an incomplete period is never served). Each read reports whether it FAILED, which
+        # the flat `get_benchmark_values` view cannot: it rebuilt a plain dict and dropped
+        # the `BenchmarkLookupFailed` flag, so a Supabase error read like "no rows" and the
         # report froze a missing sector line into every shared cache (round 3, P6/P23).
-        period_types = ("annual", CALENDAR_QUARTER_PERIOD_TYPE, TTM_PERIOD_TYPE)
+        period_types = ("annual", CALENDAR_QUARTER_PERIOD_TYPE)
         reads = await asyncio.gather(
             asyncio.to_thread(_read_peer_line, lookup, industry, sector, metrics, "annual"),
             # Calendar-quarter rows (migration 184), joined by `_history_period_id`.
@@ -2489,7 +2426,6 @@ class TickerReportDataCollector:
                 _read_peer_line, lookup, industry, sector, metrics,
                 CALENDAR_QUARTER_PERIOD_TYPE,
             ),
-            asyncio.to_thread(_read_ttm_peer_cells, lookup, industry, sector, metrics),
             return_exceptions=True,
         )
         failed_reads: List[str] = []
@@ -2508,16 +2444,14 @@ class TickerReportDataCollector:
                 failed_reads.append(period_type)
         annual, annual_levels = loaded.get("annual", ({}, {}))
         quarterly, quarterly_levels = loaded.get(CALENDAR_QUARTER_PERIOD_TYPE, ({}, {}))
-        (ttm_cells,) = loaded.get(TTM_PERIOD_TYPE, ({},))
 
         # Liquidity / coverage lines the Health card never compares against
         # (`_withheld_peer_line_reason`): a Financial Services SECTOR median of current
         # ratio, quick ratio or interest coverage (SPGI, ICE, CME: thin industries fall to
         # the sector line), a metric meaningless for the company's own industry, or ANY
         # line of these metrics in a mixed industry (V's industry line pools lenders). The
-        # line AND its level go, and no TTM point is injected in their place below — an
-        # empty line would otherwise take the sector TTM point as its whole line. (Every
-        # line of a listed non-lender member goes in pass 2 — it is not read at all:
+        # line AND its level go. (Every line of a listed non-lender member goes in pass 2 —
+        # it is not read at all:
         # `_fetch_dependent`; `_withhold_payment_network_lines` is the backstop.)
         withheld: List[str] = []
         for tag, line, line_levels in (
@@ -2535,43 +2469,6 @@ class TickerReportDataCollector:
                 ):
                     withheld.append(f"{tag}:{metric}[{reason}]")
 
-        # "Keep history + TTM current": the CURRENT calendar year's annual point is the
-        # TTM median — a full rolling 12 months. The stored annual cell of the current
-        # year is never served (its year has not ended + 75 days), so this never
-        # overwrites a real row. Only a MATURE TTM cell is injected (`_mature_ttm_value`,
-        # the same rule as the Overview card's current benchmark); a thin one leaves the
-        # current year blank. And only onto a line of the SAME peer group
-        # (`_ttm_point_fits_line`): an industry TTM point on a sector line, or the
-        # reverse, would make the line's last step a change of population. A company
-        # whose latest period isn't the current year aligns to its own fiscal point, so
-        # the injected point is simply unused for it. `_read_peer_line` returns fresh
-        # dicts → safe to mutate. Annual only (quarterly multiples are single-quarter
-        # scale; an annual-scale TTM would mix scales).
-        from datetime import datetime, timezone
-        cur_year = str(datetime.now(timezone.utc).year)
-        other_group: List[str] = []
-        ttm_floor = peer_floor(industry, sector)
-        for metric, cell in ttm_cells.items():
-            value = _mature_ttm_value(metric, cell, ttm_floor)
-            if value is None:
-                continue
-            reason = _withheld_peer_line_reason(metric, cell.get("level"), industry, sector)
-            if reason is not None:
-                withheld.append(f"ttm:{metric}[{reason}]")
-                continue
-            if not _ttm_point_fits_line(cell, annual.get(metric), annual_levels.get(metric)):
-                other_group.append(f"{metric}({cell.get('level')}≠{annual_levels.get(metric)})")
-                continue
-            annual.setdefault(metric, {})[cur_year] = value
-            # The point may be the whole line (an otherwise empty line): name its group.
-            if annual_levels.get(metric) is None and cell.get("level") in ("industry", "sector"):
-                annual_levels[metric] = cell["level"]
-        if other_group:
-            logger.info(
-                "[report-sector-history] industry=%r sector=%r: no %s TTM point on %s — "
-                "the TTM median is another peer group's than the line's; the line ends at "
-                "its last complete year", industry, sector, cur_year, ", ".join(other_group),
-            )
         if withheld:
             logger.info(
                 "[report-sector-history] industry=%r sector=%r step=peer_line_gate: "
@@ -2716,7 +2613,14 @@ class TickerReportDataCollector:
         c["price_close_date"] = close_date.isoformat() if close_date else None
 
         # ── Altman Z-Score (manufacturing formula) ────────────────────
-        c["altman_z"] = _altman_z(balance, income, profile)
+        # ONE Z per report: the Financial Health card's own (the Health Check's latest-quarter
+        # balance sheet + trailing-four-quarter income + market cap). This used to be the
+        # ANNUAL statements with today's market cap — ORCL 1.56 beside the card's 1.48
+        # (2026-11-14) — and it reached the model's EVIDENCE ("Altman Z-Score: 1.56"), which
+        # the thesis and critical-factor syntheses may quote verbatim. The annual computation
+        # stands in only when the card carries no Z (no snapshot, or the row was omitted).
+        card_z = _card_altman_z(out.snap_health)
+        c["altman_z"] = card_z if card_z is not None else _altman_z(balance, income, profile)
 
         # ── Revenue growth YoY ────────────────────────────────────────
         if len(income) >= 2:
@@ -2875,11 +2779,13 @@ class TickerReportDataCollector:
         # regardless of FMP's response order (newest-first vs oldest-first
         # has flipped historically across endpoint versions).
         if estimates and len(estimates) >= 2:
-            # CAGR spans the visible chart years (up to 4) so the legend caption
-            # matches what the user sees. The off-screen anchor returned
-            # by the helper is consumed only by _build_revenue_forecast_
-            # partial for the leftmost bar's YoY chip — it must NOT
-            # stretch the CAGR span.
+            # The SCORED forecast CAGRs (forecast vital, persona inputs): up to 4 estimate
+            # years from the one in progress. No longer what any reader is shown — the
+            # legacy 4-bar chart is gone; the insight, PDF and chat print the timeline's own
+            # rate (`_timeline_growth`). Left as is so scores do not move (owner, 2026-11-14:
+            # "Keep scores unchanged"). The off-screen anchor returned by the helper is
+            # consumed only by _build_revenue_forecast_partial for the leftmost bar's YoY
+            # chip — it must NOT stretch the CAGR span.
             visible_est, _ = _select_visible_forecast_window(
                 estimates, income=income,
             )
@@ -3156,6 +3062,9 @@ class TickerReportDataCollector:
         out.revenue_forecast_partial = _build_revenue_forecast_partial(
             out.estimates, c.get("revenue_cagr"), c.get("eps_cagr"), out.income,
             revenue_crosses_basis=_revenue_crosses_basis(out),
+            # The code every annual income row agrees on (None → "$", as before).
+            currency=_engine_reporting_currency(out.income, None, out.ticker),
+            earnings=getattr(out, "earnings", None),
         )
 
         # ── Fundamental metrics (4 cards) — deterministic from the
@@ -3855,7 +3764,7 @@ class TickerReportDataCollector:
             # the report. JSON-clean dict → TickerReportResponse coerces back to
             # GrowthResponse. None when the growth fetch failed (legacy-safe).
             "growth_chart": (
-                out.growth_chart.model_dump(mode="json")
+                out.growth_chart.model_dump(mode="json", exclude=GROWTH_CHAT_ONLY_SERIES)
                 if out.growth_chart else None
             ),
             # Rich Profit Power chart (margins + per-margin sector medians), frozen
@@ -4131,6 +4040,28 @@ def _coerce_score(v: Any, default: float = 50.0) -> float:
     return max(0.0, min(100.0, f))
 
 
+def _card_altman_z(snap: Any) -> Optional[float]:
+    """The Financial Health card's own Altman Z, or None.
+
+    Read from the card's `altman_z` row: its `numeric_value` (the Health Check's value), else
+    its printed `value` when that is a plain number ("1.48"; "—" is no value). Works on the
+    response model and on a plain dict (a collection read back from cache). A non-finite or
+    unparseable figure is None, so the caller's annual fallback applies.
+    """
+    metrics = snap.get("metrics") if isinstance(snap, dict) else getattr(snap, "metrics", None)
+    if not isinstance(metrics, (list, tuple)):
+        return None
+    for m in metrics:
+        get = m.get if isinstance(m, dict) else (lambda k, _m=m: getattr(_m, k, None))
+        if get("metric_key") != "altman_z":
+            continue
+        z = _finite_or_none(get("numeric_value"))
+        if z is None and isinstance(get("value"), str):
+            z = _finite_or_none(get("value").strip())
+        return z
+    return None
+
+
 def _altman_z(
     balance: List[Dict[str, Any]],
     income: List[Dict[str, Any]],
@@ -4298,16 +4229,20 @@ def _format_close_date(close_date_iso: Optional[str], now: datetime) -> str:
     return _format_live_date(now)
 
 
-def _format_revenue(rev: Optional[float]) -> str:
+def _format_revenue(rev: Optional[float], currency: Any = None) -> str:
+    """Compact revenue ("$710M", "$1.2B"). `currency` is the filer's reporting currency: a
+    non-USD code replaces the "$" ("CNY 1.0T" — BABA's yuan read as dollars beside a USD
+    price line, 2026-11-14); USD, None or garbage keep "$" (`money_prefix`)."""
+    prefix = money_prefix(currency)
     if not rev or rev <= 0:
-        return "$0"
+        return f"{prefix}0"
     if rev >= 1e12:
-        return f"${rev / 1e12:.1f}T"
+        return f"{prefix}{rev / 1e12:.1f}T"
     if rev >= 1e9:
-        return f"${rev / 1e9:.1f}B"
+        return f"{prefix}{rev / 1e9:.1f}B"
     if rev >= 1e6:
-        return f"${rev / 1e6:.0f}M"
-    return f"${rev:,.0f}"
+        return f"{prefix}{rev / 1e6:.0f}M"
+    return f"{prefix}{rev:,.0f}"
 
 
 def _format_money_compact(value: Optional[float], currency: Any = None, *,
@@ -5525,8 +5460,7 @@ _SECTOR_METRIC_BY_HISTORY_KEY: Dict[str, str] = {
 # history_key → the sector_benchmarks metric whose line it is the RECIPROCAL of. Earnings yield
 # is sector-compared on the valuation card, and since Price-card payload v8 (owner decision
 # 2026-10-09) that comparison is 1 / P/E against 1 / the P/E median. Its drill-down peer line is
-# the same: 100 / the P/E line of the same period and peer group (the injected TTM point
-# included), never the STORED earnings_yield medians (net income ÷ market cap — a few percent off
+# the same: 100 / the P/E line of the same period and peer group, never the STORED earnings_yield medians (net income ÷ market cap — a few percent off
 # median 1/P/E where preferred dividends are common), which are no longer read. Withholding the
 # P/E line withholds this one with it. (Odd peer counts: median(1/P/E) = 1/median(P/E) exactly.)
 _RECIPROCAL_SECTOR_LINE_BY_HISTORY_KEY: Dict[str, str] = {
@@ -5654,12 +5588,44 @@ def _history_period_id(
 _RECON_RATIO_CEIL = 1000.0
 
 
-def _hist_pfcf(km: Dict[str, Any], cf: Dict[str, Any]) -> Optional[float]:
+# Quarterly drill-down rows that divide ONE quarter's flow by a balance or a price, and the
+# factor that puts them on a yearly scale (owner, 2026-11-14: "Annualize ×4"). FMP's quarterly
+# returnOnEquity / returnOnAssets are one quarter's net income over the period-end equity /
+# assets and its quarterly priceToSalesRatio is price over one quarter's sales, and the
+# P/FCF and EV/EBITDA reconstructions below read quarterly flows: ORCL's Q4 '26 bars read ROE
+# 10.1% / ROA 1.6% / P/S 37.2 / EV/EBITDA 86.9 against FY2026's 40.2% / 6.5% / 10.6 / 25.1 on
+# the same 2026-05-31 balance sheet, and the card's 42.58% / 6.24% / 5.28 / 13.2. The peer
+# quarterly line is built the same way (sector_benchmark_service reads the same FMP fields per
+# quarter), so it is scaled by the same factor and every bar-vs-peer ratio is unchanged.
+# NOT here: P/E (FMP annualizes quarterly EPS: Q4 '26 42.2 vs FY 41.78) and earnings yield
+# (100 / that P/E); P/B, D/E, current / quick ratio (balance over balance); margins and
+# interest coverage (flow over flow); growth (same quarter a year earlier).
+_QUARTERS_PER_YEAR = 4.0
+_QUARTERLY_ANNUALIZATION: Dict[str, float] = {
+    "roe": _QUARTERS_PER_YEAR,             # flow ÷ balance → ×4
+    "roa": _QUARTERS_PER_YEAR,
+    "ps": 1.0 / _QUARTERS_PER_YEAR,        # price ÷ flow → ÷4
+    "pfcf": 1.0 / _QUARTERS_PER_YEAR,
+    "ev_ebitda": 1.0 / _QUARTERS_PER_YEAR,
+}
+
+
+def _scaled(v: Optional[float], factor: Optional[float]) -> Optional[float]:
+    """``v * factor`` when both are present; ``v`` unchanged when no factor applies."""
+    if v is None or factor is None:
+        return v
+    return v * factor
+
+
+def _hist_pfcf(
+    km: Dict[str, Any], cf: Dict[str, Any], flow_scale: float = 1.0,
+) -> Optional[float]:
     """P/FCF = market cap ÷ FCF. None for non-positive FCF or an artefact-grade
     multiple (near-zero FCF → astronomical ratio). Mirrors the reconstruction
-    in sector_benchmark_service / valuation_snapshot_service."""
+    in sector_benchmark_service / valuation_snapshot_service. ``flow_scale`` annualizes a
+    quarter's FCF (4.0) BEFORE the ceiling, so the ceiling judges the yearly multiple."""
     mcap = _safe_float(km, "marketCap")
-    fcf = _safe_float(cf, "freeCashFlow")
+    fcf = _safe_float(cf, "freeCashFlow") * flow_scale
     if mcap <= 0 or fcf <= 0:
         return None
     ratio = mcap / fcf
@@ -5668,12 +5634,14 @@ def _hist_pfcf(km: Dict[str, Any], cf: Dict[str, Any]) -> Optional[float]:
 
 def _hist_ev_ebitda(
     km: Dict[str, Any], cf: Dict[str, Any], inc: Dict[str, Any],
+    flow_scale: float = 1.0,
 ) -> Optional[float]:
     """EV/EBITDA with the same EBITDA fallback chain used elsewhere
     (inc.ebitda → operatingIncome + D&A). The fallback requires a POSITIVE
     operating income — otherwise a deep operating loss + heavy D&A can
     manufacture a fake positive EBITDA and a misleading multiple. Also drops
-    artefact-grade multiples (near-zero EBITDA)."""
+    artefact-grade multiples (near-zero EBITDA). ``flow_scale`` annualizes a quarter's
+    EBITDA (4.0) BEFORE the ceiling, so the ceiling judges the yearly multiple."""
     ev = _safe_float(km, "enterpriseValue")
     if ev <= 0:
         return None
@@ -5689,8 +5657,41 @@ def _hist_ev_ebitda(
         ebitda = op_income + d_and_a
     if ebitda <= 0:
         return None
-    ratio = ev / ebitda
+    ratio = ev / (ebitda * flow_scale)
     return ratio if ratio <= _RECON_RATIO_CEIL else None
+
+
+def _prev_calendar_quarter(year: int, quarter: int) -> Tuple[int, int]:
+    """The calendar quarter before (year, quarter): Q1 2026 → Q4 2025."""
+    return (year, quarter - 1) if quarter > 1 else (year - 1, 4)
+
+
+def _ttm_income_at(
+    idx_inc: Dict[str, Dict[str, Any]], year: int, quarter: Optional[int],
+) -> Optional[Dict[str, float]]:
+    """Trailing-four-quarter income totals ending at calendar quarter (year, quarter), or None.
+
+    The four quarters are found by their calendar JOIN keys (`"{year}-Q{n}"`, the keys
+    `_history_period_id` gives quarterly rows), so they are contiguous by construction: a
+    missing quarter, a semi-annual filer (its halves land on every other calendar quarter)
+    or a fiscal-year-end change that skips a key yields None instead of a sum over the
+    wrong span. The sum itself is the Health Check's (`_sum_ttm_income`: four rows
+    required, a field missing in any of them dropped), so the drill-down's quarterly Altman
+    Z and the card's Z read the same flows.
+    """
+    if quarter is None or not 1 <= quarter <= 4:
+        return None
+    rows: List[Dict[str, Any]] = []
+    y, q = year, quarter
+    for _ in range(4):
+        rec = idx_inc.get(f"{y}-Q{q}")
+        if not isinstance(rec, dict):
+            return None
+        rows.append(rec)
+        y, q = _prev_calendar_quarter(y, q)
+    from app.services.health_check_service import _sum_ttm_income
+
+    return _sum_ttm_income(rows) or None
 
 
 def _fundamentals_history_for_period(
@@ -5772,6 +5773,11 @@ def _fundamentals_history_for_period(
     def prior_key(cal_year: int, quarter: Optional[int]) -> str:
         return f"{cal_year - 1}" if quarter is None else f"{cal_year - 1}-Q{quarter}"
 
+    # A quarter's ROE / ROA / P/S / P/FCF / EV/EBITDA on a yearly scale
+    # (`_QUARTERLY_ANNUALIZATION`); annual rows are already yearly.
+    q_scale: Dict[str, float] = _QUARTERLY_ANNUALIZATION if quarterly else {}
+    q_flow = _QUARTERS_PER_YEAR if quarterly else 1.0
+
     for key, (year, quarter, label, _sort_date) in ordered:
         inc, bal = idx_inc.get(key), idx_bal.get(key)
         cf, km, rat = idx_cf.get(key), idx_km.get(key), idx_rat.get(key)
@@ -5795,7 +5801,10 @@ def _fundamentals_history_for_period(
             # misleading negative bar). D/E etc. below are NOT gated.
             add("pe", label, _positive_or_none(_num_or_none(rat.get("priceToEarningsRatio"))))
             add("pb", label, _positive_or_none(_num_or_none(rat.get("priceToBookRatio"))))
-            add("ps", label, _positive_or_none(_num_or_none(rat.get("priceToSalesRatio"))))
+            add("ps", label, _scaled(
+                _positive_or_none(_num_or_none(rat.get("priceToSalesRatio"))),
+                q_scale.get("ps"),
+            ))
             add("debt_to_equity", label, _num_or_none(rat.get("debtToEquityRatio")))
             # Current/Quick ratio are structurally >= 0 (assets & liabilities are
             # non-negative) → gate a negative as bad data (undefined marker).
@@ -5806,12 +5815,14 @@ def _fundamentals_history_for_period(
             add("interest_coverage", label, _num_or_none(rat.get("interestCoverageRatio")))
 
         if km is not None:
-            add("roe", label, _pct_or_none(km.get("returnOnEquity")))
-            add("roa", label, _pct_or_none(km.get("returnOnAssets")))
+            add("roe", label, _pct_or_none(
+                _scaled(_num_or_none(km.get("returnOnEquity")), q_scale.get("roe"))))
+            add("roa", label, _pct_or_none(
+                _scaled(_num_or_none(km.get("returnOnAssets")), q_scale.get("roa"))))
             if cf is not None:
-                add("pfcf", label, _hist_pfcf(km, cf))
+                add("pfcf", label, _hist_pfcf(km, cf, flow_scale=q_flow))
                 if inc is not None:
-                    add("ev_ebitda", label, _hist_ev_ebitda(km, cf, inc))
+                    add("ev_ebitda", label, _hist_ev_ebitda(km, cf, inc, flow_scale=q_flow))
 
         if bal is not None and inc is not None:
             # Use this period's own market cap (from key_metrics) so the
@@ -5819,7 +5830,17 @@ def _fundamentals_history_for_period(
             # period — not today's. Falls back to the current profile mktCap
             # when the period has no key_metrics row.
             _km_mcap = _num_or_none(km.get("marketCap")) if isinstance(km, dict) else None
-            add("altman_z", label, _altman_z([bal], [inc], profile, mkt_cap_override=_km_mcap))
+            # Altman's EBIT/TA (weight 3.3) and Sales/TA (1.0) are ANNUAL flows. A quarter's
+            # point used that ONE quarter's EBIT and revenue beside a full balance sheet, so
+            # every quarterly bar read ~0.4 low: ORCL Q4 '26 2.11 vs FY2026 2.48 on the same
+            # 2026-05-31 balance sheet, Q1 '27 1.29 under the card's 1.48 (2026-11-14, owner:
+            # "TTM flows"). A quarter now sums the four quarters ending there, as the card's
+            # Z does; fewer than four contiguous quarters is no point, never a low one.
+            z_inc = _ttm_income_at(idx_inc, year, quarter) if quarterly else inc
+            add("altman_z", label, (
+                _altman_z([bal], [z_inc], profile, mkt_cap_override=_km_mcap)
+                if z_inc else None
+            ))
 
         # YoY vs the SAME period one year earlier (direct key lookup).
         pk = prior_key(year, quarter)
@@ -5984,8 +6005,15 @@ def _build_fundamentals_history(out: "CollectedTickerData") -> Dict[str, Dict[st
 
         sa, sa_has = _aligned_sector_series(
             payload["annual"], ann_keys, _peer_map(annual_bench), to_percent)
+        # The quarterly peer medians are one-quarter figures exactly like the company's
+        # (`_QUARTERLY_ANNUALIZATION`): the same factor puts them on the yearly scale, and a
+        # median scales with its members, so bar-vs-peer is unchanged.
+        q_factor = _QUARTERLY_ANNUALIZATION.get(key)
+        q_peer = _peer_map(quarterly_bench)
+        if q_factor is not None:
+            q_peer = {k: v * q_factor for k, v in q_peer.items() if v is not None}
         sq, sq_has = _aligned_sector_series(
-            payload["quarterly"], qtr_keys, _peer_map(quarterly_bench), to_percent)
+            payload["quarterly"], qtr_keys, q_peer, to_percent)
         if sa_has:
             payload["sector_annual"] = sa
             if annual_levels.get(sector_name) in ("industry", "sector"):
@@ -6010,6 +6038,54 @@ def _growth_row_values(metrics: Any) -> Dict[str, float]:
         if key and isinstance(text, str) and _GROWTH_ROW_VALUE_RE.fullmatch(text.strip()):
             values[key] = float(text.strip().rstrip("%").replace(",", ""))
     return values
+
+
+def _current_comparison(m: Any, rows: Any) -> Dict[str, Any]:
+    """The drill-down's second legend line for one card row (owner decisions 2026-11-13):
+    ``current_value`` / ``current_peer_median`` / ``current_score`` / ``current_period``,
+    from the row's own `numeric_value` / `peer_median` / `score` / `period_label` — the
+    comparison the card itself printed and scored, so the line can never disagree with the
+    card.
+
+    - The numbers are emitted only when finite (a NaN would 500 the report and cannot be
+      stored in jsonb).
+    - ``current_score`` is the row's own score (an int, never a bool) whenever the line has
+      a number at all — a value, a median, or both: a Growth row whose year has no peer
+      figure yet ("FY2026 34.33% · Industry not out yet") is still coloured as the card
+      judged it. EXCEPT Earnings Yield, unscored by design: it takes the P/E row's score,
+      and only beside a median — its median is 1 / the P/E row's usable median and its value
+      1 / the displayed P/E, so the P/E bands judge exactly that pair (cheap P/E = high
+      yield = good), and nothing else.
+    - ``current_period`` ("FY2026") names the CLOSED period the row's figure covers, whenever
+      the row has a `period_label`: a Growth row (its value is a fiscal year's YoY), or a
+      Price row shown on a LAST-FISCAL-YEAR basis (a P/FCF or EV/EBITDA reconstruction, which
+      carries no value or median — the period alone stops the sheet calling it TTM). A row
+      without it is a TTM / current row and keeps its "Current (TTM)" wording.
+
+    A snapshot cached before these fields existed yields nothing — period line only."""
+    out: Dict[str, Any] = {}
+    value = _finite_or_none(getattr(m, "numeric_value", None))
+    if value is not None:
+        out["current_value"] = value
+    median = _finite_or_none(getattr(m, "peer_median", None))
+    if median is not None:
+        out["current_peer_median"] = median
+    period = getattr(m, "period_label", None)
+    if isinstance(period, str) and period.strip():
+        out["current_period"] = period.strip()
+    if value is None and median is None:
+        return out
+    score = getattr(m, "score", None)
+    if getattr(m, "metric_key", None) == "earnings_yield":
+        pe_row = next(
+            (r for r in (rows or []) if getattr(r, "metric_key", None) == "pe"), None)
+        score = (
+            getattr(pe_row, "score", None)
+            if (pe_row is not None and median is not None) else None
+        )
+    if isinstance(score, int) and not isinstance(score, bool):
+        out["current_score"] = score
+    return out
 
 
 def _snapshot_to_card(
@@ -6084,6 +6160,7 @@ def _snapshot_to_card(
                 md["sector_quarterly_history"] = h["sector_quarterly"]
                 if h.get("sector_quarterly_level"):
                     md["sector_quarterly_level"] = h["sector_quarterly_level"]
+            md.update(_current_comparison(m, snap.metrics))
         metrics.append(md)
     if extra_metrics:
         metrics.extend(extra_metrics)
@@ -6710,6 +6787,11 @@ class _TimelineRow(NamedTuple):
     revenue_analyst_count: Optional[int]
     eps_analyst_count: Optional[int]
     period_end: str  # "yyyy-MM-dd" — the fiscal period's END date
+    # Which EPS `eps` holds: "gaap" (the income statement's `epsDiluted`) or "adjusted" (the
+    # four quarterly earnings-feed actuals summed, `_adjusted_annual_eps`) on a reported year,
+    # "consensus" on a forecast year. `gaap_eps` keeps the GAAP figure of an "adjusted" year.
+    eps_basis: str = "gaap"
+    gaap_eps: Optional[float] = None
 
 
 def _iso_day(value: Any) -> Optional[date]:
@@ -6732,8 +6814,15 @@ def _rows_symbol(*row_lists: Any) -> str:
 def _annual_timeline_rows(
     income: Optional[List[Dict[str, Any]]],
     estimates: Optional[List[Dict[str, Any]]],
+    *,
+    adjusted_eps: Optional[Dict[int, float]] = None,
 ) -> Tuple[List[_TimelineRow], List[_TimelineRow]]:
     """(actual rows, forecast rows), each ascending by FISCAL year, one row per year.
+
+    `adjusted_eps` (from `_adjusted_annual_eps`): when given, EVERY reported year's EPS is
+    that year's adjusted figure — None (→ "N/A") for a year it has none — and the GAAP figure
+    moves to `gaap_eps`. Never a mix: a year without an adjusted figure is not filled with
+    GAAP, which would put two measures on one line.
 
     Actual years come from `annual_fiscal_year` (FMP `fiscalYear`, else the period END
     minus 7 days) — NOT `date[:4]`. A 52/53-week filer that closes its year on the
@@ -6756,7 +6845,19 @@ def _annual_timeline_rows(
         # estimated* names. None-preserving (a genuinely absent field → "N/A"),
         # unlike _est_revenue/_est_eps which collapse missing to 0.0.
         v = _num_or_none(est.get(primary))
-        return v if v is not None else _num_or_none(est.get(legacy))
+        if v is None:
+            v = _num_or_none(est.get(legacy))
+        if v == 0:
+            # FMP sends a BLANK consensus as an exact 0 (BABA FY2031: epsAvg 0 from 7 analysts
+            # beside a CNY 1-trillion revenue). Drawn as a real 0.00 the EPS line dropped to
+            # zero and the popup read -100%. An average of several estimates landing on exactly
+            # zero is not a forecast anyone made: it is absent ("N/A").
+            logger.info(
+                "[report-timeline-blank-estimate] %s: %s %s is 0 — shown as N/A",
+                ticker, str(est.get("date") or "")[:10], primary,
+            )
+            return None
+        return v
 
     actual_by_fy: Dict[int, _TimelineRow] = {}
     for rec in income or []:
@@ -6776,10 +6877,17 @@ def _annual_timeline_rows(
             if held.period_end >= end.isoformat():
                 continue
         # Reported actuals have no analyst coverage.
-        actual_by_fy[fy] = _TimelineRow(
-            fy, _num_or_none(rec.get("revenue")), _num_or_none(rec.get("epsDiluted")),
-            False, None, None, end.isoformat(),
-        )
+        gaap = _num_or_none(rec.get("epsDiluted"))
+        if adjusted_eps is not None:
+            actual_by_fy[fy] = _TimelineRow(
+                fy, _num_or_none(rec.get("revenue")), adjusted_eps.get(fy),
+                False, None, None, end.isoformat(), "adjusted", gaap,
+            )
+        else:
+            actual_by_fy[fy] = _TimelineRow(
+                fy, _num_or_none(rec.get("revenue")), gaap,
+                False, None, None, end.isoformat(),
+            )
     actuals = [actual_by_fy[k] for k in sorted(actual_by_fy)]
 
     last = actuals[-1] if actuals else None
@@ -6813,6 +6921,7 @@ def _annual_timeline_rows(
             _int_or_none(est.get("numAnalystsRevenue")),
             _int_or_none(est.get("numAnalystsEps")),
             end.isoformat(),
+            "consensus",
         )
     forecasts = [forecast_by_fy[k] for k in sorted(forecast_by_fy)]
 
@@ -6825,23 +6934,273 @@ def _annual_timeline_rows(
     return actuals, forecasts
 
 
-def _signed_revenue_label(rev: Optional[float]) -> str:
+# ── Adjusted EPS history (owner, 2026-11-14: "Switch to adjusted") ──────────────────────
+# Reported years used to plot GAAP `epsDiluted` while forecast years plot the consensus,
+# which is ADJUSTED for most companies: ORCL drew GAAP $5.83 → consensus $8.15, a "+40%" step
+# that is mostly the gap between the two measures, so the first forecast year's EPS change was
+# left blank. Every platform researched (Yahoo, stockanalysis, Finviz, Zacks, TIKR, Seeking
+# Alpha, Morningstar) measures that year against the last reported year ON THE CONSENSUS'S
+# BASIS (ORCL: 8.15 / 7.63 = +6.8%), because the data vendors record each "actual" on the
+# basis most analysts forecast. The earnings feed's quarterly actuals are those figures (ORCL
+# 1.47 + 2.26 + 1.79 + 2.11 = 7.63 = Yahoo's normalized FY2026), so a reported year's EPS is
+# the sum of its four quarters. Measured on 58 cached collections (2026-11-14): within a few
+# percent of the year's consensus for nearly every large company.
+#
+# A year's quarters: the four feed quarters whose period ends fall inside its fiscal window,
+# each consensus-comparable (`has_estimate`, a surprise was computed — a GAAP fallback or a
+# dropped-digit quarter has neither). Anything else (three quarters, a half-year filer, a
+# changed year-end) leaves that year N/A, never a GAAP figure.
+_ADJ_EPS_SLACK_DAYS = 7          # a quarter's period end vs the fiscal window's edges
+# Consecutive quarter ends. 125, not 105: a 12/12/12/16-week calendar (Costco, PepsiCo) has a
+# 112-day fourth quarter (119 in a 53-week year). Half-years are ~182 apart.
+_ADJ_EPS_QUARTER_GAP_DAYS = (75, 125)
+# A reported year carries its GAAP figure (`eps_gaap_label`, the signal iOS reads to label the
+# line "Adj. EPS") only when the two differ by more than this: Apple, Alphabet and Meta report
+# GAAP EPS alone, their feed quarters sum to it within a cent or two, and "Adj." would be false.
+_ADJ_EPS_GAAP_DIFF_SHARE = 0.02
+_ADJ_EPS_GAAP_DIFF_FLOOR = 0.03
+# The LAST reported year (the first forecast year's base) must land near that year's own
+# consensus, or the whole timeline keeps GAAP: Berkshire's feed holds GAAP-like quarters
+# ($29.21 vs a $21.48 operating consensus), Nike's $2.09 sat 39% above a $1.50 consensus.
+# Only that year: FMP's consensus rows for OLDER years are unreliable (FY2024: ORCL 3.99,
+# CSCO 2.29, AVGO 2.23 beside true adjusted 5.56 / 3.73 / 4.86) and would drop good years.
+_ADJ_EPS_CONSENSUS_TOLERANCE = 0.25
+_ADJ_EPS_CONSENSUS_FLOOR = 0.10  # per share: a near-zero EPS has no meaningful % gap
+_ADJ_EPS_CONSENSUS_MATCH_DAYS = 10
+
+
+def _eps_consensus_at(estimates: Optional[List[Dict[str, Any]]], end: date) -> Optional[float]:
+    """The analyst EPS consensus FMP keeps for the fiscal year ending `end` (the estimate row
+    whose period end is nearest, within `_ADJ_EPS_CONSENSUS_MATCH_DAYS`). None when absent; a
+    blank 0 (FMP's empty consensus) is absent too."""
+    best: Optional[Tuple[int, float]] = None
+    for est in estimates or []:
+        if not isinstance(est, dict):
+            continue
+        d = _iso_day(est.get("date"))
+        if d is None:
+            continue
+        gap = abs((d - end).days)
+        if gap > _ADJ_EPS_CONSENSUS_MATCH_DAYS:
+            continue
+        value = _num_or_none(est.get("epsAvg"))
+        if value is None:
+            value = _num_or_none(est.get("estimatedEpsAvg"))
+        if value is None or value == 0:
+            continue
+        if best is None or gap < best[0]:
+            best = (gap, value)
+    return best[1] if best is not None else None
+
+
+def _comparable_quarter(q: Any) -> Optional[Tuple[date, Optional[float]]]:
+    """(period end, actual) of one earnings-feed EPS quarter; the actual is None when the
+    quarter is not a consensus-comparable figure. None when the quarter is undatable."""
+    end = _iso_day(getattr(q, "fiscal_date", None))
+    if end is None:
+        return None
+    actual = getattr(q, "actual_value", None)
+    surprise = getattr(q, "surprise_percent", None)
+    comparable = (
+        getattr(q, "has_estimate", None) is True
+        and not isinstance(actual, bool) and _num_or_none(actual) is not None
+        and not isinstance(surprise, bool) and _num_or_none(surprise) is not None
+    )
+    return end, (float(actual) if comparable else None)
+
+
+def _adjusted_annual_eps(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+    earnings: Any,
+    *,
+    currency: Any = None,
+) -> Optional[Dict[int, float]]:
+    """{fiscal year: adjusted EPS} for the Earnings Timeline's reported years, or None when the
+    timeline keeps GAAP (see the block comment above). None when: there is no forecast year (no
+    consensus to match), the filer does not report in USD (the feed's currency and per-share
+    unit are unverified for foreign filers), the last reported year has no four comparable
+    quarters, or its sum is off its own consensus. Every None is logged with its reason."""
+    ticker = _rows_symbol(income, estimates)
+    actuals, forecasts = _annual_timeline_rows(income, estimates)
+    if not actuals or not forecasts:
+        return None
+    if currency != "USD":
+        logger.info(
+            "[report-timeline-adjusted-eps] %s: reporting currency %s — GAAP EPS kept (the "
+            "feed's currency is unverified for a non-USD filer)", ticker, currency,
+        )
+        return None
+    quarters = [
+        cq for q in (getattr(earnings, "eps_quarters", None) or [])
+        if (cq := _comparable_quarter(q)) is not None
+    ]
+    slack = timedelta(days=_ADJ_EPS_SLACK_DAYS)
+    lo_gap, hi_gap = _ADJ_EPS_QUARTER_GAP_DAYS
+    by_year: Dict[int, float] = {}
+    for i, row in enumerate(actuals):
+        end = _iso_day(row.period_end)
+        if end is None:
+            continue
+        prev = actuals[i - 1] if i > 0 and actuals[i - 1].fy == row.fy - 1 else None
+        prev_end = _iso_day(prev.period_end) if prev is not None else None
+        opens = (prev_end if prev_end is not None else end - timedelta(days=366)) + slack
+        inside = sorted(q for q in quarters if opens < q[0] <= end + slack)
+        ends = [d for d, _ in inside]
+        if (
+            len(inside) != 4 or len(set(ends)) != 4
+            or any(v is None for _, v in inside)
+            or abs((ends[-1] - end).days) > _ADJ_EPS_SLACK_DAYS
+            or any(not lo_gap <= (b - a).days <= hi_gap for a, b in zip(ends, ends[1:]))
+        ):
+            continue
+        # `+ 0.0`: quarters that cancel out (-0.05 - 0.02 + 0.03 + 0.04) round to -0.0,
+        # which printed "$-0.00".
+        by_year[row.fy] = round(sum(v for _, v in inside if v is not None), 4) + 0.0
+
+    last = actuals[-1]
+    adjusted = by_year.get(last.fy)
+    if adjusted is None:
+        logger.info(
+            "[report-timeline-adjusted-eps] %s: FY%s has no four comparable feed quarters — "
+            "GAAP EPS kept", ticker, last.fy,
+        )
+        return None
+    last_end = _iso_day(last.period_end)
+    consensus = _eps_consensus_at(estimates, last_end) if last_end is not None else None
+    if consensus is None:
+        logger.info(
+            "[report-timeline-adjusted-eps] %s: no FY%s EPS consensus to check the adjusted "
+            "%.4f against — GAAP EPS kept", ticker, last.fy, adjusted,
+        )
+        return None
+    allowed = max(_ADJ_EPS_CONSENSUS_TOLERANCE * abs(consensus), _ADJ_EPS_CONSENSUS_FLOOR)
+    if abs(adjusted - consensus) > allowed:
+        logger.warning(
+            "[report-timeline-adjusted-eps] %s: FY%s adjusted EPS %.4f is %.4f from its "
+            "consensus %.4f (allowed %.4f) — not the consensus's basis; GAAP EPS kept",
+            ticker, last.fy, adjusted, abs(adjusted - consensus), consensus, allowed,
+        )
+        return None
+    missing = [r.fy for r in actuals[-_TIMELINE_ACTUALS_SHOWN:] if r.fy not in by_year]
+    logger.info(
+        "[report-timeline-adjusted-eps] %s: adjusted EPS for %s (FY%s %.4f vs consensus "
+        "%.4f)%s", ticker, sorted(by_year), last.fy, adjusted, consensus,
+        f"; N/A for {missing}" if missing else "",
+    )
+    return by_year
+
+
+def _signed_revenue_label(rev: Optional[float], currency: Any = None) -> str:
     """`_format_revenue` with a sign: it collapses every non-positive value to "$0", which
-    captioned a below-zero bar (a financial's negative revenue year) "$0"."""
+    captioned a below-zero bar (a financial's negative revenue year) "$0". `currency` is the
+    filer's reporting currency ("CNY 1.0T", never "$1.0T" for a figure in yuan)."""
     if rev is None:
         return "N/A"
     if rev < 0:
-        return "-" + _format_revenue(-rev)
-    return _format_revenue(rev)
+        return "-" + _format_revenue(-rev, currency)
+    return _format_revenue(rev, currency)
 
 
-def _signed_eps_label(eps: Optional[float]) -> str:
-    """"-$2.00", not "$-2.00" — the module's sign style (`_format_money_compact`)."""
+def _signed_eps_label(eps: Optional[float], currency: Any = None) -> str:
+    """"-$2.00", not "$-2.00" — the module's sign style (`_format_money_compact`); a non-USD
+    filer's code replaces the "$" ("-CNY 2.00")."""
     if eps is None:
         return "N/A"
+    eps = eps + 0.0  # -0.0 → 0.0: f"{-0.0:.2f}" is "-0.00"
+    prefix = money_prefix(currency)
     if eps < 0 and round(abs(eps), 2) > 0:
-        return f"-${abs(eps):.2f}"
-    return f"${abs(eps):.2f}" if eps < 0 else f"${eps:.2f}"
+        return f"-{prefix}{abs(eps):.2f}"
+    return f"{prefix}{abs(eps):.2f}" if eps < 0 else f"{prefix}{eps:.2f}"
+
+
+# The Earnings Timeline's window: the last N reported years (the standard forecast-chart past)
+# and up to M forward estimate years (whatever FMP has, capped).
+_TIMELINE_ACTUALS_SHOWN = 5
+_TIMELINE_FORECASTS_SHOWN = 5
+
+
+def _timeline_window(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+    *,
+    adjusted_eps: Optional[Dict[int, float]] = None,
+) -> Tuple[List[_TimelineRow], List[_TimelineRow]]:
+    """(off-screen YoY anchor, DISPLAYED rows) of the Earnings Timeline — the one window the
+    chart (`_build_annual_timeline`) and the growth rates its text cites (`_timeline_growth`)
+    both read, so the insight can never quote a span the chart does not draw.
+
+    The anchor is the one older actual (when present) kept only as the leftmost bar's YoY
+    base, so it still gets a % chip; it is never drawn."""
+    actuals, forecasts = _annual_timeline_rows(income, estimates, adjusted_eps=adjusted_eps)
+    anchor: List[_TimelineRow] = (
+        actuals[-(_TIMELINE_ACTUALS_SHOWN + 1):-_TIMELINE_ACTUALS_SHOWN]
+        if len(actuals) > _TIMELINE_ACTUALS_SHOWN else []
+    )
+    return anchor, actuals[-_TIMELINE_ACTUALS_SHOWN:] + forecasts[:_TIMELINE_FORECASTS_SHOWN]
+
+
+def _span_cagr(
+    rows: List[_TimelineRow], first: int, last: int, field: str,
+) -> Tuple[Optional[float], Optional[str]]:
+    """(CAGR %, span label) of `field` ("revenue" / "eps") from rows[first] to rows[last].
+
+    The exponent is the FISCAL-YEAR difference, never the row count. None (and no label)
+    when the span is not one consecutive run of years (a gap, a duplicate, an unordered
+    year), is shorter than one year, or either end is missing or not positive — a growth
+    rate from or to a loss is not defined."""
+    if not (0 <= first < last < len(rows)):
+        return None, None
+    span = rows[first:last + 1]
+    if any(b.fy - a.fy != 1 for a, b in zip(span, span[1:])):
+        return None, None
+    start, end = getattr(span[0], field), getattr(span[-1], field)
+    if start is None or end is None or start <= 0 or end <= 0:
+        return None, None
+    years = span[-1].fy - span[0].fy
+    rate = round(((end / start) ** (1.0 / years) - 1) * 100, 1)
+    if not math.isfinite(rate):
+        return None, None
+    first_label = f"FY{span[0].fy}{'E' if span[0].is_forecast else ''}"
+    return rate + 0.0, f"{first_label}–FY{span[-1].fy}{'E' if span[-1].is_forecast else ''}"
+
+
+def _timeline_growth(
+    income: Optional[List[Dict[str, Any]]],
+    estimates: Optional[List[Dict[str, Any]]],
+    *,
+    revenue_crosses_basis: bool = False,
+    adjusted_eps: Optional[Dict[int, float]] = None,
+) -> Dict[str, Any]:
+    """The growth rates the report's TEXT cites (insight prompt, evidence, PDF, chat), measured
+    over the bars the Future Forecast chart actually draws (`_timeline_window`).
+
+    The old figure was the consensus CAGR over a 4-estimate window of the legacy module chart
+    (PLUG: FY2026E-FY2029E, "22% annually") — a span drawn nowhere once the chart became the
+    timeline, skipping the FY2025→FY2026 step and the last bar. Owner, 2026-11-14:
+    - Revenue: the last REPORTED year → the last forecast year ("Last reported → last
+      forecast"). Where reported and consensus revenue are different measures (a bank,
+      `revenue_crosses_basis`) or nothing is reported, the first → last forecast year.
+    - EPS: the same span when the reported years are ADJUSTED (`adjusted_eps`, the
+      consensus's basis — 2026-11-14). On GAAP years, first → last forecast year only: GAAP
+      against an adjusted consensus is not a growth rate.
+    The SCORED rates (`c["revenue_cagr"]` / `c["eps_cagr"]`) are untouched ("Keep scores
+    unchanged"). Every value is None when it cannot be measured."""
+    out: Dict[str, Any] = {
+        "revenue_cagr": None, "revenue_span": None, "eps_cagr": None, "eps_span": None,
+    }
+    _anchor, rows = _timeline_window(income, estimates, adjusted_eps=adjusted_eps)
+    n_actual = sum(1 for r in rows if not r.is_forecast)
+    if not rows or n_actual == len(rows) or any(r.is_forecast for r in rows[:n_actual]):
+        return out  # no forecast column, or actuals and forecasts interleaved
+    last = len(rows) - 1
+    rev_first = n_actual - 1 if n_actual > 0 and not revenue_crosses_basis else n_actual
+    out["revenue_cagr"], out["revenue_span"] = _span_cagr(rows, rev_first, last, "revenue")
+    eps_first = (
+        n_actual - 1 if n_actual > 0 and rows[n_actual - 1].eps_basis == "adjusted" else n_actual
+    )
+    out["eps_cagr"], out["eps_span"] = _span_cagr(rows, eps_first, last, "eps")
+    return out
 
 
 def _build_annual_timeline(
@@ -6849,10 +7208,19 @@ def _build_annual_timeline(
     estimates: Optional[List[Dict[str, Any]]],
     *,
     revenue_crosses_basis: bool = False,
+    currency: Any = None,
+    adjusted_eps: Optional[Dict[int, float]] = None,
 ) -> List[Dict[str, Any]]:
     """One continuous yearly revenue+EPS series for the Earnings Timeline view:
     the last 5 reported ACTUAL years (is_forecast=False) followed GAPLESSLY by up
     to 5 forward analyst-estimate years (is_forecast=True).
+
+    EPS since 2026-11-14 ("Switch to adjusted"): with `adjusted_eps` the reported years are
+    the ADJUSTED figures the consensus is on (`_adjusted_annual_eps`), so the first forecast
+    year's EPS change is measured like every other year's (ORCL FY2027E: 8.15 vs 7.63 =
+    +6.8%), each reported row carries its GAAP figure as `eps_gaap_label`, and `eps_basis` is
+    "adjusted". Without it (no four comparable quarters, a non-USD filer, a last year off its
+    consensus) the rules below hold unchanged.
 
     This is the industry-standard forecast window — a short, deliberate past (not a
     company's whole history: Apple/Coca-Cola back to the 1990s is noise on a forecast
@@ -6880,20 +7248,10 @@ def _build_annual_timeline(
     window in `_build_revenue_forecast_partial`. Reuses inputs the collector
     already fetched (no new FMP calls). Returns [] when there is no data.
     """
-    _ACTUALS_SHOWN = 5   # last N reported years (standard forecast-chart past window)
-    _FORECASTS_SHOWN = 5  # up to N forward estimate years (whatever FMP has, capped)
-
-    actuals, forecasts = _annual_timeline_rows(income, estimates)
-
     # Window: last 5 actuals DISPLAYED, plus one older actual (when present) kept
     # ONLY as the leftmost bar's off-screen YoY anchor (so it still gets a % chip),
-    # then up to 5 forecasts. Mirrors the off-screen-anchor idea in
-    # _select_visible_forecast_window.
-    anchor: List[_TimelineRow] = (
-        actuals[-(_ACTUALS_SHOWN + 1):-_ACTUALS_SHOWN]
-        if len(actuals) > _ACTUALS_SHOWN else []
-    )
-    display_rows = actuals[-_ACTUALS_SHOWN:] + forecasts[:_FORECASTS_SHOWN]
+    # then up to 5 forecasts. The same window `_timeline_growth` measures.
+    anchor, display_rows = _timeline_window(income, estimates, adjusted_eps=adjusted_eps)
     if not display_rows:
         return []
     rows_for_yoy = anchor + display_rows
@@ -6906,9 +7264,19 @@ def _build_annual_timeline(
         # abs(prior) so a NEGATIVE base (loss years — EPS/FCF for names like PLUG)
         # still yields a correctly-signed %: a narrowing loss reads positive, a
         # widening loss negative. Only a zero prior has no defined YoY.
+        # THREE decimals: every reader rounds again (iOS "%.0f", the PDF "%+.1f", the prompt
+        # ":+.0f"), and a 1-dp value rounded twice: PLUG FY2024's -29.453% became -29.5, then
+        # "-30" (half-to-even) on the chip, one point off (2026-11-14).
         if curr is None or prior is None or prior == 0:
             return None
-        return round((curr - prior) / abs(prior) * 100, 1)
+        return round((curr - prior) / abs(prior) * 100, 3)
+
+    def _revenue_yoy(curr: Optional[float], prior: Optional[float]) -> Optional[float]:
+        # The abs(prior) rule is for EPS loss years. Revenue at or below zero has no growth
+        # rate: PLUG FY2021 read +639% against its FY2020 revenue of -$93M (2026-11-14).
+        if curr is None or prior is None or prior <= 0 or curr < 0:
+            return None
+        return _yoy(curr, prior)
 
     series: List[Dict[str, Any]] = []
     for k in range(anchor_offset, len(rows_for_yoy)):
@@ -6917,22 +7285,38 @@ def _build_annual_timeline(
         if prior is not None and prior.fy != row.fy - 1:
             prior = None  # a gap year: no single-year change to measure
         prior_rev = prior.revenue if prior is not None else None
-        # GAAP actual → consensus forecast: not a growth rate (see the docstring).
-        crosses_basis = prior is not None and row.is_forecast and not prior.is_forecast
-        prior_eps = prior.eps if prior is not None and not crosses_basis else None
-        if crosses_basis and revenue_crosses_basis:
+        # Reported → forecast. A GAAP actual → consensus EPS change is not a growth rate (see
+        # the docstring); an ADJUSTED actual is on the consensus's basis, so it is one.
+        boundary = prior is not None and row.is_forecast and not prior.is_forecast
+        eps_crosses = boundary and prior is not None and prior.eps_basis != "adjusted"
+        prior_eps = prior.eps if prior is not None and not eps_crosses else None
+        if boundary and revenue_crosses_basis:
             prior_rev = None
         rev, eps = row.revenue, row.eps
+        # The GAAP figure beside an adjusted one only where the two really differ
+        # (`_ADJ_EPS_GAAP_DIFF_*`); never on an N/A year, which has nothing to set it beside.
+        gaap = row.gaap_eps
+        gaap_differs = (
+            not row.is_forecast and row.eps_basis == "adjusted"
+            and eps is not None and gaap is not None
+            and abs(eps - gaap) > max(_ADJ_EPS_GAAP_DIFF_SHARE * abs(gaap), _ADJ_EPS_GAAP_DIFF_FLOOR)
+        )
         series.append({
             "period": str(row.fy),
             "period_end": row.period_end,
-            "revenue": round(rev / divisor, 2) if rev else 0.0,
-            "revenue_label": _signed_revenue_label(rev),
-            "revenue_yoy_pct": _yoy(rev, prior_rev),
+            # 4 dp: at 2 dp NVDA's $26.9B bar beside a $1.21T maximum was stored as 0.03T,
+            # drawn ~11% too tall (2026-11-14).
+            "revenue": round(rev / divisor, 4) if rev else 0.0,
+            "revenue_label": _signed_revenue_label(rev, currency),
+            "revenue_yoy_pct": _revenue_yoy(rev, prior_rev),
             "eps": round(eps, 2) if eps else 0.0,
-            "eps_label": _signed_eps_label(eps),
+            "eps_label": _signed_eps_label(eps, currency),
             "eps_yoy_pct": _yoy(eps, prior_eps),
-            "eps_basis": "consensus" if row.is_forecast else "gaap",
+            "eps_basis": "consensus" if row.is_forecast else row.eps_basis,
+            # The reported GAAP figure of an adjusted year that differs from it; None otherwise
+            # (GAAP, forecast and N/A rows included). Not displayed (owner: "we don't need to
+            # show GAAP anymore"): its presence is what makes iOS label the line "Adj. EPS".
+            "eps_gaap_label": _signed_eps_label(gaap, currency) if gaap_differs else None,
             "revenue_analyst_count": row.revenue_analyst_count,
             "eps_analyst_count": row.eps_analyst_count,
             "is_forecast": row.is_forecast,
@@ -6946,7 +7330,8 @@ _TIMELINE_FIRST_COLUMN_DAYS = 365
 
 
 def _build_timeline_prices(
-    historical: Any, annual_timeline: List[Dict[str, Any]]
+    historical: Any, annual_timeline: List[Dict[str, Any]],
+    *, now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Weekly close series (last trading day per ISO week) spanning the Earnings
     Timeline's ACTUAL years, for its price overlay.
@@ -6966,7 +7351,15 @@ def _build_timeline_prices(
     of the first label dropped NVDA's Feb–Dec prices of its first fiscal year (FY2022
     runs Feb 2021 – Jan 2022). Rows without `period_end` (older timelines) keep the
     calendar-year floor.
+
+    Only SETTLED closes: FMP's EOD feed carries the current session's partial bar, which a
+    report generated mid-session froze as its "last close" (2026-11-14). Rows dated after
+    the current close cycle's day are skipped — the rule `_latest_completed_close` uses.
     """
+    from app.services.ticker_report_cache import current_close_cycle_start
+    from app.utils.market_hours import ET
+
+    settled_through = current_close_cycle_start(now).astimezone(ET).date()
     actual_rows = [p for p in (annual_timeline or []) if not p.get("is_forecast")]
     if not actual_rows:
         return []
@@ -6996,7 +7389,7 @@ def _build_timeline_prices(
             d = date.fromisoformat(ds)
         except ValueError:
             continue
-        if not _in_window(d):
+        if not _in_window(d) or d > settled_through:
             continue
         close = _safe_float(rec, "close", _safe_float(rec, "price", 0.0))
         if close <= 0:
@@ -7054,7 +7447,16 @@ def _build_revenue_forecast_partial(
     income: Optional[List[Dict[str, Any]]] = None,
     *,
     revenue_crosses_basis: bool = False,
+    currency: Any = None,
+    earnings: Any = None,
 ) -> Dict[str, Any]:
+    # `earnings`: the collection's EarningsResponse, whose quarterly feed actuals give the
+    # timeline's reported years their ADJUSTED EPS (`_adjusted_annual_eps`, 2026-11-14).
+    # `revenue_cagr` / `eps_cagr` are the SCORED rates (the 4-estimate window below). The
+    # wire's `cagr` / `eps_growth` — what the insight, the PDF and report chat print — are
+    # measured over the timeline the chart draws (`_timeline_growth`) whenever it has a
+    # forecast column; the scored ones are only the fallback for a report without one.
+    # `currency`: the filer's reporting currency, for every money label ("CNY 1.0T").
     # Pick up to 4 forward projections plus the off-screen anchor (FY before
     # "current") for the leftmost bar's YoY chip. With fewer than 4 forward
     # years there is no anchor — see `_select_visible_forecast_window`.
@@ -7073,16 +7475,26 @@ def _build_revenue_forecast_partial(
     def _yoy(curr: float, prior: float) -> Optional[float]:
         """YoY % change. Uses abs(prior) so a negative base (loss years) still
         yields a correctly-signed % (a narrowing loss reads positive). None only
-        when prior is exactly zero (no defined YoY)."""
+        when prior is exactly zero (no defined YoY). Three decimals: readers round again
+        (see `_build_annual_timeline`)."""
         if prior is None or prior == 0:
             return None
-        return round((curr - prior) / abs(prior) * 100, 1)
+        return round((curr - prior) / abs(prior) * 100, 3)
+
+    def _revenue_yoy(curr: float, prior: Optional[float]) -> Optional[float]:
+        # Revenue at or below zero has no growth rate (abs(prior) is for EPS loss years).
+        if prior is None or prior <= 0 or curr < 0:
+            return None
+        return _yoy(curr, prior)
 
     # Label each projection with the SAME fiscal year the Earnings Timeline gives that
     # estimate (`_forecast_fiscal_label`). `date[:4]` named HD's FY2026 estimate (ending
     # 2027-01-31) "2027" while the timeline bar said 2026, so the Stage B insight — built
     # from these labels — cited a year one ahead of the chart it sits under.
-    timeline_actuals, _timeline_forecasts = _annual_timeline_rows(income, estimates)
+    adjusted_eps = _adjusted_annual_eps(income, estimates, earnings, currency=currency)
+    timeline_actuals, _timeline_forecasts = _annual_timeline_rows(
+        income, estimates, adjusted_eps=adjusted_eps,
+    )
     last_actual = timeline_actuals[-1] if timeline_actuals else None
 
     projections: List[Dict[str, Any]] = []
@@ -7104,23 +7516,27 @@ def _build_revenue_forecast_partial(
             # would print a multi-year change as YoY, which the timeline refuses too). EPS
             # stays None: a GAAP actual against a consensus figure is not a growth rate
             # (`crosses_basis`), Berkshire would show about -28%. Nor does revenue where it
-            # changes basis too (`_build_annual_timeline`).
-            if (
+            # changes basis too (`_build_annual_timeline`). An ADJUSTED reported EPS is on the
+            # consensus's basis, so it is read (2026-11-14), as the timeline does.
+            follows = (
                 anchor is None and last_actual is not None
-                and period == str(last_actual.fy + 1) and not revenue_crosses_basis
-            ):
+                and period == str(last_actual.fy + 1)
+            )
+            if follows and not revenue_crosses_basis:
                 prior_rev = last_actual.revenue
+            if follows and last_actual is not None and last_actual.eps_basis == "adjusted":
+                prior_eps = last_actual.eps
         else:
             prior_est = sorted_estimates[i - 1]
             prior_rev = _est_revenue(prior_est)
             prior_eps = _est_eps(prior_est)
         projections.append({
             "period": period,
-            "revenue": round(rev / divisor, 2) if rev else 0.0,
-            "revenue_label": _format_revenue(rev),
-            "revenue_yoy_pct": _yoy(rev, prior_rev) if rev else None,
+            "revenue": round(rev / divisor, 4) if rev else 0.0,
+            "revenue_label": _format_revenue(rev, currency),
+            "revenue_yoy_pct": _revenue_yoy(rev, prior_rev) if rev else None,
             "eps": round(eps, 2) if eps else 0.0,
-            "eps_label": f"${eps:.2f}" if eps else "$0",
+            "eps_label": _signed_eps_label(eps, currency) if eps else f"{money_prefix(currency)}0",
             "eps_yoy_pct": _yoy(eps, prior_eps) if eps else None,
             "revenue_analyst_count": _int_or_none(est.get("numAnalystsRevenue")),
             "eps_analyst_count": _int_or_none(est.get("numAnalystsEps")),
@@ -7129,18 +7545,34 @@ def _build_revenue_forecast_partial(
             "is_forecast": True,
         })
 
+    annual_timeline = _build_annual_timeline(
+        income, estimates, revenue_crosses_basis=revenue_crosses_basis, currency=currency,
+        adjusted_eps=adjusted_eps,
+    )
+    if any(row.get("is_forecast") for row in annual_timeline):
+        growth = _timeline_growth(
+            income, estimates, revenue_crosses_basis=revenue_crosses_basis,
+            adjusted_eps=adjusted_eps,
+        )
+        shown_rev, rev_span = growth["revenue_cagr"], growth["revenue_span"]
+        shown_eps, eps_span = growth["eps_cagr"], growth["eps_span"]
+    else:
+        shown_rev, rev_span, shown_eps, eps_span = revenue_cagr, None, eps_cagr, None
+
     return {
-        "cagr": revenue_cagr if revenue_cagr is not None else 0.0,
-        "eps_growth": eps_cagr if eps_cagr is not None else 0.0,
+        # Required floats on the wire: 0.0 is how "no rate" arrives (narrative_prompts and
+        # chat_context_resolver read it that way). The span says which bars a rate covers.
+        "cagr": shown_rev if shown_rev is not None else 0.0,
+        "cagr_span": rev_span,
+        "eps_growth": shown_eps if shown_eps is not None else 0.0,
+        "eps_growth_span": eps_span,
         "management_guidance": GUIDANCE_UNKNOWN,  # Stage A overlay sets a read only when a transcript existed
         "projections": projections,
         # Full GAPLESS yearly series (historical actuals + ALL forward estimates
         # after the last reported year) for the "Earnings Timeline" sheet —
         # independent of the curated `projections` window above (own divisor +
         # YoY). The module chart keeps using `projections`; the sheet uses this.
-        "annual_timeline": _build_annual_timeline(
-            income, estimates, revenue_crosses_basis=revenue_crosses_basis,
-        ),
+        "annual_timeline": annual_timeline,
         "forecast_analyst_count": _forecast_analyst_count(income, estimates),
         "guidance_quote": None,         # AI fills via Stage A (PR 6)
         "guidance_speaker": None,       # AI fills via Stage A (PR 6)
@@ -11387,10 +11819,28 @@ def build_financial_context(out: CollectedTickerData) -> str:
     else:
         parts.append(f"DCF Fair Value: {_fmt_currency_or_na(c.get('fair_value'))}")
         parts.append(f"DCF Upside: {_fmt_pct_or_na(c.get('upside_pct'))}")
-    parts.append(
-        f"Revenue CAGR (analyst est.): {_fmt_pct_or_na(c.get('revenue_cagr'))}"
-    )
-    parts.append(f"EPS CAGR (analyst est.): {_fmt_pct_or_na(c.get('eps_cagr'))}")
+    # The rates the report PRINTS (the Future Forecast chart's own span, `_timeline_growth`),
+    # with that span — never a second, differently-spanned figure beside the insight's. A
+    # collection built since 2026-11-14 always carries the span keys: then the printed value
+    # is the only one shown, N/A when the chart's span could not be measured (the scored
+    # 4-estimate rate here, unlabelled, contradicted the insight's "n/a" and the PDF's dash).
+    # A present span means MEASURED, so 0.0 is a flat outlook, not "no rate". Only an older
+    # cached collection, without the keys, still prints the scored rate.
+    rf_partial = getattr(out, "revenue_forecast_partial", None)
+    rf_partial = rf_partial if isinstance(rf_partial, dict) else {}
+    for label, key, span_key, scored in (
+        ("Revenue CAGR (analyst est.)", "cagr", "cagr_span", c.get("revenue_cagr")),
+        ("EPS CAGR (analyst est.)", "eps_growth", "eps_growth_span", c.get("eps_cagr")),
+    ):
+        if span_key not in rf_partial:
+            parts.append(f"{label}: {_fmt_pct_or_na(scored)}")
+            continue
+        shown, span = rf_partial.get(key), rf_partial.get(span_key)
+        number = shown if isinstance(shown, (int, float)) and not isinstance(shown, bool) else None
+        if span:
+            parts.append(f"{label}, {span}: {_fmt_pct_or_na(number)}")
+        else:
+            parts.append(f"{label}: {_fmt_pct_or_na(number if number else None)}")
 
     if income:
         for stmt in income[:3]:
@@ -11460,11 +11910,14 @@ def build_financial_context(out: CollectedTickerData) -> str:
 
     if estimates:
         parts.append("\nAnalyst Estimates:")
+        # In the filer's reporting currency, as the chart and the projection list label them:
+        # BABA's yuan estimates read "$1.1T" here beside "CNY 1.1T" there (2026-11-14).
+        est_currency = _engine_reporting_currency(out.income, None, out.ticker)
         for est in estimates[:2]:
             parts.append(
                 f"  {est.get('date', '?')}: "
-                f"Rev {_format_money_compact(_est_revenue(est))}, "
-                f"EPS ${_est_eps(est):.2f}"
+                f"Rev {_format_money_compact(_est_revenue(est), est_currency)}, "
+                f"EPS {_signed_eps_label(_est_eps(est), est_currency)}"
             )
         if _revenue_gross_of_interest(out):
             parts.append(

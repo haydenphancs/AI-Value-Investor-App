@@ -39,6 +39,7 @@ def _svc(quote, history):
         without this seam the build makes (blocked) network calls and measures a degraded
         path, not the one under test."""
         async def get_ex_dividend_dates(self, *a, **k): return []
+        async def get_dividend_events(self, *a, **k): return []
 
     svc._get_quote, svc._get_fundamentals, svc._get_chart = _quote, _fund, _chart
     svc._get_related, svc._get_history, svc._get_derived = _related, _hist, _derived

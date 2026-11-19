@@ -20,6 +20,11 @@ struct TickerPriceHeader: View {
     /// direction — neutral colour, no arrow, no flash. Defaults `true` for the callers
     /// whose models carry no such flag yet.
     var changeKnown: Bool = true
+    /// Set for a listing the backend CONFIRMED is delisted (`DelistedListing`): `price` is then
+    /// its last close. The market badge gives way to a "Delisted" pill (a delisted listing has
+    /// no session, so a clock-based "Market Open" would be false), the day change to "Last
+    /// close · Nov 6, 2026", and the price never flashes. Nil for every other caller.
+    var delisting: DelistedListing? = nil
 
     @State private var priceFlashColor: Color?
 
@@ -40,7 +45,7 @@ struct TickerPriceHeader: View {
                     .font(AppTypography.label)
                     .foregroundColor(AppColors.textSecondary)
                 
-                MarketStatusBadge(status: marketStatus)
+                statusBadge
             }
             
             Spacer()
@@ -53,21 +58,26 @@ struct TickerPriceHeader: View {
                     .contentTransition(.numericText())
                     .animation(.snappy(duration: 0.3), value: price)
 
-                // Price change
-                HStack(spacing: 4) {
-                    // An arrow asserts a direction; an unknown change has none.
-                    if changeKnown {
-                        Image(systemName: arrowIcon)
-                            .font(AppTypography.iconTiny).fontWeight(.semibold)
-                            .foregroundColor(changeColor)
-                    }
+                // Price change — or, for a delisted listing, what the price IS: its last
+                // close. There is no day change to show.
+                if let delisting {
+                    lastCloseLabel(delisting)
+                } else {
+                    HStack(spacing: 4) {
+                        // An arrow asserts a direction; an unknown change has none.
+                        if changeKnown {
+                            Image(systemName: arrowIcon)
+                                .font(AppTypography.iconTiny).fontWeight(.semibold)
+                                .foregroundColor(changeColor)
+                        }
 
-                    Text("\(priceChange) \(priceChangePercent)")
-                        .font(AppTypography.labelSmall)
-                        .fontWeight(.semibold)
-                        .foregroundColor(changeColor)
-                        .contentTransition(.numericText())
-                        .animation(.snappy(duration: 0.3), value: priceChange)
+                        Text("\(priceChange) \(priceChangePercent)")
+                            .font(AppTypography.labelSmall)
+                            .fontWeight(.semibold)
+                            .foregroundColor(changeColor)
+                            .contentTransition(.numericText())
+                            .animation(.snappy(duration: 0.3), value: priceChange)
+                    }
                 }
             }
         }
@@ -75,11 +85,46 @@ struct TickerPriceHeader: View {
         .onChange(of: price) { _, _ in
             // Brief color flash on price update (green for positive, red for negative)
             guard changeKnown else { return }
+            guard delisting == nil else { return }
             priceFlashColor = isPositive ? AppColors.bullish : AppColors.bearish
             withAnimation(.easeOut(duration: 0.6)) {
                 priceFlashColor = nil
             }
         }
+    }
+
+    /// The left column's status line: the market badge, or — for a confirmed delisting — the
+    /// "Delisted" pill over "from NASDAQ · Nov 9, 2026". Not a `MarketStatus` case: that enum
+    /// is shared and switched exhaustively in five files. `textSecondary` ink on the pill's
+    /// own opaque surface (never `neutral`, which is amber).
+    @ViewBuilder
+    private var statusBadge: some View {
+        if let delisting {
+            VStack(alignment: .leading, spacing: 2) {
+                TintedTagBadge(text: DelistedListing.pillText, color: AppColors.textSecondary)
+                if let line = delisting.detailLine {
+                    Text(line)
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(delisting.spokenHeadline)
+        } else {
+            MarketStatusBadge(status: marketStatus)
+        }
+    }
+
+    /// "Last close · Nov 6, 2026" under a delisted listing's price: no arrow, neutral ink.
+    private func lastCloseLabel(_ delisting: DelistedListing) -> some View {
+        Text(delisting.lastCloseLine)
+            .font(AppTypography.labelSmall)
+            .fontWeight(.semibold)
+            .foregroundColor(AppColors.textSecondary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
     }
 }
 
@@ -123,6 +168,39 @@ struct TickerPriceHeader: View {
             isPositive: false,
             marketStatus: .open,
             changeKnown: false
+        )
+    }
+    .padding(.vertical)
+    .background(AppColors.background)
+}
+
+// A confirmed delisting: the pill and its exchange/date line replace the market badge, the
+// price is the last close and says so. Nothing here may claim a live session.
+#Preview("Delisted") {
+    VStack(spacing: AppSpacing.xl) {
+        TickerPriceHeader(
+            companyName: "Roku, Inc.",
+            symbol: "ROKU",
+            price: "$160.52",
+            priceChange: "—",
+            priceChangePercent: "",
+            isPositive: false,
+            marketStatus: .open,
+            changeKnown: false,
+            delisting: .sample
+        )
+
+        // Fields missing: the clauses drop, nothing is guessed.
+        TickerPriceHeader(
+            companyName: "Example Corp.",
+            symbol: "EXMP",
+            price: "$12.04",
+            priceChange: "—",
+            priceChangePercent: "",
+            isPositive: false,
+            marketStatus: .open,
+            changeKnown: false,
+            delisting: DelistedListing(delistedDay: nil, exchange: "NYSE", lastTradeDay: nil)
         )
     }
     .padding(.vertical)

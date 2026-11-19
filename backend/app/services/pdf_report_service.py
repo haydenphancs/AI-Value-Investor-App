@@ -974,8 +974,16 @@ def build_context(
         },
         "forecast": {
             # 0.0 is the required float's "no rate": "—" here, never a measured flat outlook.
-            "cagr": _num(forecast.get("cagr")) or None,
-            "eps_growth": _num(forecast.get("eps_growth")) or None,
+            # A stored span means the rate was MEASURED over those years, so 0.0 is a flat
+            # outlook ("+0.0%"); without one (older reports) 0.0 is "no rate" ("—").
+            "cagr": _num(forecast.get("cagr")) if forecast.get("cagr_span")
+            else (_num(forecast.get("cagr")) or None),
+            "eps_growth": _num(forecast.get("eps_growth")) if forecast.get("eps_growth_span")
+            else (_num(forecast.get("eps_growth")) or None),
+            # The fiscal years each rate spans ("FY2025–FY2030E"): a bare "Revenue CAGR" above
+            # a table of every forecast year read as covering all of them (2026-11-14).
+            "cagr_span": forecast.get("cagr_span") or "",
+            "eps_growth_span": forecast.get("eps_growth_span") or "",
             # "unknown" = no transcript was read; the template's `or "—"` dash is
             # the honest cell, not a capitalised "Unknown" that reads like a stance.
             "management_guidance": _guidance_for_pdf(forecast.get("management_guidance")),

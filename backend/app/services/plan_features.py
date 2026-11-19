@@ -308,11 +308,11 @@ def _whale_tracking_row(tier: str) -> Dict[str, Any]:
 def _whale_detail_row(tier: str) -> Dict[str, Any]:
     unlocked = entitlements.whale_detail_unlocked(tier)
     detail = (
-        "Current Picks, Recent Trades and the AI sentiment summary on every investor "
+        "13F picks, Recent Trades and the AI sentiment summary on every investor "
         "you open."
         if unlocked else
-        "Free shows each investor's profile, risk badge and sector exposure. Current "
-        "Picks, Recent Trades and the AI sentiment summary are paid."
+        "Free shows each investor's profile, risk badge and sector exposure. 13F "
+        "picks, Recent Trades and the AI sentiment summary are paid."
     )
     return _row(
         KEY_WHALE_DETAIL,

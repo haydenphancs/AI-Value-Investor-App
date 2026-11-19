@@ -28,6 +28,7 @@ from app.api.error_response import (
     ErrorCode,
     error_body_from_exception,
     make_error_response,
+    ticker_delisted_error,
 )
 from app.database import get_supabase
 from app.dependencies import (
@@ -59,6 +60,7 @@ from app.services.credit_service import (
     settle_detached,
     settle_off_loop,
 )
+from app.services.listing_status_service import PAID_DOOR_WAIT, get_delisted_for_symbols
 from app.services.report_degradation import DegradedReportError
 from app.services.research_reconciliation_service import (
     REFUND_OUTCOME_COLUMN,
@@ -121,6 +123,7 @@ async def generate_research_report(
     Trigger deep research report generation.
     Validates credits + persona, inserts a 'pending' DB row,
     launches an async background task, and returns immediately.
+    A CONFIRMED delisting answers 409 `TICKER_DELISTED` before the cap read and any charge.
     """
     # Validate persona exists BEFORE charging — a bad persona key is
     # caller error and should never burn credits.
@@ -137,6 +140,27 @@ async def generate_research_report(
             ErrorCode.INVALID_PERSONA,
             message=f"Unknown persona key: {request.investor_persona!r}",
             details={"persona": request.investor_persona},
+        )
+
+    # ── DELISTED (owner, 2026-11-13: "approve phase 2 too"): a NEW report on a confirmed
+    #    delisting is refused BEFORE the per-user cap read and the precharge. This door charges
+    #    on a cross-user reuse too, so the refusal covers reuse hits as well; reports the user
+    #    already has are opened through /research/reports/{id} and stay free. A ticker that
+    #    traded in the latest session costs nothing here; anything the check cannot decide
+    #    within PAID_DOOR_WAIT is logged and proceeds exactly as before (fail open).
+    delisted_ticker = request.stock_id.strip().upper()
+    listing = (await get_delisted_for_symbols(
+        [delisted_ticker], wait=PAID_DOOR_WAIT, purpose="POST /research/generate",
+    )).get(delisted_ticker)
+    if listing is not None:
+        logger.info(
+            "Research %s/%s refused before any charge for user=%s — a confirmed delisting (%s, %s)",
+            delisted_ticker, request.investor_persona, user.get("id"), listing.exchange,
+            listing.delisted_date.isoformat(),
+        )
+        return ticker_delisted_error(
+            ticker=delisted_ticker, delisted_date=listing.delisted_date,
+            exchange=listing.exchange, purpose="report",
         )
 
     # ── Per-user concurrency cap (pre-charge: a caller error like the persona

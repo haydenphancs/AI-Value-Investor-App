@@ -359,7 +359,9 @@ async def test_thinking_budget_is_part_of_the_gemini_cache_key(monkeypatch):
 
     # The budget actually reaches the SDK as a ThinkingConfig, and is absent by default.
     assert calls[0]["config"].thinking_config is not None
-    assert calls[0]["config"].thinking_config.thinking_budget == 0
+    # gemini-2.5-flash refuses 0 after the 2026-12-01 reroute, so "off" goes out as 1.
+    from app.integrations.gemini import _BUDGET_OFF_ON_REFUSING_MODELS
+    assert calls[0]["config"].thinking_config.thinking_budget == _BUDGET_OFF_ON_REFUSING_MODELS
     assert calls[1]["config"].thinking_config is None
 
 
@@ -483,3 +485,68 @@ async def test_the_fakes_actually_suspend():
         "both coroutines must be in flight before either finishes, or every "
         "concurrency test in this file is vacuous"
     )
+
+
+# ── 4. Header cleanup never eats the digits of a figure (2026-11-19) ─────────────
+#
+# The parser ran `text.replace("1.", "")` / `.replace("2.", "")` over the WHOLE answer to drop the
+# prompt's "1. SECTOR STORY" / "2. MACRO ITEMS" headers, which also deleted those characters from
+# every number: a macro description's "CPI rose 2.4%" became "CPI rose 4%" (cached 7 days), and a
+# sector line's "up 1.9%" became "up 9%". Markers are now stripped only where they ARE markers.
+
+from app.services.index_service import _strip_story_headers  # noqa: E402
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("1. SECTOR STORY\n{TOP_SECTOR} led, up 1.9%.", "{TOP_SECTOR} led, up 1.9%."),
+    ("**1. SECTOR STORY:** {TOP_SECTOR} led.", "{TOP_SECTOR} led."),
+    ("  # 1. SECTOR STORY  \n{TOP_SECTOR} led.", "{TOP_SECTOR} led."),
+    ("SECTOR STORY: {TOP_SECTOR} gained 2.0% and 11. sectors rose.", "{TOP_SECTOR} gained 2.0% and 11. sectors rose."),
+    ("1.9% gains led the day", "1.9% gains led the day"),              # a figure at line start
+    ("2.4% CPI", "2.4% CPI"),
+    ("Rates near 2.25%, GDP at $2.1 trillion in Q2.", "Rates near 2.25%, GDP at $2.1 trillion in Q2."),
+    ("-1.5% for {BOTTOM_SECTOR}", "-1.5% for {BOTTOM_SECTOR}"),
+    ("2. MACRO ITEMS\n[{\"description\": \"CPI rose 2.4% in Q2.\"}]", "[{\"description\": \"CPI rose 2.4% in Q2.\"}]"),
+    ("the sector story today", "the sector story today"),              # lower-case prose is not the label
+    ("", ""), ("   ", ""),
+    # Header on its own line, the NEXT line opening on a figure.
+    ("1. SECTOR STORY\n1.9% gains led the day", "1.9% gains led the day"),
+    ("1. SECTOR STORY\r\n{TOP_SECTOR} up 1.9%.", "{TOP_SECTOR} up 1.9%."),   # CRLF
+    ("1.\n{TOP_SECTOR} led", "{TOP_SECTOR} led"),                        # a bare marker line
+    ("**SECTOR STORY**\n{TOP_SECTOR} gained 12.1%", "{TOP_SECTOR} gained 12.1%"),
+    # Macro JSON with no header at all, and a pretty-printed array whose line opens on 2.4.
+    ('[{"description": "GDP grew 2.1% and 1.2%"}]', '[{"description": "GDP grew 2.1% and 1.2%"}]'),
+    ('2. MACRO ITEMS:\n[\n  2.4,\n  {"title": "CPI"}\n]', '[\n  2.4,\n  {"title": "CPI"}\n]'),
+])
+def test_story_header_cleanup_keeps_every_figure(raw, expected):
+    assert _strip_story_headers(raw) == expected
+
+
+@pytest.mark.parametrize("bad", [None, 123, ["1. x"], b"1. SECTOR STORY"])
+def test_story_header_cleanup_of_a_non_string_is_empty_not_a_crash(bad):
+    assert _strip_story_headers(bad) == ""
+
+
+@pytest.mark.asyncio
+async def test_the_refresh_keeps_the_figures_in_the_cached_stories(monkeypatch):
+    gem = _RecordingGemini(text=(
+        "1. SECTOR STORY\n{TOP_SECTOR} led at {TOP_SECTOR_CHANGE} while {BOTTOM_SECTOR} lagged at "
+        "{BOTTOM_SECTOR_CHANGE}; {ADVANCING_COUNT} advanced, the broad tape up 1.2%."
+        "\n---\n"
+        "2. MACRO ITEMS\n"
+        '[{"title": "Inflation", "description": "CPI rose 2.4% in October, above 2.2% in Q2.", '
+        '"signal": "cautious"}, '
+        '{"title": "Labor", "description": "Unemployment held at 4.1% for 12 months.", '
+        '"signal": "neutral"}, '
+        '{"title": "GDP Growth", "description": "Output grew 2.8% annualised.", "signal": "positive"}]'
+    ))
+    mod, svc, puts = _index_service(monkeypatch, gem)
+    await svc._generate_ai_stories(**_STORY_ARGS)
+    await _drain()
+    payload = puts[0][2]
+    assert payload["sector"].startswith("{TOP_SECTOR} led") and "up 1.2%." in payload["sector"]
+    assert "SECTOR STORY" not in payload["sector"] and not payload["sector"].startswith("1.")
+    descriptions = [i["description"] for i in payload["indicators"]]
+    assert "CPI rose 2.4% in October, above 2.2% in Q2." in descriptions
+    assert "Unemployment held at 4.1% for 12 months." in descriptions
+    assert "Output grew 2.8% annualised." in descriptions

@@ -52,7 +52,10 @@ _IOS_METRIC_KEYS = {"name", "value"}
 # Backend-only extras the iOS DTOs intentionally do NOT declare (silently ignored
 # by the plain JSONDecoder). They feed the report-path card-verdict generator.
 _BACKEND_ONLY_ITEM_KEYS = {"weighted_score"}
-_BACKEND_ONLY_METRIC_KEYS = {"metric_key", "score"}
+# `numeric_value` / `peer_median` (2026-11-13) and `period_label` (the Growth rows' fiscal
+# year, 2026-11-13) feed the report drill-down's second legend line; the overview decoder
+# never reads them.
+_BACKEND_ONLY_METRIC_KEYS = {"metric_key", "score", "numeric_value", "peer_median", "period_label"}
 
 
 def test_overview_snapshot_serializes_ios_keys_and_backend_extras():
@@ -131,3 +134,23 @@ def test_overview_path_snapshot_emits_none_extras():
     metric = dumped["metrics"][0]
     assert "metric_key" in metric and metric["metric_key"] is None
     assert "score" in metric and metric["score"] is None
+
+
+def test_the_drilldown_numbers_are_optional_and_null_on_the_overview_path():
+    """`numeric_value` / `peer_median` / `period_label` default to None and serialize as
+    null (never omitted) on a row built without them — an older snapshot, an unscored row,
+    the overview path — and a Growth row carries its fiscal year as a plain string."""
+    for key in ("numeric_value", "peer_median", "period_label"):
+        field = SnapshotMetricResponse.model_fields[key]
+        assert field.default is None and not field.is_required(), key
+    bare = SnapshotMetricResponse(name="Altman Z-Score", value="2.10").model_dump(mode="json")
+    assert all(k in bare and bare[k] is None for k in ("numeric_value", "peer_median",
+                                                        "period_label"))
+    growth = SnapshotMetricResponse(
+        name="Revenue Growth (YoY)", value="+34.3%", metric_key="revenue_growth", score=5,
+        numeric_value=34.33, period_label="FY2026").model_dump(mode="json")
+    assert (growth["numeric_value"], growth["peer_median"], growth["period_label"]) == (
+        34.33, None, "FY2026")
+    # A legacy cached row (no such keys) still validates.
+    legacy = SnapshotMetricResponse.model_validate({"name": "EPS Growth", "value": "+1.0%"})
+    assert legacy.period_label is None

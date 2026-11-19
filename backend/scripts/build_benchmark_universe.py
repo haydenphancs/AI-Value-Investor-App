@@ -450,6 +450,34 @@ _HAND_CHECKED_ISSUERS: Dict[str, Tuple[Optional[str], str]] = {
     # floor-0 industry build named them as a cross-industry statement twin.
     "tennessee valley authority": (None, "power bonds (TVC); TVA issues no stock"),
     "tennessee valley authority parrs a": (None, "PARRS bonds (TVE); TVA issues no stock"),
+    # Found 2026-11-15 in the live floor-0 industry file (built 2026-10-08) by a read-only
+    # screener + profile sweep after the moat refresh. Each is a $25-par debt listing whose
+    # FMP name carries no debt word the name rules read, so it voted in the moat peer
+    # averages with its parent's (or a funding vehicle's) statements:
+    #   * BEPJ "Brookfield BRP Holdings (Canada" (FMP cuts the name there; $21.75, $130.5M)
+    #     and BEPH (… 4.625 % Notes …) share BEP's CIK 0001533232 and CUSIP issuer 11259P —
+    #     Brookfield Renewable's finance subsidiary's subordinated notes. BEPJ sat in
+    #     Real Estate - Development (FMP now files it under Renewable Utilities); its TTM
+    #     ratios are close to BEP's but not equal, so the statement-twin pass cannot pair them.
+    "brookfield brp holdings canada": (
+        None, "Brookfield Renewable's finance subsidiary's subordinated notes (BEPJ, BEPH); "
+        "BEP votes",
+    ),
+    #   * BEPI is one more 11259P note (CUSIP 11259P208, its FMP description is the holding
+    #     company's) under the partnership's OWN name, "Brookfield Renewable Partners L.P." —
+    #     BEP's exact TTM ratios at $14.15 (BEP $29.98). The root-twin rule drops it in any
+    #     industry WHILE the build also holds BEP (its base); a screener answer without BEP
+    #     (the 2026-11-15 sweep came back without FOXA, NWSA, Z and UAA) would leave BEPI
+    #     voting BEP's statements alone. Keyed here so it leaves either way.
+    "brookfield renewable partners": (
+        "BEP", "BRP Holdings notes FMP names after the partnership (BEPI); BEP votes",
+    ),
+    #   * EMP "Entergy Mississippi, Inc. 1M BD 66" (first mortgage bonds, "1M BD" is FMP's
+    #     cut) and ENO "Entergy New Orleans, LLC": utility SUBSIDIARIES (own CIKs 66901 and
+    #     71508) with no listed common, ~$160M caps at $18-19, identical TTM ratios, filed
+    #     under Regulated Electric and Regulated Gas. ETR ("entergy") votes.
+    "entergy mississippi": (None, "first mortgage bonds (EMP); ETR votes"),
+    "entergy new orleans": (None, "bonds (ENO); ETR votes"),
 }
 
 # A depositary receipt over a foreign issuer's ORDINARY shares is that issuer's US common

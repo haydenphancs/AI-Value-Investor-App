@@ -48,6 +48,20 @@ struct EarningsTimelineChart: View {
     /// re-parses the ~1500 date strings on the render path.
     @State private var priceColumns: [(colX: Double, price: Double)] = []
 
+    // Explicit: the private @ScaledMetric below (`popupHalfWidthScaled`) would make the
+    // memberwise init private, and ReportEarningsTimelinePanel and the previews call it.
+    init(
+        timeline: [RevenueProjection],
+        dailyPrices: [EarningsDailyPricePoint],
+        showPrice: Bool,
+        selectedIndex: Binding<Int?>
+    ) {
+        self.timeline = timeline
+        self.dailyPrices = dailyPrices
+        self.showPrice = showPrice
+        self._selectedIndex = selectedIndex
+    }
+
     private struct YP {
         let year: Int
         let revenue: Double
@@ -80,6 +94,14 @@ struct EarningsTimelineChart: View {
                       epsAnalystCount: p.epsAnalystCount,
                       periodEnd: p.periodEnd)
         }
+    }
+
+    /// The popup's EPS column title: "Adj. EPS" on every column when the legend says so
+    /// (`RevenueProjection.showsAdjustedEPS`), so the popup and the legend always name the
+    /// same measure. Every year on an adjusted line is adjusted, so no GAAP figure is shown
+    /// beside it (owner, 2026-11-14: "we don't need to show GAAP anymore").
+    private var epsSeriesLabel: String {
+        RevenueProjection.showsAdjustedEPS(timeline) ? "Adj. EPS" : "EPS"
     }
 
     // Magnitudes (abs) so the EPS scaling and value domain handle NEGATIVE
@@ -165,21 +187,19 @@ struct EarningsTimelineChart: View {
         } else {
             cols = priceColumnsByCalendarYear()
         }
-        // Start the line at the CENTER of its leftmost data column, not that
-        // column's left edge — so the tail sits over the first bar instead of
-        // overshooting ~half a column to its left. A price's natural early-period
-        // start maps to colX ≈ idx (the left edge); we trim that lead-in up
-        // to idx + 0.5 (the bar center). Only ever pulls the tail rightward.
-        guard let minColX = cols.map(\.colX).min() else { return cols }
-        let firstCenter = minColX.rounded(.down) + 0.5
-        let clipped = cols.filter { $0.colX >= firstCenter }
+        // Start the line at the FIRST bar — the first fiscal year's END (see
+        // `yearEndShift`): that year's earlier closes fall left of it, outside the chart's
+        // first column. Only column 0's lead-in is trimmed: a later column's first closes
+        // are a listing's first trading months (an IPO mid-series) — real data. Trimming to
+        // the first column WITH data cut them (2026-11-14).
+        let clipped = cols.filter { $0.colX >= 0.5 }
         return clipped.isEmpty ? cols : clipped
     }
 
     /// The first column has no previous period end on the wire: its window opens this many
     /// days before its own end. The backend's `_TIMELINE_FIRST_COLUMN_DAYS` (which trims the
     /// frozen price series to the same window) uses the same span.
-    private static let firstColumnDays = 365
+    static let firstColumnDays = 365
 
     /// Day numbers of each column's period end, or nil when any column lacks a parseable
     /// one (an older report) or they are not strictly increasing — then the calendar
@@ -195,8 +215,19 @@ struct EarningsTimelineChart: View {
         return edges.isEmpty ? nil : edges
     }
 
+    /// Where a fiscal year's END sits relative to its fraction-through-the-year position:
+    /// half a column back, so a year's last day lands on its own bar and EPS dot (the
+    /// column's centre). Bars and dots stay together and read as "this fiscal year, at its
+    /// end": Oracle's price on Nov 13 2026 (46% into FY2027) stops between the FY2026 bar
+    /// (May 2026) and the FY2027 bar (May 2027), and a December filer's stops just before
+    /// its 2026 bar instead of running past it. Owner, 2026-11-14: "Shift the price line"
+    /// (the bars and EPS dots must not move apart: "revenue and eps go together").
+    static let yearEndShift: Double = 0.5
+
     /// Column i spans (edges[i-1], edges[i]]; the first spans `firstColumnDays` before its
-    /// end. A close outside every window (before the first, after the last) is dropped.
+    /// end. A close outside every window (before the first, after the last) is dropped. A
+    /// close at fraction f of column i's window is drawn at i - `yearEndShift` + f, so each
+    /// period end sits on its column's centre.
     private func priceColumnsByPeriodEnd(edges: [Int]) -> [(colX: Double, price: Double)] {
         guard let lastEdge = edges.last else { return [] }
         let firstStart: Int = edges[0] - Self.firstColumnDays
@@ -220,13 +251,14 @@ struct EarningsTimelineChart: View {
             let start: Int = lo == 0 ? firstStart : edges[lo - 1]
             let span: Int = max(edges[lo] - start, 1)
             let frac: Double = Double(day - start) / Double(span)
-            out.append((colX: Double(lo) + frac, price: dp.price))
+            out.append((colX: Double(lo) - Self.yearEndShift + frac, price: dp.price))
         }
         return out
     }
 
     /// Legacy mapping for reports without period ends: the close's CALENDAR year picks the
-    /// column, its month/day the fraction through it.
+    /// column, its month/day the fraction through it, with the same `yearEndShift` (Dec 31
+    /// on the year's bar).
     private func priceColumnsByCalendarYear() -> [(colX: Double, price: Double)] {
         // `uniqueKeysWithValues:` TRAPS on a duplicate key, and older reports did not
         // dedupe the year (`int(date[:4])` of every annual record — a company that moved
@@ -243,7 +275,7 @@ struct EarningsTimelineChart: View {
                   let d = Int(dp.date.dropFirst(8).prefix(2)),
                   let idx = yearToIndex[y] else { return nil }
             let frac = (Double(m - 1) * 30.4 + Double(d)) / 365.0
-            return (Double(idx) + frac, dp.price)
+            return (Double(idx) - Self.yearEndShift + frac, dp.price)
         }
     }
 
@@ -366,16 +398,10 @@ struct EarningsTimelineChart: View {
                                 .position(x: centerX(i), y: plotBottom + labelStripHeight / 2)
                         }
 
-                        // Dashed actual | forecast boundary (in the gap before it)
-                        if let fi = firstForecastIndex, fi > 0 {
-                            let bx = sidePad + CGFloat(fi) * colW
-                            Path { p in
-                                p.move(to: CGPoint(x: bx, y: topPad))
-                                p.addLine(to: CGPoint(x: bx, y: plotBottom))
-                            }
-                            .stroke(AppColors.textMuted.opacity(0.35),
-                                    style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-                        }
+                        // No dashed actual | forecast divider (owner, 2026-11-14): with the
+                        // price line on fiscal year-ends (`yearEndShift`) a divider in the gap
+                        // sat beside the price's last close and read as a date. The faded
+                        // forecast bars mark where the estimates begin.
 
                         // EPS line + dots (scaled into the revenue domain, shared
                         // zero — so negative EPS dips below the baseline too). Years
@@ -421,10 +447,14 @@ struct EarningsTimelineChart: View {
                         if !points.isEmpty {
                             let anchorX = firstForecastIndex.map { sidePad + CGFloat($0) * colW }
                                 ?? centerX(points.count - 1)
+                            // `.id` BEFORE `.position`: `.position` wraps the 1pt view in a
+                            // container that fills the chart, so an id applied after it
+                            // centred the WHOLE chart, which coincides with the boundary only
+                            // for 5 actual + 5 forecast columns (JPM's 5 + 3 opened off it).
                             Color.clear
                                 .frame(width: 1, height: 1)
-                                .position(x: anchorX, y: topPad)
                                 .id(boundaryAnchorID)
+                                .position(x: anchorX, y: topPad)
                         }
 
                         // Transparent tap-catcher on top: a discrete tap maps the
@@ -503,7 +533,11 @@ struct EarningsTimelineChart: View {
 
     // MARK: - Inspect popup
 
-    private let popupHalfWidth: CGFloat = 84   // ~half the (2-column) popup, for edge clamping
+    // ~Half the (2-column) popup, for edge clamping. It grows with Dynamic Type (the caption
+    // font does, up to AppTypography's 1.4× cap) and holds an "Adj. EPS" column title: a
+    // fixed 84 let the first column's popup slip past the left edge at XXL.
+    @ScaledMetric(relativeTo: .caption2) private var popupHalfWidthScaled: CGFloat = 100
+    private var popupHalfWidth: CGFloat { min(popupHalfWidthScaled, 140) }
     private let popupCenterY: CGFloat = 64     // pushed down so the tighter toggle-chart gap doesn't crowd the button
 
     /// Detail card for the tapped column: a year header (an off-calendar filer's
@@ -526,10 +560,13 @@ struct EarningsTimelineChart: View {
             HStack(alignment: .top, spacing: AppSpacing.lg) {
                 popupColumn(color: AppColors.primaryBlue, label: "Revenue",
                             yoy: pt.revenueYoYText, yoyColor: pt.revenueYoYColor,
-                            value: pt.revenueLabel, analysts: pt.revenueAnalystCount)
-                popupColumn(color: AppColors.accentYellow, label: "EPS",
+                            value: pt.revenueLabel, analysts: pt.revenueAnalystCount,
+                            isForecast: pt.isForecast)
+                popupColumn(color: AppColors.accentYellow,
+                            label: epsSeriesLabel,
                             yoy: pt.epsYoYText, yoyColor: pt.epsYoYColor,
-                            value: pt.epsLabel, analysts: pt.epsAnalystCount)
+                            value: pt.epsLabel, analysts: pt.epsAnalystCount,
+                            isForecast: pt.isForecast)
             }
         }
         .padding(.horizontal, AppSpacing.sm)
@@ -547,11 +584,14 @@ struct EarningsTimelineChart: View {
     }
 
     /// One side of the popup — a colored dot + series label, then the YoY %, the
-    /// value, and the analyst count stacked beneath. YoY hidden when there's no
-    /// anchor; analyst count shows "n/a" on actuals / years FMP didn't cover.
+    /// value, and (forecast years only) the analyst count stacked beneath. YoY hidden when
+    /// there's no anchor. A REPORTED year has no analysts behind it, so it shows no analyst
+    /// line at all (owner, 2026-11-14: no "n/a" on past years); a forecast year FMP didn't
+    /// cover still says "n/a".
     private func popupColumn(color: Color, label: String,
                              yoy: String?, yoyColor: Color,
-                             value: String, analysts: Int?) -> some View {
+                             value: String, analysts: Int?,
+                             isForecast: Bool) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 5) {
                 Circle().fill(color).frame(width: 6, height: 6)
@@ -567,17 +607,17 @@ struct EarningsTimelineChart: View {
             Text(value)
                 .font(AppTypography.caption)
                 .foregroundColor(AppColors.textPrimary)
-            if let analysts {
-                Text("\(analysts) Analyst\(analysts == 1 ? "" : "s")")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
-            } else {
-                // Actuals (reported, no analyst coverage) and any forecast year
-                // FMP didn't cover show "n/a" rather than a blank — so every year
-                // surfaces its analyst count.
-                Text("n/a")
-                    .font(AppTypography.caption)
-                    .foregroundColor(AppColors.textMuted)
+            if isForecast {
+                if let analysts {
+                    Text("\(analysts) Analyst\(analysts == 1 ? "" : "s")")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                } else {
+                    // A forecast year FMP didn't cover says "n/a" rather than a blank.
+                    Text("n/a")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
             }
         }
         .frame(minWidth: 58, alignment: .leading)

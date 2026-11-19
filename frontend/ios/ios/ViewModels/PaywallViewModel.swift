@@ -37,6 +37,8 @@ final class PaywallViewModel: ObservableObject {
     @Published var isPendingApproval: Bool = false
     /// Result of a restore, so "nothing to restore" reads differently from "restored".
     @Published var restoreMessage: String?
+    /// True while `restore()` runs — the in-flight guard against a second tap.
+    @Published private(set) var isRestoring = false
 
     /// Whether the account's current tier is PAID FOR through a store subscription
     /// (`GET /users/me/subscription`: a store-backed row that still entitles, for this tier —
@@ -267,20 +269,22 @@ final class PaywallViewModel: ObservableObject {
         }
     }
 
+    /// The paywall's Restore button. Same path and copy as General Settings → Restore
+    /// Purchases: `syncAndRestore()` syncs with the App Store (a subscriber on a new device
+    /// was told "No previous purchases found" without it) and runs both sweeps, and the
+    /// message is classified from what the backend applied — never "Restored your
+    /// subscription." for a pack the server had already recorded or a lapsed renewal. An
+    /// all-failed sweep still says what went wrong rather than "no previous purchases", which
+    /// told an ACTIVE subscriber they never bought anything.
     func restore() async {
+        // One restore at a time: the App Store sync can show the Apple Account prompt, and a
+        // second tap would queue a second prompt and a second pair of sweeps.
+        guard !isRestoring else { return }
+        isRestoring = true
+        defer { isRestoring = false }
         purchaseError = nil
         restoreMessage = nil
-        let result = await store.restorePurchases()
-        if result.applied > 0 {
-            restoreMessage = "Restored your subscription."
-        } else if result.seen > 0 {
-            // Apple returned entitlements and every submission failed. Reporting "no previous
-            // purchases" there tells an ACTIVE subscriber they never bought anything, and
-            // leaves them no reason to contact support.
-            let err = AppError.from(result.lastError ?? AppError.unknown(message: "The purchase couldn't be applied. Please try again."))
-            restoreMessage = "We found your purchase but couldn't restore it: \(err.message)"
-        } else {
-            restoreMessage = "No previous purchases found for this Apple Account."
-        }
+        let result = await store.syncAndRestore()
+        restoreMessage = result.subscriptionMessage
     }
 }

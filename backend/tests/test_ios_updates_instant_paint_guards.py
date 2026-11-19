@@ -66,7 +66,7 @@ _INIT = "init(apiClient: APIClient = .shared)"
 _LOAD_INITIAL = "private func loadInitialData() async"
 _LOAD_IF_NEEDED = "func loadIfNeeded() async"
 _LOAD_TABS = "private func loadTabs() async"
-_LOAD_FEED = "private func loadFeed(for tab: NewsFilterTab, force: Bool) async"
+_LOAD_FEED = "private func loadFeed(for tab: NewsFilterTab, force: Bool, fresh: Bool = false) async"
 _IDENTITY = "func handleIdentityChange(isActiveTab: Bool) async"
 _SEED = "private func seedFromSnapshot()"
 _PREPARE = "func prepareSnapshot() async"
@@ -395,7 +395,7 @@ def _check_generic_catch_fenced(s):
     )
 
 
-_KEEP_ROWS = "let keepsShownRows = force && shownFeedScope == scope"
+_KEEP_ROWS = "let keepsShownRows = (force || fresh) && shownFeedScope == scope"
 
 
 def _check_refresh_keeps_shown_rows(s):
@@ -607,9 +607,11 @@ def _check_ask_cay_nil_on_snapshot(s):
 
 def _check_retry_notice_placement(s):
     body = _body(s)
-    _in_order(body, "LiveNewsHeader(", "if viewModel.showsSnapshotRefreshFailure {", "InlineRetryNotice(",
+    _in_order(body, "LiveNewsHeader(", "if viewModel.showsSnapshotRefreshFailure {",
               "ScrollView(showsIndicators: false)")
     notice = _block_at(body, _idx(body, "if viewModel.showsSnapshotRefreshFailure {"))
+    # Its own block (2026-11-13: a waiting "Ask Cay AI" notice now comes first in the slot).
+    assert "InlineRetryNotice(" in notice, "the snapshot's failure branch renders no notice"
     assert "viewModel.refresh()" in notice, "the snapshot's failure notice offers no retry"
     assert "message: snapshotRefreshFailureMessage" in notice
     stack = _block(body, "LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders])")

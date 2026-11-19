@@ -389,6 +389,17 @@ struct PriceAlertDTO: Decodable, Identifiable, Hashable, Sendable {
     let triggerCount: Int
     let note: String?
     let createdAt: String?
+    /// The ticker's confirmed delisting, the same four keys every other surface carries
+    /// (delisting Phase 2, owner 2026-11-13). All nil unless the server confirmed one, and
+    /// Optional so a server that predates them decodes as "not delisted".
+    let listingStatus: String?
+    let delistedDate: String?
+    let delistedExchange: String?
+    let lastTradeDate: String?
+    /// Why the server is not watching this rule right now: "delisted" | nil. Computed per
+    /// request, never stored — nothing on the rule changes, and it resumes on its own if the
+    /// ticker trades again.
+    let pausedReason: String?
 
     enum CodingKeys: String, CodingKey {
         case id, ticker, kind, threshold, armed, note
@@ -399,6 +410,35 @@ struct PriceAlertDTO: Decodable, Identifiable, Hashable, Sendable {
         case lastTriggeredAt = "last_triggered_at"
         case triggerCount = "trigger_count"
         case createdAt = "created_at"
+        case listingStatus = "listing_status"
+        case delistedDate = "delisted_date"
+        case delistedExchange = "delisted_exchange"
+        case lastTradeDate = "last_trade_date"
+        case pausedReason = "paused_reason"
+    }
+
+    /// The caption a paused rule's row shows, in the bell sheet and in Tracking → Alerts.
+    static let pausedDelistedCaption = "Paused: delisted"
+
+    /// True only for `paused_reason` "delisted" (trimmed, any case). Anything else — nil, blank,
+    /// a reason this build does not know — is a live rule: fail open, today's behaviour.
+    ///
+    /// The server writes the same word `listing_status` carries, so it is read through the ONE
+    /// wire rule (`DelistedListing.from`) rather than a second copy of that word here.
+    var isPausedForDelisting: Bool {
+        DelistedListing.from(status: pausedReason, delistedDate: nil,
+                             exchange: nil, lastTradeDate: nil) != nil
+    }
+
+    /// "Paused: delisted" for a paused rule, else nil.
+    var pausedCaption: String? {
+        isPausedForDelisting ? Self.pausedDelistedCaption : nil
+    }
+
+    /// The ticker's delisting through the ONE wire rule every surface uses, or nil.
+    var delisting: DelistedListing? {
+        DelistedListing.from(status: listingStatus, delistedDate: delistedDate,
+                             exchange: delistedExchange, lastTradeDate: lastTradeDate)
     }
 
     var alertKind: PriceAlertKind { PriceAlertKind(rawValue: kind) ?? .above }
@@ -417,6 +457,9 @@ struct PriceAlertDTO: Decodable, Identifiable, Hashable, Sendable {
     /// the user concludes the feature is broken.
     var quietReason: String? {
         guard isActive else { return "Turned off" }
+        // A paused rule's own caption says why it is quiet. "Re-arms when the price moves
+        // back" would promise a move a delisted ticker cannot make.
+        guard !isPausedForDelisting else { return nil }
         guard armed else { return "Already triggered — re-arms when the price moves back" }
         return nil
     }
@@ -441,7 +484,12 @@ struct PriceAlertDTO: Decodable, Identifiable, Hashable, Sendable {
             lastTriggeredAt: lastTriggeredAt,
             triggerCount: triggerCount,
             note: note,
-            createdAt: createdAt
+            createdAt: createdAt,
+            listingStatus: listingStatus,
+            delistedDate: delistedDate,
+            delistedExchange: delistedExchange,
+            lastTradeDate: lastTradeDate,
+            pausedReason: pausedReason
         )
     }
 }

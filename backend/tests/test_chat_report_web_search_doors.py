@@ -214,6 +214,12 @@ async def test_a_1_0_caller_gets_no_tool_on_either_door_and_is_told_none_ran(web
         assert prep["web_search_granted"] is False and prep["web_turn"] is None
         assert "No web search is available on this turn" in prep["system_instruction"]
         assert not re.search(r"\bweb_search\b", prep["system_instruction"])
+        # The caller ASKED (a verify ask): told in one sentence that none can run (2026-11-14),
+        # on both doors and on the tool-less build of the same turn.
+        tail = ChatService._WEB_UNAVAILABLE_ASKED_TAIL
+        assert prep["system_instruction"].count(tail) == 1
+        assert prep["system_instruction_no_tools"].count(tail) == 1
+        assert svc.gemini.kw["system_instruction"].count(tail) == 1
     finally:
         cav._client_app_version.reset(token)
 
@@ -565,3 +571,35 @@ async def test_no_on_request_line_when_search_is_off(web_env, monkeypatch):
     instr = svc.gemini.kw["system_instruction"]
     assert ChatService._WEB_ON_REQUEST_RULE not in instr
     assert instr.count("WEB SEARCH:") == 1 and ChatService._WEB_NONE_RULE in instr
+
+
+# ── The cut-answer continuation never re-asks for the "not available" sentence (2026-11-14) ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["system_instruction_no_tools", "system_instruction"])
+async def test_the_continuation_drops_the_asked_tail_but_keeps_the_plain_line(key):
+    """The partial answer already told the user the asked search could not run; the continuation
+    (`_continue_cut_answer`, tool-less) must not be asked to say it again mid-answer — but it
+    keeps "never say you searched the web"."""
+    from app.api.v1.endpoints import chat as chat_ep
+
+    seen = {}
+
+    class _Gem:
+        async def stream_text(self, prompt, *, system_instruction=None, **kw):
+            seen["instr"] = system_instruction
+            yield ("answer", "and that is the rest of the answer, finished here as one sentence.")
+
+    class _Svc:
+        gemini = _Gem()
+
+    instr = "RULES" + ChatService._WEB_UNAVAILABLE_ASKED_RULE + "<<<CLIENT_CONTEXT>>>"
+    prep = {"prompt": "USER MESSAGE: how much does Oracle invest?", key: instr}
+    signals: dict = {}
+    out = [t async for _k, t in chat_ep._continue_cut_answer(
+        _Svc(), prep, "Web search isn't available right now. Oracle", model_name=None,
+        max_output_tokens=256, usage_tag="t", signals=signals)]
+    assert out and signals["continuation"] in ("clean", "cut")
+    assert ChatService._WEB_UNAVAILABLE_ASKED_TAIL not in seen["instr"]
+    assert seen["instr"].count(ChatService._WEB_UNAVAILABLE_RULE) == 1

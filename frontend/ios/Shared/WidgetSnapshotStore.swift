@@ -513,6 +513,10 @@ nonisolated public struct WidgetMover: Codable, Equatable, Sendable {
     /// "etf" | "crypto" | "stock", from the server's own quote flags. nil ⇒ unknown — a
     /// tap-through then resolves by symbol, never by a guess made here.
     public let assetType: String?
+    /// The cause came from this ticker's Insights card (2026-11-12). Optional, so a snapshot or
+    /// payload from before the key decodes (synthesized `decodeIfPresent`); absent reads as
+    /// false (`linksToInsightCard`). Such a row links to the Updates card, where its sources are.
+    public let causeCard: Bool?
 
     enum CodingKeys: String, CodingKey {
         case ticker
@@ -521,6 +525,7 @@ nonisolated public struct WidgetMover: Codable, Equatable, Sendable {
         case price, tier, z, cause, context
         case rolling24h = "rolling_24h"
         case assetType = "asset_type"
+        case causeCard = "cause_card"
     }
 
     /// Explicit so the gallery and preview samples keep compiling as fields are added —
@@ -529,7 +534,7 @@ nonisolated public struct WidgetMover: Codable, Equatable, Sendable {
         ticker: String, companyName: String? = nil, changePercent: Double?,
         price: Double? = nil, tier: String? = nil, z: Double? = nil,
         cause: WidgetCause, context: WidgetMoveContext, rolling24h: Bool? = nil,
-        assetType: String? = nil
+        assetType: String? = nil, causeCard: Bool? = nil
     ) {
         self.ticker = ticker
         self.companyName = companyName
@@ -541,7 +546,12 @@ nonisolated public struct WidgetMover: Codable, Equatable, Sendable {
         self.context = context
         self.rolling24h = rolling24h
         self.assetType = assetType
+        self.causeCard = causeCard
     }
+
+    /// Whether a tap should open the ticker's Updates card (`causeCard == true`); a missing key
+    /// is false, never a guess.
+    public var linksToInsightCard: Bool { causeCard == true }
 
     /// `nil` ⇒ the number is HIDDEN, never rendered as 0.0%. A fabricated flat reading
     /// on a stock that actually moved is worse than no reading.

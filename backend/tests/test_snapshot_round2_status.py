@@ -183,6 +183,10 @@ def _use_compute(monkeypatch, s, answers):
     async def _compute(ticker):
         calls.append(ticker)
         snapshot, degraded = answers.pop(0)
+        # The Financial Health build notes the Health Check's earnings stamp beside its
+        # answer (2026-11-14); without one its getter never writes the 24h row.
+        if hasattr(s.mod, "_note_build_stamp"):
+            s.mod._note_build_stamp(f"{s.prefix}{ticker}", snapshot, None)
         return snapshot, list(degraded)
 
     monkeypatch.setattr(s.svc, "_compute_with_status", _compute)
@@ -371,6 +375,9 @@ def _health_service(monkeypatch, health, fmp_answers=None, lookup=None):
             if isinstance(health, BaseException):
                 raise health
             return health
+
+        def next_earnings_for(self, ticker, *, served):
+            return None     # a build with no pending report: the plain 24h row
 
     monkeypatch.setattr(health_check_service, "get_health_check_service", lambda: _HealthCheck())
     monkeypatch.setattr(hs, "get_sector_benchmark_lookup", lambda: lookup or _PlainLookup())
@@ -718,8 +725,9 @@ def test_the_profitability_upsert_stamps_the_version():
     svc._upsert_supabase_cache("AAPL", card)
     (payload,) = svc.supabase.upserts
     assert payload["category"] == "Profitability"
-    # 4 since 2026-10-09 (NET-4: a listed non-lender member is never compared with lenders).
-    assert payload["response_json"][ps._VERSION_KEY] == ps._SNAPSHOT_PAYLOAD_VERSION == 6
+    # 4 since 2026-10-09 (NET-4: a listed non-lender member is never compared with lenders);
+    # 7 since 2026-11-13 (`numeric_value` / `peer_median` on each row).
+    assert payload["response_json"][ps._VERSION_KEY] == ps._SNAPSHOT_PAYLOAD_VERSION == 7
 
     # What it writes, it reads back.
     _, reader = _prof_svc_with_rows([_row(payload["response_json"])])

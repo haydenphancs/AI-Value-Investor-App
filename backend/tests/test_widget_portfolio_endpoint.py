@@ -71,8 +71,9 @@ class _FakeMovers:
         self._result = result
         self._raises = raises
 
-    async def get_portfolio_mover(self, user_id: str, tickers):
+    async def get_portfolio_mover(self, user_id: str, tickers, *, links_web_only: bool = False):
         self.portfolio_calls.append((user_id, list(tickers)))
+        self.links_web_only = links_web_only
         if self._raises is not None:
             raise self._raises
         if self._result is not None:
@@ -80,7 +81,7 @@ class _FakeMovers:
         # Default: a healthy build whose count is what the SERVICE was handed (the cap).
         return _payload(holdings_count=len(tickers))
 
-    async def get_market_mover(self):
+    async def get_market_mover(self, **_kw):
         self.market_calls += 1
         raise AssertionError("the portfolio route must never fall back to the market payload")
 

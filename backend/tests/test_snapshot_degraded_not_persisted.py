@@ -304,6 +304,9 @@ async def test_health_snapshot_persists_only_a_complete_build(
                 raise health
             return health
 
+        def next_earnings_for(self, ticker, *, served):
+            return None     # a build with no pending report: the plain 24h row
+
     monkeypatch.setattr(health_check_service, "get_health_check_service", lambda: _HealthCheck())
     monkeypatch.setattr(hs, "get_sector_benchmark_lookup", lambda: _StubLookup())
     hs._cache.clear()

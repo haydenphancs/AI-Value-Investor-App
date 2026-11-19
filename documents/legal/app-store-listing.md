@@ -177,7 +177,9 @@ silently truncated on paste. Only ~13 characters of headroom: if you add a sente
 'AI-assisted' label" on the weekly Deep Dives, so the description no longer says they are
 marked; it still says AI helps write and narrate some Learn articles, as the web Terms and
 Support pages do. Not live yet: App Store Connect takes a description change only with a new
-version, so paste this block when you create the next one.)
+version. ⚠️ Do NOT paste this block over the live text (2026-11-14 check): the live 1.02 description
+also carries a Pro/Max unlock paragraph naming "the Caydex Fair Value Estimate" (Guideline 2.3.2)
+that this block lacks. Edit only the Learn sentence of the copied text in place.)
 
 ### Why the description is shaped this way
 

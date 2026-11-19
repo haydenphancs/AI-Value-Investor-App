@@ -562,10 +562,16 @@ def test_the_operating_path_keeps_its_job():
 
 def test_the_cards_cannot_serve_old_rows():
     from app.services import growth_service as gs
-    assert vss._SNAPSHOT_PAYLOAD_VERSION == 10
-    assert ps._SNAPSHOT_PAYLOAD_VERSION == 6
-    assert gss._SNAPSHOT_PAYLOAD_VERSION == 6
-    assert gs._GROWTH_PAYLOAD_VERSION == 8
+    # 11 (2026-11-13): `numeric_value` / `peer_median` on each Price metric.
+    # 12 (2026-11-13): a fiscal-year P/FCF / EV/EBITDA row names its year, never TTM.
+    assert vss._SNAPSHOT_PAYLOAD_VERSION == 12
+    # 7 (2026-11-13): `numeric_value` / `peer_median` on each Profitability metric.
+    assert ps._SNAPSHOT_PAYLOAD_VERSION == 7
+    # 7 (2026-11-13): Growth rows carry `numeric_value` / `peer_median` / `period_label`.
+    # 8 (2026-11-14): Growth's zero-filled FCF year is a gap, not a -100% point.
+    assert gss._SNAPSHOT_PAYLOAD_VERSION == 8
+    # 9 (2026-11-14): operating cash flow + capex series, FCF zero-fill is a gap.
+    assert gs._GROWTH_PAYLOAD_VERSION == 9
     assert pp._PP_PAYLOAD_VERSION == 10
 
 

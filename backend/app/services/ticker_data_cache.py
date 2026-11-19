@@ -49,7 +49,7 @@ from app.schemas.revenue_breakdown import RevenueBreakdownResponse
 from app.schemas.signal_of_confidence import SignalOfConfidenceResponse
 from app.schemas.earnings import EarningsResponse
 from app.schemas.stock_overview import SnapshotItemResponse
-from app.schemas.growth import GrowthResponse
+from app.schemas.growth import GROWTH_CHAT_ONLY_SERIES, GrowthResponse
 from app.schemas.profit_power import ProfitPowerResponse
 from app.schemas.dcf_fair_value import DcfFairValueResponse
 from app.services.dcf_report_gate import report_dcf_source_matches
@@ -184,7 +184,11 @@ def _serialize(out: Any) -> Optional[Dict[str, Any]]:
             if val is None:
                 result[name] = None
             elif name in _PYDANTIC_FIELDS:
-                result[name] = val.model_dump(mode="json")
+                # The growth chart's chat-only series (capex, operating cash flow — 2026-11-14)
+                # are never read back from a collection (the report freezes the chart without
+                # them; chat reads GrowthService itself): ~25 KB a row of dead weight.
+                exclude = set(GROWTH_CHAT_ONLY_SERIES) if name == "growth_chart" else None
+                result[name] = val.model_dump(mode="json", exclude=exclude)
             elif name in _DATACLASS_FIELDS:
                 cls, dt_fields = _DATACLASS_FIELDS[name]
                 if type(val) is not cls:

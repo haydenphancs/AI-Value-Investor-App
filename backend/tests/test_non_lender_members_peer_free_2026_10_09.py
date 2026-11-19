@@ -552,7 +552,7 @@ async def test_vs_health_check_judges_pe_and_roe_on_absolute_bands(monkeypatch, 
         assert row.peer_level is None and row.comparison_value is None, row.type
         text = hcd._rendered(row)
         assert "industry" not in text and "sector" not in text, text
-    assert hc._HC_PAYLOAD_VERSION == 10
+    assert hc._HC_PAYLOAD_VERSION == 11    # 11 (2026-11-14): QR insight bands
 
 
 @pytest.mark.asyncio
@@ -1038,39 +1038,42 @@ def test_the_overview_response_passes_its_quarters_to_the_snapshots():
 
 
 @pytest.mark.asyncio
-async def test_growth_payload_version_is_8_and_older_rows_rebuild(monkeypatch):
+async def test_growth_payload_version_is_9_and_older_rows_rebuild(monkeypatch):
     """Growth v6 (2026-10-09, NET-4): a v5 row of MA drew the lenders' +24.6% operating-
     income line under its +15.7%; v7 (2026-10-21): a v6 row of a small Financial Services
-    industry drew the sector's line. Mutation: the constant left at 5 serves that row."""
-    assert gmod._GROWTH_PAYLOAD_VERSION == 8
+    industry drew the sector's line; v9 (2026-11-14): a v8 row charts FMP's zero-filled FCF
+    year as 0.00 with -100% and has no capex / operating cash flow. Mutation: the constant
+    left at 5 serves that row."""
+    assert gmod._GROWTH_PAYLOAD_VERSION == 9
     lookup = gd._yoy_metrics_lookup()
     fmp = gd._FakeFMP(profile={"symbol": "MA", "sector": FS, "industry": CREDIT})
     resp, _degraded = await gd._service(monkeypatch, fmp, lookup)._build_growth("MA")
     body = resp.model_dump()
     svc = gmod.GrowthService.__new__(gmod.GrowthService)
-    for old in (None, 4, 5, 6, 7):
+    for old in (None, 4, 5, 6, 7, 8):
         stale = dict(body) if old is None else {**body, gmod._VERSION_KEY: old}
         svc.supabase = sph._Supabase([sph._row(stale)[0]])
         assert svc._check_supabase_cache("MA") is None, f"a v{old} Growth row was served"
-    svc.supabase = sph._Supabase([sph._row({**body, gmod._VERSION_KEY: 8})[0]])
+    svc.supabase = sph._Supabase([sph._row({**body, gmod._VERSION_KEY: 9})[0]])
     assert svc._check_supabase_cache("MA") is not None
 
 
-def test_growth_snapshot_payload_version_is_6_and_older_rows_rebuild():
+def test_growth_snapshot_payload_version_is_8_and_older_rows_rebuild():
     """Growth snapshot v4 (2026-10-09, NET-4): a v3 row of MA scored its growth 2/5 against
-    the lenders' median; v5 (2026-10-21): the Financial Services peer rule. Mutation: the
-    constant left at 3 serves that score."""
+    the lenders' median; v5 (2026-10-21): the Financial Services peer rule; v7 (2026-11-13):
+    the drill-down card line's numbers; v8 (2026-11-14): Growth's zero-filled FCF year is a
+    gap. Mutation: the constant left at 3 serves that score."""
     from app.services import growth_snapshot_service as gss
 
-    assert gss._SNAPSHOT_PAYLOAD_VERSION == 6
+    assert gss._SNAPSHOT_PAYLOAD_VERSION == 8
     body = SnapshotItemResponse(category="Growth", rating=2, metrics=[],
                                 computed_at="2026-10-08T09:15:00Z").model_dump()
     svc = gss.GrowthSnapshotService.__new__(gss.GrowthSnapshotService)
-    for old in (None, 2, 3, 4, 5):
+    for old in (None, 2, 3, 4, 5, 6, 7):
         stale = dict(body) if old is None else {**body, gss._VERSION_KEY: old}
         svc.supabase = sph._Supabase([sph._row(stale)[0]])
         assert svc._check_supabase_cache("MA") is None, f"a v{old} growth snapshot was served"
-    svc.supabase = sph._Supabase([sph._row({**body, gss._VERSION_KEY: 6})[0]])
+    svc.supabase = sph._Supabase([sph._row({**body, gss._VERSION_KEY: 8})[0]])
     assert svc._check_supabase_cache("MA") is not None
 
 

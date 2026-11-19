@@ -20,6 +20,10 @@ struct ContentView: View {
     /// tab observes it and selects its Market chip — a repeat tap while it is already there is
     /// still a change, so the feed scrolls back to the Market Insight card.
     @State private var updatesMarketFocusSeq = 0
+    /// Set on every card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`, 2026-11-12). The
+    /// Updates tab observes it and selects that ticker's chip, or hands it back through
+    /// `onTickerFocusMissed` when the ticker is not one of the user's chips.
+    @State private var updatesTickerFocus: UpdatesTickerFocus?
 
     /// The ONE general-purpose Cay AI conversation, owned here so it survives tab switches and
     /// the chat resumes wherever it is reopened from.
@@ -78,7 +82,14 @@ struct ContentView: View {
             .allowsHitTesting(selectedTab == .home)
             .environment(\.isActiveTab, selectedTab == .home)
 
-            UpdatesView(selectedTab: $selectedTab, marketFocusSeq: updatesMarketFocusSeq)
+            UpdatesView(
+                selectedTab: $selectedTab,
+                marketFocusSeq: updatesMarketFocusSeq,
+                tickerFocus: updatesTickerFocus,
+                onTickerFocusMissed: { missed in
+                    presentTickerLink(symbol: missed.symbol, assetType: missed.assetType)
+                }
+            )
                 .opacity(selectedTab == .updates ? 1 : 0)
                 .allowsHitTesting(selectedTab == .updates)
                 .environment(\.isActiveTab, selectedTab == .updates)
@@ -180,7 +191,8 @@ struct ContentView: View {
         // that asset's detail screen, in the SAME destination cover a push uses (its own
         // `NavigationStack`, so the ticker screen's search and sheets work, and it dispatches all
         // five asset classes through `NotificationRouteContent`); `caydex://updates/market` →
-        // the Updates tab on its Market chip.
+        // the Updates tab on its Market chip; `caydex://updates/<SYMBOL>` → the Updates tab on
+        // that ticker's chip, or its detail screen when it is not one of the user's chips.
         //
         // ONE OWNER, consume-and-clear, `initial: true`: the same three rules as the push
         // handler above, for the same reasons. A cold launch parks the link before this view
@@ -294,6 +306,8 @@ struct ContentView: View {
             presentTickerLink(symbol: symbol, assetType: assetType)
         case .updatesMarket:
             openUpdatesMarket()
+        case .updatesTicker(let symbol, let assetType):
+            openUpdatesTicker(symbol: symbol, assetType: assetType)
         }
     }
 
@@ -342,6 +356,32 @@ struct ContentView: View {
         let open = {
             selectedTab = .updates
             updatesMarketFocusSeq &+= 1
+        }
+        guard ModalPresentationProbe.isAnythingPresented else {
+            open()
+            return
+        }
+        appState.dismissAllPresentations()
+        Task { @MainActor in
+            _ = await ModalPresentationProbe.waitUntilNothingPresented()
+            open()
+        }
+    }
+
+    /// A card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`, 2026-11-12): the Updates
+    /// tab on that ticker's chip, where its Insights card and the card's sources are.
+    ///
+    /// `openUpdatesMarket`'s teardown, for its reasons (the expanded player first, then the
+    /// stack). The tab cannot know whether the ticker is a chip until its tabs load, so it decides:
+    /// a ticker that is not an openable chip comes back through `onTickerFocusMissed` and opens
+    /// its detail screen, the link's fallback.
+    private func openUpdatesTicker(symbol: String, assetType: MarketTickerType) {
+        if AudioManager.shared.showFullScreenPlayer {
+            AudioManager.shared.collapsePlayer()
+        }
+        let open = {
+            selectedTab = .updates
+            updatesTickerFocus = UpdatesTickerFocus(symbol: symbol, assetType: assetType)
         }
         guard ModalPresentationProbe.isAnythingPresented else {
             open()

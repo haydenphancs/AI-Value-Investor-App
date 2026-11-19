@@ -659,11 +659,23 @@ _CARVE_OUT_CLAUSES = {
         "TermsOfUseView.swift",
         [
             "learning preferences",
+            # Learning goals reach the prompt ("Trying to get better at: …"), so the Terms
+            # name them too (2026-11-15 audit: the list stopped at "subjects you find interesting").
+            "and what you want to get better at",
             "we use those preferences only to decide which information to show you first",
             "never change our analysis, ratings, scores, or estimates",
             "never make any output a recommendation that a security is suitable for you",
             "your finances, risk tolerance, time horizon, tax situation, or investment objectives",
             "turn personalized explanations off at any time",
+        ],
+    ),
+    # The Support page's "general and impersonal" paragraph is the one the App Store Support URL
+    # opens. Once personalized explanations were switched on, "the same methodology for every
+    # user" with no exception became a flat claim the Terms contradict (2026-11-15 audit).
+    "support": (
+        "SupportView.swift",
+        [
+            "if you turn on personalized explanations, cay ai uses the learning preferences you give it only to choose what to cover first and how to word an explanation",
         ],
     ),
     "privacy": (

@@ -99,7 +99,7 @@ from app.services.agents.chat_guardrails import enforce_answer, scan_answer
 from app.services.chat_answer_coverage import judge_answer_coverage
 from app.services.chat_intent import is_trade_intent
 from app.services.chat_security import finalize_disclaimer, sanitize_context, sanitize_symbol
-from app.services.chat_service import ChatService, _chat_thinking_budget
+from app.services.chat_service import ChatService, _chat_thinking_budget, _chat_thinking_level_kwargs
 
 # Brave's terms (§3(b)(xiii)) forbid using web-search results to evaluate or train an AI, so an
 # eval run must never reach report chat's web search — forced OFF for the whole process, before
@@ -201,6 +201,30 @@ _PROBE_CASES: List[Dict[str, Any]] = [
         "reference_id": "SPY",
         "expect": {"tool": "check_asset_profile", "tool_args": {"ticker": ["SPY"]},
                    "resolved_as": ["exchange-traded fund", "— a fund"]},
+    },
+    {
+        # 2026-11-14 (owner: "Yes, add capex"): capital expenditure is in the growth section
+        # (and the summary's latest year) — never a web search for a figure Caydex holds.
+        "id": "probe-capex",
+        "intent": "financials",
+        "question": "How much did they spend on capex last fiscal year?",
+        "session_type": "STOCK",
+        "stock_id": "MSFT",
+        "context_type": "STOCK",
+        "reference_id": "MSFT",
+        "expect": {"tool": "check_company_financials",
+                   "tool_args": {"ticker": ["MSFT"], "section": ["growth", "summary"]}},
+    },
+    {
+        "id": "probe-operating-cash-flow",
+        "intent": "financials",
+        "question": "What was their operating cash flow in the latest quarter?",
+        "session_type": "STOCK",
+        "stock_id": "AAPL",
+        "context_type": "STOCK",
+        "reference_id": "AAPL",
+        "expect": {"tool": "check_company_financials",
+                   "tool_args": {"ticker": ["AAPL"], "section": ["growth", "summary"]}},
     },
 ]
 
@@ -432,7 +456,7 @@ async def _run_chat_stream(svc: ChatService, case: Dict[str, Any]) -> Dict[str, 
         async for kind, payload in svc.gemini.stream_agentic(
             prep["prompt"], tools=tools, tool_handlers=handlers,
             system_instruction=system_instruction, model_name=model, max_output_tokens=cap,
-            thinking_budget=_chat_thinking_budget(model),
+            thinking_budget=_chat_thinking_budget(model), **_chat_thinking_level_kwargs(model),
             usage_tag=f"eval-{case['id']}:{route['specialists'][0]}",
         ):
             if kind == "answer":

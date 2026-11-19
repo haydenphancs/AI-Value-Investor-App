@@ -100,6 +100,7 @@ from app.schemas.themes_detail import (
     ThemePeriodReturnResponse,
 )
 from app.services.price_service import _UNIVERSE_TTL as _PRICE_UNIVERSE_TTL_SECONDS, price_source
+from app.services.listing_status_service import get_delisted_many
 from app.services.market_movers_service import (
     _UNIVERSE_TTL as _MOVERS_UNIVERSE_TTL_SECONDS,
     get_market_movers_service,
@@ -1776,12 +1777,18 @@ class HomeDashboardService:
                 user_id, type(exc).__name__, exc,
             )
 
+        # The "Delisted" label, from the quotes already in hand (zero I/O for every symbol
+        # that traded in the latest session; one shared bounded wait otherwise — inside
+        # `_WATCHLIST_BUILD_TIMEOUT_SECONDS`). Never raises. Keys are UPPERCASE.
+        listing_map = await get_delisted_many(quotes)
+
         by_ticker = {str(r["ticker"]).upper(): r for r in rows if r.get("ticker")}
         tiles: List[MarketPulseItemResponse] = []
         for sym in symbols:
             q = quotes.get(sym)
             if not q:
                 continue
+            listing = listing_map.get(str(sym).strip().upper())
             price = _finite_float(q.get("price"))
             change = _parse_pct(q.get("changePercentage"))
             if price is None or price <= 0:
@@ -1797,7 +1804,22 @@ class HomeDashboardService:
             # exactly as `_fetch_pulse_item` does one function below; iOS gates the
             # sign, the colour and the dashed reference line on the flag.
             change_known = change is not None
-            if not change_known:
+            if not change_known and listing is not None:
+                # A CONFIRMED delisting: the price is the last close and there is no day
+                # change by design — not a data problem.
+                logger.debug(
+                    "Home watchlist: %s delisted %s — last close, no day change by design",
+                    sym, listing.delisted_date,
+                )
+            elif not change_known and q.get("isActivelyTrading") is False:
+                # FMP flags it inactive but no delisting is confirmed (not on FMP's list, it
+                # traded after its row, the registry is cold, or a lookup is still running).
+                # The "stale/missing close snapshot" wording below would be wrong here.
+                logger.warning(
+                    "Home watchlist: %s is flagged inactive by FMP (no delisting confirmed) "
+                    "— no day change, serving with change_known=false", sym,
+                )
+            elif not change_known:
                 logger.warning(
                     "Home watchlist: %s has no day change (stale/missing close snapshot) "
                     "— serving with change_known=false", sym,
@@ -1818,6 +1840,8 @@ class HomeDashboardService:
                 change_known=change_known,
                 previous_close=_finite_float(q.get("previousClose")) if change_known else None,
                 spark=[],
+                # All four or none (`app/schemas/listing_status.py`).
+                **(listing.wire() if listing is not None else {}),
             ))
         return title, is_group, tiles
 

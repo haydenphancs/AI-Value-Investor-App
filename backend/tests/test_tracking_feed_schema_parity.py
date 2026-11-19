@@ -52,6 +52,9 @@ ASSET_KEYS = {
     # "YYYY-MM-DDTHH:MM:SS.mmmZ", the Holdings "Date Added" sort key. Optional; iOS
     # decodes it leniently as `String?` (TrackedAssetDTO `addedAt`).
     "added_at",
+    # The "Delisted" label (2026-11-13, `app/schemas/listing_status.py`): four Optional keys,
+    # all null unless `listing_status_service` confirms a delisting; iOS decodes `String?`.
+    "listing_status", "delisted_date", "delisted_exchange", "last_trade_date",
 }
 ALERT_KEYS = {
     "type", "title", "description", "ticker", "company_name", "day", "month",

@@ -14,7 +14,7 @@ import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List, Tuple
+from typing import TYPE_CHECKING, Dict, Any, Optional, List, Tuple
 
 
 from app.database import get_supabase
@@ -28,6 +28,9 @@ from app.schemas.chat import MACRO_INDICATORS_BASIS, StockChartWidget, Historica
 from app.services.agents.book_voice_prompt import book_display_title, render_book_voice
 from app.services.agents.report_voice_prompt import render_report_voice, resolve_voice_key
 from app.services.agents.persona_config import ADVICE_BOUNDARY, IDENTITY_RULE
+
+if TYPE_CHECKING:  # annotation only; the endpoint builds the lens
+    from app.services.agents.investor_profile_prompt import ReaderLens
 from app.services.asset_class import (
     canonical_stored_symbol,
     detect_asset_class,
@@ -75,6 +78,15 @@ from app.services.chat_web_search_service import (
     web_results_delivered,
     web_search_mode,
 )
+from app.services.chat_intent import WEB_ASK_EXPLICIT
+
+# The asked half of the unavailable web line (2026-11-14; `ChatService._WEB_UNAVAILABLE_ASKED_RULE`).
+# Module-level so the stream door's cut-answer continuation can strip it without reaching
+# through the class (`endpoints.chat._continue_cut_answer`).
+WEB_UNAVAILABLE_ASKED_TAIL = (
+    "This question asked for a web search or a check: say in one short sentence that a web "
+    "search is not available right now, then answer as fully as you can from Caydex's data. "
+)
 # The chart normaliser the rest of the app already gets right. `_normalize_historical` below
 # used to hand-roll its own coercion and drifted: it kept rows a chart cannot plot.
 from app.services.chart_helper import _finite_or_none, fetch_chart_data
@@ -86,6 +98,8 @@ from app.services.chat_numeric_grounding import (
     audit_answer_bounded,
 )
 from app.services.price_service import price_source
+from app.services.listing_status_service import DelistedListing, get_delisted
+from app.schemas.listing_status import LISTING_STATUS_DELISTED
 from app.utils.currency import currency_code
 from app.utils.market_hours import ET, session_trading_date
 
@@ -220,6 +234,32 @@ def _chat_thinking_budget(model_name: Optional[str] = None) -> Optional[int]:
         return None
     value = settings.CHAT_THINKING_BUDGET
     return None if value < 0 else int(value)
+
+
+def _chat_thinking_level(model_name: Optional[str] = None) -> Optional[str]:
+    """Gemini `thinking_level` for a chat model call, or None to send no level (today's request).
+
+    The twin of `_chat_thinking_budget`, resolved the same way and from the same `model_name`:
+    the CHEAP route keeps None whatever the setting says (it never thinks), every other call
+    reads `settings.CHAT_THINKING_LEVEL` at CALL time (validated at start-up to minimal / low /
+    medium / high). The encoder (`gemini._thinking_fields`) sends a level only to a model that
+    accepts it; on any other model low / medium / high are ignored and the budget above applies,
+    while "minimal" means off there (budget 0 rules).
+    """
+    if model_name and model_name == settings.CHAT_CHEAP_MODEL:
+        return None
+    return settings.CHAT_THINKING_LEVEL or None
+
+
+def _chat_thinking_level_kwargs(model_name: Optional[str] = None) -> Dict[str, str]:
+    """`{"thinking_level": level}` when `_chat_thinking_level(model_name)` names one, else `{}`.
+
+    Splatted beside every `thinking_budget=_chat_thinking_budget(<model>)` with the SAME model
+    argument, so an unset `CHAT_THINKING_LEVEL` sends no new keyword at all: the request, the
+    response-cache key and every test fake with an explicit signature stay exactly as before.
+    """
+    level = _chat_thinking_level(model_name)
+    return {"thinking_level": level} if level else {}
 
 
 def _day_range(
@@ -564,7 +604,7 @@ class ChatService:
         context_type: Optional[str] = None,
         reference_id: Optional[str] = None,
         context_is_replayed: bool = False,
-        reader_lens: Optional[str] = None,
+        reader_lens: Optional["ReaderLens | str"] = None,
         user_id: Optional[str] = None,
         attach_base_widget: bool = True,
         web_turn: Optional[WebSearchTurn] = None,
@@ -673,12 +713,11 @@ class ChatService:
             )
 
         # Check Market Deep Dive cache for index/ETF/crypto/commodity
-        cached_report = None
         is_deep_dive = self._is_deep_dive_request(is_stock, stock_id, user_message)
-        if is_deep_dive and context:
-            cached_report = await asyncio.to_thread(
-                self._check_deep_dive_cache, stock_id, context, user_message, asset_type
-            )
+        cached_report = await self._read_deep_dive_cache(
+            is_deep_dive=is_deep_dive, context=context, stock_id=stock_id,
+            user_message=user_message, asset_type=asset_type, reader_lens=reader_lens,
+        )
 
         # The web search: the stream's turn when this is its fallback (one search per turn, its
         # tier kept); the stream's decision when it holds no turn (no search on this turn — never
@@ -820,6 +859,7 @@ class ChatService:
                 # green with the hole open. Reports keep 8192; chat does not.
                 max_output_tokens=_chat_output_cap(is_deep_dive),
                 thinking_budget=_chat_thinking_budget(),
+                **_chat_thinking_level_kwargs(),
                 # An explicit ask: the first request MUST call the search; a news ask: Caydex's
                 # licensed news first (`web_force_first`); the automatic tier is forced only for a
                 # news ask. On the stream→non-stream fallback the turn REPLAYS its one search.
@@ -874,6 +914,7 @@ class ChatService:
                 system_instruction=used_instruction,
                 max_output_tokens=_chat_output_cap(is_deep_dive),
                 thinking_budget=_chat_thinking_budget(),
+                **_chat_thinking_level_kwargs(),
             )
         else:
             web_used = web_turn is not None and any(
@@ -1015,7 +1056,7 @@ class ChatService:
         context_type: Optional[str] = None,
         reference_id: Optional[str] = None,
         context_is_replayed: bool = False,
-        reader_lens: Optional[str] = None,
+        reader_lens: Optional["ReaderLens | str"] = None,
         user_id: Optional[str] = None,
         include_today_line: bool = True,
     ) -> Dict[str, Any]:
@@ -1064,12 +1105,9 @@ class ChatService:
         is_deep_dive = self._is_deep_dive_request(
             asset_type == "STOCK", stock_id, user_message
         )
-        cached_report = (
-            await asyncio.to_thread(
-                self._check_deep_dive_cache, stock_id, context, user_message, asset_type
-            )
-            if is_deep_dive and context and stock_id
-            else None
+        cached_report = await self._read_deep_dive_cache(
+            is_deep_dive=is_deep_dive, context=context, stock_id=stock_id,
+            user_message=user_message, asset_type=asset_type, reader_lens=reader_lens,
         )
 
         # Stock enrichment (only for STOCK — other types are grounded by the resolver).
@@ -1243,14 +1281,32 @@ class ChatService:
         them."""
         granted = web_turn is not None
         d = decision if isinstance(decision, WebSearchDecision) else WebSearchDecision()
+        unavailable = (not granted) and d.unavailable
         return dict(
             web_search_granted=granted,
             web_search_tier=web_turn.tier if granted else None,
             web_ask_kind=web_prompt_kind(web_turn, allowed) if granted else None,
-            web_search_unavailable=(not granted) and d.unavailable,
+            web_search_unavailable=unavailable,
+            # The user asked for a search no tier can serve: they are told so in one sentence.
+            web_search_asked=unavailable and ChatService._web_search_asked(d),
             web_search_on_request=(not granted) and d.on_request,
             web_search_none=(not granted) and d.none_line,
         )
+
+    @staticmethod
+    def _web_search_asked(decision: Any) -> bool:
+        """The message EXPLICITLY asked for a web search or a check (2026-11-14) — the asked half
+        of the unavailable line (`_WEB_UNAVAILABLE_ASKED_RULE`). Never a NEWS ask (Caydex's
+        licensed headlines answer it, so "a web search is not available" would be a non sequitur),
+        never a market-data ask (the web never serves one by policy) and never an automatic turn
+        (no ask: a search the user never asked for is never announced). Never raises."""
+        try:
+            return (isinstance(decision, WebSearchDecision)
+                    and decision.ask_kind == WEB_ASK_EXPLICIT
+                    and not decision.market_data)
+        except Exception as e:  # noqa: BLE001 — a prompt flag must never break a turn
+            logger.warning("web search: asked-flag read failed (%s) — plain line", type(e).__name__)
+            return False
 
     @staticmethod
     def _web_prompt_flags_dropped(decision: Optional[WebSearchDecision]) -> Dict[str, Any]:
@@ -1260,7 +1316,10 @@ class ChatService:
         explicit_open = isinstance(decision, WebSearchDecision) and decision.explicit_open
         return dict(
             web_search_granted=False, web_search_tier=None, web_ask_kind=None,
-            web_search_unavailable=not explicit_open, web_search_on_request=explicit_open,
+            web_search_unavailable=not explicit_open,
+            # Parity with the send-door fallback, which is handed `decision_without_web(...)`.
+            web_search_asked=(not explicit_open) and ChatService._web_search_asked(decision),
+            web_search_on_request=explicit_open,
             web_search_none=False,
         )
 
@@ -1277,7 +1336,7 @@ class ChatService:
 
     def _today_line_allowed(
         self, include_today_line: bool, *, is_deep_dive: bool, context: Optional[str],
-        stock_id: Optional[str], cache_safe: bool, history: Any, reader_lens: Optional[str],
+        stock_id: Optional[str], cache_safe: bool, history: Any, reader_lens: Optional["ReaderLens | str"],
         asset_type: str, context_type: Optional[str], reference_id: Optional[str],
     ) -> bool:
         """Whether this turn's instruction carries the date line (`_today_line`).
@@ -1369,7 +1428,7 @@ class ChatService:
             return GroundingAudit(skipped="error").as_dict()
 
     def _deep_dive_cacheable(
-        self, *, cache_safe: bool, history: Any, reader_lens: Optional[str],
+        self, *, cache_safe: bool, history: Any, reader_lens: Optional["ReaderLens | str"],
         stock_id: Optional[str], asset_type: str, context_type: Optional[str],
         reference_id: Optional[str], log: bool = True,
     ) -> bool:
@@ -1464,6 +1523,7 @@ class ChatService:
                     system_instruction=sys, max_rounds=2,
                     max_output_tokens=settings.CHAT_MAX_OUTPUT_TOKENS,
                     thinking_budget=_chat_thinking_budget(),
+                    **_chat_thinking_level_kwargs(),
                 ):
                     if kind == "answer":
                         texts.append(payload)
@@ -1524,6 +1584,7 @@ class ChatService:
                 system_instruction=prep["system_instruction"],
                 max_output_tokens=deep_dive_cap,
                 thinking_budget=_chat_thinking_budget(),
+                **_chat_thinking_level_kwargs(),
             ):
                 yield ev
             return
@@ -1556,6 +1617,7 @@ class ChatService:
                 system_instruction=prep.get("system_instruction_no_tools") or prep["system_instruction"],
                 max_output_tokens=deep_dive_cap,
                 thinking_budget=_chat_thinking_budget(),
+                **_chat_thinking_level_kwargs(),
             ):
                 if kind == "answer" and text:
                     merge_yielded = True
@@ -1939,6 +2001,15 @@ class ChatService:
             sym, tail = "", f" {ccy}"
         else:
             sym, tail = "", ""
+        if widget.get("listing_status") == LISTING_STATUS_DELISTED:
+            # A CONFIRMED delisting (`listing_status_service`): the card's price is the LAST
+            # close, frozen, and must never be narrated as live (ROKU's $160.52 was "(live)"
+            # for days after Fox Corp's acquisition closed). This line REPLACES the LIVE QUOTE
+            # line. No reason is given: the data cannot tell an acquisition, a move to another
+            # exchange and a regulatory delisting apart (owner decision D4, 2026-11-13).
+            return ChatService._delisted_grounding_line(
+                widget, ticker, f"{sym}{_usd(price)}{tail}",
+            )
         parts = [f"{ticker} {sym}{_usd(price)}{tail}".strip()]
         chg, chg_pct = _fin(widget.get("change")), _fin(widget.get("change_percent"))
         if widget.get("change_known") is False:
@@ -1961,6 +2032,38 @@ class ChatService:
             f"at right now: {', '.join(parts)}{status}. "
             "These are the current numbers — prefer them over any older figures above, and "
             "never say a chart is unavailable: it is already on screen."
+        )
+
+    @staticmethod
+    def _delisted_grounding_line(widget: Dict[str, Any], ticker: str, price_text: str) -> str:
+        """The DELISTED LISTING line that replaces the LIVE QUOTE line for a confirmed
+        delisting. Every date is a plain ISO day, and a missing exchange or last-trade date
+        drops its clause rather than inventing one. Never names the data vendor."""
+        def _day(raw: Any) -> Optional[str]:
+            try:
+                return datetime.strptime(str(raw)[:10], "%Y-%m-%d").date().isoformat() if raw else None
+            except ValueError:
+                return None
+
+        exchange = widget.get("delisted_exchange")
+        exchange = " ".join(exchange.split()) if isinstance(exchange, str) and exchange.strip() else None
+        delisted = _day(widget.get("delisted_date"))
+        last = _day(widget.get("last_trade_date"))
+        where = f"from {exchange}" if exchange else ""
+        when = f"on {delisted} (a US Eastern calendar date)" if delisted else ""
+        listed = " ".join(p for p in ("is delisted", where, when) if p)
+        close = f"its LAST CLOSE (the {last} session)" if last else "its last stored close"
+        venue = f"on {exchange}" if exchange else "on its former exchange"
+        return (
+            f"\n\nDELISTED LISTING shown on the price-chart card the user is looking at: "
+            f"{ticker} {listed}, per Caydex's market data. {price_text} is {close}, NOT a "
+            "live or current price, and there is no day change. Call it the last close with "
+            "its date; never call it live, current or today's price, never describe a day "
+            f"move, and never imply it can still be traded {venue}. The data does not say why "
+            "it was delisted (an acquisition, a move to another exchange and a regulatory "
+            "delisting look the same), so give no reason unless a source cited in this "
+            "conversation does, and never claim the company itself stopped operating. The "
+            "chart card is already on screen; never say a chart is unavailable."
         )
 
     # ── FMP data fetching for the stock widget ──────────────────────
@@ -2089,8 +2192,17 @@ class ChatService:
             currency = currency_code(quote.get("currency"))
             if currency is None and uses_coingecko_price(ticker):
                 currency = "USD"
+            # A CONFIRMED delisting (zero I/O for anything that traded in the latest session;
+            # bounded and never raising otherwise): the card carries the four listing fields,
+            # and its dot reads "Closed" on every build — a green "Live" beside a frozen last
+            # close is the claim this exists to stop. The streamed context line then says
+            # DELISTED LISTING instead of LIVE QUOTE (`_widget_grounding_line`).
+            listing = await get_delisted(ticker, quote=quote)
+            if listing is not None:
+                is_market_open = False
             return self._build_stock_widget(
                 ticker, quote, historical_data, avg_volume, is_market_open, currency=currency,
+                listing=listing,
             )
 
         except Exception as e:
@@ -2168,6 +2280,7 @@ class ChatService:
         avg_volume: int,
         is_market_open: Optional[bool],
         currency: Optional[str] = None,
+        listing: Optional[DelistedListing] = None,
     ) -> Dict[str, Any]:
         """Build the StockChartWidget payload from a raw FMP quote + normalized history. Null-coerces
         the REQUIRED numeric fields (`or 0`) so a null price/change/volume degrades to 0 instead of
@@ -2207,9 +2320,11 @@ class ChatService:
             pe_ratio=quote.get("pe"),
             year_high=quote.get("yearHigh"),
             year_low=quote.get("yearLow"),
-            is_market_open=is_market_open,
+            # A delisted listing is never "Live" (belt and braces: the fetcher forces it too).
+            is_market_open=False if listing is not None else is_market_open,
             currency=currency_code(currency),
             historical_data=[HistoricalDataPoint(**d) for d in historical_data],
+            **(listing.wire() if listing is not None else {}),
         )
         return widget.model_dump()
 
@@ -3305,6 +3420,23 @@ class ChatService:
 
     _DEEP_DIVE_TTL_HOURS = 24
 
+    async def _read_deep_dive_cache(
+        self, *, is_deep_dive: bool, context: Optional[str], stock_id: Optional[str],
+        user_message: str, asset_type: str, reader_lens: Any,
+    ) -> Optional[str]:
+        """The cached AI Analyst brief for this turn, or None. BOTH doors read through here.
+
+        Never for a reader with a lens (owner decision 2026-11-15, "Answer live"): the cached
+        brief was written once for everyone, and they turned on answers in their own style.
+        The WRITE side refuses a lens turn too (`_deep_dive_cacheable`), so one reader's style
+        never reaches the shared row either.
+        """
+        if not (is_deep_dive and context and stock_id) or reader_lens:
+            return None
+        return await asyncio.to_thread(
+            self._check_deep_dive_cache, stock_id, context, user_message, asset_type
+        )
+
     @staticmethod
     def _is_deep_dive_request(is_stock: bool, stock_id: Optional[str], user_message: str) -> bool:
         """Whether to route this message through the Market Deep Dive cache. That cache is for the
@@ -3443,15 +3575,48 @@ class ChatService:
 
     # ── Answer shape ────────────────────────────────────────────────
     #
-    # Two mutually exclusive directives. Exactly one is inserted per turn.
+    # Two mutually exclusive directives. Exactly one is inserted per turn (`_answer_style`).
+    #
+    # A reader who turned on personalized explanations may choose a different LENGTH
+    # (`answer_depth`) or LANGUAGE (`explanation_style`). Those choices REPLACE the matching
+    # sentences of the one directive; they are never a second, later "Length:" line. That
+    # second line told the model "thorough" after "SHORT, at most 2-3 bullets" with nothing
+    # saying which won (audit 2026-11-15). The house defaults (`brief`, `balanced`) select the
+    # default sentences, so `_BRIEF_STYLE` is byte-for-byte what it always was.
 
-    _BRIEF_STYLE = (
-        "STYLE: Keep every answer SHORT, direct, and friendly. Lead with a 1-2 sentence direct "
+    _STYLE_LENGTH_DEFAULT = (
+        "Keep every answer SHORT, direct, and friendly. Lead with a 1-2 sentence direct "
         "answer to what was asked, then AT MOST 2-3 brief supporting bullet points, and only when "
         "they truly add value. Never write long, multi-section essays or ## headings. Do NOT dump "
         "everything you know — answer the specific question. Only expand into full detail if the "
-        "user explicitly asks for more. Use plain, conversational language. "
+        "user explicitly asks for more. "
     )
+    # Keys = `investor_profile_prompt._DEPTH` (non-default only).
+    _STYLE_LENGTH: Dict[str, str] = {
+        "standard": (
+            "Keep answers MODERATE in length, direct, and friendly. Lead with a 1-2 sentence "
+            "direct answer to what was asked, then give the reasoning behind it in a short "
+            "paragraph or 3-5 brief bullet points. Never write long, multi-section essays or ## "
+            "headings. Answer the specific question, not everything you know. "
+        ),
+        "deep": (
+            "This reader prefers THOROUGH answers. Lead with a 1-2 sentence direct answer to "
+            "what was asked, then cover the reasoning and the main counter-arguments, in short "
+            "paragraphs or bullet points; a long answer may use up to three '## ' headings. "
+            "Stay on the question that was asked. "
+        ),
+    }
+    _STYLE_LANGUAGE_DEFAULT = "Use plain, conversational language. "
+    # Keys = `investor_profile_prompt._STYLE` (non-default only).
+    _STYLE_LANGUAGE: Dict[str, str] = {
+        "plain_language": (
+            "Use plain, conversational language with minimal jargon, and a concrete example "
+            "where it helps. "
+        ),
+        "technical": "Use precise financial terminology, without over-explaining the basics. ",
+    }
+
+    _BRIEF_STYLE = "STYLE: " + _STYLE_LENGTH_DEFAULT + _STYLE_LANGUAGE_DEFAULT
 
     # Used ONLY for the "AI Analyst" / "Deep Research" button, whose own prompt asks for a
     # comprehensive multi-topic analysis. Under `_BRIEF_STYLE` the model was told to answer that
@@ -3476,6 +3641,25 @@ class ChatService:
         "market-wide number as if it belonged to this one specific asset. Prefer fewer, "
         "well-sourced points over broad coverage. "
     )
+
+    @classmethod
+    def _answer_style(
+        cls, *, is_deep_dive: bool,
+        answer_depth: Optional[str] = None, explanation_style: Optional[str] = None,
+    ) -> str:
+        """The turn's ONE style directive.
+
+        A deep dive keeps its fixed brief format (the button asked for it), so only a LANGUAGE
+        choice applies there. An unknown key falls back to the house sentence, never to nothing.
+        """
+        if is_deep_dive:
+            language = cls._STYLE_LANGUAGE.get(explanation_style or "")
+            return cls._DEEP_DIVE_STYLE + ("LANGUAGE: " + language if language else "")
+        return (
+            "STYLE: "
+            + cls._STYLE_LENGTH.get(answer_depth or "", cls._STYLE_LENGTH_DEFAULT)
+            + cls._STYLE_LANGUAGE.get(explanation_style or "", cls._STYLE_LANGUAGE_DEFAULT)
+        )
 
     # ── Answer-scope rules (TestFlight 2026-09-16, E2 / E4 / E5) ─────────────────
     # Three dead-ends the tester hit, each a model behaviour no prompt line asked for:
@@ -3638,17 +3822,40 @@ class ChatService:
     # pass-through or timed-out resolve the fenced text is the client's, and must never be
     # promoted to "what the report shows". No tool identifiers (test_chat_capability_block)
     # and none of the injection words test_chat_prompt_fencing forbids.
+    #
+    # Beyond the report (owner 2026-11-14: "I need Cay AI be able answer things outside of the
+    # report too … for data like number, it should prefer what we have in the report"; decision
+    # "Tools + web only"). The ORCL "how much does Oracle invest in data centers" turn ended at
+    # "The report does not provide…": the rule's only unscoped sentence was "if the report data
+    # does not cover something, say it is not in what you were given", which read as the whole
+    # answer to a question the report was never about. Now a question beyond the report is
+    # answered like any other chat question — Caydex's data and tools, then a web search when one
+    # runs on the turn, memory only for stable background and never for a figure (the company
+    # tier of WHAT YOU KNOW is unchanged); a figure the report holds leads, with its period and
+    # the report date, and a later-dated Caydex figure follows as the current one (CAYDEX DATA
+    # FIRST's "the later-dated one is current"); the honest exit is scoped to claims about the
+    # report. The "broader view" licence never carries a figure.
     _REPORT_GROUNDING_RULE = (
         "\nTHE REPORT ON SCREEN: The user is reading a Cay research report, and the report data "
         "in the CLIENT CONTEXT block below is what that report shows. When a question is about "
         "the report itself — its lists, rankings, scores, thesis, competitors and risks, or how "
         "it defines a score or an order — answer from that report data first and explain the "
         "report's own definition. Your general knowledge may add a second point, clearly "
-        "labelled as your broader view, but it must never contradict or deny what the report "
-        "shows. For today's price or anything else that moves with the market, use the LIVE "
-        "QUOTE line or a tool result when you have one, and give the report's own figure as of "
-        "the report date. If the report data you were given does not cover something, say it "
-        "is not in what you were given — never that the report lacks it or does not mention it. "
+        "labelled as your broader view and never with a figure, but it must never contradict or "
+        "deny what the report shows. For today's price or anything else that moves with the "
+        "market, use the LIVE QUOTE line or a tool result when you have one, and give the "
+        "report's own figure as of the report date. For any other figure the report holds, lead "
+        "with the report's figure, its period and the report date; when Caydex's data has a "
+        "later-dated figure for the same item, give it next, with its own period, as the current "
+        "one. A question that goes beyond the report — a newer period, an announced plan, "
+        "investment or deal, the company's strategy, the wider market or any other topic — is "
+        "answered like any other question in this chat: Caydex's data and tools first, then a "
+        "web search when one is available on this turn, and your general knowledge only for "
+        "stable background, never for a figure. Say in a few words that this part is not from "
+        "the report (for example 'Beyond the report, …'), and never decline a question because "
+        "the report does not cover it. When the report data you were given does not cover "
+        "something about the report, say it is not in what you were given — never that the "
+        "report lacks it, does not mention it or does not provide it. "
     )
     # ── Ask Cay AI's web search (2026-10-02; tiers and "Caydex figure only" 2026-10-08) ────
     # The trusted half of the `web_search` tool, rendered ONLY on a turn whose decision granted a
@@ -3661,7 +3868,10 @@ class ChatService:
     # automatic fallback (`_AUTO_WEB_RULE`, never forced) — over ONE shared body. CAYDEX FIGURE
     # ONLY (owner decision 2026-10-08, replacing the 2026-10-02 side-by-side wording): for an item
     # Caydex's data holds, the answer is the Caydex figure and a differing web figure is never
-    # restated; the web is for what Caydex does not cover and for dated later events. Neutral
+    # restated; the web is for what Caydex does not cover and for dated later events — and an
+    # announced plan, commitment or guidance IS such an event, never "the same item" as a past
+    # filed figure (2026-11-14: with capital expenditure in Caydex's financials tool, Oracle's
+    # announced data-center commitments must not be withheld as a restated capex). Neutral
     # wording ("a web search may run"), because the trigger is also "verify" / "double-check". No
     # tool identifiers (`test_chat_capability_block`), no vendor words, none of the injection words
     # `test_chat_prompt_fencing` forbids (`test_chat_answer_scope_rules` pins all three).
@@ -3677,10 +3887,13 @@ class ChatService:
         "other figure — answer with the Caydex figure and its date, and never restate a different "
         "web figure for that item, not even beside it or as a second view. Use web results only "
         "for what Caydex's data does not cover and for "
-        "dated events after it, each attributed to its publisher and date. Never take a price, "
+        "dated events after it, each attributed to its publisher and date. A plan, commitment or "
+        "guidance the company announced is such a dated event, not the same item as a past "
+        "filed figure. Never take a price, "
         "quote, price change, volume, market capitalisation, index level, exchange rate or other "
-        "market data from a web result; those come only from the LIVE QUOTE line or a market-data "
-        "tool result. A web search names only the company, its ticker, the topic and the period — "
+        "market data from a web result; those come only from the LIVE QUOTE line, a DELISTED "
+        "LISTING line or a market-data tool result. A web search names only the company, its "
+        "ticker, the topic and the period — "
         "never a figure from the report or from the data you were given. Never name or describe "
         "the search engine or service behind the results: say 'a web search' or name the "
         "publisher. Never write a URL or a link; the sources are attached separately. Never say "
@@ -3706,10 +3919,13 @@ class ChatService:
         "ownership stake, a dividend, a date or any other figure — answer with the Caydex figure "
         "and its date, and never restate a different web figure for that item, not even beside it "
         "or as a second view. Use web results only for what Caydex's data does not cover and for "
-        "dated events after it, each attributed to its publisher and date. Never take a price, "
+        "dated events after it, each attributed to its publisher and date. A plan, commitment or "
+        "guidance the company announced is such a dated event, not the same item as a past "
+        "filed figure. Never take a price, "
         "quote, price change, volume, market capitalisation, index level, exchange rate or other "
-        "market data from a web result; those come only from the LIVE QUOTE line or a market-data "
-        "tool result. A web search names only the company, its ticker, the topic and the period — "
+        "market data from a web result; those come only from the LIVE QUOTE line, a DELISTED "
+        "LISTING line or a market-data tool result. A web search names only the company, its "
+        "ticker, the topic and the period — "
         "never a figure from the data you were given. Never name or describe the search engine or "
         "service behind the results: say 'a web search' or name the publisher. Never write a URL "
         "or a link; the sources are attached separately. Never say you searched or checked the web "
@@ -3745,10 +3961,11 @@ class ChatService:
     _AUTO_WEB_HEAD = (
         "\nWEB RESULTS: A web search is available on this turn only as a fallback. Answer from "
         "Caydex's data and tools first, and call the web search only after they could not "
-        "answer — for an event, a lawsuit, a product launch, what management said, a calendar, a "
-        "filing's text or a private company. Never call it for prices, quotes, market data, "
-        "exchange rates, the VIX or the DXY, never to restate or check a Caydex figure, and call "
-        "it at most once. "
+        "answer — for an event, a lawsuit, a product launch, what management said, a company's "
+        "announced plans, investments, spending commitments, deals, partnerships or strategy, a "
+        "calendar, a filing's text, a private company, or any other recent fact outside Caydex's "
+        "data. Never call it for prices, quotes, market data, exchange rates, the VIX or the DXY, "
+        "never to restate or check a Caydex figure, and call it at most once. "
     )
     _AUTO_WEB_END = (
         "; if no search ran, or it found nothing useful, follow the result's note and answer "
@@ -3758,12 +3975,17 @@ class ChatService:
     _AUTO_WEB_RULE = _AUTO_WEB_HEAD + _WEB_RESULTS_BODY + _AUTO_WEB_END
     _AUTO_WEB_RULE_GENERAL = _AUTO_WEB_HEAD + _WEB_RESULTS_BODY_GENERAL + _AUTO_WEB_END
     # WHAT YOU KNOW's absent-figure branch, on a turn the automatic tier is granted: a missing
-    # NON-figure fact may be searched instead of declined; a figure Caydex holds never is.
+    # fact may be searched instead of declined — since 2026-11-14 also an announced plan,
+    # investment or commitment, and a figure Caydex's data does NOT hold, given with its publisher
+    # and date, never as Caydex's (owner decision "Tools + web only"); a figure Caydex holds never
+    # comes from the web.
     _KNOWLEDGE_AUTO_WEB_CLAUSE = (
         "\nWHEN CAYDEX'S DATA IS SILENT: On this turn a web search is available as a fallback, so "
         "a missing fact that is not a figure Caydex's data holds — an event, a lawsuit, a product "
-        "launch, what management said, a private company's details — may be searched once "
-        "instead of declined. A figure Caydex's data holds never comes from the web. "
+        "launch, what management said, a company's announced plans, investments, spending "
+        "commitments or deals, a private company's details — may be searched once instead of "
+        "declined, and a figure found that way is given with its publisher and date, never as "
+        "Caydex's. A figure Caydex's data holds never comes from the web. "
     )
     # The other half: the user asked to search / verify, but no search can run on this call —
     # the decision closed every tier (`web_search_intent_unserved`), the automatic tier cannot run
@@ -3773,6 +3995,15 @@ class ChatService:
     _WEB_UNAVAILABLE_RULE = (
         "\nWEB SEARCH: No web search is available on this turn; never say you searched the web. "
     )
+    # The ASKED half (owner, 2026-11-14 — "Search for me, how much Oracle invest in data center?"
+    # answered as if nobody had asked): the message explicitly asked for a search or a check and
+    # no tier opened, so the user is told in one sentence, then answered. Built ON the line above,
+    # so "never say you searched the web" stays word for word and one `WEB SEARCH:` line renders.
+    # Never on a news ask (Caydex's headlines answer it), a market-data ask (the web never serves
+    # one), an automatic turn (a search nobody asked for is never announced) or a tool-less build
+    # of a GRANTED turn (its tool round or a specialist may have searched) — `_web_search_asked`.
+    _WEB_UNAVAILABLE_ASKED_TAIL = WEB_UNAVAILABLE_ASKED_TAIL
+    _WEB_UNAVAILABLE_ASKED_RULE = _WEB_UNAVAILABLE_RULE + _WEB_UNAVAILABLE_ASKED_TAIL
     # A chat where an explicit web search IS available (report chat, or every-chat search for this
     # caller), on a turn that did not ask for it: the model had no word about it and told a user
     # "I do not have the ability to browse the web" (owner test 2026-10-03). It points the user at
@@ -3799,7 +4030,7 @@ class ChatService:
         client_context: Optional[str] = None,
         asset_type: str = "STOCK",
         context_is_replayed: bool = False,
-        reader_lens: Optional[str] = None,
+        reader_lens: Optional["ReaderLens | str"] = None,
         is_deep_dive: bool = False,
         reference_id: Optional[str] = None,
         tools_granted: bool = True,
@@ -3812,6 +4043,7 @@ class ChatService:
         web_search_tier: Optional[str] = None,
         web_ask_kind: Optional[str] = None,
         web_search_none: bool = False,
+        web_search_asked: bool = False,
     ) -> str:
         # `include_today_line`: the date line (`_today_line`) — on by default, on every build
         # (tool-less, fallback and continuation included); off only for an answer that is
@@ -3839,6 +4071,11 @@ class ChatService:
         # `web_search_unavailable`: no search can run on this turn although one was asked for
         # (`web_search_intent_unserved`) — the one-line `_WEB_UNAVAILABLE_RULE`, so the model
         # never claims a search.
+        #
+        # `web_search_asked` (2026-11-14): read ONLY with `web_search_unavailable` on a build with
+        # no granted tier — the message explicitly asked for a search or a check
+        # (`_web_search_asked`), so `_WEB_UNAVAILABLE_ASKED_RULE` tells the user in one sentence
+        # that none can run. A tool-less build of a GRANTED turn ignores it.
         #
         # `web_search_tier` / `web_ask_kind` (the turn's `WebSearchTurn`): which granted rule —
         # the automatic fallback (`_AUTO_WEB_RULE`), a news ask (`_WEB_NEWS_RULE`) or an explicit
@@ -3930,7 +4167,13 @@ class ChatService:
             # deep-dive prompt asks for fundamentals + valuation + moat + risks + outlook, and
             # the brevity rule below simultaneously forbade sections and capped the answer at
             # 2-3 bullets. The model resolved that by writing something thin and shapeless.
-            + (self._DEEP_DIVE_STYLE if is_deep_dive else self._BRIEF_STYLE)
+            # The reader's length/language choice, when they gave one, is folded into this
+            # same directive (`_answer_style`) rather than stated again below.
+            + self._answer_style(
+                is_deep_dive=is_deep_dive,
+                answer_depth=getattr(reader_lens, "answer_depth", None),
+                explanation_style=getattr(reader_lens, "explanation_style", None),
+            )
             +
             # ── Disclaimer: CONDITIONAL on trade-action intent ──
             # A note on every answer — including "Hi" — trains people to skip it. It
@@ -3964,14 +4207,21 @@ class ChatService:
         )
 
         # Reader preferences sit HERE — after the shared guards (identity rule, style,
-        # advice boundary) and BEFORE anything session- or turn-specific. Order matters
-        # twice over: the amended ADVICE_BOUNDARY above refers to "a USER PREFERENCES
-        # block ... above", and a block placed after the fenced client context would be
-        # read as part of that untrusted span. Already rendered by the caller (a
-        # server-authored string from closed enums), so it is trusted and unfenced —
-        # see agents/investor_profile_prompt for why fencing it would make it inert.
-        if reader_lens:
-            base += reader_lens
+        # advice boundary) and BEFORE anything session- or turn-specific. The ADVICE_BOUNDARY
+        # above tells the model how to read "a USER PREFERENCES block in this instruction",
+        # and a block placed after the fenced client context would be read as part of that
+        # untrusted span. Already rendered by the caller (a server-authored string from
+        # closed enums), so it is trusted and unfenced — see agents/investor_profile_prompt
+        # for why fencing it would make it inert.
+        #
+        # `reader_lens` is an `investor_profile_prompt.ReaderLens` (its `block` carries no
+        # Length/Language line: those went into the STYLE directive above). A plain string is
+        # still accepted, as a block with no style choice.
+        lens_text = (
+            reader_lens if isinstance(reader_lens, str) else getattr(reader_lens, "block", "")
+        ) or ""
+        if lens_text:
+            base += lens_text
             # Learn surfaces only (book / article / journey lesson), and only when a lens
             # actually exists — "connect this to what they follow" is meaningless for a
             # reader who stated no interests, and would invite the model to invent some.
@@ -4102,8 +4352,13 @@ class ChatService:
                 base += self._WEB_NEWS_RULE if report_web else self._WEB_NEWS_RULE_GENERAL
             else:
                 base += self._WEB_RESULTS_RULE if report_web else self._WEB_RESULTS_RULE_GENERAL
-        elif web_search_granted or web_search_unavailable:
+        elif web_search_granted:
+            # A tool-less build of a granted turn: no results in front of it, and its tool round
+            # or a specialist may already have searched — so never "not available" (plain line).
             base += self._WEB_UNAVAILABLE_RULE
+        elif web_search_unavailable:
+            base += (self._WEB_UNAVAILABLE_ASKED_RULE if web_search_asked
+                     else self._WEB_UNAVAILABLE_RULE)
         elif web_search_on_request:
             base += self._WEB_ON_REQUEST_RULE
         elif web_search_none:
@@ -4142,12 +4397,14 @@ class ChatService:
                     "Use it for background, but for time-sensitive figures (prices, analyst targets, "
                     "technical levels) "
                     + (
-                        "rely on your live tools or the LIVE QUOTE line below rather than "
+                        "rely on your live tools or the LIVE QUOTE line below (or the DELISTED "
+                        "LISTING line) rather than "
                         if tools_granted else
                         # The tool-less variant (the synthesis merge, the no-tools fallback):
                         # telling a model with no tools to "rely on your live tools" invites
                         # it to supply a tool's output from memory (F06-9).
-                        "rely on the LIVE QUOTE line below if one is present, and otherwise "
+                        "rely on the LIVE QUOTE line below (or the DELISTED LISTING line) if one is "
+                        "present, and otherwise "
                         "present them as a point-in-time snapshot, not as current — never as "
                     )
                     + "these possibly-stale numbers."

@@ -72,9 +72,11 @@ _MARKET_CONTEXT_KEYS = {
 _INDEX_KEYS = {
     "symbol", "label", "change_percent", "price", "short_label", "rolling_24h", "asset_type",
 }
+# `cause_card` (2026-11-12): the cause came from the ticker's Insights card, so a new build links
+# the row to the Updates card (`caydex://updates/<SYMBOL>`). Always on the wire, default False.
 _MOVER_KEYS = {
     "ticker", "company_name", "change_percent", "price", "tier", "z",
-    "cause", "context", "rolling_24h", "asset_type",
+    "cause", "context", "rolling_24h", "asset_type", "cause_card",
 }
 # `detail_aged` — the headline's cause worded for a LATER day ("…on Tue"), shown when the
 # client ages the footer. None on every non-headline mover and on a 24/7 row.

@@ -207,11 +207,13 @@ async def test_a_financial_services_price_card_needs_two_judged_multiples(
     assert bool([r for r in caplog.records if "[valuation-unrated]" in r.getMessage()]) is not rated
 
 
-def test_the_drill_down_ttm_point_uses_the_floor_of_its_group():
-    cell = {"value": 24.8, "n": 10, "level": "industry"}
-    assert C._mature_ttm_value("pe_ratio", cell) is None             # 20 elsewhere
-    assert C._mature_ttm_value("pe_ratio", cell, 10) == 24.8         # FS industry
-    assert C._mature_ttm_value("pe_ratio", dict(cell, n=9), 10) is None
+def test_the_drill_down_draws_no_ttm_point_at_all():
+    """The FS-floored TTM point this file used to pin (a 10-company industry's TTM median
+    drawn as the current year's peer point) is gone with every other TTM point (owner
+    decision 2026-11-13, "Replace it"): the drill-down's TTM comparison is the legend's
+    "Current (TTM)" line, carried on the card row. The helper must not come back."""
+    for gone in ("_mature_ttm_value", "_read_ttm_peer_cells", "_ttm_point_fits_line"):
+        assert not hasattr(C, gone), gone
 
 
 def _snap(category, rows: Dict[str, Any], rating=3):

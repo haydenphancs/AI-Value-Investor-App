@@ -32,16 +32,23 @@ struct MarketPulseCard: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.85)
 
-                // A `lineLimit(1)` with no `minimumScaleFactor` TRUNCATES, and the real
-                // values are 9 characters ("23,840.10"). At `dataMedium` × dataCap that
-                // is ~88pt of monospaced digits in a 68pt box, which is why index prices
-                // clipped. 0.75 is derived, not felt: 88 × 0.75 = 66pt, just inside.
-                Text(item.priceText)
-                    .font(AppTypography.dataMedium)
-                    .foregroundColor(AppColors.textPrimary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.75)
-                    .allowsTightening(true)
+                // Delisted (owner decision 2026-11-13, D1): a grey pill in place of the
+                // price, which is a stale last close. No height reservation is needed:
+                // `EqualWidthHStack` gives every tile the tallest tile's cell.
+                if item.isDelisted {
+                    delistedPill
+                } else {
+                    // A `lineLimit(1)` with no `minimumScaleFactor` TRUNCATES, and the real
+                    // values are 9 characters ("23,840.10"). At `dataMedium` × dataCap that
+                    // is ~88pt of monospaced digits in a 68pt box, which is why index prices
+                    // clipped. 0.75 is derived, not felt: 88 × 0.75 = 66pt, just inside.
+                    Text(item.priceText)
+                        .font(AppTypography.dataMedium)
+                        .foregroundColor(AppColors.textPrimary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .allowsTightening(true)
+                }
 
                 // Dual-tone sparkline with a dashed previous-close reference
                 // line — green above / red below — matching the Holdings cards.
@@ -52,7 +59,7 @@ struct MarketPulseCard: View {
                 // strip, which never fetches one (a per-ticker series would be one
                 // API call each on the most-visited screen). Reserving the gap made
                 // those tiles look like a failed render.
-                if !item.spark.isEmpty {
+                if !item.spark.isEmpty, !item.isDelisted {
                     SparklineView(
                         data: item.spark,
                         // Direction of the SERIES when today's change is unknown, so the
@@ -77,12 +84,14 @@ struct MarketPulseCard: View {
 
                 // Had NO line limit at all, so it wrapped instead of truncating and grew
                 // the tile vertically rather than clipping — a different symptom of the
-                // same 68pt squeeze.
-                Text(item.changeText)
-                    .font(AppTypography.dataSmall)
-                    .foregroundColor(changeColor)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
+                // same 68pt squeeze. None for a delisted tile: it has no day change.
+                if !item.isDelisted {
+                    Text(item.changeText)
+                        .font(AppTypography.dataSmall)
+                        .foregroundColor(changeColor)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
             }
             // `minWidth: 88` is a FLOOR, never a hard width: the strip is a horizontal
             // ScrollView that constrains nothing, so larger text costs a little scroll
@@ -114,6 +123,13 @@ struct MarketPulseCard: View {
         }
         .buttonStyle(.plain)
     }
+
+    /// The "Delisted" pill: `textSecondary` ink on the pill's own opaque surface (never
+    /// `neutral`, which is amber). VoiceOver reads the whole headline.
+    private var delistedPill: some View {
+        TintedTagBadge(text: DelistedListing.pillText, color: AppColors.textSecondary)
+            .accessibilityLabel(item.delisting?.spokenHeadline ?? DelistedListing.pillText)
+    }
 }
 
 #Preview {
@@ -125,6 +141,24 @@ struct MarketPulseCard: View {
         MarketPulseCard(item: MarketPulseItem(
             name: "ORCL", symbol: "ORCL", type: .stock,
             priceText: "229.87", changeText: "+0.41%", isPositive: true, spark: []
+        ))
+    }
+    .padding()
+    .background(AppColors.background)
+}
+
+// A confirmed delisting in the Your Watchlist strip: the pill replaces the price, with no
+// sparkline and no change; the strip still gives every tile one cell size.
+#Preview("Delisted") {
+    EqualWidthHStack(spacing: 10) {
+        MarketPulseCard(item: MarketPulseItem(
+            name: "ORCL", symbol: "ORCL", type: .stock,
+            priceText: "229.87", changeText: "+0.41%", isPositive: true, spark: []
+        ))
+        MarketPulseCard(item: MarketPulseItem(
+            name: "ROKU", symbol: "ROKU", type: .stock,
+            priceText: "160.52", changeText: "—", isPositive: false, spark: [],
+            changeKnown: false, delisting: .sample
         ))
     }
     .padding()

@@ -350,7 +350,63 @@ TABLE_NAME = "ticker_report_cache"
 #     to the push time if the deploy lands later. The full backend suite ran on this change,
 #     on the exact commit, BEFORE this literal was written. This ONE bump supersedes every
 #     instant above.
-CACHE_SCHEMA_FLOOR = datetime(2026, 11, 6, 2, 54, 0, tzinfo=timezone.utc)
+# 2026-11-13 (23:42 UTC = 18:42 ET, after the close; the push, owner's "Yes, push now"): the
+#     drill-down's two-line legend (owner decision 2026-11-13). Cached collections carry the annual peer lines with the TTM median drawn
+#     as the current calendar year's point (ORCL's closed FY2026 read "1.42× vs industry"
+#     against today's median) and card rows without `current_value` / `current_peer_median`
+#     / `current_score`, so a report frozen from them would keep the mispaired line and never
+#     show the "Current (TTM)" line. Ships with Valuation 11 and Financial Health 10.
+#     SCORER_VERSION stays: no score changes. Same rule: a PAST instant, moved to the push
+#     time if the deploy lands later. The full backend suite ran on this change, on the exact
+#     commit, BEFORE it was pushed. This ONE bump supersedes every instant above.
+# 2026-11-14 (02:24 UTC = 21:24 ET on the 13th, after the close; the push, owner's "Yes, push
+#     it"): the rest of the drill-down work, two sessions in one commit. Cached collections carry
+#     Profitability snapshot rows without `numeric_value` / `peer_median` (the Profitability
+#     sheet's "Current (TTM)" line), Growth rows without `numeric_value` / `peer_median` /
+#     `period_label` (the Growth sheet's "FY2026 …" card line, owner: "Name the periods"), and
+#     Price rows whose last-fiscal-year P/FCF or EV/EBITDA still carry numbers the sheet would
+#     call TTM (owner: "Fallback TTM labels"). It also closes the 23:42-00:10 UTC window the
+#     entry above left (its deploy landed after its instant). Ships with Profitability 7,
+#     Growth 7 and Price 12. SCORER_VERSION stays: no score changes. Same rule: a PAST instant,
+#     moved to the push time if the deploy lands later. The full backend suite ran on this
+#     change, on the exact commit, BEFORE it was pushed. This ONE bump supersedes every
+#     instant above.
+# 2026-11-14 (20:49 UTC = 15:49 ET, a Saturday: no session since Friday's 18:00 ET close; the
+#     commit, owner's "Commit them"): the numbers around the Future Forecast chart (owner
+#     decisions 2026-11-14: "All 13", growth span "Last reported → last forecast", "Keep scores
+#     unchanged", price cutoff "Caption"). Cached collections carry `revenue_forecast_partial`
+#     without `cagr_span` / `eps_growth_span` and with the legacy-window CAGR as the printed
+#     rate (PLUG's "22% annually"), 1-dp YoY chips (PLUG FY2024 "-30%" for -29.45%), "$" on
+#     non-USD filers, a blank consensus drawn as 0.00 and frozen partial-session closes, so a
+#     report built from them would keep all of it. SCORER_VERSION stays: the scored
+#     c["revenue_cagr"] / c["eps_cagr"] did not change. Same rule: a PAST instant, moved to the
+#     push time if the deploy lands later. Targeted suites ran on this change; run the full
+#     suite on the exact commit before pushing. This ONE bump supersedes every instant above.
+# 2026-11-14 (22:50 UTC = 17:50 ET, a Saturday; owner: "Switch to adjusted"): the Earnings
+#     Timeline's reported years plot ADJUSTED EPS (the four quarterly feed actuals summed, the
+#     consensus's basis) with `eps_basis` "adjusted" and `eps_gaap_label`, so the first forecast
+#     year's EPS change and an EPS CAGR from the last reported year are measured. Cached
+#     collections carry the GAAP timeline with that change blank. SCORER_VERSION stays. Same
+#     rule: a PAST instant, moved to the push time if the deploy lands later. This ONE bump
+#     supersedes every instant above.
+# 2026-11-15 (00:59 UTC = 19:59 ET Saturday, after the close; the push, owner's "run the full
+#     suite and push"): moved to the push moment for the five commits it ships (report-day
+#     earnings dots, Future Forecast numbers, adjusted EPS + the price line on year-ends, and
+#     the Health / drill-down work beside them), so a collection the old code writes before
+#     the deploy is not served as fresh. The full suite ran on 3f2c5ee0 (79,879 passed); this
+#     floor-only commit adds nothing else. This ONE bump supersedes every instant above.
+# 2026-11-15 (03:57 UTC = 22:57 ET Saturday, after the close; the push, owner's "Push all
+#     now", inside the Sunday 02:00-08:00 UTC window by the owner's choice): ships 11684f3b
+#     (report chat beyond the report; capex and operating cash flow for Cay AI) and 53301589
+#     (the FCF growth peer median), with 3ebf8074 (ETF dividends, no floor of its own).
+#     Cached collections carry `growth_chart` with FMP's zero-filled free-cash-flow row as a
+#     0.00 point and a -100% YoY, and `snap_growth` scoring that -100% (owner: "Fix it too"), so
+#     a report frozen from them would keep both. Ships with Growth 9 and Growth snapshot 8 (their
+#     own Supabase rows are versioned; the frozen copies here are not). The peer median changes
+#     only when the owner recomputes. SCORER_VERSION stays. The full suite ran on 53301589
+#     (80,118 + 715 + 99 passed, 0 failed); this floor-only commit adds nothing else. This ONE
+#     bump supersedes every instant above.
+CACHE_SCHEMA_FLOOR = datetime(2026, 11, 15, 3, 57, 0, tzinfo=timezone.utc)
 
 # The internal report key carrying the Financials sections a report lost to a degraded
 # upstream build. Equal to `ticker_report_data_collector.DEGRADED_SECTIONS_KEY`.

@@ -353,19 +353,29 @@ class TickerReportViewModel: ObservableObject {
             print("   Error details: \(error.localizedDescription)")
 
             self.isLoading = false
-            self.error = self.userFriendlyError(error)
-            // What the user can actually DO about it.
-            //
-            // The message copy below stays bespoke (it names the ticker, which
-            // `AppError` cannot), but the ACTION is taken from `AppError.from(_:)` so this
-            // screen agrees with every other surface about where an error sends you. It
-            // used to be dropped entirely: a 402 INSUFFICIENT_CREDITS carries
-            // `action: "upgrade"`, but the error view offered only Retry — which re-issues
-            // the identical request and 402s again — with no route to Buy Credits. A user
-            // out of credits was stuck in a loop on the one screen that could sell them the
-            // fix (SYSTEM_DESIGN_GUIDELINES §9b.7).
-            self.errorAction = AppError.from(error).suggestedAction
-            // Don't set reportData — let the error view show with retry button
+            if self.reportData == nil {
+                self.error = self.userFriendlyError(error)
+                // What the user can actually DO about it.
+                //
+                // The message copy below stays bespoke (it names the ticker, which
+                // `AppError` cannot), but the ACTION is taken from `AppError.from(_:)` so this
+                // screen agrees with every other surface about where an error sends you. It
+                // used to be dropped entirely: a 402 INSUFFICIENT_CREDITS carries
+                // `action: "upgrade"`, but the error view offered only Retry — which re-issues
+                // the identical request and 402s again — with no route to Buy Credits. A user
+                // out of credits was stuck in a loop on the one screen that could sell them the
+                // fix (SYSTEM_DESIGN_GUIDELINES §9b.7).
+                self.errorAction = AppError.from(error).suggestedAction
+                // Don't set reportData — let the error view show with retry button
+            } else {
+                // "Regenerate · N credits" tapped over a report already on screen
+                // (`regenerateForCredits`) and refused — e.g. 409 TICKER_DELISTED once the
+                // cached report aged out, refused before any charge. `body` renders
+                // `reportData` before `error`, so writing `error` here showed the old report
+                // back with no word at all. The banner is the one surface over a loaded
+                // report, the same routing as Path A's refresh failures above.
+                self.transientError = AppError.from(error).message
+            }
         }
         // Re-read the shared balance on EVERY outcome of the paid door: a cache miss
         // precharges the report's credits (refunded if it is not delivered), a transport
@@ -449,6 +459,11 @@ class TickerReportViewModel: ObservableObject {
                 switch code {
                 case "TICKER_NOT_FOUND":
                     return "Ticker '\(ticker)' wasn't found. Check the symbol and try again."
+                // Refused before any charge. The backend's own sentence (ticker, exchange, date,
+                // "you haven't been charged"), through the typed AppError case so this screen and
+                // the Research tab say the same thing; its `.goBack` action means no Retry.
+                case "TICKER_DELISTED":
+                    return AppError.from(apiError).message
                 case "INVALID_PERSONA":
                     return "That investor persona isn't supported."
                 case "INVALID_INPUT":

@@ -107,13 +107,15 @@ def test_a_banks_first_forecast_bar_has_no_revenue_change():
     assert first["revenue_yoy_pct"] is None
     assert first["revenue_label"] == "$208.4B", "the bar itself stays: the consensus is honest"
     later = [r["revenue_yoy_pct"] for r in rows if r["is_forecast"]][1:]
-    assert later == [4.2, 5.1], "estimate against estimate is one basis"
-    assert [r["revenue_yoy_pct"] for r in rows if not r["is_forecast"]][-1] == 3.3
+    # 3 dp on the wire since 2026-11-14 (readers round again; 1 dp double-rounded).
+    assert later == pytest.approx([4.2, 5.1], abs=0.05), "estimate against estimate is one basis"
+    assert [r["revenue_yoy_pct"] for r in rows if not r["is_forecast"]][-1] == \
+        pytest.approx(3.3, abs=0.05)
 
 
 def test_the_default_is_exactly_what_it_was():
     rows = C._build_annual_timeline(JPM_INCOME, JPM_ESTIMATES)
-    assert _first_forecast(rows)["revenue_yoy_pct"] == -25.5
+    assert _first_forecast(rows)["revenue_yoy_pct"] == pytest.approx(-25.5, abs=0.05)
 
 
 def test_a_real_decline_at_an_operating_company_still_shows():
@@ -130,7 +132,8 @@ def test_the_projections_carry_no_cross_basis_change_either():
     partial = C._build_revenue_forecast_partial(
         JPM_ESTIMATES, 4.6, 5.4, JPM_INCOME, revenue_crosses_basis=True,
     )
-    assert [p["revenue_yoy_pct"] for p in partial["projections"]] == [None, 4.2, 5.1]
+    yoys = [p["revenue_yoy_pct"] for p in partial["projections"]]
+    assert yoys[0] is None and yoys[1:] == pytest.approx([4.2, 5.1], abs=0.05)
     assert _first_forecast(partial["annual_timeline"])["revenue_yoy_pct"] is None
 
 
@@ -145,7 +148,8 @@ def test_the_collector_blanks_it_for_a_bank_and_only_for_one():
     assert _first_forecast(timeline)["revenue_yoy_pct"] is None
     assert report["revenue_forecast"]["projections"][0]["revenue_yoy_pct"] is None
     _, other = _bank_report("Software - Infrastructure")
-    assert _first_forecast(other["revenue_forecast"]["annual_timeline"])["revenue_yoy_pct"] == -25.5
+    assert _first_forecast(other["revenue_forecast"]["annual_timeline"])["revenue_yoy_pct"] == \
+        pytest.approx(-25.5, abs=0.05)
 
 
 def test_an_insurers_chip_goes_but_it_is_not_marked_gross():
@@ -1319,11 +1323,105 @@ def _swift(relative):
 
 
 def test_the_drill_down_never_calls_a_closed_period_current():
+    """2026-11-13 (owner: "Time labels"): "Current" is the TTM figure only — the header and
+    the legend's second line — and is spelled in ONE place; the first line is named by its
+    period ("FY2025", "Q4 '26"). The old build called the newest closed period "Current"
+    beside a TTM header (ORCL: "Current 41.78x" under "Current: 18.21")."""
     sheet = _swift("Views/Molecules/FundamentalsHistorySheet.swift")
     assert "periodPrefix" not in sheet
+    prefix = _decl_body(sheet, "private var currentPrefix: String")
+    # Each card's word, as one unit: Health readings are balance-sheet (no TTM), Growth rows
+    # are the latest fiscal year (never "Current"), everything else is FMP's TTM multiple.
+    assert re.search(r'case "Health":\s*return "Current"\s', prefix), prefix
+    assert re.search(r'case "Growth":\s*return "Latest"\s', prefix), prefix
+    assert re.search(r'default:\s*return "Current \(TTM\)"\s', prefix), prefix
+    assert '"Current' not in sheet.replace(prefix, ""), "a second spelling of Current"
+    header = _decl_body(sheet, "private func header(_ m: DeepDiveMetric)")
+    assert 'Text("\\(prefix(for: m)): \\(currentValueText(m.value))")' in header
+    # A row the backend names a closed period for (a Growth row's fiscal year, or a Price row
+    # on a last-fiscal-year basis — owner: "Fallback TTM labels") never says "Current (TTM)".
+    word = _decl_body(sheet, "private func prefix(for m: DeepDiveMetric) -> String")
+    assert "guard let period = m.currentPeriod, !period.isEmpty else { return currentPrefix }" in word
+    assert re.search(r'case "pfcf":\s*return "\\\(period\) FCF basis"', word), word
+    assert "TTM" not in word
     legend = sheet[sheet.index("deltaText(prefix:"):]
-    assert legend.startswith("deltaText(prefix: pair.period,")
-    assert '"Current ' not in sheet and '"Current"' not in sheet
+    assert legend.startswith("deltaText(prefix: periodLabel(pair.period),")
+    label = _decl_body(sheet, "private func periodLabel(_ label: String)")
+    assert 'period == .annual ? "FY\\(label)" : label' in label
+    # The removed helpers quoted a closed year's median after "Current: Negative".
+    for gone in ("currentIndustry", "undefinedCurrentText", "currentIsUndefined"):
+        assert gone not in sheet, gone
+
+
+def test_the_current_line_is_the_card_rows_own_comparison():
+    """Line 2 (owner decisions 2026-11-13: "2-current vs industry", "Match the card"): the
+    row's carried value and median, coloured by the row's own score behind the unrated-card
+    gate, drawn only when the report carries a median (never parsed from the label), and
+    blind to the tab — no period, series, line level or same-period pair."""
+    sheet = _swift("Views/Molecules/FundamentalsHistorySheet.swift")
+    text = _decl_body(sheet, "private func currentLineText(_ m: DeepDiveMetric)")
+    assert "guard let median = m.currentPeerMedian else { return nil }" in text
+    assert "m.currentValue" in text and "prefix(for: m)" in text
+    color = _decl_body(sheet, "private func currentLineColor(_ m: DeepDiveMetric)")
+    # Each arm as ONE unit (a swapped gain/loss or a dropped muted guard must fail), and the
+    # muted guard runs before the unrated-card gate.
+    muted = re.search(r"guard m\.currentValue != nil else \{ return AppColors\.textMuted \}", color)
+    gate = re.search(r"guard card\.starRating > 0, let score = m\.currentScore else "
+                     r"\{ return AppColors\.textPrimary \}", color)
+    assert muted and gate and muted.start() < gate.start(), color
+    assert re.search(r"if score >= 4 \{ return AppColors\.gain \}", color), color
+    assert re.search(r"if score <= 2 \{ return AppColors\.loss \}", color), color
+    word = _decl_body(sheet, "private func currentPeerWord(_ m: DeepDiveMetric)")
+    assert "(m.peerLevel ?? card.peerGroupLevel)" in word
+    for body in (text, color, word):
+        for tab_bound in (r"\bperiod\b", r"points\(", r"sectorPoints\(", r"peerWord\(",
+                          r"sectorPair\(", r"sectorAnnual", r"sectorQuarterly", r"m\.label"):
+            assert not re.search(tab_bound, body), (tab_bound, body)
+    legend = _decl_body(sheet, "private func legendAndDelta(_ m: DeepDiveMetric)")
+    assert "if usesLineChart, let current = currentLineText(m)" in legend
+    assert ".foregroundColor(currentLineColor(m))" in legend
+    # One row per comparison (owner 2026-11-13: "i don't want to make new line for the
+    # second line"): both lines are single-line, shrinking no further than the 11pt floor.
+    for color in ("deltaColor(m)", "currentLineColor(m)"):
+        assert re.search(rf"\.foregroundColor\({re.escape(color)}\)\s*"
+                         r"\.multilineTextAlignment\(\.center\)\s*\.lineLimit\(1\)\s*"
+                         r"\.minimumScaleFactor\(Self\.legendLineMinScale\)", legend), color
+    scale = re.search(r"static let legendLineMinScale: CGFloat = ([\d.]+)", sheet)
+    assert scale and 11 / 14 <= float(scale.group(1)) < 1, "bodySmall is 14pt; the data floor is 11pt"
+    note = _decl_body(sheet, "private func ttmNote(_ m: DeepDiveMetric)")
+    assert 'card.title == "Valuation"' in note and "Text(ttmNoteText(m))" in note
+    assert re.search(r"legendAndDelta\(m\)\s*ttmNote\(m\)", sheet), "the caption is never drawn"
+    text = _decl_body(sheet, "private func ttmNoteText(_ m: DeepDiveMetric)")
+    for key, words in (('"ps"', "sales"), ('"pfcf"', "free cash flow"),
+                       ('"ev_ebitda"', "EBITDA"), ('"pb"', "book value")):
+        assert re.search(rf'case {key}:\s*return "[^"]*{words}', text), key
+    assert re.search(r'default:\s*return "TTM = the last 12 months of earnings', text)
+
+
+def test_the_report_dto_carries_the_current_comparison_optionally():
+    dto = _decl_body(_swift("Models/TickerReportResponse.swift"), "struct DeepDiveMetricDTO")
+    for decl, key in (("let currentValue: Double?", 'case currentValue = "current_value"'),
+                      ("let currentPeerMedian: Double?",
+                       'case currentPeerMedian = "current_peer_median"'),
+                      ("let currentScore: Int?", 'case currentScore = "current_score"'),
+                      ("let peerLevel: String?", 'case peerLevel = "peer_level"'),
+                      ("let currentPeriod: String?", 'case currentPeriod = "current_period"')):
+        assert decl in dto and key in dto, decl
+    response = _swift("Models/TickerReportResponse.swift")
+    mapper = response[response.index("return DeepDiveMetric("):]
+    mapper = mapper[:mapper.index(")\n")]
+    for field in ("currentValue", "currentPeerMedian", "currentScore", "peerLevel", "currentPeriod"):
+        assert f"{field}: m.{field}" in mapper, field
+    model = _decl_body(_swift("Models/TickerReportModels.swift"), "struct DeepDiveMetric: Identifiable")
+    for field, kind in (("currentValue", "Double"), ("currentPeerMedian", "Double"),
+                        ("currentScore", "Int"), ("peerLevel", "String"),
+                        ("currentPeriod", "String")):
+        assert f"let {field}: {kind}?" in model and f"{field}: {kind}? = nil" in model, field
+    # The wire names are the backend's.
+    from app.schemas.ticker_report import DeepDiveMetricResponse
+    for key in ("current_value", "current_peer_median", "current_score", "peer_level",
+                "current_period"):
+        assert key in DeepDiveMetricResponse.model_fields, key
 
 
 def test_an_unrated_card_paints_no_verdict():

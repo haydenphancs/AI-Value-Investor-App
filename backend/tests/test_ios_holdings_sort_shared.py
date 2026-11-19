@@ -162,9 +162,12 @@ def test_holdings_rows_are_ordered_by_the_shared_comparator(src):
     assert "let sort = HoldingsSort(option: sortOption, ascending: sortAscending)" in flat
     assert "return sort.ordered(assets)" in flat
     assert "position: positions[asset.ticker.uppercased()]" in flat
-    # A "—" row's placeholder is UNKNOWN (nil), never its 0.0 wire value.
-    assert "price: asset.priceKnown ? asset.price : nil" in flat
-    assert "changePercent: asset.changeKnown ? asset.changePercent : nil" in flat
+    # A "—" row's placeholder is UNKNOWN (nil), never its 0.0 wire value. A delisted row
+    # (owner decision 2026-11-13) shows a "Delisted" pill, not its stale last close, so its
+    # price, change and market cap are unknown too: it sorts last in both directions.
+    assert "price: asset.priceKnown && !asset.isDelisted ? asset.price : nil" in flat
+    assert "changePercent: asset.changeKnown && !asset.isDelisted ? asset.changePercent : nil" in flat
+    assert "marketCap: asset.isDelisted ? nil : asset.marketCap" in flat
     assert "addedAt: asset.addedAt" in flat
     assert not _PRIVATE_SORT.search(rows), "filteredAssets sorts on its own again — the chips will drift"
 

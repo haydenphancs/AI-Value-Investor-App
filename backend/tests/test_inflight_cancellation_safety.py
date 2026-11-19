@@ -123,6 +123,12 @@ _INFLIGHT_MODULES = [
     # stops a burst of keystrokes starting duplicate 70k-row fetches, and the entry must
     # clear from the task's own completion (`add_done_callback`).
     "stock_search_service.py",
+    # Added 2026-11-13 with the "Delisted" label. Task-based: ONE delisted-companies window
+    # load, one EOD read per symbol and one resolution per (symbol, ET day), each held in
+    # `_inflight` and cleared from the task's own completion (`add_done_callback`). Callers
+    # wait with `asyncio.wait` (never cancels) and joins go through `asyncio.shield`, so a
+    # screen that gives up after its 1.5 s budget never cancels the load the others share.
+    "listing_status_service.py",
     # Added 2026-09-26 with the search-screen chips. Future-based: the first search sheet to
     # open computes the two lists and every concurrent opener joins it under `shield`, so a
     # sheet dismissed mid-fetch cannot cancel the computation the others are waiting on.

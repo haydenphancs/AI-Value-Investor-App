@@ -448,13 +448,15 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
         "`section` picks the depth: summary (the default: key stats, the latest fiscal year and "
         "quarter, margins, the last earnings result and the next report date, valuation "
         "multiples, and the balance sheet's debt and cash), growth (revenue, EPS, net income, "
-        "operating income and free cash flow by fiscal year and quarter, with year-over-year "
-        "change), margins, health (debt, cash, liquidity and leverage), earnings (results "
+        "operating income, free cash flow, operating cash flow and capital expenditure by fiscal "
+        "year and quarter, with year-over-year change), margins, health (debt, cash, liquidity "
+        "and leverage), earnings (results "
         "against analysts' estimates and the next report date), estimates (analysts' forward "
         "revenue and EPS estimates, when available), valuation (multiples and a fair-value "
         "model estimate), segments (revenue by business segment) or dividends (yield, "
         "per-share history, ex-dividend date and stock splits). Call it before answering any "
-        "question about a company's revenue, earnings, EPS, margins, growth, cash flow, debt, "
+        "question about a company's revenue, earnings, EPS, margins, growth, cash flow, capital "
+        "expenditure, debt, "
         "cash, valuation multiples, fair value, dividends, splits, earnings dates or results, "
         "or analysts' revenue or EPS estimates, and never answer those figures from memory. "
         "Only the latest periods are listed unless `period` names one (FY2019, Q3 2019): set it "
@@ -516,7 +518,8 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
 
 TOOL_CAPABILITIES: Dict[str, str] = {
     "get_stock_chart_data": (
-        "get_stock_chart_data for a ticker's live quote and 30-day price history — its result "
+        "get_stock_chart_data for a ticker's latest quote (for a delisted listing, its last "
+        "close, which its result marks) and 30-day price history — its result "
         "is rendered to the user as an interactive price-chart card beneath your answer (for "
         "the asset this chat is grounded on, the card shown under the first answer stays on "
         "screen and is not repeated), so never say charts are unavailable; describe what the "
@@ -601,7 +604,8 @@ WEB_SEARCH_TIER_DESCRIPTIONS: Dict[str, str] = {
     "auto": (
         "Search the public web as a FALLBACK: call it only after Caydex's data and tools could "
         "not answer — for example an event, a lawsuit or regulatory action, a product launch, "
-        "what management said, an IPO or economic calendar, a filing's text or a private "
+        "what management said or announced (plans, investments, spending commitments, deals, "
+        "partnerships), an IPO or economic calendar, a filing's text or a private "
         "company — and at most once. Never call it to restate or check a figure Caydex's data "
         "holds. " + _WEB_QUERY_GUIDE + " " + _WEB_NEVER_MARKET
     ),
@@ -966,7 +970,7 @@ def capability_block(allowed: frozenset, *, web_search_mode: Optional[str] = Non
 # "the mood in news and social chatter" there proposed exactly the dead-end chip this
 # block exists to prevent (review finding, 2026-09-19).
 _CHIP_SCOPE_BY_TOOL: Dict[str, str] = {
-    "get_stock_chart_data": "the live price, today's change, volume and market cap",
+    "get_stock_chart_data": "the latest price, today's change, volume and market cap",
     "get_ticker_news": "recent news",
     "explain_price_move": "why the price moved",
     FINANCIALS_TOOL: (
@@ -1181,7 +1185,8 @@ def build_chat_tool_handlers(
         sym, _ = _resolve(args)
         if sym is None:
             return _invalid(args)
-        return await svc._fetch_stock_widget_data(sym)
+        result = await svc._fetch_stock_widget_data(sym)
+        return _with_delisted_note(result)
 
     async def _analyst(args: Dict[str, Any]) -> Dict[str, Any]:
         sym, _ = _resolve(args)
@@ -1351,6 +1356,30 @@ def build_chat_tool_handlers(
 
 # Tool results with these widget_types render as inline widgets; others only inform the answer.
 _RENDERABLE_WIDGET_TYPES = {"stock_chart", "market_overview"}
+
+
+def _with_delisted_note(result: Any) -> Any:
+    """The quote tool's result, plus a `note` for the model when the listing is a CONFIRMED
+    delisting (`listing_status_service`). Mid-stream the model reads THIS dict, not the
+    streamed DELISTED LISTING context line, and its `current_price` is a frozen last close.
+    A COPY: the widget dict may be shared (the card itself is built from the same object).
+    Any other result passes through unchanged."""
+    if not isinstance(result, dict) or result.get("listing_status") != "delisted":
+        return result
+    exchange = result.get("delisted_exchange")
+    where = f" from {exchange}" if isinstance(exchange, str) and exchange.strip() else ""
+    when = f" on {result['delisted_date']}" if result.get("delisted_date") else ""
+    last = result.get("last_trade_date")
+    close = f"its last close (the {last} session)" if last else "its last stored close"
+    return {
+        **result,
+        "note": (
+            f"This listing is delisted{where}{when} (a US Eastern calendar date). "
+            f"current_price is {close}, not a live or current price, and there is no day "
+            "change; never call it live or today's price. The data does not say why it was "
+            "delisted, so give no reason unless a cited source does."
+        ),
+    }
 
 
 def widget_from_tool_result(result: Any) -> Any:

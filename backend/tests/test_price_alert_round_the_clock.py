@@ -123,4 +123,4 @@ async def test_a_closed_cycle_with_no_crypto_spends_no_upstream_call():
 async def test_an_empty_universe_is_still_a_no_op_in_both_modes():
     for kw in ({}, {"only_round_the_clock": True}):
         stats = await _run([], **kw)
-        assert stats == {"tickers": 0, "rules": 0, "fired": 0, "sent": 0}
+        assert stats == {"tickers": 0, "rules": 0, "fired": 0, "sent": 0, "paused": 0}

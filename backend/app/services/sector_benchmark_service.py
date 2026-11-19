@@ -532,16 +532,28 @@ _FALLBACK_SECTOR_TICKERS: Dict[str, List[str]] = {
 # The 11 canonical sectors (derived from fallback keys)
 CANONICAL_SECTORS: frozenset = frozenset(_FALLBACK_SECTOR_TICKERS.keys())
 
-# All metrics to compute
-METRIC_CONFIGS: List[Dict[str, str]] = [
+# All metrics to compute.
+#
+# Optional per-metric keys: `positive_only`, `cap`, `revenue_backed` (see the entries) and
+# `reading` — a callable that maps each finite raw field value to the value the metric is
+# computed on, or None for "no reading" (`app.utils.margins`). On a yoy / qoq metric it
+# reads BOTH the current period and its base, so a blank on either side gives that company
+# no growth figure for the period (never a fall-back to an older row); on a direct metric it
+# reads the one value. A `computed` metric has no field and takes none.
+METRIC_CONFIGS: List[Dict[str, Any]] = [
     # YoY growth metrics (from income statement)
     {"name": "eps_yoy",              "source": "income",   "field": "epsDiluted",             "type": "yoy"},
     {"name": "revenue_yoy",          "source": "income",   "field": "revenue",                "type": "yoy"},
     {"name": "net_income_yoy",       "source": "income",   "field": "netIncome",              "type": "yoy"},
     {"name": "operating_income_yoy", "source": "income",   "field": "operatingIncome",        "type": "yoy"},
     {"name": "gross_profit_yoy",     "source": "income",   "field": "grossProfit",            "type": "yoy"},
-    # YoY growth from cash flow
-    {"name": "fcf_yoy",             "source": "cashflow",  "field": "freeCashFlow",           "type": "yoy"},
+    # YoY growth from cash flow. FMP zero-fills a cash-flow statement it does not have
+    # (HSBC's every quarter, JPM's unfiled newest quarter), and a 0 counted as a figure voted
+    # a -100% into the peer median whenever the year before was real (2026-11-14, owner:
+    # "Fix it too"). The company's own Growth series reads FCF the same way
+    # (`growth_service`, `reading=free_cash_flow_reading`), so peer and company agree.
+    {"name": "fcf_yoy",             "source": "cashflow",  "field": "freeCashFlow",           "type": "yoy",
+     "reading": free_cash_flow_reading},
     # QoQ growth metrics (sequential quarter comparison, quarterly only)
     {"name": "eps_qoq",             "source": "income",    "field": "epsDiluted",             "type": "qoq"},
     {"name": "revenue_qoq",         "source": "income",    "field": "revenue",                "type": "qoq"},
@@ -647,6 +659,18 @@ def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
+
+#: A metric's `reading` (`METRIC_CONFIGS`): a finite raw value → the value the metric is
+#: computed on, or None for "no reading".
+Reading = Callable[[float], Optional[float]]
+
+
+def _read(record: Dict[str, Any], key: str, reading: Optional[Reading]) -> Optional[float]:
+    """`_safe_float`, then the metric's `reading` when it has one (None stays None)."""
+    value = _safe_float(record, key)
+    if value is None or reading is None:
+        return value
+    return reading(value)
 
 
 def _extract_year(record: Dict[str, Any]) -> str:
@@ -826,10 +850,17 @@ def _compute_yoy_for_records(
     records: List[Dict[str, Any]],
     field: str,
     is_quarterly: bool,
+    *,
+    reading: Optional[Reading] = None,
 ) -> Dict[str, float]:
     """
     Compute YoY growth % for each period in the records.
     Returns {period_label: yoy_percent}.
+
+    ``reading`` (the metric's, `METRIC_CONFIGS`) reads the current value AND its year-ago
+    base; either one reading None gives no figure for that period. The base is still only
+    the row keyed one year earlier — a blank base never sends the comparison to an older
+    row. Without it every value counts as filed (every income-statement metric).
     """
     if not records:
         return {}
@@ -847,8 +878,8 @@ def _compute_yoy_for_records(
             prev_rec = by_quarter.get((key[0] - 1, key[1]))
             if prev_rec is None:
                 continue
-            current_val = _safe_float(rec, field)
-            prev_val = _safe_float(prev_rec, field)
+            current_val = _read(rec, field, reading)
+            prev_val = _read(prev_rec, field, reading)
             if current_val is not None and prev_val is not None and prev_val != 0:
                 result[format_calendar_quarter(key)] = round(
                     (current_val - prev_val) / abs(prev_val) * 100, 2,
@@ -873,8 +904,8 @@ def _compute_yoy_for_records(
                 # (FY), Jun-2024 (6-month stub, alone under 2024), Jun-2025 passes the gap
                 # test (365 days) but would file a full year over a half year (~+100%).
                 continue
-            current_val = _safe_float(rec, field)
-            prev_val = _safe_float(prev_rec, field)
+            current_val = _read(rec, field, reading)
+            prev_val = _read(prev_rec, field, reading)
             if current_val is not None and prev_val is not None and prev_val != 0:
                 result[label] = round((current_val - prev_val) / abs(prev_val) * 100, 2)
 
@@ -884,6 +915,8 @@ def _compute_yoy_for_records(
 def _compute_qoq_for_records(
     records: List[Dict[str, Any]],
     field: str,
+    *,
+    reading: Optional[Reading] = None,
 ) -> Dict[str, float]:
     """
     Compute sequential Quarter-over-Quarter growth % for each period.
@@ -892,7 +925,8 @@ def _compute_qoq_for_records(
 
     The previous quarter must actually be present: this used to compare each row with
     whatever row preceded it in date order, so a quarter missing from FMP's history
-    silently produced a six-month change filed as a one-quarter one.
+    silently produced a six-month change filed as a one-quarter one. ``reading`` works as
+    in `_compute_yoy_for_records` (both sides read; a blank on either → no figure).
     """
     if not records:
         return {}
@@ -904,8 +938,8 @@ def _compute_qoq_for_records(
         prev_rec = by_quarter.get(previous_calendar_quarter(key))
         if prev_rec is None:
             continue
-        current_val = _safe_float(rec, field)
-        prev_val = _safe_float(prev_rec, field)
+        current_val = _read(rec, field, reading)
+        prev_val = _read(prev_rec, field, reading)
         if current_val is not None and prev_val is not None and prev_val != 0:
             result[format_calendar_quarter(key)] = round(
                 (current_val - prev_val) / abs(prev_val) * 100, 2,
@@ -1587,6 +1621,9 @@ class SectorBenchmarkService:
 
         source = metric_config["source"]   # "income", "cashflow", "ratios"
         field = metric_config["field"]
+        # The metric's own reading of a raw value (`METRIC_CONFIGS`): fcf_yoy reads FMP's
+        # zero-filled cash-flow row as no reading, on the current period and its base alike.
+        reading: Optional[Reading] = metric_config.get("reading")
         data_key = f"{source}_{period_type}"
         period_values: Dict[str, List[float]] = {}
 
@@ -1597,12 +1634,14 @@ class SectorBenchmarkService:
 
             if metric_type == "yoy":
                 # Compute per-company YoY, then collect
-                yoy_points = _compute_yoy_for_records(records, field, is_quarterly)
+                yoy_points = _compute_yoy_for_records(
+                    records, field, is_quarterly, reading=reading,
+                )
                 for label, yoy_val in yoy_points.items():
                     period_values.setdefault(label, []).append(yoy_val)
             elif metric_type == "qoq":
                 # Compute per-company QoQ (sequential quarter), then collect
-                qoq_points = _compute_qoq_for_records(records, field)
+                qoq_points = _compute_qoq_for_records(records, field, reading=reading)
                 for label, qoq_val in qoq_points.items():
                     period_values.setdefault(label, []).append(qoq_val)
             else:
@@ -1623,7 +1662,7 @@ class SectorBenchmarkService:
                     else list(_by_annual_key(records).items())
                 )
                 for label, rec in labelled:
-                    val = _safe_float(rec, field)
+                    val = _read(rec, field, reading)
                     if revenue_backed:
                         val = revenue_backed_margin(val, _safe_float(rec, "revenuePerShare"))
                     if val is None:

@@ -941,7 +941,9 @@ def _huge_growth():
                                              yoy_change_percent=-12345.6, sector_average_yoy=9876.5))
         return out
     data = {"symbol": "X", "peer_group_levels": {}}
-    for attr in ("revenue", "eps", "net_income", "operating_profit", "free_cash_flow"):
+    # Every series the tool reads, the two chat-only cash-flow series (2026-11-14) included.
+    for attr in ("revenue", "eps", "net_income", "operating_profit", "free_cash_flow",
+                 "operating_cash_flow", "capital_expenditure"):
         data[f"{attr}_annual"] = series(attr, 60)
         data[f"{attr}_quarterly"] = series(attr, 60, quarterly=True)
     return GrowthResponse(**data)
@@ -1955,8 +1957,10 @@ async def test_a_series_missing_for_the_period_is_named_never_zeroed(monkeypatch
     g = (await _run_period("growth", "Q3 2019"))["growth"]
     assert g["revenue"].startswith("Q3 FY2019: 53.81B")
     assert "eps" not in g
+    # 2026-11-14: the two cash-flow series (operating cash flow, capex) are named too.
     assert g["not_in_data_for_this_period"] == ["eps", "net_income", "operating_income",
-                                                "free_cash_flow"]
+                                                "free_cash_flow", "operating_cash_flow",
+                                                "capital_expenditure"]
     assert "not_loaded_in_this_build" not in g
 
 
@@ -1965,7 +1969,9 @@ async def test_a_series_whose_statement_failed_is_not_loaded_never_absent(monkey
     deep = _deep_growth(free_cash_flow_quarterly=[], degraded=["quarterly_cashflow"])
     _install(monkeypatch, {"growth": deep})
     g = (await _run_period("growth", "Q3 2019"))["growth"]
-    assert g["not_loaded_in_this_build"] == ["free_cash_flow"]
+    # 2026-11-14: every series read from the cash-flow statement did not load.
+    assert g["not_loaded_in_this_build"] == ["free_cash_flow", "operating_cash_flow",
+                                             "capital_expenditure"]
     assert g["not_in_data_for_this_period"] == ["net_income", "operating_income"]
     assert "quarterly cash-flow statement" in g["incomplete"]
 
@@ -2218,3 +2224,203 @@ async def test_a_series_that_ends_is_never_called_not_reported_yet(monkeypatch, 
     _install(monkeypatch, {"key_facts": kf, "growth": growth})
     g = (await _run_period("growth", period, "OLD"))["growth"]
     assert expected in g["not_in_data"] and "never estimate" in g["not_in_data"]
+
+
+# ── operating cash flow and capital expenditure (2026-11-14) ──────────────────────
+# Owner decisions: "Yes, add capex" (both series in the growth section), "Hide, say why" (a
+# bank's, insurer's, lender's or broker's free and operating cash flow are named NOT
+# MEANINGFUL, never missing or not loaded — so the model never looks them up on the web).
+
+
+def _cash_growth(**over):
+    """MSFT-like: operating cash flow and capex (the cash SPENT, positive) beside the defaults."""
+    data = dict(
+        operating_cash_flow_annual=[_g("2024", 118.5e9), _g("2025", 136.2e9, 14.9)],
+        operating_cash_flow_quarterly=[_g("Q4'25", 42.6e9, 16.2)],
+        capital_expenditure_annual=[_g("2024", 44.5e9), _g("2025", 64.6e9, 45.2)],
+        capital_expenditure_quarterly=[_g("Q4'25", 2_777_000_000.0, 12.5)],
+    )
+    data.update(over)
+    return _growth(**data)
+
+
+def _bank_growth(**over):
+    """A bank as the service builds it: FCF and operating cash flow emptied and named."""
+    data = dict(
+        free_cash_flow_annual=[], free_cash_flow_quarterly=[],
+        operating_cash_flow_annual=[], operating_cash_flow_quarterly=[],
+        capital_expenditure_annual=[_g("2025", 4.2e9, 8.0)],
+        series_not_meaningful=["free_cash_flow", "operating_cash_flow"],
+    )
+    data.update(over)
+    return _growth(**data)
+
+
+def test_every_growth_series_has_a_statement_and_both_response_spans():
+    """A series with no `_SERIES_STATEMENT` entry KeyErrors the period block; one with no
+    `<attr>_annual` / `<attr>_quarterly` on GrowthResponse is silently never shown."""
+    keys = {key for key, *_rest in cft._GROWTH_SERIES}
+    assert keys == set(cft._SERIES_STATEMENT)
+    assert {"operating_cash_flow", "capital_expenditure"} <= keys
+    for _key, attr, _fmt, _lk in cft._GROWTH_SERIES:
+        for span in ("annual", "quarterly"):
+            assert f"{attr}_{span}" in GrowthResponse.model_fields, (attr, span)
+    assert cft._SERIES_STATEMENT["operating_cash_flow"] == "cashflow"
+    assert cft._SERIES_STATEMENT["capital_expenditure"] == "cashflow"
+
+
+@pytest.mark.asyncio
+async def test_the_growth_section_carries_operating_cash_flow_and_capex_with_no_median(monkeypatch):
+    # The service never sets a peer value on the chat-only series (pinned in
+    # test_growth_cash_flow_series_2026_11_14), so their rows carry no median.
+    _install(monkeypatch, {"growth": _cash_growth()})
+    g = (await _run("growth"))["growth"]
+    assert g["operating_cash_flow"]["annual"] == ["FY2025: 136.20B, +14.9% YoY", "FY2024: 118.50B"]
+    assert g["operating_cash_flow"]["quarterly"] == ["Q4'25: 42.60B, +16.2% YoY"]
+    assert g["capital_expenditure"]["annual"] == ["FY2025: 64.60B, +45.2% YoY", "FY2024: 44.50B"]
+    for key in ("operating_cash_flow", "capital_expenditure"):
+        for rows in g[key].values():
+            assert all("median" not in row for row in rows), rows
+    assert "cash spent, shown as a positive amount" in g["basis"]
+    assert "files it as a negative" in g["basis"]
+    assert "the peer median, where shown," in g["basis"]
+    assert cft._NOT_MEANINGFUL_KEY not in g
+    _no_vendor(g)
+
+
+@pytest.mark.asyncio
+async def test_the_summary_shows_the_latest_capex_year(monkeypatch):
+    _install(monkeypatch, {"growth": _cash_growth()})
+    out = await _run("summary")
+    assert out["growth"]["capital_expenditure"]["annual"] == ["FY2025: 64.60B, +45.2% YoY"]
+    assert out["growth"]["operating_cash_flow"]["annual"] == ["FY2025: 136.20B, +14.9% YoY"]
+
+
+@pytest.mark.asyncio
+async def test_a_periods_capex_says_spent_never_as_reported(monkeypatch):
+    """The series holds the cash spent (positive); the filed figure is negative, so the exact
+    form must not claim "as reported"."""
+    _install(monkeypatch, {"growth": _cash_growth()})
+    g = (await _run_period("growth", "Q4 2025"))["growth"]
+    assert g["capital_expenditure"] == ("Q4 FY2025: 2.78B (2,777,000,000 spent; filed as a "
+                                        "negative), +12.5% YoY")
+    assert "as reported" not in g["capital_expenditure"]
+    assert g["operating_cash_flow"] == "Q4 FY2025: 42.60B (42,600,000,000 as reported), +16.2% YoY"
+    assert g["revenue"].startswith("Q4 FY2025: 102.50B (102,500,000,000 as reported)")
+    # A small capex keeps the short form, like every other money figure.
+    assert cft._capex_exact(9_000.0) == "9.00K"
+    assert cft._capex_exact(None) is None and cft._capex_exact(float("nan")) is None
+
+
+@pytest.mark.asyncio
+async def test_an_implausible_capex_is_omitted_and_logged_never_shown(monkeypatch, caplog):
+    growth = _cash_growth(capital_expenditure_annual=[_g("2024", 44.5e9), _g("2025", 2e18, 9.0)])
+    _install(monkeypatch, {"growth": growth})
+    with caplog.at_level(logging.WARNING, logger=cft.__name__):
+        g = (await _run("growth"))["growth"]
+    assert g["capital_expenditure"]["annual"] == ["FY2024: 44.50B"]
+    assert "2000000" not in json.dumps(g) and "2.00E" not in json.dumps(g).upper()
+    assert any("implausible amount" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("section,period", [("growth", None), ("summary", None),
+                                            ("growth", "FY2025"), ("summary", "Q4 2025")])
+@pytest.mark.asyncio
+async def test_a_v8_shaped_payload_without_the_new_keys_still_reads(monkeypatch, section, period):
+    """A payload cached before 2026-11-14 (a plain dict, no cash-flow series and no
+    `series_not_meaningful`) must read as before — never crash, never a note."""
+    legacy = _growth().model_dump()
+    for key in ("operating_cash_flow_annual", "operating_cash_flow_quarterly",
+                "capital_expenditure_annual", "capital_expenditure_quarterly",
+                "series_not_meaningful"):
+        legacy.pop(key)
+    _install(monkeypatch, {"growth": legacy})
+    out = await cft.fetch_company_financials("AAPL", section, period)
+    g = out["growth"]
+    assert "error" not in out and "upstream" not in out
+    assert "operating_cash_flow" not in g and "capital_expenditure" not in g
+    assert cft._NOT_MEANINGFUL_KEY not in g
+    assert g["revenue"]
+
+
+@pytest.mark.parametrize("section", ["growth", "summary"])
+@pytest.mark.asyncio
+async def test_a_banks_cash_flows_are_not_meaningful_never_missing(monkeypatch, section):
+    _install(monkeypatch, {"growth": _bank_growth()})
+    out = await _run(section)
+    g = out["growth"]
+    note = g[cft._NOT_MEANINGFUL_KEY]
+    assert note["series"] == ["free_cash_flow", "operating_cash_flow"]
+    assert "not meaningful for a bank, insurer, lender or broker" in note["reason"]
+    assert "never that they are missing or not loaded" in note["reason"]
+    assert "never look them up elsewhere" in note["reason"]
+    assert "free_cash_flow" not in g and "operating_cash_flow" not in g
+    assert g["capital_expenditure"]["annual"] == ["FY2025: 4.20B, +8.0% YoY"]
+    assert "left out on purpose" in out["how_to_read"]
+    # Never presented as an outage or an absence.
+    assert not any("free_cash_flow" in u or "operating_cash_flow" in u
+                   for u in out.get("unavailable", []))
+    _no_vendor(out)
+
+
+@pytest.mark.parametrize("degraded", [[], ["quarterly_cashflow"]])
+@pytest.mark.asyncio
+async def test_a_banks_period_block_names_them_apart_from_absent_and_unloaded(monkeypatch, degraded):
+    bank = _bank_growth(capital_expenditure_quarterly=[_g("Q4'25", 1.1e9)], degraded=degraded)
+    if degraded:
+        bank = bank.model_copy(update={"capital_expenditure_quarterly": []})
+    _install(monkeypatch, {"growth": bank})
+    g = (await _run_period("growth", "Q4 2025"))["growth"]
+    assert g[cft._NOT_MEANINGFUL_KEY]["series"] == ["free_cash_flow", "operating_cash_flow"]
+    for listed in ("not_in_data_for_this_period", "not_loaded_in_this_build"):
+        assert "free_cash_flow" not in g.get(listed, []), listed
+        assert "operating_cash_flow" not in g.get(listed, []), listed
+    if degraded:
+        # The failed cash-flow leg still names the series it DID cost: capex.
+        assert g["not_loaded_in_this_build"] == ["capital_expenditure"]
+    else:
+        assert g["capital_expenditure"] == "Q4 FY2025: 1.10B (1,100,000,000 spent; filed as a negative)"
+    assert g["revenue"].startswith("Q4 FY2025: 102.50B")
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (["operating_cash_flow", "free_cash_flow"], ["free_cash_flow", "operating_cash_flow"]),
+    (["revenue_typo", 5, None, "free_cash_flow"], ["free_cash_flow"]),
+    ("free_cash_flow", []),            # a bare string is not a list of series
+    (None, []),
+    ({"free_cash_flow": True}, []),
+])
+def test_only_known_series_are_named_not_meaningful(raw, expected):
+    assert cft._not_meaningful({"series_not_meaningful": raw}) == expected
+    assert cft._not_meaningful(SimpleNamespace(series_not_meaningful=raw)) == expected
+
+
+@pytest.mark.asyncio
+async def test_the_worst_case_with_the_cash_flow_series_still_fits(monkeypatch):
+    """`_huge_growth` holds all seven series at 60 + 60 periods: the result still fits the
+    budget, newest periods first, and the new series are cut like the others."""
+    monkeypatch.setattr(cft, "_ANNUAL_ROWS", 60)
+    monkeypatch.setattr(cft, "_QUARTER_ROWS", 60)
+    huge = _huge_growth().model_copy(
+        update={"series_not_meaningful": ["free_cash_flow", "operating_cash_flow"]})
+    _install(monkeypatch, {"growth": huge})
+    for section in ("growth", "summary"):
+        out = await _run(section)
+        assert len(json.dumps(out)) <= cft._budget(), section
+        g = out.get("growth") or {}
+        if "capital_expenditure" in g:
+            assert g["capital_expenditure"]["annual"][0].startswith("FY2009")
+
+
+@pytest.mark.parametrize("period", [None, "FY2025"])
+@pytest.mark.asyncio
+async def test_a_series_named_not_meaningful_is_never_shown_even_with_rows(monkeypatch, period):
+    """A payload that names a series not meaningful AND still holds rows for it (a hand-edited
+    or half-migrated cache row) never shows them: the note and a figure would contradict."""
+    stray = _bank_growth(free_cash_flow_annual=[_g("2025", 98.8e9, -9.2)],
+                         operating_cash_flow_annual=[_g("2025", 120e9, 3.0)])
+    _install(monkeypatch, {"growth": stray})
+    g = (await cft.fetch_company_financials("AAPL", "growth", period))["growth"]
+    assert "free_cash_flow" not in g and "operating_cash_flow" not in g
+    assert "98.80B" not in json.dumps(g) and "120.00B" not in json.dumps(g)
+    assert g[cft._NOT_MEANINGFUL_KEY]["series"] == ["free_cash_flow", "operating_cash_flow"]

@@ -424,9 +424,10 @@ def _five_year_decline():
 
 
 def test_price_overlay_fills_the_plot_in_a_one_year_window():
-    """1Y = 4 reported quarters + 2 estimates; the anchors are the first and the last
-    reported quarter's fiscal end. The old scale (the whole series) put the visible
-    $20-25 band in the bottom ~12% of the plot."""
+    """1Y = 4 reported quarters + 2 estimates. This pins the visible-window SCALE only: the
+    old scale (the whole series) put the visible $20-25 band in the bottom ~12% of the plot.
+    The time axis here is a plain linear one; where each close really goes (report-day
+    anchors, piecewise, since 2026-11-14) is test_ios_earnings_price_timeline.py's job."""
     closes = _five_year_decline()
     width, height = 270.0, 200.0
     step = width / 6

@@ -155,7 +155,10 @@ final class HomeRepository: HomeRepositoryProtocol {
             previousClose: tile.previousClose,
             sparkFrom: tile.sparkFrom,
             sparkTo: tile.sparkTo,
-            changeKnown: tile.changeKnown
+            changeKnown: tile.changeKnown,
+            // The ONLY Home strip that can hold a delisted symbol: dropping this here would
+            // show its stale last close as a live price (the init defaults it to nil).
+            delisting: tile.delisting
         )
     }
 
@@ -205,7 +208,11 @@ final class HomeRepository: HomeRepositoryProtocol {
             // move, so the colour guard fell through to the bearish arm: the tile painted
             // a RED "—", i.e. a fabricated decline, which is the exact regression the
             // flag exists to prevent.
-            changeKnown: changeKnown
+            changeKnown: changeKnown,
+            // A confirmed delisting (all four keys set together by the backend), through the
+            // one wire rule. Absent / null → nil → the tile renders as it always has.
+            delisting: DelistedListing.from(status: dto.listingStatus, delistedDate: dto.delistedDate,
+                                            exchange: dto.delistedExchange, lastTradeDate: dto.lastTradeDate)
         )
     }
 

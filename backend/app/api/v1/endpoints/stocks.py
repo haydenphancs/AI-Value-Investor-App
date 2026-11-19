@@ -63,7 +63,7 @@ from app.services.valuation_snapshot_service import gate_caydex_estimate
 from app.services.analyst_service import get_analyst_service
 from app.services.earnings_service import get_earnings_service
 from app.schemas.earnings import EarningsResponse
-from app.schemas.growth import GrowthResponse
+from app.schemas.growth import GROWTH_CHAT_ONLY_SERIES, GrowthResponse
 from app.services.growth_service import get_growth_service
 from app.schemas.profit_power import ProfitPowerResponse
 from app.services.profit_power_service import get_profit_power_service
@@ -91,6 +91,13 @@ from app.dependencies import (
 )
 from app.services.ticker_data_cache import warm_ticker_collection
 from app.services.price_service import price_source, profile_change_is_current
+from app.services.listing_status_service import (
+    PAID_DOOR_WAIT,
+    get_delisted,
+    get_delisted_for_symbols,
+    peek_delisted,
+)
+from app.schemas.listing_status import NULL_LISTING_FIELDS
 
 logger = logging.getLogger(__name__)
 
@@ -181,11 +188,44 @@ async def prewarm_report_collection(
     # can't pile up background warms (each of which can spend Gemini quota).
     if len(_PREWARM_TASKS) >= settings.REPORT_PREWARM_MAX_INFLIGHT:
         return JSONResponse(status_code=202, content={"ticker": t, "status": "busy"})
+    # A CONFIRMED delisting gets no warm (Phase 2, owner 2026-11-13): no new report can be
+    # generated for it, so ~20 FMP calls per open would buy nothing. `peek_delisted` is sync
+    # and free (no I/O, no scheduling); a delisting it does not hold yet is caught by the
+    # check at the head of the background warm below.
+    if peek_delisted(t) is not None:
+        return JSONResponse(status_code=202, content={"ticker": t, "status": "delisted"})
 
-    task = asyncio.create_task(warm_ticker_collection(t))
+    task = asyncio.create_task(_warm_unless_delisted(t))
     _PREWARM_TASKS.add(task)
     task.add_done_callback(_PREWARM_TASKS.discard)
     return JSONResponse(status_code=202, content={"ticker": t, "status": "warming"})
+
+
+async def _warm_unless_delisted(ticker: str) -> None:
+    """The background half of the on-view pre-warm: skip a CONFIRMED delisting, else warm.
+
+    The check runs HERE, off the request path, so the route still answers at once. It costs
+    nothing for a ticker that traded in the latest session; otherwise one memoised quote read
+    (the detail screen that fired this usually just made it) — far below the ~20 FMP calls of
+    the warm it can save. An undecided check warms, exactly as before. Never raises (a
+    fire-and-forget task's exception would only reach the loop's handler).
+    """
+    try:
+        listing = (await get_delisted_for_symbols(
+            [ticker], wait=PAID_DOOR_WAIT, purpose="the report pre-warm",
+            unknown_level=logging.DEBUG,
+        )).get(ticker)
+    except Exception as e:  # noqa: BLE001 — get_delisted_for_symbols never raises; belt
+        logger.warning("prewarm-report: delisted check for %s failed (%s: %s) — warming anyway",
+                       ticker, type(e).__name__, e)
+        listing = None
+    if listing is not None:
+        logger.info(
+            "prewarm-report: %s skipped — a confirmed delisting (%s, %s); no new report can be "
+            "generated for it", ticker, listing.exchange, listing.delisted_date.isoformat(),
+        )
+        return
+    await warm_ticker_collection(ticker)
 
 
 # Major US stock exchanges — used to filter search results.
@@ -641,6 +681,12 @@ async def get_stock_details(ticker: str):
         if isinstance(short_data, dict) and short_data.get("short_percent_of_float") is not None:
             response["short_percent_float"] = short_data["short_percent_of_float"]
 
+        # The "Delisted" label — this route is the detail screen's fallback when /overview
+        # fails, so it carries the same four fields (all None unless a delisting is confirmed;
+        # the profile is the only flag source here). Never raises; bounded wait.
+        listing = await get_delisted(ticker, profile=profile)
+        response.update(listing.wire() if listing is not None else NULL_LISTING_FIELDS)
+
         # Forward P/E from analyst estimates (nearest future fiscal year)
         price = profile.get("price")
         if analyst_est and isinstance(analyst_est, list) and price and float(price) > 0:
@@ -824,6 +870,12 @@ async def get_stock_quote(ticker: str):
             avg_vol = profile.get("averageVolume") or profile.get("volAvg")
             if avg_vol is not None:
                 response["avg_volume"] = float(avg_vol)
+
+        # The "Delisted" label for the 15 s poll: the quote's flag (the profile only when the
+        # quote carries none). A poll that sees it lets the app stop polling. Bounded, never
+        # raises; all four None unless a delisting is confirmed.
+        listing = await get_delisted(ticker, quote=quote, profile=profile)
+        response.update(listing.wire() if listing is not None else NULL_LISTING_FIELDS)
 
         # Sanitise AGAIN, at the exit.
         #
@@ -1244,7 +1296,10 @@ async def get_earnings(ticker: str):
 
 # ── Growth endpoint ──────────────────────────────────────────────
 
-@router.get("/{ticker}/growth", response_model=GrowthResponse)
+# The chat-only series (capex, operating cash flow — 2026-11-14) never go to the app: no chart
+# draws them and iOS's DTO ignores them, so sending them was ~25 KB of dead weight per call.
+@router.get("/{ticker}/growth", response_model=GrowthResponse,
+            response_model_exclude=set(GROWTH_CHAT_ONLY_SERIES))
 async def get_growth(ticker: str, _fanout: None = MarketFanoutRateLimit):
     """Get growth data (EPS & Revenue YoY growth with sector comparison)."""
     ticker = ticker.upper()

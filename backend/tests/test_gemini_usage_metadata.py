@@ -491,3 +491,90 @@ async def test_stream_agentic_sums_rounds_rather_than_reporting_only_the_last(ca
     assert ("answer", "final.") in out
     assert "prompt_tok=220" in caplog.text   # 100 + 120, not 120
     assert "total_tok=250" in caplog.text
+
+
+# ── `served=`: the model that ACTUALLY answered (2026-11-15) ─────────────────────
+#
+# From 2026-12-01 Google serves every gemini-2.5-flash request with gemini-3.5-flash-lite. The line
+# used to carry only the REQUESTED model, so the reroute (and the thought tokens it bills) could not
+# be seen in the logs. `served` comes from the response's `model_version`, last on the line so every
+# reader of the earlier fields is unaffected.
+
+from app.integrations.gemini import _response_served_model  # noqa: E402
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite"),
+    ("  gemini-3.5-flash-lite\n", "gemini-3.5-flash-lite"),
+    ("m" * 200, "m" * 80),                       # capped
+    ("", None), ("   ", None), (None, None),
+    (123, None), (True, None), (["gemini"], None), (b"gemini", None),
+])
+def test_served_model_is_a_clean_short_string_or_none(value, expected):
+    resp = type("R", (), {"model_version": value})()
+    assert _response_served_model(resp) == expected
+
+
+def test_served_model_never_raises_on_a_response_without_the_field():
+    assert _response_served_model(object()) is None
+    assert _response_served_model(None) is None
+
+
+def test_the_usage_line_ends_with_served_and_keeps_every_earlier_field(caplog):
+    with caplog.at_level(logging.INFO, logger="app.integrations.gemini"):
+        _log_gemini_usage(_response_usage(type("R", (), {"usage_metadata": _usage()})()),
+                          call_site="generate_text", model="gemini-2.5-flash", finish="STOP",
+                          served="gemini-3.5-flash-lite")
+        _log_gemini_usage({"prompt": None}, call_site="x", model="m")
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("GEMINI_USAGE")]
+    assert lines[0].endswith("finish=STOP served=gemini-3.5-flash-lite")
+    assert "model=gemini-2.5-flash " in lines[0] and "cached_pct=75.0" in lines[0]
+    assert lines[1].endswith("finish=- served=-")
+
+
+class _ServedUnary(_Unary):
+    def __init__(self, served, **kw):
+        super().__init__(**kw)
+        self._served = served
+
+    async def generate_content(self, *, model, contents, config):
+        resp = await super().generate_content(model=model, contents=contents, config=config)
+        resp.model_version = self._served
+        return resp
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("served,expected", [("gemini-3.5-flash-lite", "gemini-3.5-flash-lite"), (None, "-")])
+async def test_each_unary_door_logs_the_served_model(caplog, served, expected):
+    c = _unary_client(_ServedUnary(served, text='{"a": 1}'))
+    with caplog.at_level(logging.INFO, logger="app.integrations.gemini"):
+        await c.generate_json("p", cache=False)
+        await c.generate_text("p2")
+        await c.generate_text_cached("p3", {"cache": type("H", (), {"name": "cachedContents/x"})()})
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("GEMINI_USAGE")]
+    assert len(lines) == 3
+    assert all(line.endswith(f"served={expected}") for line in lines), lines
+    assert all("model=gemini-2.5-flash " in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_a_stream_logs_the_last_served_model_any_chunk_carried(caplog):
+    first = _Chunk(_Part("Apple "))
+    second = _Chunk(_Part("is solid."), usage=_usage())
+    second.model_version = "gemini-3.5-flash-lite"
+    c = _client(models=_Models([first, second]))
+    with caplog.at_level(logging.INFO, logger="app.integrations.gemini"):
+        [pair async for pair in c.stream_text("prompt")]
+    line = [r.getMessage() for r in caplog.records if "call_site=stream_text" in r.getMessage()][0]
+    assert line.endswith("served=gemini-3.5-flash-lite")
+
+
+def test_stream_usage_keeps_the_served_model_across_rounds():
+    u = _StreamUsage()
+    chunk = type("K", (), {"model_version": "gemini-3.5-flash-lite", "usage_metadata": None})()
+    u.observe(chunk)
+    u.commit_round()
+    u.observe(type("K", (), {"usage_metadata": None})())        # a later chunk without the field
+    assert u.served == "gemini-3.5-flash-lite"
+    u.totals()
+    assert u.served == "gemini-3.5-flash-lite"

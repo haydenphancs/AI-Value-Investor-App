@@ -13,6 +13,11 @@ from functools import lru_cache
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
+#: The Gemini `thinking_level` values a *_THINKING_LEVEL setting may name (the encoder,
+#: `integrations/gemini._thinking_fields`, sends one only to a model that accepts it).
+GEMINI_THINKING_LEVELS = ("minimal", "low", "medium", "high")
+
+
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "Caydex API"
@@ -56,6 +61,99 @@ class Settings(BaseSettings):
     # model id is part of every card's fingerprint: changing it re-keys every scope
     # (one controlled regeneration wave, bounded by the per-cycle and daily caps).
     INSIGHT_AI_MODEL: Optional[str] = None
+    # The grounding judge for WEB-ONLY Insights cards (news_insight_service, 2026-11-13, owner:
+    # "Add a grounding judge"): one call per web-only card (two with a conclusion repair's re-judge)
+    # checks every claim against the 1-3
+    # web pages it was written from, and the card is refused when the judge cannot answer. A
+    # different, stronger model than the card writer on purpose. Not in the fingerprint. A retired
+    # model fails EVERY web-only card closed (`web_only_judge: unavailable`) — documents/OWNER_TASKS.md.
+    INSIGHT_WEB_ONLY_JUDGE_MODEL: str = "gemini-2.5-flash"
+
+    # ── Per-feature models and thinking levels for the 2026-12-01 reroute ──
+    # Google routes every gemini-2.5-flash request to gemini-3.5-flash-lite from 2026-12-01. These
+    # settings let the owner's per-feature pick (measured 2026-11-16; documents/OWNER_TASKS.md, the
+    # 2026-12-01 row) be a Railway variable change. EVERY DEFAULT KEEPS TODAY'S REQUEST: the model
+    # defaults are the strings that used to be hard-coded, and a level of None sends no level.
+    # A *_THINKING_LEVEL is minimal / low / medium / high (a typo fails the deploy). The encoder sends
+    # it ONLY to a model that accepts it (gemini-3.5-flash-lite: all four; gemini-3.8-flash: low /
+    # medium / high); on any other model "minimal" means off (budget 0 rules) and the others are
+    # ignored, so the feature's thinking BUDGET applies (gemini-2.5-flash refuses every level).
+    # Hard-coded until 2026-11-16 (etf_service / index_service / crypto_service `model_name=`):
+    ETF_AI_MODEL: str = "gemini-2.5-flash"
+    INDEX_AI_MODEL: str = "gemini-2.5-flash"
+    CRYPTO_AI_MODEL: str = "gemini-2.5-flash"
+    # The crypto snapshot sends no thinking budget (2.5-flash thinks dynamically); on 3.5-flash-lite
+    # that is "minimal" = no thinking, and 9 of 15 measured snapshots then had a factual error.
+    CRYPTO_AI_THINKING_LEVEL: Optional[str] = None
+    # The marketing writer's Gemini call (writer_service.WRITER_MODEL; Claude first when
+    # MARKETING_WRITER_PROVIDER=claude, this on any Claude failure). Read at import.
+    MARKETING_WRITER_GEMINI_MODEL: str = "gemini-2.5-flash"
+    # Report Stage A and the two post-assembly syntheses (core thesis, critical factors). None =
+    # GEMINI_MODEL, the client default they used before. The synthesis level applies to both calls.
+    REPORT_STAGE_A_MODEL: Optional[str] = None
+    REPORT_SYNTHESIS_MODEL: Optional[str] = None
+    REPORT_SYNTHESIS_THINKING_LEVEL: Optional[str] = None
+    # The deep-research loop's `research_complete` asks for a "Brief summary" by default. True asks
+    # for a 300-600-word memo instead: on 3.5-flash-lite the default gave ~470-char findings and a
+    # Stage A that lost 4-12 to today's end to end; the memo gave 2,742 chars and parity (8-1-7).
+    REPORT_AGENTIC_FINDINGS_MEMO: bool = False
+    # Chat's flagship route (the cheap route never thinks). On a model that takes no level, low /
+    # medium / high are ignored and CHAT_THINKING_BUDGET applies; "minimal" means off there
+    # (budget 0 rules: 1 on gemini-2.5-flash).
+    CHAT_THINKING_LEVEL: Optional[str] = None
+    # The web-only Insights grounding judge (INSIGHT_WEB_ONLY_JUDGE_MODEL above).
+    INSIGHT_WEB_ONLY_JUDGE_THINKING_LEVEL: Optional[str] = None
+    # Theme insights (THEME_INSIGHTS_MODEL / THEME_INSIGHTS_THINKING_BUDGET below; budget 512 is 0
+    # thought tokens on 3.5-flash-lite).
+    THEME_INSIGHTS_THINKING_LEVEL: Optional[str] = None
+    # The Learn weekly writer's Gemini path, and the topic step's call (LEARN_WRITER_MODEL), which
+    # serves both the peg and the label. On 3.5-flash-lite without thinking the writer failed 3 of
+    # 3 pieces (too short) and the peg copied bullet fragments; the label was valid at every level.
+    LEARN_WRITER_THINKING_LEVEL: Optional[str] = None
+    LEARN_TOPIC_THINKING_LEVEL: Optional[str] = None
+
+    @field_validator(
+        "CRYPTO_AI_THINKING_LEVEL", "REPORT_SYNTHESIS_THINKING_LEVEL", "CHAT_THINKING_LEVEL",
+        "INSIGHT_WEB_ONLY_JUDGE_THINKING_LEVEL", "THEME_INSIGHTS_THINKING_LEVEL",
+        "LEARN_WRITER_THINKING_LEVEL", "LEARN_TOPIC_THINKING_LEVEL", mode="before",
+    )
+    @classmethod
+    def _thinking_level(cls, value: object) -> Optional[str]:
+        """Unset or blank → None (no level: today's request). Otherwise one of
+        GEMINI_THINKING_LEVELS, case- and space-insensitive; anything else FAILS the deploy, because
+        a silently ignored level would quietly change a feature's quality or cost."""
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"a thinking level must be text, got {value!r}")
+        text = value.strip().lower()
+        if not text:
+            return None
+        if text not in GEMINI_THINKING_LEVELS:
+            raise ValueError(f"thinking level must be one of {', '.join(GEMINI_THINKING_LEVELS)}, "
+                             f"got {value!r}")
+        return text
+
+    @field_validator("ETF_AI_MODEL", "INDEX_AI_MODEL", "CRYPTO_AI_MODEL",
+                     "MARKETING_WRITER_GEMINI_MODEL", mode="before")
+    @classmethod
+    def _required_model(cls, value: object) -> object:
+        """Trimmed (a Railway value with a stray space would reach the SDK as typed and 404). Unset
+        or blank → "gemini-2.5-flash", the default: a blank must not silently become GEMINI_MODEL
+        through `model_name or self.model_name`."""
+        if value is None:
+            return "gemini-2.5-flash"
+        if isinstance(value, str):
+            return value.strip() or "gemini-2.5-flash"
+        return value
+
+    @field_validator("REPORT_STAGE_A_MODEL", "REPORT_SYNTHESIS_MODEL", mode="before")
+    @classmethod
+    def _optional_model(cls, value: object) -> Optional[str]:
+        """Unset or blank → None (GEMINI_MODEL, today's request)."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value.strip() if isinstance(value, str) else value
 
     # ── News features' switchable model (app/services/news_llm.py) ──
     # ONLY per-article sentiment + summary bullets and the sentiment backfill. Chat,
@@ -664,6 +762,16 @@ class Settings(BaseSettings):
     # excluded them. It now has its own setting, same semantics as the two above,
     # and the loop emits GEMINI_USAGE per round so the deep door can be measured.
     # Re-run scripts/eval_report_thinking.py on the deep path before moving it.
+    #
+    # 0 MEANS "off", NOT a literal wire value (2026-11-15): gemini-3.5-flash-lite answers
+    # thinking_budget=0 with 400 INVALID_ARGUMENT, and Google routes every gemini-2.5-flash
+    # request to it from 2026-12-01. The encoder (`gemini._thinking_config`) sends a 0 as
+    # thinking_level "minimal" to a request that names gemini-3.5-flash-lite (its real off: 0
+    # thought tokens), as budget 1 to one that names gemini-2.5-flash (the smallest budget both
+    # sides of the reroute accept), and as 0 to every other model. Every 0 below is safe from the
+    # 400, but budget 1 is NOT off once served by 3.5-flash-lite: it thinks like level "low" on
+    # real prompts (re-measured 2026-11-16: Stage B ~500 thought tokens per call, a deep report
+    # +56%). Requests must name gemini-3.5-flash-lite before 2026-12-01 to stay at 0.
     REPORT_NARRATIVE_THINKING_BUDGET: int = 0
     REPORT_STAGE_A_THINKING_BUDGET: int = 0
     REPORT_AGENTIC_THINKING_BUDGET: int = 0
@@ -866,13 +974,16 @@ class Settings(BaseSettings):
 
     # Apply the reader's learning preferences to chat answers (Pro/Max only).
     #
-    # ⚠️ SHIPS OFF, AND THE GATE IS LEGAL, NOT TECHNICAL. Turning this on changes the app
-    # from producing output that is identical for everyone to output composed for one
-    # reader. The design keeps that on the safe side of the line — it personalizes
+    # ⚠️ SHIPS OFF IN CODE, AND THE GATE WAS LEGAL, NOT TECHNICAL. Turning this on changes
+    # the app from producing output that is identical for everyone to output composed for
+    # one reader. The design keeps that on the safe side of the line — it personalizes
     # PEDAGOGY (what to cover first, at what reading level), never a view about a
-    # security, and the profile deliberately excludes the five suitability inputs — but
-    # the live Terms §2 still promise output is "general and impersonal", and that
-    # paragraph needs its carve-out before this is enabled. See the plan's §1.
+    # security, and the profile deliberately excludes the five suitability inputs. The
+    # Terms §2 "Learning preferences" carve-out it waited for has been live since
+    # 2026-08-13 (Terms, Privacy and both in-app mirrors; the Support page since
+    # 2026-11-15), so it is turned on with a Railway variable, not a code change.
+    # While it is off, a consented Pro/Max reader's Settings row reads "On — not switched
+    # on yet, we'll start using it soon" (`PersonalizationConsentViewModel.statusText`).
     #
     # Independent of the tier gate on purpose: `signals_unlocked` answers "may this user
     # have it", this answers "does the feature exist yet".
@@ -886,6 +997,9 @@ class Settings(BaseSettings):
     # preference block is something the reader TOLD us, this is something we OBSERVED,
     # and a reader may reasonably feel differently about the second. It is gated behind
     # the same tier + consent checks regardless, so this flag can only ever narrow.
+    # ⚠️ KEEP OFF until it has its OWN disclosure: no Terms, Privacy or consent text
+    # mentions remembering what a reader asked about (audit 2026-11-15), revoking consent
+    # leaves the stored rows in place, and there is no way to view or clear them.
     CHAT_MEMORY_FACTS_ENABLED: bool = False
 
     # ── Chat security / abuse & cost controls (denial-of-wallet, OWASP LLM10) ──
@@ -1007,7 +1121,15 @@ class Settings(BaseSettings):
     # think we break any terms"): ON at deploy, and the card — which is SHARED by every watcher
     # and served until a newer card replaces it — may hold text written from those pages and
     # their titles and links.
-    # Still binding: web results are never used to evaluate or tune the AI (Brave §3(b)(xiii)).
+    # Still binding: web results are never used to evaluate or tune the AI (Brave §3(b)(xiii):
+    # "to create, evaluate, train, re-train, fine-tune, benchmark … or otherwise improve
+    # artificial intelligence models or services"); chat's number check and refund judge still
+    # skip web turns. ONE narrow exception, an ACCEPTED RISK (owner 2026-11-13:
+    # "Accept the risk"), not a reading of the clause: the runtime grounding check of a web-only
+    # Insights card against the pages it was written from (the word checks + `_judge_web_only`),
+    # before it is shown — the clause may cover it. Nothing else is exempt (no offline grading,
+    # calibration, benchmark or prompt tuning on web results or on cards written from them).
+    # SYSTEM_DESIGN_GUIDELINES §9b.10a "What still binds".
     # The query is only a company name, never anything about a user. Needs the Brave key too.
     #
     # The switch is read at call time on BOTH sides: OFF stops new searches AND withholds every

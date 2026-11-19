@@ -663,7 +663,8 @@ _LEAD_OWNED_SECTION_KEYS: Dict[str, frozenset] = {
     "revenue_engine": frozenset({"segments", "period", "revenue_unit", "total_revenue",
                                  "intersegment_eliminations", "gross_reported_revenue",
                                  "reporting_currency", "currency"}),
-    "revenue_forecast": frozenset({"cagr", "eps_growth", "beat_summary", "forecast_analyst_count"}),
+    "revenue_forecast": frozenset({"cagr", "eps_growth", "cagr_span", "eps_growth_span",
+                                   "beat_summary", "forecast_analyst_count"}),
     "key_management": frozenset({"officers", "top_holders"}),
     "wall_street_consensus": frozenset({"caydex_fair_value"}),
 }
@@ -990,6 +991,8 @@ def _segment_figures(report: Dict[str, Any]) -> List[_FigSpec]:
 _ProjRow = Tuple[int, str, Dict[str, Any]]   # (payload index, period label, projection row)
 # The collector's stored growth rate per projected field (0.0 = "unknown").
 _STORED_GROWTH_KEY = {"revenue": "cagr", "eps": "eps_growth"}
+# The fiscal years a stored rate spans ("FY2025–FY2030E"); present on reports from 2026-11-14.
+_STORED_SPAN_KEY = {"revenue": "cagr_span", "eps": "eps_growth_span"}
 
 
 def _stored_growth(value: Any) -> Optional[float]:
@@ -1030,10 +1033,12 @@ def _projection_growth(rows: List[_ProjRow], field: str, stored: Optional[float]
                        complete: bool) -> Optional[Tuple[float, str, str]]:
     """(rate %/yr, first period, last period) for `field` across the projections, or None.
 
-    The STORED rate (`cagr` / `eps_growth`) is the one the report card and the PDF print — the
-    collector computed it from the unrounded estimates over this same visible window — so it is
-    stated whenever it is a real number and the window is intact (every payload row kept, both
-    endpoints positive), labelled with the window's first and last period. Its 0.0 means
+    Used for reports WITHOUT a stored span (before 2026-11-14), whose STORED rate (`cagr` /
+    `eps_growth`) the collector computed from the unrounded estimates over this same visible
+    window — so it is stated whenever it is a real number and the window is intact (every
+    payload row kept, both endpoints positive), labelled with the window's first and last
+    period. A newer report's rate spans the Future Forecast chart's own bars and carries that
+    span (`cagr_span`); `_forecast_figures` states it with that label instead. Its 0.0 means
     "unknown" (an endpoint without a positive estimate) and is never stated: the rate is then
     recomputed over the positive points — chained from the per-row YoY when every link is there,
     else from the rounded projections only when their rounding cannot move it by more than
@@ -1073,6 +1078,17 @@ def _projection_growth(rows: List[_ProjRow], field: str, stored: Optional[float]
     return (rate, p0, p1) if math.isfinite(rate) and abs(rate) < _CAGR_MAX_ABS else None
 
 
+def _timeline_eps_adjusted(rf: Dict[str, Any]) -> bool:
+    """True when the report's Earnings Timeline plots a reported year on ADJUSTED EPS that
+    differs from its GAAP figure (the collector sets `eps_gaap_label` only then)."""
+    rows = rf.get("annual_timeline")
+    return isinstance(rows, list) and any(
+        isinstance(r, dict) and not r.get("is_forecast") and r.get("eps_basis") == "adjusted"
+        and isinstance(r.get("eps_gaap_label"), str) and r["eps_gaap_label"] not in ("", "N/A")
+        for r in rows
+    )
+
+
 def _forecast_figures(report: Dict[str, Any]) -> List[_FigSpec]:
     """The forward analyst forecast, labelled as the analysts' estimate, with its growth rate:
     the stored one the card shows, or one recomputed from the projections when the collector
@@ -1108,9 +1124,21 @@ def _forecast_figures(report: Dict[str, Any]) -> List[_FigSpec]:
         if bits:
             years.append(f"{period} {', '.join(bits)}")
     growth: List[str] = []
-    for field, label in (("revenue", "revenue"), ("eps", "EPS")):
-        cagr = _projection_growth(rows, field, _stored_growth(rf.get(_STORED_GROWTH_KEY[field])),
-                                  complete)
+    # Since 2026-11-14 the EPS rate can start at a reported year plotted on ADJUSTED EPS, while
+    # this chat's financials tool gives GAAP EPS: named, so the two are never mixed.
+    eps_word = "adjusted EPS" if _timeline_eps_adjusted(rf) else "EPS"
+    for field, label in (("revenue", "revenue"), ("eps", eps_word)):
+        stored = _stored_growth(rf.get(_STORED_GROWTH_KEY[field]))
+        span = _fig_label(rf.get(_STORED_SPAN_KEY[field]), 24)
+        measured = _fig_float(rf.get(_STORED_GROWTH_KEY[field])) if span else None
+        if measured is not None and abs(measured) < _CAGR_MAX_ABS:
+            # The rate the report prints, over the chart's own fiscal years (2026-11-14). A
+            # span means MEASURED, so 0.0 is a flat outlook, stated as such. The projections
+            # window below is a different span: labelling this rate with its first and last
+            # period would put it on years it was not measured over.
+            growth.append(f"{label} CAGR {span} {_fig_pct(measured)}/yr")
+            continue
+        cagr = _projection_growth(rows, field, None if span else stored, complete)
         if cagr is not None:
             rate, first, last = cagr
             growth.append(f"{label} CAGR {first}–{last} {_fig_pct(rate)}/yr")
@@ -1970,9 +1998,13 @@ class ChatContextResolver:
         parts = list(lead)
         if dump:
             parts.append("Report data the user can see (an excerpt; long sections are shortened):\n" + dump)
+        # Scoped to the REPORT (owner 2026-11-14: report chat answers questions beyond the report
+        # too — the trusted report rule says how). The "\nAnswer grounded in THIS report" prefix
+        # is the split marker tests read.
         parts.append(
-            "Answer grounded in THIS report and never invent figures. If something is not in "
-            "this excerpt, say it was not included here, never that the report lacks it."
+            "Answer grounded in THIS report for questions about it, and never invent figures. If "
+            "part of the report is not in this excerpt, say it was not included here, never that "
+            "the report lacks it."
         )
         return "\n".join(parts)
 
@@ -2046,6 +2078,15 @@ class ChatContextResolver:
         the owner chose that Ask Cay sees what the card shows — but labelled as drawing on web
         search results, and ``meta["web_assisted_card"]`` is set so the turn is never audited
         or judged (Brave §3(b)(xiii)).
+
+        A card written from those pages ALONE (``web_only``, 2026-11-12) follows the feed's
+        own same-day rule through the SAME helper (`web_only_card_visible`): on screen only
+        on the ET day it was written — over an empty window too, and never on a later day,
+        even when the window has news (the feed then shows the headline list instead). It is
+        labelled as coming from web search results, not "partly". On a later day the model
+        gets ONE line saying such a card exists and is not on screen — never its headline,
+        sentiment or bullets, so chat cannot restate an earlier day's web-derived cause the
+        app no longer shows.
         """
         scope = _updates_scope(reference_id)
         if scope is None:
@@ -2058,6 +2099,7 @@ class ChatContextResolver:
         from app.services.news_insight_service import (
             get_news_insight_service,
             select_recent_corpus,
+            web_only_card_visible,
         )
         from app.services.news_sentiment_trend_service import (
             TREND_DAYS,
@@ -2138,27 +2180,51 @@ class ChatContextResolver:
             f"The user is on the Updates tab, looking at the news feed for {subject}"
             + (" (general market news)." if is_market else ".")
         ]
+        web_only_hidden = False
         if card:
             written = _et_stamp(card.get("generated_at"), now)
-            on_screen = bool(feed_recent)
-            web_card = bool(card.get("web_assisted"))
+            web_only = card.get("web_only") is True
+            # The feed's rule, through the same helper: a web-only card is on screen on its
+            # ET day only, whatever the window holds.
+            web_only_hidden = web_only and not web_only_card_visible(card, now)
+            web_card = web_only or bool(card.get("web_assisted"))
             if web_card and meta is not None:
+                # Kept even when the card's text is withheld below: the turn still knows a
+                # web-derived card exists, and the audits stay skipped (fail closed).
                 meta["web_assisted_card"] = True
+        if card and web_only_hidden:
+            # Owner rule (2026-11-12): a web-only card is visible the same ET day only. The
+            # model gets its existence and age — never its headline, sentiment or bullets.
+            lines.append(
+                "A Cay AI Insights card for this feed"
+                + (f", written {written}," if written else "")
+                + " came from web search results and is not on screen: such cards show "
+                "only on the day they are written. Its content is not available here; do "
+                "not describe or restate it."
+            )
+        elif card:
+            on_screen = web_only or bool(feed_recent)
+            hidden_why = "the feed has no news in its window right now"
             lines.append(
                 ("Cay AI Insights card on screen" if on_screen
-                 else "The most recent Cay AI Insights card (not on screen: the feed has no "
-                      "news in its window right now)")
+                 else f"The most recent Cay AI Insights card (not on screen: {hidden_why})")
                 + (f", written {written}" if written else "")
-                + (" partly from web search results (third-party pages, not Caydex data)"
+                + (" from web search results (third-party pages, not Caydex data)"
+                   if web_only
+                   else " partly from web search results (third-party pages, not Caydex data)"
                    if web_card else "")
                 + f" — sentiment {card.get('sentiment') or 'Neutral'}: "
                 + _cap(str(card.get("headline") or ""), _UPDATES_HEADLINE_CAP)
             )
             for bullet in card.get("bullets") or []:
                 lines.append("• " + _cap(str(bullet), _UPDATES_BULLET_CAP))
-        elif headline_lines:
+        if (not card or web_only_hidden) and headline_lines:
+            # No card, or a web-only card from an earlier day the feed hides: either way
+            # the feed shows its plain headline list.
             lines.append(
-                "There is no Cay AI summary for this feed yet: the card on screen is the plain "
+                ("No Cay AI summary is on screen today" if web_only_hidden
+                 else "There is no Cay AI summary for this feed yet")
+                + ": the card on screen is the plain "
                 "\"Latest headlines\" list, i.e. the newest headlines below, verbatim."
             )
 

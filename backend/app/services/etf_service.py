@@ -17,6 +17,7 @@ from app.integrations.fmp import get_fmp_client, FMPClient, FMPUnavailableExcept
 from app.utils.inflight import fail_shared_future
 from app.services.agents.persona_config import neutral_system_instruction
 from app.services.benchmark_math import format_since, overlapping_cagrs
+from app.config import settings
 from app.integrations.gemini import get_gemini_client
 from app.schemas.etf import (
     BenchmarkSummaryResponse,
@@ -41,7 +42,10 @@ from app.schemas.etf import (
 )
 from app.utils.market_hours import ET, market_status_fields, to_utc_instant
 from app.services.ticker_report_cache import current_close_cycle_start
-from app.services.corporate_actions_service import corporate_actions_source
+from app.services.corporate_actions_service import (
+    corporate_actions_source,
+    estimated_dividend_amount,
+)
 from app.services.price_service import price_source
 
 logger = logging.getLogger(__name__)
@@ -70,6 +74,162 @@ def _pay_frequency_window(today: Optional[str] = None) -> Tuple[str, str]:
     end = today or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     begin = datetime.strptime(end, "%Y-%m-%d") - timedelta(days=_PAY_FREQUENCY_LOOKBACK_DAYS)
     return begin.strftime("%Y-%m-%d"), end
+
+
+# ── Derived dividend history (owner decision 2026-11-14) ─────────────────────────────────
+#
+# `/dividends` is outside the licence, so the per-payment history is DERIVED from the
+# entitled `/dividend-adjusted` vs `/full` series (`corporate_actions_service`). Ex-dates are
+# exact (SOXX 5/5 and AAPL 11/11 against the published lists). Amounts are an ESTIMATE —
+# measured +0.9% .. +2.7% high on SOXX — so they are printed rounded to the cent with "≈",
+# never as an exact figure. Pay dates are not recoverable at all and read "—".
+
+#: Rows the detail card carries; the dedicated endpoint returns the whole window.
+_DETAIL_DIVIDEND_ROWS = 20
+
+#: `profile.lastDividend` (the TTM total) is replaced by the derived TTM only when the two
+#: disagree by more than this. Measured over 49 ETFs: every agreeing fund sat within ~1%
+#: (DIA, whose detection missed 3 of 12 monthly steps, at 6%); SOXX's figure was 2x because
+#: FMP never restated it for the 3:1 split of 2026-11-05.
+_YIELD_DISAGREEMENT = 0.25
+_TTM_DAYS = 365
+
+#: Fewer derived steps than this, with no recognisable cadence, are not shown as payments
+#: (see `ETFService._derived_dividend_events`).
+_MIN_UNPATTERNED_DIVIDEND_EVENTS = 3
+
+#: Payments ONE year holds per cadence. The derived total sums exactly the newest N inside
+#: the trailing 365 days, and fewer than N means "incomplete" — FMP's figure stays. Never a
+#: band: an ex-date that drifts a few days earlier puts the SAME period's payment in the
+#: window twice (annual 2x, semi-annual 1.5x — review 2026-11-14), and an upper bound of
+#: N + 1 accepted that as complete and overrode a CORRECT yield. Fewer than N is the other
+#: guard: a partly-detected payer (below the detection floor) must never pull a yield DOWN.
+_TTM_PAYMENTS_BY_FREQUENCY: Dict[str, int] = {
+    "Monthly": 12,
+    "Quarterly": 4,
+    "Semi-Annually": 2,
+    "Annually": 1,
+}
+
+
+def _iso_day(value: Any) -> Optional[str]:
+    """`YYYY-MM-DD` when ``value`` is a real calendar date, else None."""
+    if not isinstance(value, str) or len(value) < 10:
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _format_estimated_amount(amount: Optional[float]) -> str:
+    """``"≈$0.11"``, or ``"—"`` when there is no estimate or it rounds below a cent."""
+    if amount is None or not math.isfinite(amount):
+        return "—"
+    cents = round(amount, 2)
+    if cents < 0.01:
+        return "—"
+    return f"≈${cents:,.2f}"
+
+
+def _derived_dividend_rows(
+    events: Any, limit: Optional[int] = None
+) -> List[ETFDividendPaymentResponse]:
+    """History rows from derived dividend events, newest first, one row per ex-date."""
+    seen = set()
+    dated = []
+    for ev in events or []:
+        day = _iso_day(getattr(ev, "date", None))
+        if day is None or day in seen:
+            continue
+        seen.add(day)
+        dated.append((day, ev))
+    dated.sort(key=lambda pair: pair[0], reverse=True)
+    if limit is not None:
+        dated = dated[:limit]
+    return [
+        ETFDividendPaymentResponse(
+            dividend_per_share=_format_estimated_amount(estimated_dividend_amount(ev)),
+            ex_dividend_date=_format_date_readable(day),
+            pay_date="—",
+        )
+        for day, ev in dated
+    ]
+
+
+def reconcile_dividend_yield(
+    symbol: str,
+    profile: Dict[str, Any],
+    price: Any,
+    profile_yield: float,
+    profile_known: bool,
+    events: Any,
+    frequency: str,
+    today: Optional[str] = None,
+) -> Tuple[float, bool]:
+    """``(dividend_yield_pct, known)`` — FMP's figure unless the derived TTM clearly beats it.
+
+    The derived trailing-twelve-month total replaces `profile.lastDividend` only when ALL of:
+    FMP reports a positive yield (an FMP zero or unknown is never overridden — ARKK, GLD);
+    every payment in the window has an estimate; the payment count matches the cadence
+    (`_TTM_PAYMENTS_BY_FREQUENCY`); and the two totals disagree by more than
+    `_YIELD_DISAGREEMENT`. Any other case returns FMP's answer unchanged, so the 48 ETFs
+    whose figures agree render byte-for-byte as before.
+    """
+    if not profile_known or profile_yield <= 0:
+        return profile_yield, profile_known
+    raw = (profile or {}).get("lastDividend")
+    if raw is None:
+        raw = (profile or {}).get("lastDiv")
+    last_div = _finite_num(raw, default=-1.0)
+    priced = _finite_num(price, default=-1.0)
+    if last_div <= 0 or priced <= 0:
+        return profile_yield, profile_known
+
+    end = _iso_day(today) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    start = (datetime.strptime(end, "%Y-%m-%d") - timedelta(days=_TTM_DAYS)).strftime("%Y-%m-%d")
+    in_window: List[Tuple[str, Any]] = []
+    seen = set()
+    for ev in events or []:
+        day = _iso_day(getattr(ev, "date", None))
+        if day is None or day in seen or not (start < day <= end):
+            continue
+        seen.add(day)
+        in_window.append((day, ev))
+    in_window.sort(key=lambda pair: pair[0], reverse=True)
+    expected = _TTM_PAYMENTS_BY_FREQUENCY.get(frequency or "")
+    # The newest `expected` payments are ONE year; anything older in the window is the
+    # same period counted twice (see the constant). Unknown cadence: sum all, never trusted.
+    counted = in_window[:expected] if expected else in_window
+    amounts = [estimated_dividend_amount(ev) for _, ev in counted]
+    known_amounts = [a for a in amounts if a is not None]
+    derived_ttm = sum(known_amounts)
+    if derived_ttm <= 0:
+        return profile_yield, profile_known
+
+    disagreement = abs(last_div / derived_ttm - 1.0)
+    if disagreement <= _YIELD_DISAGREEMENT:
+        return profile_yield, profile_known
+
+    complete = (
+        expected is not None
+        and len(in_window) >= expected
+        and len(known_amounts) == len(amounts) == expected
+    )
+    if not complete:
+        logger.warning(
+            "etf: %s dividend TTM disagrees — FMP lastDividend %.4f vs derived %.4f "
+            "(%d payments, frequency %r); derived set incomplete, keeping FMP's yield",
+            symbol, last_div, derived_ttm, len(amounts), frequency,
+        )
+        return profile_yield, profile_known
+    derived_yield = round(derived_ttm / priced * 100, 2)
+    logger.warning(
+        "etf: %s dividend TTM disagrees — FMP lastDividend %.4f vs derived %.4f "
+        "(%d %s payments); using the derived yield %.2f%% instead of %.2f%%",
+        symbol, last_div, derived_ttm, len(amounts), frequency, derived_yield, profile_yield,
+    )
+    return derived_yield, True
 
 # ── Per-section in-memory cache ──────────────────────────────────
 #
@@ -1375,6 +1535,25 @@ class ETFService:
         # vacuously over a flag that was a tautology.
         dividend_yield, dividend_yield_known = dividend_yield_from_profile(profile, price)
 
+        # Dividend events DERIVED from the entitled price series — one call, reused for the
+        # history rows, the pay frequency and the yield cross-check below. `dividends` is
+        # permanently `[]` (`/dividends` is outside the FMP licence), so this is the only
+        # per-payment source. A failed derivation is `[]`: empty history, FMP's yield and a
+        # "—" frequency, exactly what the card showed before.
+        dividend_events = await self._derived_dividend_events(symbol)
+        pay_frequency = self._infer_pay_frequency(dividends)
+        if pay_frequency == "—" and dividend_events:
+            pay_frequency = self._infer_pay_frequency(
+                [{"date": ev.date} for ev in dividend_events]
+            )
+        # FMP's `lastDividend` is not restated after a split (SOXX, 3:1 on 2026-11-05: 0.57%
+        # shown against a true 0.27%). See `reconcile_dividend_yield` for when the derived
+        # total wins; every other case keeps FMP's figure unchanged.
+        dividend_yield, dividend_yield_known = reconcile_dividend_yield(
+            symbol, profile, price, dividend_yield, dividend_yield_known,
+            dividend_events, pay_frequency,
+        )
+
         # Step 3 (build chart data) is gone: `chart_data` now arrives from `_get_chart`
         # in step 1, which derives 5Y/ALL from the shared history instead of re-fetching
         # it. The old branch called `fetch_chart_data` for 1D/1W/5Y/ALL, and for ALL that
@@ -1417,7 +1596,13 @@ class ETFService:
         concentration = self._build_concentration(top_holdings)
 
         # ── Step 7: Build dividend data ───────────────────────────
-        dividend_payments = self._build_dividend_history(dividends)
+        # Licensed per-payment rows win if they ever come back; otherwise the derived rows
+        # (exact ex-dates, "≈" amounts, pay date "—" — owner decision 2026-11-14).
+        dividend_payments = (
+            self._build_dividend_history(dividends)
+            if dividends
+            else _derived_dividend_rows(dividend_events, _DETAIL_DIVIDEND_ROWS)
+        )
 
         # ── Step 8: Build snapshots (FMP data + Gemini for hook text) ──
         identity_rating = self._build_identity_rating(
@@ -1483,31 +1668,10 @@ class ETFService:
         else:
             last_payment = dividend_payments[0]
 
-        # Pay frequency from DERIVED ex-dividend dates.
-        #
-        # `dividends` is permanently `[]` — `/dividends` is outside the FMP licence — so
-        # this used to render "—" for every fund. The DATES are recoverable exactly from
-        # the entitled `dividend-adjusted` vs `/full` price series (verified: AAPL 6/6,
-        # KO / MSFT / JNJ / SCHD 6/6 each), and a frequency needs only dates. The AMOUNTS
-        # are NOT recoverable to the cent and are deliberately still absent.
-        #
-        # Best-effort: a fund whose per-payment yield sits below the detection floor
-        # (~0.04%) degrades to "—", which is what it already showed.
-        pay_frequency = self._infer_pay_frequency(dividends)
-        if pay_frequency == "—":
-            try:
-                ex_dates = await corporate_actions_source(self).get_ex_dividend_dates(
-                    symbol, *_pay_frequency_window()
-                )
-                if ex_dates:
-                    pay_frequency = self._infer_pay_frequency(
-                        [{"date": d} for d in ex_dates]
-                    )
-            except Exception as e:
-                logger.warning(
-                    "etf: ex-dividend date derivation failed for %s (%s: %s) — "
-                    "pay frequency stays unknown", symbol, type(e).__name__, e,
-                )
+        # Pay frequency was derived above with the dividend events (Step 2): the DATES are
+        # exact from the entitled `dividend-adjusted` vs `/full` series (verified: AAPL 6/6,
+        # KO / MSFT / JNJ / SCHD 6/6 each). A fund below the detection floor (~0.04% per
+        # payment) degrades to "—", which is what it already showed.
 
         net_yield = ETFNetYieldResponse(
             expense_ratio=expense_ratio,
@@ -1659,6 +1823,46 @@ class ETFService:
         except Exception as e:
             logger.warning(f"ETF snapshot upsert failed ({category}) for {symbol}: {e}")
 
+    # ── Derived dividend events (shared by the detail card and the endpoint) ──
+
+    async def _derived_dividend_events(self, symbol: str) -> List[Any]:
+        """Dividend steps over `_pay_frequency_window()`, newest first; `[]` on failure.
+
+        Through the `corporate_actions_source` seam, so the detail card and the
+        dedicated endpoint read the SAME cached derivation and cannot contradict each
+        other (SPY once said "Pays Quarterly" on one and "—" on the other).
+        """
+        try:
+            events = list(
+                await corporate_actions_source(self).get_dividend_events(
+                    symbol, *_pay_frequency_window()
+                )
+                or []
+            )
+        except Exception as e:
+            logger.warning(
+                "etf: dividend event derivation failed for %s (%s: %s) — no history, "
+                "frequency unknown, FMP's yield kept", symbol, type(e).__name__, e,
+            )
+            return []
+        # Thin evidence degrades to nothing, like the frequency label. FMP's dividend-
+        # adjusted series holds level shifts no published list confirms — ARKK shows one on
+        # 2023-09-08 (≈$0.36) and has paid nothing since Dec 2021 — and a lone step with no
+        # cadence cannot be told apart from one. Two such steps are dropped; three or more,
+        # or any recognised cadence, are kept.
+        if (
+            len(events) < _MIN_UNPATTERNED_DIVIDEND_EVENTS
+            and self._infer_pay_frequency([{"date": ev.date} for ev in events]) == "—"
+        ):
+            if events:
+                logger.info(
+                    "etf: %s has %d derived dividend step(s) and no cadence (%s) — not "
+                    "shown as payments", symbol, len(events),
+                    ", ".join(str(ev.date) for ev in events),
+                )
+            return []
+        return events
+
     # ── Dividend History (dedicated endpoint) ─────────────────────
 
     async def get_dividend_history(self, symbol: str) -> ETFDividendHistoryResponse:
@@ -1700,36 +1904,45 @@ class ETFService:
         raw_dividends = (await self._get_fundamentals(symbol)).get("dividends") or []
         if not raw_dividends:
             # `/dividends` is outside the FMP licence, so this is now the ONLY path — the
-            # per-payment feed is permanently empty. Amounts and payment dates are genuinely
-            # unrecoverable, but the ex-dividend DATES are exact from the entitled price
-            # series, and a frequency needs nothing else.
+            # per-payment feed is permanently empty. Payment dates are unrecoverable and
+            # amounts only estimable, but the ex-dividend DATES are exact from the entitled
+            # price series, and a frequency needs nothing else.
             #
             # ⚠️ This derivation was originally wired into the DETAIL card only, so the two
             # screens contradicted each other: SPY's detail said "Pays Quarterly" while this
             # endpoint said "—" and showed nothing. Same source, same answer, both places.
-            derived_frequency = "—"
-            try:
-                ex_dates = await corporate_actions_source(self).get_ex_dividend_dates(
-                    symbol, *_pay_frequency_window()
-                )
-                if ex_dates:
-                    derived_frequency = self._infer_pay_frequency(
-                        [{"date": d} for d in ex_dates]
-                    )
-            except Exception as e:
-                logger.warning(
-                    "etf: ex-dividend date derivation failed for %s (%s: %s) — frequency "
-                    "stays unknown", symbol, type(e).__name__, e,
-                )
-            logger.info(
-                "No per-payment dividend data for %s (endpoint unlicensed); frequency "
-                "derived as %r", symbol, derived_frequency,
+            #
+            # Since 2026-11-14 the ROWS are derived too (owner decision): exact ex-dates,
+            # amounts estimated from the step size and printed with "≈", pay date "—".
+            events = await self._derived_dividend_events(symbol)
+            derived_frequency = (
+                self._infer_pay_frequency([{"date": ev.date} for ev in events])
+                if events else "—"
             )
+            rows = _derived_dividend_rows(events)
+            if not rows:
+                # Nothing detected (a non-payer) or the derivation failed — the two are
+                # indistinguishable here, so the next open simply derives again.
+                logger.info(
+                    "No dividend payments derived for %s (per-payment feed unlicensed); "
+                    "frequency %r", symbol, derived_frequency,
+                )
+                return ETFDividendHistoryResponse(
+                    symbol=symbol,
+                    pay_frequency=derived_frequency,
+                    total_dividends=0,
+                    dividends=[],
+                )
+            # NOT cached here, in either tier. The derivation underneath is already cached
+            # (`corporate_actions_service`, 15 min while the window touches today) and the
+            # rows are a pure function of it, so re-building them costs no FMP call. A 1 h /
+            # 24 h copy here let this screen keep yesterday's rows while the detail card
+            # had re-derived a new ex-date — the two screens disagreeing (review 2026-11-14).
             return ETFDividendHistoryResponse(
                 symbol=symbol,
                 pay_frequency=derived_frequency,
-                total_dividends=0,
-                dividends=[],
+                total_dividends=len(rows),
+                dividends=rows,
             )
 
         # Use FMP's frequency field directly (first non-empty value)
@@ -3151,7 +3364,9 @@ RULES:
                     system_instruction=neutral_system_instruction(
                         "You are a concise financial writer. Output only the requested sentence."
                     ),
-                    model_name="gemini-2.5-flash",
+                    # Read per call (Railway variable, default "gemini-2.5-flash" = the
+                    # string that was hard-coded here until 2026-11-16).
+                    model_name=settings.ETF_AI_MODEL,
                     # No thinking — the output is ONE sentence of at most 120 characters.
                     # See index_service for the measurement behind this.
                     thinking_budget=0,

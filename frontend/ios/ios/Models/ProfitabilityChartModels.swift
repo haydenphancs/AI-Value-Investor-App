@@ -26,6 +26,21 @@ enum ProfitabilityMetricType: String, CaseIterable, Identifiable {
     case roa = "ROA"
 
     var id: String { rawValue }
+
+    /// The Profitability card row (its `DeepDiveMetric.historyKey`) whose TTM figure the
+    /// drill-down's header and "Current (TTM)" legend line quote (owner decision 2026-11-13).
+    /// nil for FCF Margin: the card has no FCF row, so that chart has no current figure and
+    /// names only its closed periods.
+    var cardHistoryKey: String? {
+        switch self {
+        case .grossMargin: return "gross_margin"
+        case .operatingMargin: return "operating_margin"
+        case .netMargin: return "net_margin"
+        case .fcfMargin: return nil
+        case .roe: return "roe"
+        case .roa: return "roa"
+        }
+    }
 }
 
 // MARK: - Series models

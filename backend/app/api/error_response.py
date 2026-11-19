@@ -25,8 +25,11 @@ helper stays cheap to import and resilient to dependency changes.
 
 from __future__ import annotations
 
+import re
+
 from app.log_redaction import redact_secrets
 
+from datetime import date
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
@@ -51,6 +54,15 @@ class ErrorCode(str, Enum):
     # company left the club, was unpublished, or the section is off / hidden for stale
     # membership (GET /home/trillion-club/{slug}).
     TRILLION_CLUB_COMPANY_NOT_FOUND = "TRILLION_CLUB_COMPANY_NOT_FOUND"
+    # The ticker is a CONFIRMED delisting (`listing_status_service`: FMP's inactive flag, no
+    # trade in the latest session, FMP's delisted-companies row dated on or before today ET,
+    # no traded day after it), so a NEW AI report or a NEW price alert is refused — BEFORE any
+    # charge on both report doors (owner, 2026-11-13: "approve phase 2 too"). Reports already
+    # generated stay free to open; an unknown answer never refuses (fail open). Built with
+    # `ticker_delisted_error`, whose per-request `user_message` names the ticker, the exchange
+    # and the date. Distinct from TICKER_NOT_FOUND: the symbol exists and its history is real,
+    # so "check the spelling" would be false.
+    TICKER_DELISTED = "TICKER_DELISTED"
 
     # ── Upstream services ────────────────────────────────────────────
     FMP_RATE_LIMITED = "FMP_RATE_LIMITED"
@@ -414,6 +426,12 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.TRILLION_CLUB_COMPANY_NOT_FOUND: (
         "That company is no longer in the Trillion-Dollar Club section."
     ),
+    # The fallback only: `ticker_delisted_error` always sends a per-request message naming the
+    # ticker, exchange and date (and, for a price alert, alert copy instead of report copy).
+    ErrorCode.TICKER_DELISTED: (
+        "This company is no longer listed, so a new AI report can't be generated. "
+        "You haven't been charged."
+    ),
     ErrorCode.FMP_RATE_LIMITED: (
         "Market data is rate-limited right now. Please try again in a minute."
     ),
@@ -630,8 +648,8 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.ACCOUNT_DELETE_INCOMPLETE: "retry_later",
     # NOT retry_later: retrying changes nothing until the user deletes an alert.
     ErrorCode.PRICE_ALERT_LIMIT_REACHED: "fix_input",
-    # PRICE_ALERT_NOT_FOUND deliberately has NO action, matching THEME_NOT_FOUND and
-    # TRILLION_CLUB_COMPANY_NOT_FOUND: there
+    # PRICE_ALERT_NOT_FOUND and TICKER_DELISTED deliberately have NO action, matching
+    # THEME_NOT_FOUND and TRILLION_CLUB_COMPANY_NOT_FOUND: there
     # is nothing for the user to do, and "none" is not one of the iOS `ErrorAction`
     # cases — it would decode as an unknown action rather than as no action.
     # `sign_in` maps to iOS `ErrorAction.signIn`, whose button opens SignInView.
@@ -658,6 +676,11 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.INVALID_INPUT: 400,
     ErrorCode.THEME_NOT_FOUND: 404,
     ErrorCode.TRILLION_CLUB_COMPANY_NOT_FOUND: 404,
+    # 409, not 404/410: the symbol exists and its stored history is real — it is the STATE of
+    # the listing that conflicts with the request. A 4xx terminal for the client (never
+    # auto-retried, §6.4), and iOS decodes the structured 409 body, so the per-request copy
+    # reaches the user. Not 429 (iOS swallows 429 bodies), not 402 (nothing to buy).
+    ErrorCode.TICKER_DELISTED: 409,
     ErrorCode.FMP_RATE_LIMITED: 502,
     ErrorCode.FMP_UNAVAILABLE: 502,
     ErrorCode.FMP_NOT_ENTITLED: 409,
@@ -845,6 +868,72 @@ def make_error_body(
         "action": action if action is not None else _DEFAULT_ACTIONS.get(code),
         "details": details or {},
     }
+
+
+# ── TICKER_DELISTED ───────────────────────────────────────────────────
+
+# Locale-free on purpose: `strftime("%b")` follows the process locale, and this copy reaches users.
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+# The two doors that refuse a confirmed delisting, and what each tells the user after
+# "{T} was delisted from {EXCH} on {date}, ". Closed: a third door gets its own reviewed copy.
+_DELISTED_COPY: Dict[str, str] = {
+    # Both report doors (POST /research/generate, GET /stocks/{t}/report): refused BEFORE any
+    # charge, and a report the user already has stays free to open.
+    "report": (
+        "so a new AI report can't be generated. You haven't been charged. "
+        "Reports you already have stay available."
+    ),
+    # POST /alerts/price: nothing is created and nothing is charged.
+    "price_alert": "so it has no live price to watch.",
+}
+
+
+def format_listing_day(day: date) -> str:
+    """'Nov 9, 2026' — FMP's delistedDate is a US Eastern CALENDAR date, printed as it is: no
+    time-zone conversion (it is a date, not an instant) and no locale."""
+    return f"{_MONTH_ABBR[day.month - 1]} {day.day}, {day.year}"
+
+
+def ticker_delisted_error(
+    *,
+    ticker: str,
+    delisted_date: date,
+    exchange: Optional[str],
+    purpose: str,
+) -> JSONResponse:
+    """The 409 `TICKER_DELISTED` body for a CONFIRMED delisting (`purpose`: "report" or
+    "price_alert"), with the per-request copy the owner approved on 2026-11-13:
+
+        "ROKU was delisted from NASDAQ on Nov 9, 2026, so a new AI report can't be generated.
+         You haven't been charged. Reports you already have stay available."
+        "ROKU was delisted from NASDAQ on Nov 9, 2026, so it has no live price to watch."
+
+    `details` are flat scalars (iOS `AnyCodable` reads String/Int/Double/Bool only): the
+    exchange is "" when FMP's row names none, and the copy then drops "from …".
+    """
+    tail = _DELISTED_COPY.get(purpose)
+    if tail is None:
+        raise ValueError(f"ticker_delisted_error: unknown purpose {purpose!r}")
+    exch = (exchange or "").strip()
+    where = f" from {exch}" if exch else ""
+    day = format_listing_day(delisted_date)
+    refused = "no report generated, nothing charged" if purpose == "report" else "no alert created"
+    return make_error_response(
+        ErrorCode.TICKER_DELISTED,
+        message=(
+            f"{ticker} is a confirmed delisting ({exch or 'exchange not named'}, "
+            f"{delisted_date.isoformat()}) — {refused}"
+        ),
+        user_message=f"{ticker} was delisted{where} on {day}, {tail}",
+        details={
+            "ticker": ticker,
+            "delisted_date": delisted_date.isoformat(),
+            "delisted_exchange": exch,
+            "step": "delisted",
+        },
+    )
 
 
 def auth_error(
@@ -1191,6 +1280,49 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     )
 
 
+#: Error codes that mean "the AI engine failed". Their client-facing `message` /
+#: `details.underlying` never carry the exception's own text: a provider error names the vendor
+#: and the model ("GeminiQuotaError: Gemini quota circuit open", "models/gemini-2.5-flash is not
+#: found…"), and these bodies reach the client verbatim — CLAUDE.md invariant 7 (the agent is
+#: "Cay AI by Caydex"; never reveal Gemini/Google/the model). The full text stays in the server
+#: log and Sentry, which every door writes before it answers.
+_AI_ENGINE_CODES = frozenset({ErrorCode.GEMINI_UNAVAILABLE, ErrorCode.GEMINI_QUOTA_EXCEEDED})
+#: Vendor and model names, for the text of every OTHER code (a stray mention in an unrelated
+#: exception). `models/gemini-2.5-flash`, `GeminiTimeoutError`, `google.genai`, `Claude…`.
+_AI_VENDOR_RE = re.compile(
+    r"(?i)(?:models/)?(?:gemini|claude)[\w.\-]*|\b(?:google(?:\.genai)?|genai|vertex ?ai|anthropic|openai)\b"
+)
+
+
+def _ai_engine_summary(exc: BaseException, code: ErrorCode) -> str:
+    """A vendor-free description of an AI-engine failure: kind + the HTTP status, if any."""
+    cls = type(exc).__name__
+    label = "AIEngineError" if _AI_VENDOR_RE.search(cls) or cls in ("ClientError", "ServerError", "APIError") else cls
+    if code is ErrorCode.GEMINI_QUOTA_EXCEEDED:
+        kind = "quota"
+    elif "timeout" in cls.lower():
+        kind = "timeout"
+    else:
+        kind = "unavailable"
+    bits = []
+    status_code = getattr(exc, "code", None)
+    if isinstance(status_code, int) and not isinstance(status_code, bool):
+        bits.append(str(status_code))
+    status = getattr(exc, "status", None)
+    if isinstance(status, str) and re.fullmatch(r"[A-Z_]{1,40}", status):
+        bits.append(status)
+    return f"{label}: {kind}" + (f" ({' '.join(bits)})" if bits else "")
+
+
+def client_error_text(exc: BaseException, code: ErrorCode, *, limit: int) -> str:
+    """`<Class>: <message>` for a client-facing error field: secrets redacted BEFORE truncating,
+    no AI vendor or model name. An AI-engine code gets `_ai_engine_summary` (no upstream text)."""
+    if code in _AI_ENGINE_CODES:
+        return _ai_engine_summary(exc, code)[:limit]
+    text = f"{type(exc).__name__}: {redact_secrets(exc)}"
+    return _AI_VENDOR_RE.sub("ai-engine", text)[:limit]
+
+
 def error_response_from_exception(
     exc: BaseException,
     *,
@@ -1215,9 +1347,10 @@ def error_response_from_exception(
     # the twin builder, into `research_reports.error_message` in Supabase). The repo's
     # redaction stopped at the log/Sentry boundary. Slicing first would leave a usable key
     # prefix, so the order matters.
-    safe = redact_secrets(exc)
+    # `client_error_text` also keeps every AI vendor / model name out of both fields
+    # (invariant 7): an AI-engine code gets a vendor-free summary, never the provider's text.
     details: Dict[str, Any] = {
-        "underlying": f"{type(exc).__name__}: {safe[:200]}",
+        "underlying": client_error_text(exc, code, limit=200),
     }
     if ticker is not None:
         details["ticker"] = ticker
@@ -1231,7 +1364,7 @@ def error_response_from_exception(
     return make_error_response(
         code,
         status_code=status_code,
-        message=f"{type(exc).__name__}: {safe[:300]}",
+        message=client_error_text(exc, code, limit=300),
         details=details,
     )
 
@@ -1298,9 +1431,10 @@ def error_body_from_exception(
     # the twin builder, into `research_reports.error_message` in Supabase). The repo's
     # redaction stopped at the log/Sentry boundary. Slicing first would leave a usable key
     # prefix, so the order matters.
-    safe = redact_secrets(exc)
+    # `client_error_text` also keeps every AI vendor / model name out of both fields
+    # (invariant 7): an AI-engine code gets a vendor-free summary, never the provider's text.
     details: Dict[str, Any] = {
-        "underlying": f"{type(exc).__name__}: {safe[:200]}",
+        "underlying": client_error_text(exc, code, limit=200),
     }
     if ticker is not None:
         details["ticker"] = ticker
@@ -1313,6 +1447,6 @@ def error_body_from_exception(
 
     return make_error_body(
         code,
-        message=f"{type(exc).__name__}: {safe[:300]}",
+        message=client_error_text(exc, code, limit=300),
         details=details,
     )

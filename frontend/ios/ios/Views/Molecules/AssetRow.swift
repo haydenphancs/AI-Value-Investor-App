@@ -142,6 +142,10 @@ struct AssetRow: View {
                         tail: afterHoursTail
                     )
                     .frame(width: Self.sparklineWidth, height: 32)
+                    // A delisted row has no session to draw: the line goes, its slot stays,
+                    // so the chart's x still matches every other card.
+                    .opacity(asset.isDelisted ? 0 : 1)
+                    .accessibilityHidden(asset.isDelisted)
                     // No Spacer after the chart (owner, 2026-11-11: "i want the ticker and
                     // its name longer"): the ticker column's `maxWidth: .infinity` takes ALL
                     // the slack, and the chart sits one gap from the price column. A Spacer
@@ -154,9 +158,10 @@ struct AssetRow: View {
             .accessibilityLabel("\(asset.ticker), \(asset.companyName)")
             .accessibilityHint("Opens details")
 
-            // Price Info — its own tap target.
+            // Price Info — its own tap target. A delisted row has no change to toggle, so its
+            // pill opens the details like the rest of the row (never a dead tap target).
             Button {
-                onToggleChangeDisplay?()
+                if asset.isDelisted { onTap?() } else { onToggleChangeDisplay?() }
             } label: {
                 VStack(alignment: .trailing, spacing: AppSpacing.xxs) {
                     // Unguarded before: headingSmall is reading-tier (1.4x) and this Text
@@ -193,6 +198,20 @@ struct AssetRow: View {
                     // vanished from a box already sized for it (ORCL/ACHR/NVDA, 2026-11-11).
                     .frame(maxWidth: .infinity, alignment: .trailing)
                 }
+                // Delisted (owner decision 2026-11-13, D1): a grey "Delisted" pill in place of
+                // the price and change. They stay LAID OUT, only invisible, so the card keeps
+                // its height — `AssetsListSection` sizes the whole List from one hidden row,
+                // and a shorter or taller first row would mis-size every card. `textSecondary`
+                // ink on the pill's own opaque surface (never `neutral`, which is amber);
+                // `fixedSize` so a large text size widens the pill instead of truncating it.
+                .opacity(asset.isDelisted ? 0 : 1)
+                .accessibilityHidden(asset.isDelisted)
+                .overlay(alignment: .trailing) {
+                    if asset.isDelisted {
+                        TintedTagBadge(text: DelistedListing.pillText, color: AppColors.textSecondary)
+                            .fixedSize()
+                    }
+                }
                 // One column width for the whole list (see `HoldingsPriceColumn`), trailing,
                 // so the chart's x and both right edges match on every card, chip or not.
                 .holdingsPriceColumn(reservesExtendedMove: reservesExtendedMove)
@@ -209,8 +228,10 @@ struct AssetRow: View {
             // first with HALF the row, it takes its whole cap (128 after hours), and on a
             // 375pt phone the navigation side is left 167 < 176 — the row overflows its card.
             .layoutPriority(1)
-            .accessibilityLabel("\(asset.formattedPrice), \(changeAccessibilityValue)\(extendedAccessibilityValue)")
-            .accessibilityHint("Switches between percent and dollar change")
+            .accessibilityLabel(asset.isDelisted
+                ? delistedAccessibilityLabel
+                : "\(asset.formattedPrice), \(changeAccessibilityValue)\(extendedAccessibilityValue)")
+            .accessibilityHint(priceAccessibilityHint)
         }
         .padding(.vertical, AppSpacing.md)
         .padding(.horizontal, AppSpacing.lg)
@@ -220,6 +241,18 @@ struct AssetRow: View {
         .cornerRadius(AppCornerRadius.large)
         // Card edge: present in light, absent in dark (cardEdge).
         .cardBorder(cornerRadius: AppCornerRadius.large)
+    }
+
+    /// What VoiceOver reads for a delisted row's price button: "Delisted from NASDAQ, Nov 9,
+    /// 2026" — the pill's meaning, never the hidden last close as if it were live.
+    private var delistedAccessibilityLabel: String {
+        asset.delisting?.spokenHeadline ?? DelistedListing.pillText
+    }
+
+    /// The price button's hint: it toggles percent / dollars, except on a delisted row,
+    /// where it opens the details.
+    private var priceAccessibilityHint: String {
+        asset.isDelisted ? "Opens details" : "Switches between percent and dollar change"
     }
 
     /// Spoken form of whichever value is on screen. VoiceOver used to get the row's children
@@ -422,5 +455,34 @@ extension View {
             }
         }
     }
+    .background(AppColors.background)
+}
+
+// A confirmed delisting: the pill replaces the price and change, the sparkline is hidden in
+// its own slot, and the card keeps the height of its neighbours (the List is sized from one
+// row).
+#Preview("Delisted") {
+    let delisted = TrackedAsset(
+        ticker: "ROKU",
+        companyName: "Roku",
+        price: 160.52,
+        changePercent: 0,
+        changeKnown: false,
+        sparklineData: [158.1, 159.4, 160.0, 160.52],
+        assetType: "stock",
+        marketCap: nil,
+        shares: nil,
+        marketValue: nil,
+        sector: nil,
+        country: nil,
+        backendPreviousClose: nil,
+        delisting: .sample
+    )
+    return VStack(spacing: AppSpacing.sm) {
+        AssetRow(asset: TrackedAsset.sampleData[0])
+        AssetRow(asset: delisted)
+        AssetRow(asset: TrackedAsset.sampleData[1])
+    }
+    .padding(.horizontal, AppSpacing.lg)
     .background(AppColors.background)
 }

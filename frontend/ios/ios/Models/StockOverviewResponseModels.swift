@@ -37,6 +37,13 @@ struct StockOverviewResponseDTO: Decodable {
     let companyProfile: CompanyProfileDTO
     let relatedTickers: [RelatedTickerDTO]
     let benchmarkSummary: BenchmarkSummaryDTO?
+    /// The delisting label's four keys (`DelistedListing`). All null unless the backend
+    /// CONFIRMED a delisting. Optional, so an older backend and an active ticker decode as
+    /// "not delisted"; only `DelistedListing.from` reads them.
+    let listingStatus: String?
+    let delistedDate: String?
+    let delistedExchange: String?
+    let lastTradeDate: String?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -55,6 +62,10 @@ struct StockOverviewResponseDTO: Decodable {
         case companyProfile = "company_profile"
         case relatedTickers = "related_tickers"
         case benchmarkSummary = "benchmark_summary"
+        case listingStatus = "listing_status"
+        case delistedDate = "delisted_date"
+        case delistedExchange = "delisted_exchange"
+        case lastTradeDate = "last_trade_date"
     }
 
     /// True when a snapshot says its Caydex Fair Value Estimate is TEMPORARILY unavailable.
@@ -94,6 +105,11 @@ struct StockOverviewCoreResponseDTO: Decodable {
     let changeKnown: Bool?
     let marketStatus: MarketStatusDTO
     let chartData: [StockOverviewPricePointDTO]
+    /// See `StockOverviewResponseDTO.listingStatus`.
+    let listingStatus: String?
+    let delistedDate: String?
+    let delistedExchange: String?
+    let lastTradeDate: String?
 
     enum CodingKeys: String, CodingKey {
         case symbol
@@ -104,6 +120,10 @@ struct StockOverviewCoreResponseDTO: Decodable {
         case changeKnown = "change_known"
         case marketStatus = "market_status"
         case chartData = "chart_data"
+        case listingStatus = "listing_status"
+        case delistedDate = "delisted_date"
+        case delistedExchange = "delisted_exchange"
+        case lastTradeDate = "last_trade_date"
     }
 
     /// Map to the lightweight price+chart side model the ViewModel paints until
@@ -120,7 +140,9 @@ struct StockOverviewCoreResponseDTO: Decodable {
             chartPricePoints: chartData.map {
                 StockPricePoint(date: $0.date ?? "", close: $0.close,
                                 open: $0.open, high: $0.high, low: $0.low, volume: $0.volume)
-            }
+            },
+            delisting: DelistedListing.from(status: listingStatus, delistedDate: delistedDate,
+                                            exchange: delistedExchange, lastTradeDate: lastTradeDate)
         )
     }
 }
@@ -173,6 +195,10 @@ struct TickerCoreData {
     /// range pill while only coreData is shown (the pill is interactive before the
     /// full overview lands). See TickerDetailViewModel.fetchChartData.
     var chartPricePoints: [StockPricePoint]
+    /// Set only when the backend confirmed this listing is delisted (`DelistedListing`):
+    /// `currentPrice` is then its LAST CLOSE, and the header says so. Trailing + defaulted
+    /// so every existing memberwise call still compiles.
+    var delisting: DelistedListing? = nil
 
     var isPositive: Bool { changeKnown && priceChange >= 0 }
     /// Chart tint with an unknown change: from the series, never the placeholder.
@@ -470,7 +496,9 @@ extension StockOverviewResponseDTO {
             sectorIndustry: sectorInfo,
             companyProfile: profile,
             relatedTickers: related,
-            benchmarkSummary: benchmark
+            benchmarkSummary: benchmark,
+            delisting: DelistedListing.from(status: listingStatus, delistedDate: delistedDate,
+                                            exchange: delistedExchange, lastTradeDate: lastTradeDate)
         )
     }
 }

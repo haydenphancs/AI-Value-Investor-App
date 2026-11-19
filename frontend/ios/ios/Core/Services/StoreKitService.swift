@@ -27,6 +27,7 @@
 
 import Combine
 import Foundation
+import OSLog
 import StoreKit
 
 /// Failures originating in the StoreKit layer itself, before the backend is involved.
@@ -309,14 +310,135 @@ final class StoreKitService: ObservableObject {
             // entitlements Apple DID return but whose every submission failed — telling
             // someone with an active subscription that they never bought anything.
             do {
-                _ = try await handle(verificationResult: entitlement, origin: "restore")
-                result.applied += 1
+                let applied = try await handle(verificationResult: entitlement, origin: "restore")
+                result.count(applied)
             } catch {
                 result.record(error, op: "iap_restore")
             }
         }
         return result
     }
+
+    /// What a user-tapped "Restore Purchases" found: both sweeps, plus the App Store sync.
+    struct RestoreResult: Sendable {
+        /// `Transaction.unfinished` — consumables (and any renewal) never recorded server-side.
+        var drained: SweepResult
+        /// `Transaction.currentEntitlements` — active subscriptions.
+        var restored: SweepResult
+        /// `AppStore.sync()` failed for a reason other than the user cancelling the Apple
+        /// Account prompt. Shown ONLY when both sweeps came back empty: a sweep that found
+        /// something is the real answer, and a sync hiccup next to it is noise.
+        var syncError: Error?
+
+        var seen: Int { drained.seen + restored.seen }
+        var applied: Int { drained.applied + restored.applied }
+        var creditsGranted: Int { drained.creditsGranted + restored.creditsGranted }
+        var subscriptionsRestored: Int { drained.subscriptionsRestored + restored.subscriptionsRestored }
+        var packReplays: Int { drained.packReplays + restored.packReplays }
+        /// Transactions Apple handed us that the backend did not accept, across both sweeps.
+        var failed: Int { drained.failed + restored.failed }
+        /// The most useful failure to show: the subscription sweep's first, matching the order
+        /// the restore copy has always used.
+        var lastError: Error? { restored.lastError ?? drained.lastError }
+
+        /// " One purchase couldn't be applied yet: …" when ANY transaction failed while
+        /// another succeeded, else "". A partial failure used to vanish whenever anything else
+        /// in the sweep succeeded, so an unapplied paid purchase was reported nowhere.
+        var partialFailureSuffix: String {
+            guard failed > 0 else { return "" }
+            let err = AppError.from(lastError ?? StoreKitService.unexplainedSweepFailure)
+            let lead = failed == 1
+                ? " One purchase couldn't be applied yet: "
+                : " \(failed) purchases couldn't be applied yet: "
+            return lead + err.message
+        }
+
+        /// The Restore Purchases copy shared by General Settings and the paywall.
+        ///
+        /// Classified from what the BACKEND applied, not from counts alone. Counts said
+        /// "Restored your subscription." to a non-subscriber whenever anything at all was
+        /// accepted — a credit pack the server had already recorded (a replay, 0 credits) or a
+        /// renewal of a subscription that has since lapsed (winning tier free).
+        var subscriptionMessage: String {
+            if applied > 0 {
+                let base: String
+                if subscriptionsRestored > 0 && creditsGranted > 0 {
+                    base = "Restored your subscription and added \(creditsGranted) credits."
+                } else if subscriptionsRestored > 0 {
+                    base = "Restored your subscription."
+                } else if creditsGranted > 0 {
+                    base = "Added \(creditsGranted) credits from a previous purchase."
+                } else if packReplays > 0 {
+                    base = "Credits from that purchase were already added to your account."
+                } else {
+                    // Accepted, but nothing that entitles: a lapsed subscription's transaction.
+                    base = "Your purchases are up to date. No active subscription was found to restore."
+                }
+                return base + partialFailureSuffix
+            }
+            if seen > 0 {
+                // Apple returned purchases and EVERY submission failed. "No previous purchases"
+                // there tells someone who paid that they never bought anything.
+                let err = AppError.from(lastError ?? StoreKitService.unexplainedSweepFailure)
+                return "We found your purchase but couldn't restore it: " + err.message
+            }
+            if let syncError {
+                return "Couldn't check the App Store for your purchases: "
+                    + AppError.from(syncError).message
+            }
+            return "No previous purchases found for this Apple Account."
+        }
+    }
+
+    /// The fallback error for a sweep that counted a failure but kept no error — which
+    /// `record(_:op:)` should make impossible, so it is a last resort, not a message.
+    static var unexplainedSweepFailure: AppError {
+        .unknown(message: "The purchase couldn't be applied. Please try again.")
+    }
+
+    /// "Restore Purchases" as the USER taps it: sync with the App Store, then both sweeps.
+    ///
+    /// `AppStore.sync()` is what makes a restore work on a NEW or switched device. Without it,
+    /// `Transaction.currentEntitlements` holds only what this device already knows, so a
+    /// subscriber restoring on a fresh phone could be told "No previous purchases found".
+    ///
+    /// ⚠️ Call this ONLY from a button the user tapped. `AppStore.sync()` may present the Apple
+    /// Account password prompt; from the launch / sign-in drain or the `Transaction.updates`
+    /// listener that is a password sheet nobody asked for. Those keep calling
+    /// `drainUnfinishedTransactions()` directly.
+    func syncAndRestore() async -> RestoreResult {
+        var syncError: Error?
+        do {
+            try await AppStore.sync()
+        } catch StoreKit.StoreKitError.userCancelled {
+            // The app module declares its own `StoreKitError`, so Apple's needs its module name.
+            // The user dismissed the Apple Account prompt. Not a failure: the sweeps below still
+            // read whatever this device already holds.
+            Self.log.info("AppStore.sync cancelled by the user; sweeping local transactions")
+        } catch {
+            // The error CASE is the diagnostic (networkError, systemError, notEntitled, …).
+            Self.log.error("AppStore.sync failed: \(String(reflecting: error), privacy: .public)")
+            Analytics.shared.track(.backgroundSyncFailed, [
+                "op": .string("iap_app_store_sync"),
+                "code": .string(AppError.from(error).analyticsCode),
+            ])
+            // A network failure arrives wrapped; unwrap it so `AppError.from` can say "no
+            // connection" instead of StoreKit's generic sentence.
+            if case .networkError(let urlError)? = error as? StoreKit.StoreKitError {
+                syncError = urlError
+            } else {
+                syncError = error
+            }
+        }
+        // Unfinished FIRST, matching the order both restore buttons always used: a pack whose
+        // verify never landed is only reachable there, and finishing a renewal there first
+        // means the entitlement sweep reads it as already recorded.
+        let drained = await drainUnfinishedTransactions()
+        let restored = await restorePurchases()
+        return RestoreResult(drained: drained, restored: restored, syncError: syncError)
+    }
+
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "storekit")
 
     // MARK: - Verification hand-off
 
@@ -474,8 +596,7 @@ final class StoreKitService: ObservableObject {
             do {
                 let applied = try await handle(verificationResult: unfinished,
                                                origin: "unfinished")
-                result.applied += 1
-                result.creditsGranted += applied.creditsGranted
+                result.count(applied)
             } catch {
                 result.record(error, op: "iap_drain_unfinished")
             }
@@ -496,12 +617,35 @@ final class StoreKitService: ObservableObject {
         var applied = 0
         /// Credits actually added (0 for subscriptions, and 0 for a replay).
         var creditsGranted = 0
+        /// Subscriptions the backend applied that leave the account on a PAID tier. A lapsed
+        /// subscription's transaction is accepted too, but its winning tier is free — counting
+        /// it here is how a non-subscriber was told "Restored your subscription."
+        var subscriptionsRestored = 0
+        /// Credit packs the backend had ALREADY recorded: accepted, 0 credits added.
+        var packReplays = 0
         /// The last failure, for the user-facing message.
         var lastError: Error?
 
         /// True when Apple gave us transactions and NONE could be applied — the state that
         /// must never render as "nothing to restore".
         var allFailed: Bool { seen > 0 && applied == 0 }
+
+        /// Transactions Apple handed us that the backend did not accept.
+        var failed: Int { max(0, seen - applied) }
+
+        /// Tally what the backend applied for ONE transaction. Classified from the verify
+        /// response, never from the count alone (see `RestoreResult.subscriptionMessage`).
+        mutating func count(_ purchase: PurchaseApplied) {
+            applied += 1
+            creditsGranted += purchase.creditsGranted
+            if purchase.isCreditPack {
+                if purchase.wasReplay && purchase.creditsGranted == 0 { packReplays += 1 }
+            } else {
+                // `tier` is the account's WINNING tier after this transaction.
+                let tier = purchase.tier.trimmingCharacters(in: .whitespaces).lowercased()
+                if !tier.isEmpty && tier != "free" { subscriptionsRestored += 1 }
+            }
+        }
 
         mutating func record(_ error: Error, op: String) {
             lastError = error

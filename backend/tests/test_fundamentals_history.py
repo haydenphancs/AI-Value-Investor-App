@@ -160,7 +160,8 @@ def test_price_multiples_drop_nonpositive_but_keep_period():
     # Non-positive (negative AND zero) → None; positive → kept. Periods preserved.
     assert [v for _, v in _series(hist, "pe")] == [None, None, 20.0]
     assert [v for _, v in _series(hist, "pb")] == [None, 5.0, 6.0]
-    assert [v for _, v in _series(hist, "ps")] == [None, 4.0, 5.0]
+    # A quarter's P/S is price over ONE quarter's sales, put on a yearly scale (÷4, 2026-11-14).
+    assert [v for _, v in _series(hist, "ps")] == [None, 1.0, 1.25]
     # D/E keeps its negative (negative shareholders' equity is real, e.g. ORCL).
     assert [v for _, v in _series(hist, "debt_to_equity")] == [-12.0, 2.0, 1.5]
 
@@ -844,3 +845,270 @@ def test_sector_series_survives_card_validation():
     m = card.metrics[0]
     assert m.sector_annual_history is not None
     assert [p.value for p in m.sector_annual_history] == [36.0, 37.0, 38.0]
+
+
+# ── Quarterly Altman Z on TRAILING-FOUR-QUARTER flows (2026-11-14) ──────
+# Altman's EBIT/TA (weight 3.3) and Sales/TA (1.0) are annual flows. The quarterly series fed
+# ONE quarter's EBIT and revenue beside a full balance sheet, so every bar read ~0.4 low:
+# ORCL Q4 '26 2.11 vs FY2026 2.48 on the same balance sheet, Q1 '27 1.29 under the card's
+# 1.48. Owner: "TTM flows". A quarter now sums the four calendar quarters ending there.
+
+_Z_BAL = {"totalAssets": 1000.0, "totalLiabilities": 600.0, "totalCurrentAssets": 300.0,
+          "totalCurrentLiabilities": 200.0, "retainedEarnings": 100.0}
+_Z_QTRS = [  # (period, date, EBIT, revenue) — calendar-year filer, deliberately uneven
+    ("Q1", "2025-03-31", 30.0, 200.0), ("Q2", "2025-06-30", 45.0, 240.0),
+    ("Q3", "2025-09-30", 25.0, 210.0), ("Q4", "2025-12-31", 50.0, 250.0),
+]
+
+
+def _z_quarterly_inputs(qtrs=_Z_QTRS, *, mcap=900.0, drop_ebit_in=None):
+    income, balance, km = [], [], []
+    for period, date, ebit, rev in qtrs:
+        row = {"calendarYear": date[:4], "fiscalYear": date[:4], "period": period,
+               "date": date, "revenue": rev}
+        if period != drop_ebit_in:
+            row["operatingIncome"] = ebit
+        income.append(row)
+        balance.append({"calendarYear": date[:4], "fiscalYear": date[:4], "period": period,
+                        "date": date, **_Z_BAL})
+        km.append({"calendarYear": date[:4], "fiscalYear": date[:4], "period": period,
+                   "date": date, "marketCap": mcap})
+    return income, balance, km
+
+
+def test_quarterly_altman_z_q4_equals_the_annual_z_on_the_same_balance_sheet():
+    """The fiscal-Q4 point and the fiscal-year point share a balance sheet and a market cap;
+    with TTM flows they are the same Z. Mutation caught: passing the single quarter's row
+    (the old code) puts Q4 far below the annual bar."""
+    income, balance, km = _z_quarterly_inputs()
+    q = _fundamentals_history_for_period(income, balance, [], km, [], {}, quarterly=True)
+    annual_income = [{"calendarYear": "2025", "fiscalYear": "2025", "date": "2025-12-31",
+                      "operatingIncome": sum(x[2] for x in _Z_QTRS),
+                      "revenue": sum(x[3] for x in _Z_QTRS)}]
+    annual_balance = [{"calendarYear": "2025", "fiscalYear": "2025", "date": "2025-12-31",
+                       **_Z_BAL}]
+    annual_km = [{"calendarYear": "2025", "fiscalYear": "2025", "date": "2025-12-31",
+                  "marketCap": 900.0}]
+    a = _fundamentals_history_for_period(
+        annual_income, annual_balance, [], annual_km, [], {}, quarterly=False)
+    q_z = dict(_series(q, "altman_z"))
+    a_z = dict(_series(a, "altman_z"))
+    assert a_z["2025"] is not None
+    assert q_z["Q4 '25"] == a_z["2025"]
+    # The one-quarter version would have been 3.3*(50-150)/1000 + (250-900)/1000 = 0.98 lower.
+    one_quarter = _altman_z([_Z_BAL], [{"operatingIncome": 50.0, "revenue": 250.0}],
+                            {}, mkt_cap_override=900.0)
+    assert q_z["Q4 '25"] - one_quarter > 0.9
+
+
+def test_quarterly_altman_z_needs_four_contiguous_quarters():
+    """Q1-Q3 have fewer than four quarters behind them: no point, never a partial-year sum
+    (a low number would draw a Distress bar). Mutation caught: summing whatever is there."""
+    income, balance, km = _z_quarterly_inputs()
+    z = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    assert z["Q1 '25"] is None and z["Q2 '25"] is None and z["Q3 '25"] is None
+    assert z["Q4 '25"] is not None
+
+
+def test_quarterly_altman_z_a_gap_quarter_blanks_every_point_that_spans_it():
+    """Five quarters with the second one missing: the quarters whose trailing year would
+    cross the gap have no point. Mutation caught: walking the sorted list positionally
+    (it would pair Q1 '25 with Q3 '25 and sum a 15-month span)."""
+    qtrs = [("Q4", "2024-12-31", 40.0, 230.0)] + _Z_QTRS
+    income, balance, km = _z_quarterly_inputs(qtrs)
+    income = [r for r in income if r["date"] != "2025-03-31"]
+    z = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    assert z["Q4 '25"] is None  # needs Q1 '25, which is missing
+    assert z["Q3 '25"] is None and z["Q2 '25"] is None
+
+
+def test_quarterly_altman_z_a_missing_ebit_in_any_of_the_four_is_no_point():
+    """`_sum_ttm_income` drops a field missing in any quarter; the Z then has no EBIT and is
+    omitted — never scored with a 3-quarter EBIT. Mutation caught: summing the quarters
+    that do carry the field."""
+    income, balance, km = _z_quarterly_inputs(drop_ebit_in="Q2")
+    z = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    assert z["Q4 '25"] is None
+
+
+def test_quarterly_altman_z_semiannual_filer_gets_no_quarterly_point():
+    """A half-year filer's rows end in Jun and Dec only — every other calendar quarter — so
+    no four contiguous quarters exist and no quarterly Z is drawn (FMP labels these rows
+    Q2/Q4; summing four of them would be two years of flows)."""
+    halves = [("Q2", "2024-06-30", 60.0, 400.0), ("Q4", "2024-12-31", 70.0, 420.0),
+              ("Q2", "2025-06-30", 65.0, 410.0), ("Q4", "2025-12-31", 80.0, 450.0)]
+    income, balance, km = _z_quarterly_inputs(halves)
+    z = _series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z")
+    assert z and all(v is None for _, v in z)
+
+
+def test_quarterly_altman_z_unsorted_and_restated_rows_pick_the_right_four():
+    """FMP order is newest-first and a restatement repeats a period (keep-first = the
+    restatement wins). Shuffled input with a stale duplicate of Q3 still sums the four
+    newest real quarters. Mutation caught: summing the stale Q3."""
+    income, balance, km = _z_quarterly_inputs()
+    stale_q3 = dict(income[2], operatingIncome=999.0)
+    shuffled = [income[3], income[1], income[2], stale_q3, income[0]]  # newest copy of Q3 first
+    z_ok = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    z_shuf = dict(_series(_fundamentals_history_for_period(
+        shuffled, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    assert z_shuf["Q4 '25"] == z_ok["Q4 '25"]
+
+
+def test_quarterly_altman_z_sums_an_operating_loss_quarter():
+    """A loss quarter is a real reading: it is summed (lowering the Z), not skipped."""
+    loss = [("Q1", "2025-03-31", -80.0, 200.0)] + _Z_QTRS[1:]
+    inc_l, bal_l, km_l = _z_quarterly_inputs(loss)
+    inc_p, bal_p, km_p = _z_quarterly_inputs()
+    z_loss = dict(_series(_fundamentals_history_for_period(
+        inc_l, bal_l, [], km_l, [], {}, quarterly=True), "altman_z"))["Q4 '25"]
+    z_profit = dict(_series(_fundamentals_history_for_period(
+        inc_p, bal_p, [], km_p, [], {}, quarterly=True), "altman_z"))["Q4 '25"]
+    assert z_loss is not None
+    assert round(z_profit - z_loss, 2) == round(3.3 * 110.0 / 1000.0, 2)
+
+
+def test_quarterly_altman_z_crosses_the_calendar_year():
+    """An off-calendar filer (ORCL: quarters end Aug, Nov, Feb, May) — the trailing year of
+    the Feb quarter reaches back across January into the prior calendar year."""
+    orcl = [("Q2", "2025-11-30", 30.0, 200.0), ("Q3", "2026-02-28", 45.0, 240.0),
+            ("Q4", "2026-05-31", 25.0, 210.0), ("Q1", "2026-08-31", 50.0, 250.0)]
+    income, balance, km = _z_quarterly_inputs(orcl)
+    for row in income + balance + km:  # fiscal year differs from the calendar year
+        row["fiscalYear"] = "2027" if row["date"] == "2026-08-31" else "2026"
+    z = dict(_series(_fundamentals_history_for_period(
+        income, balance, [], km, [], {}, quarterly=True), "altman_z"))
+    newest = [v for p, v in z.items() if v is not None]
+    assert len(newest) == 1  # only the Aug quarter has four contiguous quarters behind it
+    expected = _altman_z([_Z_BAL], [{"operatingIncome": 150.0, "revenue": 900.0}],
+                         {}, mkt_cap_override=900.0)
+    assert newest[0] == expected
+
+
+# ── Quarterly ROE / ROA / P/S / P/FCF / EV/EBITDA on a YEARLY scale (2026-11-14) ──
+# Each divides ONE quarter's flow by a balance or a price, so the Quarterly tab read about a
+# quarter (ROE/ROA) or ~4× (multiples) of the card: ORCL Q4 '26 ROE 10.1% vs FY2026 40.2% on
+# the same balance sheet, P/S 37.2 vs 10.6. Owner: "Annualize ×4". The quarterly peer line is
+# built from the same FMP quarterly fields, so it gets the same factor.
+
+def _one_quarter_inputs():
+    d, cy = "2024-09-30", "2024"
+    income = [{"calendarYear": cy, "period": "Q3", "date": d, "revenue": 100.0,
+               "operatingIncome": 30.0, "ebitda": 40.0}]
+    ratios = [{"calendarYear": cy, "period": "Q3", "date": d,
+               "priceToSalesRatio": 20.0, "priceToEarningsRatio": 24.0,
+               "priceToBookRatio": 6.0, "grossProfitMargin": 0.5,
+               "interestCoverageRatio": 8.0, "debtToEquityRatio": 1.2,
+               "currentRatio": 1.3, "quickRatio": 1.1}]
+    km = [{"calendarYear": cy, "period": "Q3", "date": d, "returnOnEquity": 0.05,
+           "returnOnAssets": 0.015, "marketCap": 2000.0, "enterpriseValue": 2400.0}]
+    cf = [{"calendarYear": cy, "period": "Q3", "date": d, "freeCashFlow": 25.0}]
+    return income, cf, km, ratios
+
+
+def _only(hist, key):
+    pts = _series(hist, key)
+    assert len(pts) == 1, (key, pts)
+    return pts[0][1]
+
+
+def test_quarterly_flow_rows_are_annualized_and_annual_rows_are_not():
+    """Mutation caught: dropping the factor (ROE 5.0 / ROA 1.5 / P/S 20 / P/FCF 80 /
+    EV/EBITDA 60 come back), or applying it to annual rows."""
+    income, cf, km, ratios = _one_quarter_inputs()
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "roe") == 20.0          # 5% a quarter → 20% a year
+    assert _only(q, "roa") == 6.0
+    assert _only(q, "ps") == 5.0            # 20 ÷ 4
+    assert _only(q, "pfcf") == 20.0         # 2000 ÷ (25 × 4)
+    assert _only(q, "ev_ebitda") == 15.0    # 2400 ÷ (40 × 4)
+    a = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=False)
+    assert _only(a, "roe") == 5.0 and _only(a, "roa") == 1.5 and _only(a, "ps") == 20.0
+    assert _only(a, "pfcf") == 80.0 and _only(a, "ev_ebitda") == 60.0
+
+
+def test_quarterly_rows_already_on_a_yearly_or_neutral_basis_are_untouched():
+    """P/E (FMP annualizes quarterly EPS), earnings yield (100 / that P/E), P/B, margins,
+    interest coverage, D/E, current and quick ratio keep FMP's quarterly value. Mutation
+    caught: scaling every quarterly row."""
+    income, cf, km, ratios = _one_quarter_inputs()
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "pe") == 24.0 and _only(q, "pb") == 6.0
+    assert _only(q, "earnings_yield") == round(100 / 24.0, 2)
+    assert _only(q, "gross_margin") == 50.0 and _only(q, "interest_coverage") == 8.0
+    assert _only(q, "debt_to_equity") == 1.2
+    assert _only(q, "current_ratio") == 1.3 and _only(q, "quick_ratio") == 1.1
+
+
+def test_quarterly_annualizing_keeps_signs_gates_and_gaps():
+    """A loss quarter's negative ROE stays negative (×4); a missing ROE stays None; a
+    non-positive P/S / FCF / EBITDA is still no point."""
+    income, cf, km, ratios = _one_quarter_inputs()
+    km[0]["returnOnEquity"] = -0.02
+    km[0].pop("returnOnAssets")
+    ratios[0]["priceToSalesRatio"] = -3.0
+    cf[0]["freeCashFlow"] = -5.0
+    income[0].update({"ebitda": 0.0, "operatingIncome": -1.0})
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "roe") == -8.0
+    assert _only(q, "roa") is None
+    assert _only(q, "ps") is None and _only(q, "pfcf") is None and _only(q, "ev_ebitda") is None
+
+
+def test_quarterly_reconstruction_ceiling_judges_the_yearly_multiple():
+    """The artefact ceiling (`_RECON_RATIO_CEIL`, 1000×) applies to the ANNUALIZED multiple:
+    a quarter whose raw multiple is 2000 (yearly 500) is a point; a raw 8000 (yearly 2000)
+    is not. Mutation caught: dividing the already-ceiling-checked ratio by 4."""
+    income, cf, km, ratios = _one_quarter_inputs()
+    cf[0]["freeCashFlow"] = 1.0                       # 2000 / 1 = 2000 raw → 500 a year
+    income[0]["ebitda"] = 1.2                         # 2400 / 1.2 = 2000 raw → 500 a year
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "pfcf") == 500.0 and _only(q, "ev_ebitda") == 500.0
+    cf[0]["freeCashFlow"] = 0.25                      # 8000 raw → 2000 a year > ceiling
+    income[0]["ebitda"] = 0.3
+    q = _fundamentals_history_for_period(income, [], cf, km, ratios, {}, quarterly=True)
+    assert _only(q, "pfcf") is None and _only(q, "ev_ebitda") is None
+
+
+def _out_with_quarterly_peers():
+    income, cf, km, ratios = _one_quarter_inputs()
+    out = CollectedTickerData(ticker="ORCL", persona_key="warren_buffett")
+    out.profile = {"industry": "Software - Infrastructure"}
+    out.income, out.ratios, out.key_metrics, out.cash_flow = [], [], [], []
+    out.income_q, out.ratios_q, out.key_metrics_q, out.cash_flow_q = income, ratios, km, cf
+    out.balance_q = []
+    out.sector_benchmark_history = {
+        "annual": {},
+        "quarterly": {
+            "roe": {"Q3'24": 0.03}, "roa": {"Q3'24": 0.01}, "ps_ratio": {"Q3'24": 12.0},
+            "pfcf_ratio": {"Q3'24": 60.0}, "ev_ebitda": {"Q3'24": 48.0},
+            "pe_ratio": {"Q3'24": 25.0}, "gross_margin": {"Q3'24": 0.4},
+        },
+    }
+    return out
+
+
+def test_quarterly_peer_line_gets_the_same_factor_so_bar_vs_peer_is_unchanged():
+    """The peer medians are one-quarter figures too; scaled alike, every bar/peer ratio is
+    what it was. Mutation caught: annualizing the company bars but not the peer line (ROE
+    20% against a 3% "industry" would read 6.7× instead of 1.67×)."""
+    hist = _build_fundamentals_history(_out_with_quarterly_peers())
+
+    def peer(key):
+        return [p["value"] for p in hist[key]["sector_quarterly"]]
+
+    assert peer("roe") == [12.0]           # 3% a quarter → 12%
+    assert peer("roa") == [4.0]
+    assert peer("ps") == [3.0]             # 12 ÷ 4
+    assert peer("pfcf") == [15.0]
+    assert peer("ev_ebitda") == [12.0]
+    assert peer("pe") == [25.0]            # P/E: untouched
+    assert peer("gross_margin") == [40.0]  # margin: untouched
+    # The comparison the legend prints is unchanged by the scaling.
+    roe_bar = hist["roe"]["quarterly"][0]["value"]
+    assert round(roe_bar / peer("roe")[0], 4) == round(5.0 / 3.0, 4)

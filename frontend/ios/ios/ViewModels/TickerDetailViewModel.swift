@@ -577,6 +577,15 @@ class TickerDetailViewModel: ObservableObject {
     /// `false` there used to mean "the socket is down, poll now" and silently reading as
     /// "poll forever" by accident is not something the next reader should have to infer.
     func startLivePriceUpdates() {
+        // A delisted listing has no live price: nothing to poll, no intraday bars to refresh,
+        // and a poll's "live tick" would rewrite the badge to a clock-based "Market Open".
+        // Gated HERE rather than at the callers (the load's arm, didBecomeActive and the
+        // range sink stay unconditional), so every path that arms the poll is covered.
+        guard delisting == nil else {
+            stopLivePriceUpdates()
+            log.info("\(self.tickerSymbol, privacy: .public) is delisted — no quote poll, no chart refresh")
+            return
+        }
         // Symmetric with `stopLivePriceUpdates()`, which stops BOTH: the 1D chart timer
         // used to be armed only from the initial load, so after a background/foreground
         // cycle the price kept polling while the intraday chart stayed frozen.
@@ -607,12 +616,30 @@ class TickerDetailViewModel: ObservableObject {
 
     /// Fetches the latest quote via REST and updates tickerData.
     private func pollQuotePrice() async {
+        // Before the fetch: a delisted listing has no live quote (`startLivePriceUpdates`
+        // normally stops the loop first; this covers a tick already scheduled, and a label
+        // that arrived through a path that does not stop the loop). Stop the loop too, so it
+        // does not wake as a no-op for the rest of the visit. Safe: this runs on the main
+        // actor from the loop's own task, with no await between the check and the stop, so
+        // the task it cancels is the one calling it.
+        guard delisting == nil else {
+            stopQuotePoll()
+            return
+        }
         do {
             // maxAge 0 — this poll IS the freshness mechanism. Served from the default
             // 120s quote cache it advanced the header price at most once every two
             // minutes while presenting as a 15-second live feed.
             let quote = try await stockRepository.getStockQuote(ticker: tickerSymbol, maxAge: 0)
-            guard let shown = self.tickerData, let price = quote.price else { return }
+            // The quote can report the delisting itself: a screen opened before the backend
+            // confirmed it (the first view lost its short wait) picks the label up here.
+            if let delisted = quote.delisting {
+                applyDelistingFromPoll(delisted)
+                return
+            }
+            // After the await: the overview may have landed delisted while this poll was in
+            // flight. Nothing below — the price, the "Market Open" heal — may then run.
+            guard let shown = self.tickerData, shown.delisting == nil, let price = quote.price else { return }
             var data = shown
 
             data.currentPrice = price
@@ -676,15 +703,37 @@ class TickerDetailViewModel: ObservableObject {
         return oldLast != newLast
     }
 
+    /// A poll's quote said the listing is delisted while the shown model did not: put the
+    /// label on the model the header shows (the full one, else the core) and stop polling.
+    private func applyDelistingFromPoll(_ delisted: DelistedListing) {
+        if var data = tickerData {
+            data.delisting = delisted
+            tickerData = data
+        } else if var core = coreData {
+            core.delisting = delisted
+            coreData = core
+        }
+        log.info("\(self.tickerSymbol, privacy: .public): the quote poll reports a delisting — stopping the poll")
+        stopLivePriceUpdates()
+    }
+
     // MARK: - Chart Refresh Timer
 
     private func startChartRefreshTimer() {
+        // A delisted listing has no intraday bars to refresh.
+        guard delisting == nil else {
+            stopChartRefreshTimer()
+            return
+        }
         chartRefreshTask?.cancel()
         chartRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 30_000_000_000) // 30 seconds
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
+                // The range sink can arm this before the overview lands; a delisting that
+                // arrives later ends the loop here.
+                guard self.delisting == nil else { break }
 
                 // Only refresh if market is active and we're on an intraday interval
                 guard self.chartSettings.selectedInterval.isIntraday,
@@ -1174,8 +1223,27 @@ class TickerDetailViewModel: ObservableObject {
                 log.debug("entitlement overview refresh for \(ticker, privacy: .public) dropped — superseded")
                 return
             }
+            // Read right before the apply, not before the fetch: a poll's quote can put the
+            // label on screen (and stop the poll) while this request is in flight.
+            let hadDelisting = delisting != nil
             await applyOverview(response, ticker: ticker, requested: requested, keepBarsOnScreen: true)
             log.info("overview refreshed after an entitlement change for \(ticker, privacy: .public)")
+            // `applyOverview` does not touch the poll, and only `loadTickerData()` re-arms after
+            // its apply. Settle it here, both ways:
+            //  - this overview is the first to carry the delisting: stop the quote loop now
+            //    rather than leave it waking as a no-op for the rest of the visit;
+            //  - this overview ERASED a label (the server caches a whole overview, label
+            //    result included, for 120 s, while /quote works the label out on every
+            //    request, so a poll's label can be newer than the cached overview): re-arm,
+            //    so the next quote can put it back.
+            // Never an unconditional start: that would re-arm a poll that `onDisappear` or
+            // `willResignActive` stopped on purpose.
+            if delisting != nil {
+                stopLivePriceUpdates()
+            } else if hadDelisting {
+                log.info("entitlement overview for \(ticker, privacy: .public) carries no delisting — re-arming the quote poll so a quote can restore the label")
+                startLivePriceUpdates()
+            }
         } catch {
             // APIClient wraps cancellation into a network error, so check the task instead.
             guard !Task.isCancelled else { return }
@@ -1838,6 +1906,15 @@ class TickerDetailViewModel: ObservableObject {
         return stockQuote?.previousClose
     }
 
+    /// The confirmed delisting the screen shows, or nil. The model the header shows decides —
+    /// the full one once it has landed, else the fast core — exactly as `chartPreviousClose`
+    /// does. Never an OR of the two: the core is not rewritten once the full model exists, so
+    /// a stale core would keep the label through every refresh.
+    var delisting: DelistedListing? {
+        if let data = tickerData { return data.delisting }
+        return coreData?.delisting
+    }
+
     // MARK: - Build TickerDetailData from API
 
     private func buildTickerDetailData() -> TickerDetailData {
@@ -1910,7 +1987,11 @@ class TickerDetailViewModel: ObservableObject {
             sectorIndustry: sectorIndustry,
             companyProfile: companyProfile,
             relatedTickers: [],       // the /overview-failed fallback path). Sections hide when empty.
-            benchmarkSummary: nil                               // No API backing yet
+            benchmarkSummary: nil,                              // No API backing yet
+            // `GET /stocks/{t}` and `/quote` carry the listing keys too, so the overview-failed
+            // path still labels a delisted listing. The fast core is the last resort: it was
+            // painted before this build, and is never re-applied once this model exists.
+            delisting: stockDetail?.delisting ?? stockQuote?.delisting ?? coreData?.delisting
         )
     }
 
@@ -2387,7 +2468,13 @@ class TickerDetailViewModel: ObservableObject {
         guard let td = tickerData else { return nil }
         var lines: [String] = []
         lines.append("Stock: \(td.symbol) (\(td.companyName))")
-        lines.append("Price: \(td.formattedPrice) \(td.formattedChange) \(td.formattedChangePercent)")
+        // A delisted listing's price is its LAST CLOSE: say so, so the assistant never reads
+        // it as a live quote.
+        if let delisting = td.delisting {
+            lines.append(contentsOf: delisting.aiContextLines(lastClose: td.formattedPrice))
+        } else {
+            lines.append("Price: \(td.formattedPrice) \(td.formattedChange) \(td.formattedChangePercent)")
+        }
 
         // Key Statistics — include ALL stats grouped for AI context
         if !td.keyStatisticsGroups.isEmpty {

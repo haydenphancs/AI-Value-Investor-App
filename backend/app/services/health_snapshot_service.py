@@ -9,7 +9,8 @@ the 1-5 snapshot rating, and formats for display.
 
 Uses a two-tier cache-aside pattern:
   Tier 1 — in-memory dict (5-minute TTL)
-  Tier 2 — Supabase ``snapshot_cache`` table (24-hour TTL)
+  Tier 2 — Supabase ``snapshot_cache`` table (24-hour TTL + earnings-aware: the row carries
+           the Health Check's next-earnings stamp and drops on the same day its row does)
 
 Matches the iOS SnapshotItemDTO struct.
 """
@@ -25,6 +26,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.integrations.fmp import FMPNotEntitledException, get_fmp_client
+from app.services._earnings_common import (
+    CALENDAR_UNKNOWN,
+    EarningsStamp,
+    stamp_is_persistable,
+)
+from app.services.health_check_service import earnings_stamp_passed
 from app.schemas.stock_overview import (
     SnapshotItemResponse,
     SnapshotMetricResponse,
@@ -92,8 +99,24 @@ _CACHE_TTL = 300  # 5 minutes
 # 9 (2026-10-21): the Financial Services peer rule (own industry from 10 companies, else no
 #     peer — never the sector median; owner decision 2026-10-20). A v8 fallback row of a
 #     small FS industry compared D/E with the bank-dominated sector.
-_SNAPSHOT_PAYLOAD_VERSION = 9
+# 10 (2026-11-13, owner decision): each row carries `numeric_value` and `peer_median` (the
+#     report drill-down's "Current" legend line). A v9 row has neither.
+# 11 (2026-11-14, owner-approved parity fixes): the row carries the Health Check's
+#     next-earnings stamp (`_NEXT_EARNINGS_KEY`) and drops on report day exactly as the
+#     Health Check's row does (`earnings_stamp_passed`) — a v10 row has no stamp and kept
+#     the pre-earnings card on the Overview and in new reports for up to 24h after the
+#     Health Check rebuilt. The local fallback (health check down) now prints FMP's quick
+#     ratio, (current assets − inventory) / current liabilities, where it printed (cash +
+#     receivables) / current liabilities (ENPH 0.59 vs the Health Check's 1.84), and its
+#     Altman Z at two decimals ("1.5" beside the Health Check's "1.48").
+_SNAPSHOT_PAYLOAD_VERSION = 11
 _VERSION_KEY = "_schema_v"
+# The Health Check build's next-earnings stamp ("yyyy-MM-dd" or None), stored in the row
+# JSON beside the version and popped on read the same way — not a response field. Every
+# v11 writer stores it (None included), so a v11 row WITHOUT the key was not written here:
+# it is a miss, never an unbounded 24h row.
+_NEXT_EARNINGS_KEY = "_next_earnings"
+_STAMP_MISSING = object()
 
 
 def _cache_get(key: str) -> Optional[Any]:
@@ -159,6 +182,35 @@ def _degraded_of(key: str, value: Any) -> Optional[List[str]]:
     if entry is None or entry[0] is not value:
         return None
     return list(entry[1])
+
+
+# ── Earnings stamp of a fresh build (2026-11-14) ──────────────────
+# `_compute_with_status` notes the next-earnings stamp of the Health Check build it copied
+# (`HealthCheckService.next_earnings_for`) against the snapshot it returns; the getter takes
+# it back for exactly that object and stores it in the 24h row. Kept OUT of the
+# `(snapshot, degraded)` return: the stamp is not a degradation (the report collector refuses
+# a degraded snapshot, and the calendar feeds no value), and that 2-tuple is the method's
+# contract. No entry — the fallback ran, the calendar failed, or a build that never asked
+# the Health Check — reads CALENDAR_UNKNOWN: the build is served and never written.
+_build_stamp_by_key: Dict[str, Tuple[Any, EarningsStamp]] = {}
+
+
+def _note_build_stamp(key: str, value: Any, next_earnings: EarningsStamp) -> None:
+    _build_stamp_by_key.pop(key, None)
+    _build_stamp_by_key[key] = (value, next_earnings)
+    if len(_build_stamp_by_key) > _DEGRADED_MAX_ENTRIES:
+        for _old in list(_build_stamp_by_key.keys())[
+            : len(_build_stamp_by_key) - _DEGRADED_MAX_ENTRIES
+        ]:
+            _build_stamp_by_key.pop(_old, None)
+
+
+def _take_build_stamp(key: str, value: Any) -> EarningsStamp:
+    """The stamp noted for exactly ``value`` (removed); CALENDAR_UNKNOWN when unknown."""
+    entry = _build_stamp_by_key.pop(key, None)
+    if entry is None or entry[0] is not value:
+        return CALENDAR_UNKNOWN
+    return entry[1]
 
 
 # ── In-flight deduplication ───────────────────────────────────────
@@ -261,6 +313,26 @@ def _peer_level(level: Any, value: Optional[float], comparison_value: Optional[f
     return level if level in ("industry", "sector") else None
 
 
+def _finite(x: Any) -> Optional[float]:
+    """``x`` as a finite float, else None (a bool is not a number here)."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        return None
+    return float(x) if math.isfinite(x) else None
+
+
+def _row_numbers(
+    value: Optional[float], comparison_value: Optional[float],
+) -> Dict[str, Optional[float]]:
+    """`numeric_value` / `peer_median` for a row (2026-11-13): the value the row prints and
+    the median its name prints, as numbers — for the report drill-down's "Current" legend
+    line. The median only under the same rule that prints it (`_compared`), so the line
+    never shows a median the card did not compare against. A negative value stays (an
+    interest coverage below zero is a real reading the card prints)."""
+    numeric_value = _finite(value)
+    peer_median = _finite(comparison_value) if _compared(value, comparison_value) else None
+    return {"numeric_value": numeric_value, "peer_median": peer_median}
+
+
 def _safe_float(record: Dict[str, Any], key: str) -> Optional[float]:
     val = record.get(key)
     if val is None:
@@ -335,7 +407,7 @@ def _sum_ttm_income(quarterly: List[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def _compute_z_score(
-    bs: Dict, inc: Dict, mcap: Optional[float], *,
+    bs: Dict, inc: Dict, mcap: Optional[float], *, ndigits: int = 1,
     sector: Optional[str] = None, industry: Optional[str] = None,
 ) -> Optional[float]:
     """Compute Altman Z-Score — delegated to the ONE implementation.
@@ -349,13 +421,14 @@ def _compute_z_score(
     balance sheet into "Grey zone. Moderate financial stress signals". The Z also feeds
     `_zscore_rating`, which is 40% of this card's rating.
 
-    Same name and signature as before, so every call site here is unchanged; only the
-    substitution is gone. See `health_check_service._compute_z_score` for the full
-    reasoning and `tests/test_altman_z_single_implementation.py` for the anti-drift guard.
+    Same name and signature as before (plus the canonical ``ndigits``: the fallback card
+    asks for 2, the Health Check's precision); only the substitution is gone. See
+    `health_check_service._compute_z_score` for the full reasoning and
+    `tests/test_altman_z_single_implementation.py` for the anti-drift guard.
     """
     from app.services.health_check_service import _compute_z_score as _canonical
 
-    return _canonical(bs, inc, mcap, sector=sector, industry=industry)
+    return _canonical(bs, inc, mcap, ndigits=ndigits, sector=sector, industry=industry)
 
 
 def _zscore_rating(z: Optional[float]) -> int:
@@ -481,6 +554,8 @@ class HealthSnapshotService:
         try:
             logger.info(f"Health snapshot cache MISS for {ticker} — computing")
             result, degraded = await self._compute_with_status(ticker)
+            # No await since the build returned: the note describes this object.
+            next_earnings = _take_build_stamp(cache_key, result)
 
             # NEVER persist a degraded build. HealthCheckService refuses to persist a
             # result with no metrics; this card would turn it into "Financial Health —"
@@ -493,10 +568,20 @@ class HealthSnapshotService:
                     "Health snapshot NOT persisted for %s (degraded: %s) — will rebuild "
                     "after the in-memory TTL", ticker, ", ".join(degraded),
                 )
+            elif not stamp_is_persistable(next_earnings):
+                # Complete values (the calendar feeds none of them, so NOT degraded — the
+                # report may still use this card), but the row would carry no report-day
+                # bound and could outlive the release the Health Check rebuilds on. The
+                # Health Check refuses its own row for the same reason.
+                logger.warning(
+                    "Health snapshot NOT persisted for %s (the health check's earnings "
+                    "stamp is unknown — no report-day bound for the 24h row); served from "
+                    "memory, rebuilt after the in-memory TTL", ticker,
+                )
             else:
                 # Persist to Supabase in background thread
                 asyncio.get_running_loop().run_in_executor(
-                    None, self._upsert_supabase_cache, ticker, result,
+                    None, self._upsert_supabase_cache, ticker, result, next_earnings,
                 )
 
             _cache_set(cache_key, result)
@@ -548,10 +633,26 @@ class HealthSnapshotService:
 
             json_data = dict(entry.get("response_json") or {})
             version = json_data.pop(_VERSION_KEY, 1)
+            next_earnings = json_data.pop(_NEXT_EARNINGS_KEY, _STAMP_MISSING)
             if version != _SNAPSHOT_PAYLOAD_VERSION:
                 logger.info(
                     "Health snapshot payload v%s != v%s for %s — rebuilding",
                     version, _SNAPSHOT_PAYLOAD_VERSION, ticker,
+                )
+                return None
+            if next_earnings is _STAMP_MISSING:
+                logger.warning(
+                    "Health snapshot Supabase row for %s carries no earnings stamp "
+                    "(%r) — not written by this version's writer; rebuilding",
+                    ticker, _NEXT_EARNINGS_KEY,
+                )
+                return None
+            # The Health Check's own rule (`earnings_stamp_passed`): on report day both rows
+            # drop together, so the Overview card and a new report read the rebuilt build.
+            if earnings_stamp_passed(next_earnings):
+                logger.info(
+                    "Health snapshot Supabase STALE (past earnings %r) for %s",
+                    next_earnings, ticker,
                 )
                 return None
             return SnapshotItemResponse(**with_cached_build_time(json_data, cached_at))
@@ -563,14 +664,26 @@ class HealthSnapshotService:
             )
             return None
 
-    def _upsert_supabase_cache(self, ticker: str, result: SnapshotItemResponse) -> None:
+    def _upsert_supabase_cache(
+        self, ticker: str, result: SnapshotItemResponse, next_earnings: EarningsStamp,
+    ) -> None:
+        """Write the 24h row with the Health Check build's next-earnings stamp. A stamp that
+        is not a date or None (CALENDAR_UNKNOWN) is refused: that row would have no
+        report-day bound (the getter already refuses it — belt and braces)."""
+        if not stamp_is_persistable(next_earnings):
+            logger.warning(
+                "Health snapshot upsert REFUSED for %s — earnings stamp %r is not a date "
+                "(an unread earnings calendar is never persisted)", ticker, next_earnings,
+            )
+            return
         try:
             self.supabase.table("snapshot_cache").upsert(
                 {
                     "ticker": ticker,
                     "category": "Financial Health",
                     "response_json": {**result.model_dump(),
-                                      _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION},
+                                      _VERSION_KEY: _SNAPSHOT_PAYLOAD_VERSION,
+                                      _NEXT_EARNINGS_KEY: next_earnings},
                     "cached_at": datetime.now(timezone.utc).isoformat(),
                 },
                 on_conflict="ticker,category",
@@ -603,6 +716,10 @@ class HealthSnapshotService:
         `FMPNotEntitledException` is not degradation — that slice will not come back on
         retry.
 
+        The next-earnings stamp of the health check build it copied is noted for the
+        returned snapshot (`_note_build_stamp`; CALENDAR_UNKNOWN on the fallback) — it is
+        never part of ``degraded``.
+
         Income-statement fields (operatingIncome, interestExpense, revenue)
         are summed across the last 4 quarters to get TTM values. The balance
         sheet itself is a snapshot — the latest quarterly filing is used so
@@ -611,55 +728,50 @@ class HealthSnapshotService:
         """
         from app.services.health_check_service import get_health_check_service
 
-        # Fetch health check + Z-Score data in parallel.
-        # `bs` is a point-in-time figure — quarterly = latest available.
-        # `inc` is a flow figure — summed over 4 quarters for TTM.
-        health_task = get_health_check_service().get_health_check(ticker)
-        bs_task = self.fmp.get_balance_sheet(ticker, period="quarter", limit=1)
-        inc_task = self.fmp.get_income_statement(ticker, period="quarter", limit=4)
-        profile_task = self.fmp.get_company_profile(ticker)
-
-        results = await asyncio.gather(
-            health_task, bs_task, inc_task, profile_task, return_exceptions=True,
-        )
-
+        hc_service = get_health_check_service()
         degraded: List[str] = []
-        for name, raw in zip(("health_check", "balance_sheet", "income", "profile"), results):
-            if isinstance(raw, Exception) and not isinstance(raw, FMPNotEntitledException):
-                degraded.append(name)
-        if not isinstance(results[0], Exception):
-            # The bs/income/profile legs only feed the local fallback below; with a
-            # usable health check they change nothing on the card.
-            degraded = []
-            # ...but a health check that RETURNED can still be partial (one FMP leg
-            # 429'd, the peer lookup failed). HealthCheckService serves that build from
-            # memory and refuses to persist it; this card would otherwise freeze the
-            # same partial verdict into snapshot_cache for 24h. The health check's flag
-            # rides on its response, so a Tier-1 hit there carries it too. The report
-            # reads this list through `get_health_snapshot_with_status`, which is what
-            # keeps the partial card out of its snap_health and ticker_data_cache.
+        # The stamp of the health check build this card copies; the fallback has none.
+        next_earnings: EarningsStamp = CALENDAR_UNKNOWN
+        health = None
+        try:
+            health = await hc_service.get_health_check(ticker)
+        except Exception as e:
+            # A permanent `FMPNotEntitledException` still runs the fallback but is not
+            # degradation (it will not come back on retry). CancelledError is not caught.
+            if isinstance(e, FMPNotEntitledException):
+                # The fallback IS the answer, and no Health Check row exists to drop on
+                # report day: the row keeps the plain 24h TTL (None = no bound) — the rule
+                # `_earnings_common.next_earnings_stamp` applies to a not-entitled calendar.
+                next_earnings = None
+            else:
+                degraded.append("health_check")
+            logger.warning(
+                "Health snapshot %s: health check raised %s: %s — using the local fallback",
+                ticker, type(e).__name__, e,
+            )
+        if health is not None:
+            # A health check that RETURNED can still be partial (one FMP leg 429'd, the
+            # peer lookup failed). HealthCheckService serves that build from memory and
+            # refuses to persist it; this card would otherwise freeze the same partial
+            # verdict into snapshot_cache for 24h. The health check's flag rides on its
+            # response, so a Tier-1 hit there carries it too. The report reads this list
+            # through `get_health_snapshot_with_status`, which is what keeps the partial
+            # card out of its snap_health and ticker_data_cache.
             degraded.extend(
                 f"health_check:{reason}"
-                for reason in (getattr(results[0], "degraded", None) or [])
+                for reason in (getattr(health, "degraded", None) or [])
             )
-
-        health = results[0] if not isinstance(results[0], Exception) else None
-        bs_raw = results[1] if not isinstance(results[1], Exception) else []
-        inc_raw = results[2] if not isinstance(results[2], Exception) else []
-        profile_raw = results[3] if not isinstance(results[3], Exception) else {}
-
-        # Parse data
-        bs = bs_raw[0] if isinstance(bs_raw, list) and bs_raw else {}
-        inc = _sum_ttm_income(inc_raw) if isinstance(inc_raw, list) else {}
-        profile = {}
-        if isinstance(profile_raw, dict):
-            profile = profile_raw
-        elif isinstance(profile_raw, list) and profile_raw:
-            profile = profile_raw[0]
-
-        mcap = _safe_float(profile, "mktCap")
-        if mcap is None:
-            mcap = _safe_float(profile, "marketCap")
+            try:
+                next_earnings = hc_service.next_earnings_for(ticker, served=health)
+            except Exception as e:
+                # Best effort: the stamp feeds no value, so the card is still served —
+                # only never written (an unknown stamp has no report-day bound).
+                logger.warning(
+                    "Health snapshot %s: could not read the health check's earnings stamp "
+                    "(%s: %s) — served, NOT persisted", ticker, type(e).__name__, e,
+                    exc_info=True,
+                )
+                next_earnings = CALENDAR_UNKNOWN
 
         # Build the snapshot metrics. The happy path reuses HealthCheckService's
         # metrics directly (it now emits D/E, P/E, ROE, Current Ratio, Altman Z,
@@ -687,6 +799,7 @@ class HealthSnapshotService:
                     peer_level=_peer_level(
                         getattr(m, "peer_level", None), m.value, m.comparison_value,
                     ),
+                    **_row_numbers(m.value, m.comparison_value),
                 ))
 
             # Z-Score for the rating blend
@@ -696,9 +809,48 @@ class HealthSnapshotService:
             z_rating = _zscore_rating(z_val_from_hc)
         else:
             # ── Fallback path: compute D/E, CR, IC, QR + Z-Score locally ──
-            logger.warning(
-                f"HealthCheckService returned None for {ticker} — using local fallback"
+            # The balance sheet, income and profile feed ONLY this path, so they are
+            # fetched only once the health check has raised (2026-11-14) — they used to be
+            # gathered beside it on every cache miss: three FMP calls per build for
+            # nothing. Each failed leg (but a permanent FMPNotEntitledException) degrades
+            # the build. `bs` is a point-in-time figure (latest quarter); `inc` a flow,
+            # summed over 4 quarters for TTM.
+            legs = await asyncio.gather(
+                self.fmp.get_balance_sheet(ticker, period="quarter", limit=1),
+                self.fmp.get_income_statement(ticker, period="quarter", limit=4),
+                self.fmp.get_company_profile(ticker),
+                return_exceptions=True,
             )
+            for name, raw in zip(("balance_sheet", "income", "profile"), legs):
+                # BaseException: a leg CANCELLED inside the gather comes back as a
+                # CancelledError instance, which is not an Exception.
+                if isinstance(raw, BaseException):
+                    if not isinstance(raw, FMPNotEntitledException):
+                        degraded.append(name)
+                    logger.warning(
+                        "Health snapshot fallback %s: %s leg failed: %s: %s",
+                        ticker, name, type(raw).__name__, raw,
+                    )
+            bs_raw = legs[0] if not isinstance(legs[0], BaseException) else []
+            inc_raw = legs[1] if not isinstance(legs[1], BaseException) else []
+            profile_raw = legs[2] if not isinstance(legs[2], BaseException) else {}
+
+            bs = bs_raw[0] if isinstance(bs_raw, list) and bs_raw else {}
+            if not isinstance(bs, dict):
+                bs = {}
+            inc = _sum_ttm_income(inc_raw) if isinstance(inc_raw, list) else {}
+            profile = {}
+            if isinstance(profile_raw, dict):
+                profile = profile_raw
+            elif isinstance(profile_raw, list) and profile_raw and isinstance(
+                profile_raw[0], dict,
+            ):
+                profile = profile_raw[0]
+
+            mcap = _safe_float(profile, "mktCap")
+            if mcap is None:
+                mcap = _safe_float(profile, "marketCap")
+
             from app.services.health_check_service import (
                 _absolute_status,
                 _bank_pooled_sector_cell,
@@ -807,16 +959,21 @@ class HealthSnapshotService:
 
             # Z-Score from balance sheet + TTM income + market cap. Omitted outright for a
             # bank / insurer / REIT, exactly as the health check omits it, so the two
-            # paths of this card show the same rows for the same company.
-            z_score = _compute_z_score(bs, inc, mcap, sector=raw_sector, industry=industry)
+            # paths of this card show the same rows for the same company. Two decimals and
+            # the card's own formatter, as the Health Check computes and prints it ("1.48";
+            # the 1-dp default printed "1.5", and its zone was judged on the rounder value).
+            z_score = _compute_z_score(
+                bs, inc, mcap, ndigits=2, sector=raw_sector, industry=industry,
+            )
             if altman_z_applicable(raw_sector, industry):
-                z_value = f"{z_score}" if z_score is not None else "—"
+                z_value = _fmt_value("altman_z_score", z_score)
                 metrics.append(SnapshotMetricResponse(
                     name="Altman Z-Score", value=z_value,
                     metric_key="altman_z",
                     # An "—" row scores nothing (`_zscore_rating(None)` is the neutral
                     # blend anchor, not a reading of this company).
                     score=_zscore_rating(z_score) if z_score is not None else None,
+                    **_row_numbers(z_score, None),
                 ))
             z_rating = _zscore_rating(z_score)
 
@@ -850,6 +1007,7 @@ class HealthSnapshotService:
                 value=_fmt_value("debt_to_equity", de),
                 metric_key="debt_to_equity",
                 peer_level=_peer_level(fb_levels.get("debt_to_equity"), de, sector_de),
+                **_row_numbers(de, sector_de),
                 score=_row_score(DEBT_TO_EQUITY, de, sector_de, lower_is_better=True),
             ))
 
@@ -902,6 +1060,7 @@ class HealthSnapshotService:
                     value=_fmt_value("current_ratio", cr),
                     metric_key="current_ratio",
                     peer_level=_peer_level(fb_levels.get("current_ratio"), cr, sector_cr),
+                    **_row_numbers(cr, sector_cr),
                     score=_row_score("current_ratio", cr, sector_cr),
                 ))
 
@@ -921,23 +1080,42 @@ class HealthSnapshotService:
                     value=_fmt_value("interest_coverage", ic),
                     metric_key="interest_coverage",
                     peer_level=_peer_level(fb_levels.get("interest_coverage"), ic, sector_ic),
+                    **_row_numbers(ic, sector_ic),
                     score=_row_score("interest_coverage", ic, sector_ic),
                 ))
 
-            # Quick Ratio = (cash + receivables) / current liabilities
-            cash = _safe_float(bs, "cashAndCashEquivalents")
-            receivables = _safe_float(bs, "netReceivables")
+            # Quick Ratio = (current assets − inventory) / current liabilities — FMP's own
+            # `quickRatio`, the figure the Health Check prints (verified exact against it on
+            # CRDO, LRCX, ENPH, PWR, OKLO, STX and ROKU, 2026-11-14). This path used
+            # (cash + receivables) / current liabilities, which leaves out short-term
+            # investments and other current assets: ENPH read 0.59 here and 1.84 on the
+            # Health Check. A missing inventory line is 0 (a company with no inventory: the
+            # quick ratio IS the current ratio). Missing current assets or current
+            # liabilities ≤ 0 → "—". A negative inventory, or one larger than current
+            # assets, cannot be a real balance sheet (inventory is part of current assets):
+            # "—" rather than a made-up ratio.
+            inventory = _safe_float(bs, "inventory")
             qr = None
-            if quick_ok and curr_liab is not None and curr_liab > 0:
-                qr_numerator = (cash or 0) + (receivables or 0)
-                if qr_numerator > 0:
-                    qr = round(qr_numerator / curr_liab, 2)
+            if (
+                quick_ok and curr_assets is not None and curr_liab is not None
+                and curr_liab > 0
+            ):
+                quick_assets = curr_assets - (inventory or 0.0)
+                if (inventory is not None and inventory < 0) or quick_assets < 0:
+                    logger.warning(
+                        "Health snapshot fallback %s: quick ratio omitted — inventory %r "
+                        "against current assets %r is not a readable balance sheet",
+                        ticker, inventory, curr_assets,
+                    )
+                else:
+                    qr = round(quick_assets / curr_liab, 2)
             if quick_ok:
                 metrics.append(SnapshotMetricResponse(
                     name=_metric_name("quick_ratio", qr, sector_qr),
                     value=_fmt_value("quick_ratio", qr),
                     metric_key="quick_ratio",
                     peer_level=_peer_level(fb_levels.get("quick_ratio"), qr, sector_qr),
+                    **_row_numbers(qr, sector_qr),
                     score=_row_score("quick_ratio", qr, sector_qr),
                 ))
 
@@ -1021,6 +1199,8 @@ class HealthSnapshotService:
             weighted_score=round(weighted, 3) if weighted is not None else None,
             computed_at=snapshot_build_time(),
         )
+        # For the getter's 24h row (`_take_build_stamp`); keyed like its cache key.
+        _note_build_stamp(f"health_snapshot:{ticker}", snapshot, next_earnings)
         return snapshot, degraded
 
 

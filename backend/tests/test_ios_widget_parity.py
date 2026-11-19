@@ -292,7 +292,8 @@ _CONTRACT_KEYS = {
         "top_gainers", "top_losers", "market_assets",
     },
     ("WidgetIndex", "WidgetIndexResponse"): {"short_label", "rolling_24h"},
-    ("WidgetMover", "WidgetMoverResponse"): {"rolling_24h"},
+    # 2026-11-12: `cause_card` — the row links to the Updates card that holds its sources.
+    ("WidgetMover", "WidgetMoverResponse"): {"rolling_24h", "cause_card"},
     ("WidgetCause", "WidgetCauseResponse"): {"detail_aged", "note"},
 }
 

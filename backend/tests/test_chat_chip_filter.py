@@ -207,18 +207,21 @@ async def test_generate_followup_suggestions_scope_names_no_tool(monkeypatch):
 
 def test_the_chip_scope_follows_the_granted_tools(monkeypatch):
     """Review finding: a fixed scope advertised sentiment and a live quote on INDEX and
-    COMMODITY chats that have neither tool — the dead-end chip the block exists to stop."""
+    COMMODITY chats that have neither tool — the dead-end chip the block exists to stop.
+
+    The quote tool's scope reads "the latest price" since 2026-11-13 (it was "the live
+    price"): for a delisted listing the tool's price is the last close, never live."""
     from app.services.agents import chat_tools
     from app.services.agents.chat_tools import chip_scope_block, tools_for_asset_type
     monkeypatch.setattr(chat_tools, "analyst_section_available", lambda: False)
     index = chip_scope_block("INDEX")
-    assert "mood in news" not in index and "live price" not in index
+    assert "mood in news" not in index and "latest price" not in index
     assert "how the market and its sectors are doing" in index
     commodity = chip_scope_block("COMMODITY")
-    assert "mood in news" not in commodity and "live price" not in commodity
+    assert "mood in news" not in commodity and "latest price" not in commodity
     assert "recent news" in commodity
     crypto = chip_scope_block("CRYPTO")
-    assert "mood in news" in crypto and "live price" in crypto and "tokenomics" in crypto
+    assert "mood in news" in crypto and "latest price" in crypto and "tokenomics" in crypto
     assert "get_sentiment_analysis" in tools_for_asset_type("CRYPTO")
     # analyst ratings are forbidden while the package is unlicensed…
     assert "analyst ratings, consensus or upgrades/downgrades" in chip_scope_block("STOCK")
@@ -233,7 +236,7 @@ def test_learn_chats_get_the_concept_scope_not_an_asset_one():
     for ctx in ("BOOK", "MONEY_MOVES_ARTICLE", "JOURNEY_LESSON", "book"):
         block = chip_scope_block("STOCK", ctx)
         assert "idea just discussed" in block
-        assert "live price" not in block and "fundamentals, margins" not in block
+        assert "latest price" not in block and "fundamentals, margins" not in block
     assert "idea just discussed" not in chip_scope_block("STOCK", "STOCK")
     assert "idea just discussed" not in chip_scope_block("CRYPTO", None)
 
@@ -256,7 +259,7 @@ async def test_generate_followup_suggestions_threads_the_learn_context():
     )
     assert out == ["How do I apply this?", "What's a common mistake?"]
     assert "idea just discussed" in captured["prompt"]
-    assert "live price" not in captured["prompt"]
+    assert "latest price" not in captured["prompt"]
 
 
 def test_replay_of_stored_chips_is_filtered_and_an_all_refused_row_shows_none():

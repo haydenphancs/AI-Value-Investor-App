@@ -51,13 +51,23 @@ struct EarningsInfoSheet: View {
                                 icon: "calendar",
                                 iconColor: AppColors.primaryBlue,
                                 title: "1Y (One Year)",
-                                description: "Shows the last 6 quarters for a focused view on recent performance and trends."
+                                description: "Shows the last 4 reported quarters and the next 2 estimates for a focused view on recent performance and trends."
                             ),
                             InfoItem(
                                 icon: "calendar.badge.clock",
                                 iconColor: AppColors.accentCyan,
                                 title: "3Y (Three Years)",
                                 description: "Displays up to 14 quarters with a surprise bar chart. Use this view to see how price has changed in relation to earnings surprises over a longer period, revealing patterns in market reactions."
+                            ),
+                            // The labels are FISCAL quarters (FMP's fiscalYear), and nothing
+                            // said so: a July-year-end company's "Q1 '27" (Aug-Oct 2026) read as
+                            // a future calendar quarter already reported. Owner, 2026-11-14:
+                            // explained here, no line on the card.
+                            InfoItem(
+                                icon: "calendar.circle",
+                                iconColor: AppColors.primaryBlue,
+                                title: "Fiscal Quarters",
+                                description: "Quarters follow each company's own fiscal year, which often differs from the calendar year. For a company whose year ends in July, Q1 runs from August to October, and its label can carry the next year's number — Q1 '27 for August to October 2026."
                             )
                         ]
                     )
@@ -122,7 +132,9 @@ struct EarningsInfoSheet: View {
                                 icon: "chart.line.uptrend.xyaxis",
                                 iconColor: AppColors.accentCyan,
                                 title: "Price Toggle",
-                                description: "Enable to overlay historical stock price movement on the earnings chart. This helps visualize how the stock reacted to earnings reports."
+                                // True since 2026-11-14 (report_date): the dots used to sit on
+                                // the quarter's END, weeks before the report-day move.
+                                description: "Enable to overlay the daily closing price. Each reported quarter's dot sits on the day the company announced its results (when that day is known), so a move just after a dot is the market's reaction to that report."
                             )
                         ]
                     )

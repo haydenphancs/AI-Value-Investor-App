@@ -213,3 +213,37 @@ async def test_create_narrative_cache_preserves_existing_models_prefix(monkeypat
     handle = await client.create_narrative_cache("sys prompt", "lots of evidence here")
     assert handle is not None
     assert captured["model"] == "models/gemini-2.5-flash"  # not "models/models/..."
+
+
+# ── 2b. A failed create is a WARNING that names the model (2026-11-15 review) ──
+#
+# It used to be INFO: a cause that repeats on EVERY report — a model the cache API refuses after
+# Google's 2026-12-01 reroute of gemini-2.5-flash, a changed minimum size — silently sent all
+# ~14-18 Stage B jobs inline at full prefix price, visible only by grepping INFO lines.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    ValueError("Cached content is too small (min 1024 tokens)"),
+    RuntimeError("400 INVALID_ARGUMENT"),
+    asyncio.TimeoutError(),
+    RuntimeError("x" * 5000),                      # a huge upstream text is cut, not logged whole
+])
+async def test_a_failed_cache_create_is_one_warning_naming_the_model(monkeypatch, caplog, error):
+    import logging
+
+    _reset_circuit()
+    client = _make_client()
+
+    async def _boom(*args, **kwargs):
+        raise error
+
+    _patch_caches_create(monkeypatch, client, _boom)
+    with caplog.at_level(logging.INFO, logger="app.integrations.gemini"):
+        assert await client.create_narrative_cache("sys prompt", "lots of evidence here") is None
+    records = [r for r in caplog.records if "gemini-context-cache-unavailable" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    message = records[0].getMessage()
+    assert "model=gemini-2.5-flash" in message and type(error).__name__ in message
+    assert len(message) < 600

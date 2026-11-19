@@ -388,6 +388,10 @@ def test_the_financials_capability_names_no_vendor_and_no_rating():
     assert "no analyst ratings and no price targets" in desc
     for section in chat_tools.FINANCIAL_SECTIONS:
         assert section in desc
+    # 2026-11-14 (owner: "Yes, add capex"): the growth section's two cash-flow series are
+    # named, so the model calls this tool — never the web — for capex or operating cash flow.
+    assert "operating cash flow and capital expenditure" in desc
+    assert "capital expenditure, debt" in desc, "capex is in the call-it-for list"
     # Final review 2026-10-09: the capability line is a short noun list — the declaration
     # carries the sections (the line used to echo them all, a third copy in every prompt).
     cap = chat_tools.TOOL_CAPABILITIES[_FIN]

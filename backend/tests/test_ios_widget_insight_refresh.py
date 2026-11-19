@@ -79,7 +79,7 @@ def _body(src: str, decl_regex: str) -> str:
 
 def test_both_network_card_paths_reach_the_widget():
     src = _code(_UPDATES_VM)
-    load = _body(src, r"private func loadFeed\(for tab: NewsFilterTab, force: Bool\) async\s*\{")
+    load = _body(src, r"private func loadFeed\(for tab: NewsFilterTab, force: Bool, fresh: Bool = false\) async\s*\{")
     assigned = "insightSummary = response.insight.flatMap { NewsInsightSummary(dto: $0) }"
     noted = "noteInsightForWidget(insightSummary, stamp: response.insight?.generatedAt, scope: scope)"
     assert assigned in load and noted in load

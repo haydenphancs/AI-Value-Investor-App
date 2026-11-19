@@ -27,6 +27,13 @@ Its last stored close (`market_close_snapshot.trade_date`) then decides:
 Nothing is written: what to do with users' rows for a moved or renamed symbol is the
 owner's decision (documents/OWNER_TASKS.md).
 
+It also PRE-WARMS `listing_status_service` (the app's "Delisted" label): for the ERROR and
+WARNING symbols it waits up to `_DELISTED_NOTE_WAIT` for FMP's delisted-companies window and
+adds "FMP lists it delisted from NASDAQ on 2026-11-09" to the line when the list has the
+symbol (a hint for the owner, not the label's full rule); for symbols that missed only one
+session it just kicks the load in the background. Either way the first screen that shows
+one of them finds the window in memory.
+
 Runs from `_run_close_snapshot_loop` after each cycle, at most once per new session per
 process, and only once that session's snapshot write has landed (the bellwether's stored
 close carries the session's date). Every read failure DEFERS the run to the next hourly
@@ -57,6 +64,9 @@ logger = logging.getLogger(__name__)
 _MAX_LOOKUPS = 10
 _MAX_LISTED = 25  # symbols named in one log line
 _LOOKUP_TIMEOUT = 15.0
+# How long the report waits for the delisted-companies window (one shared load, ~24 pages
+# under a semaphore of 4) before logging without the "FMP lists it delisted" hint.
+_DELISTED_NOTE_WAIT = 5.0
 _MIN_MISSED_SESSIONS = 2
 _NEWLY_WINDOW_SESSIONS = 6
 # Its stored close dates the snapshot write: `_US_SESSION_BELLWETHERS[0]` in price_service.
@@ -186,7 +196,33 @@ def _describe(sym: str, holdings: Dict[str, int], since: Optional[date], info: D
         parts.append(f"; lookup failed: {info['lookup_error']}")
     if info.get("note"):
         parts.append(f"; {info['note']}")
+    if info.get("delisted"):
+        parts.append(f"; {info['delisted']}")
     return "".join(parts) + ")"
+
+
+async def _delisted_hints(symbols: List[str], now: Optional[datetime]) -> Dict[str, str]:
+    """{SYMBOL: "FMP lists it delisted from NASDAQ on 2026-11-09"} for the symbols FMP's
+    delisted-companies list has (condition (c) of the "Delisted" label only — a hint for the
+    owner). Waiting for it is what pre-warms `listing_status_service`. Never raises."""
+    from app.services import listing_status_service
+
+    if not symbols:
+        return {}
+    client = get_fmp_client()
+    rows = await asyncio.gather(
+        *(listing_status_service.delisted_row(s, now=now, wait=_DELISTED_NOTE_WAIT, fmp=client)
+          for s in symbols),
+        return_exceptions=True,
+    )
+    hints: Dict[str, str] = {}
+    for sym, row in zip(symbols, rows):
+        if isinstance(row, BaseException) or row is None:
+            continue
+        day, exchange = row
+        where = f" from {exchange}" if exchange else ""
+        hints[sym] = f"FMP lists it delisted{where} on {day.isoformat()}"
+    return hints
 
 
 def _listed(items: List[str], render) -> str:
@@ -283,6 +319,20 @@ async def report_unpriced_holdings(now: Optional[datetime] = None) -> Optional[D
             still.append(sym)
         else:
             newly.append(sym)
+
+    # Pre-warm the "Delisted" label's window, and name FMP's delisting row on the lines below.
+    # A bounded wait (the report runs in a background loop); a failure only drops the hint.
+    try:
+        hints = await _delisted_hints(newly + still, now)
+        if not newly and not still and report["pending"]:
+            from app.services import listing_status_service
+            listing_status_service.kick_window_load(report["pending"][0], fmp=get_fmp_client())
+    except Exception as e:  # noqa: BLE001 — a hint is never worth the report
+        logger.warning("unpriced holdings: delisted-list hint failed (%s: %s) — lines go out "
+                       "without it", type(e).__name__, e)
+        hints = {}
+    for sym, hint in hints.items():
+        info.setdefault(sym, {})["delisted"] = hint
 
     for sym in newly:
         report["newly"][sym] = {"holdings": unpriced[sym], "since": stored.get(sym), **info.get(sym, {})}

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pydantic import BaseModel
 
 from app.schemas.dcf_fair_value import DcfFairValueResponse
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Literal, Optional, List
 
 from app.schemas.etf import (
     KeyStatisticItem,
@@ -38,6 +38,30 @@ class SnapshotMetricResponse(BaseModel):
     # this field swaps in the industry wording when it says "industry". None whenever the
     # name prints no peer median. Optional and additive: older builds ignore it.
     peer_level: Optional[str] = None
+    # The row's own comparison as NUMBERS (2026-11-13), for the report drill-down's
+    # "Current" legend line, which must match the card's verdict to the digit. Both are in
+    # DISPLAY units: a multiple as is, a percent row in percentage points (Earnings Yield
+    # 5.49, not 0.0549). `numeric_value` is the number `name`'s "N.NNx" ratio divides (or,
+    # where the label withholds a ratio that would print "0.00x", the number the row prints:
+    # a "0.02%" yield) — None whenever the row prints no comparable number ("—", "Neg.",
+    # "N/A", "N/M", "below 0.01%"). `peer_median` is the exact (unrounded) median `name` prints — None exactly
+    # when `name` prints none. `peer_level` set implies `peer_median` set, never the reverse
+    # (a median whose cell carries no known level still prints). Optional and additive: the
+    # Financials-tab decoder and legacy cached rows have neither.
+    # Growth rows (2026-11-13, owner decision "Name the periods") print no median in `name`:
+    # there `numeric_value` is the newest annual YoY the row prints, unrounded, and
+    # `peer_median` the SAME fiscal year's peer YoY the score was judged against — None while
+    # that year is not reported (or the company has no peer group).
+    numeric_value: Optional[float] = None
+    peer_median: Optional[float] = None
+    # The DISPLAY label of the CLOSED period the row's figure covers ("FY2026"), 2026-11-13.
+    # Growth sets it on rows with a value (the newest fiscal year's YoY, never "now"). The
+    # Price card sets it on a P/FCF or EV/EBITDA row shown on a LAST-FISCAL-YEAR basis (owner
+    # decision "Fallback TTM labels"): that row's name still prints its median and keeps its
+    # `peer_level`, but carries no `numeric_value` / `peer_median` — the one exception to the
+    # rules above — so no "Current (TTM)" line is built from it. None on a TTM / current
+    # row. Optional and additive: the Financials-tab decoder and legacy cached rows have none.
+    period_label: Optional[str] = None
 
 
 # Wire format of `SnapshotItemResponse.computed_at`: ISO-8601 UTC to the second with a
@@ -180,6 +204,14 @@ class StockOverviewCoreResponse(BaseModel):
     change_known: bool = True
     market_status: MarketStatusResponse
     chart_data: List[Dict[str, Any]]
+    # The "Delisted" label (`app/schemas/listing_status.py`): all four set together for a
+    # CONFIRMED delisting (`listing_status_service`), else all None — trading or unknown.
+    # Appended last and Optional, so shipped builds ignore them. `current_price` is then the
+    # LAST close, `change_known` is False and `market_status` is still the clock's.
+    listing_status: Optional[Literal["delisted"]] = None
+    delisted_date: Optional[str] = None       # "YYYY-MM-DD", FMP's date (US Eastern calendar)
+    delisted_exchange: Optional[str] = None   # "NASDAQ"; None when FMP's row names none
+    last_trade_date: Optional[str] = None     # "YYYY-MM-DD", newest session with volume > 0
 
 
 class StockOverviewResponse(BaseModel):
@@ -201,3 +233,9 @@ class StockOverviewResponse(BaseModel):
     company_profile: CompanyProfileResponse
     related_tickers: List[RelatedTickerResponse]
     benchmark_summary: Optional[BenchmarkSummaryResponse] = None
+    # Twins of `StockOverviewCoreResponse`'s four listing fields — same rule, read from the
+    # FRESH quote only (never the bundle profile).
+    listing_status: Optional[Literal["delisted"]] = None
+    delisted_date: Optional[str] = None
+    delisted_exchange: Optional[str] = None
+    last_trade_date: Optional[str] = None

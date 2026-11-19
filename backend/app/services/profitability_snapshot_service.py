@@ -166,7 +166,10 @@ _inflight: Dict[str, asyncio.Future] = {}
 #     industry compared its margins and ROE with the bank-dominated sector.
 # 6 (2026-11-05): `score_excluded_rows`: a bank's, an insurer's or a lender's gross margin
 #     reads "N/M" and does not count. A v5 row counted it.
-_SNAPSHOT_PAYLOAD_VERSION = 6
+# 7 (2026-11-13, owner decision): each row carries `numeric_value` and `peer_median` (the
+#     report's Profitability drill-down "Current (TTM)" legend line, `_row_numbers`). A v6
+#     row has neither.
+_SNAPSHOT_PAYLOAD_VERSION = 7
 _VERSION_KEY = "_schema_v"
 
 # ── Ticker validation ────────────────────────────────────────────
@@ -326,6 +329,26 @@ def _label_with_sector(
         return f"{label} (sector avg {sector_pct:.1f}%)"
     ratio = val / sector_pct
     return f"{label} ({ratio:.2f}x sector avg {sector_pct:.1f}%)"
+
+
+def _row_numbers(
+    val: Optional[float], sector_decimal: Optional[float],
+) -> Dict[str, Optional[float]]:
+    """`numeric_value` / `peer_median` for a COMPARED row (owner decision 2026-11-13): the
+    TTM figure the row prints and the median its name prints, both in percentage points —
+    for the report Profitability drill-down's "Current (TTM)" legend line, which must match
+    the card to the digit.
+
+    The median under exactly the rule that prints it (`_label_with_sector`: a value and a
+    usable median), unrounded and computed as that function computes it (``median * 100``),
+    so ``numeric_value / peer_median`` is the label's "N.NNx" to the digit. A negative value
+    stays (a loss-maker's margin is a real reading the card prints, with the median and no
+    multiple). Only `_row`'s compared branch calls this: an "N/M", a "—" and a fiscal-year
+    fallback (a CLOSED year's figure, never the current one) carry neither."""
+    numeric_value = _finite(val)
+    median = _usable_median(sector_decimal)
+    peer_median = median * 100 if (numeric_value is not None and median is not None) else None
+    return {"numeric_value": numeric_value, "peer_median": peer_median}
 
 
 # Value printed for ROE on negative or zero shareholder equity — the same "not meaningful"
@@ -881,6 +904,7 @@ class ProfitabilitySnapshotService:
             return SnapshotMetricResponse(
                 name=name, value=_fmt_pct(value), metric_key=key, score=score,
                 peer_level=level if level in ("industry", "sector") else None,
+                **_row_numbers(value, median),
             ), (score, weight)
 
         # Weights: Gross 15% + Op 20% + Net 25% + ROE 25% + ROA 15% = 100% (re-normalised

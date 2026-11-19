@@ -929,10 +929,14 @@ def _wire_budget(budget: Optional[int], model: Optional[str]) -> Optional[int]:
         return budget
     if name not in _budget_zero_remap_logged:
         _budget_zero_remap_logged.add(name)
+        # gemini-2.5-flash itself ACCEPTS 0 (0 thought tokens); it is in the set because Google
+        # serves it with gemini-3.5-flash-lite from 2026-12-01, which refuses 0. Say which.
+        why = ("it refuses 0" if name in _LEVEL_OFF_MODELS
+               else "the model it is rerouted to on 2026-12-01 refuses 0")
         logger.info(
-            "Gemini thinking_budget 0 sent as %d for model=%s (it refuses 0; %d is the smallest "
-            "budget it accepts, not a guaranteed off)",
-            _BUDGET_OFF_ON_REFUSING_MODELS, name, _BUDGET_OFF_ON_REFUSING_MODELS,
+            "Gemini thinking_budget 0 sent as %d for model=%s (%s; %d is the smallest budget both "
+            "sides of the reroute accept, not a guaranteed off)",
+            _BUDGET_OFF_ON_REFUSING_MODELS, name, why, _BUDGET_OFF_ON_REFUSING_MODELS,
         )
     return _BUDGET_OFF_ON_REFUSING_MODELS
 
@@ -988,23 +992,39 @@ def _thinking_fields(budget: Optional[int], level: Any, model: Optional[str]) ->
     """
     name = _model_key(model)
     asked = _normalize_level(level)
+    ignored: Optional[str] = None
     if asked is not None:
         if asked in _LEVELS_BY_MODEL.get(name, frozenset()):
             return {"thinking_level": _LEVEL_ENUM[asked]}
         if asked == "minimal":
             budget = 0
-        elif (name, asked) not in _level_ignored_logged:
-            _level_ignored_logged.add((name, asked))
-            logger.warning(
-                "Gemini thinking_level=%s is not accepted by model=%s; using thinking_budget=%s "
-                "instead", asked, name or "-", budget,
-            )
+        else:
+            ignored = asked
     if budget is None:
-        return {}
-    off = _off_level(budget, model)
-    if off is not None:
-        return {"thinking_level": off}
-    return {"thinking_budget": _wire_budget(budget, model)}
+        fields: Dict[str, Any] = {}
+    else:
+        off = _off_level(budget, model)
+        fields = ({"thinking_level": off} if off is not None
+                  else {"thinking_budget": _wire_budget(budget, model)})
+    if ignored is not None and (name, ignored) not in _level_ignored_logged:
+        _level_ignored_logged.add((name, ignored))
+        # Names what is ACTUALLY sent (the caller's 0 may go out as 1; None sends nothing), so the
+        # line is enough to diagnose a 400 or a cost jump without a repro.
+        logger.warning(
+            "Gemini thinking_level=%s is not accepted by model=%s; sending %s instead",
+            ignored, name or "-", _describe_thinking_fields(fields),
+        )
+    return fields
+
+
+def _describe_thinking_fields(fields: Dict[str, Any]) -> str:
+    """`thinking_budget=1` / `thinking_level=minimal` / `no thinking budget or level`, for logs."""
+    if "thinking_level" in fields:
+        level = fields["thinking_level"]
+        return f"thinking_level={getattr(level, 'name', level)}".lower()
+    if "thinking_budget" in fields:
+        return f"thinking_budget={fields['thinking_budget']}"
+    return "no thinking budget or level"
 
 
 def _thinking_config(budget: Optional[int], *, model: Optional[str],

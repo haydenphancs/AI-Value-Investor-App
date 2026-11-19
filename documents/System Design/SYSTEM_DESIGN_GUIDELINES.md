@@ -202,8 +202,9 @@ tickers mapped to CIKs through the Learn weekly engine's company-tickers map
 10-minute circuit with the Learn weekly engine, the buyback check and the stake finder, so it reads at
 most `EARNINGS_LIVE_SEC_MAX_SYMBOLS` (25) tickers at a time, spaces its calls 1 s apart and, on a
 throttle, parks every ticker for SEC's Retry-After. The same service is a new **Gemini** caller: one
-`generate_json` call per read of a release (`EARNINGS_LIVE_EXTRACT_MODEL`, Flash at temperature 0 with
-no thinking budget, never cached), whose answer is data only: a figure reaches a user only as the
+`generate_json` call per read of a release (`EARNINGS_LIVE_EXTRACT_MODEL`, gemini-3.8-flash since
+2026-11-19, the owner's pick on a replay of 34 stored releases; no thinking budget, never cached, and
+temperature 0, which 3.x models ignore), whose answer is data only: a figure reaches a user only as the
 number printed in a quote verified against the release, and the outlook only as that quote, never
 in the model's words.
 **No Google Search grounding** (retired 2026-10-02). Gemini's `google_search` tool is not used
@@ -5917,7 +5918,18 @@ refuses it.
   WARNING for a ticker written as a US listing (letters alone), which has lost the fast path; one
   whose record shows foreign forms alone (20-F, 40-F, 6-K) rests 30 min between reads with no slot.
 - **Gemini**: one call per read of a filing, beside two document reads
-  (`EARNINGS_LIVE_EXTRACT_MODEL`, Flash, temperature 0, no thinking budget, never cached). A failed
+  (`EARNINGS_LIVE_EXTRACT_MODEL`, gemini-3.8-flash, the owner's pick of 2026-11-19; no thinking
+  budget, never cached; about $0.0085 a read, from $0.002 for a short release to $0.016 for a long
+  one, twice that from 2027-01-01, when its price doubles). Replayed on 34 stored releases (verified
+  revenue / adjusted EPS / GAAP EPS / outlook): the shipped prompt 29/19/30/8 and 29/18/30/10 on two
+  runs (3.x ignores temperature), 29/19/31/10 before its continuing-operations line; 2.5-flash
+  28/18/29/12, and 21/16/23/10 once Google serves 2.5-flash as 3.5-flash-lite from 2026-12-01. The
+  most figures, fewer outlooks (the one item FMP never replaces), and slower: a read's median
+  3.3-4.4 s (p90 6-10 s, one of 102 reads 53 s) against ~1.2-1.7 s, which a round adds up release by
+  release in a 4:05 PM burst; the model step's deadline is the call's timeout + 15 s. The prompt asks for the GAAP
+  EPS from continuing operations when a release prints it beside a total that includes discontinued
+  operations (Etsy: $1.00, not the $7.31 a discontinued gain makes); the verifier does not check
+  which of the two it got, and a GAAP-only figure is shown with no beat or miss. A failed
   read (an index or exhibit that cannot be read, a model failure or a model step past its
   deadline, a blocked, cut or off-schema answer) rests on a widening ladder and is read again, at
   most six reads a filing (`_EXTRACT_RETRY_GAPS`: about 33 min inside its company's windows, about

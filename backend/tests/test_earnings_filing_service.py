@@ -10967,6 +10967,39 @@ async def test_a_filing_is_found_extracted_once_and_then_never_polled_again(watc
     assert watcher._watch[("INTC", REPORT)].figures is found["INTC"]
 
 
+def test_the_release_reader_runs_on_the_owners_model_with_thinking_off(monkeypatch):
+    """Owner, 2026-11-19: "3.8 Flash", picked on a replay of 34 stored real releases where it
+    verified the most figures (gemini-2.5-flash becomes gemini-3.5-flash-lite on 2026-12-01, and
+    read the fewest then). Its budget 0 goes on the wire as budget 0 (gemini-3.8-flash refuses only
+    the "minimal" level), never as a level, so the read stays one plain extraction. A blank or
+    padded Railway value keeps this model (a stray space would reach the SDK as typed and 404 every
+    read): checked through pydantic itself, so the validator must be registered on the field."""
+    from pathlib import Path
+
+    from app.config import Settings
+    from app.integrations.gemini import _thinking_fields
+
+    assert Settings.model_fields["EARNINGS_LIVE_EXTRACT_MODEL"].default == "gemini-3.8-flash"
+    assert _thinking_fields(0, None, "gemini-3.8-flash") == {"thinking_budget": 0}
+    example = Path(__file__).resolve().parents[1] / ".env.example"
+    monkeypatch.delenv("EARNINGS_LIVE_EXTRACT_MODEL", raising=False)
+    assert Settings(_env_file=example).EARNINGS_LIVE_EXTRACT_MODEL == "gemini-3.8-flash"
+    for raw, kept in (("", "gemini-3.8-flash"), ("   ", "gemini-3.8-flash"),
+                      (" gemini-3.8-flash ", "gemini-3.8-flash"),
+                      ("gemini-2.5-flash", "gemini-2.5-flash")):
+        built = Settings(_env_file=example, EARNINGS_LIVE_EXTRACT_MODEL=raw)
+        assert built.EARNINGS_LIVE_EXTRACT_MODEL == kept, repr(raw)
+
+
+def test_the_reader_takes_gaap_eps_from_continuing_operations():
+    """ETSY Q3 2026 prints diluted EPS of $1.00 from continuing operations and $7.31 in total (a
+    discontinued business's gain): gemini-3.8-flash read the total, beside a consensus set on the
+    continuing figure. The instruction names the continuing figure whenever both are printed."""
+    assert ("when the release prints a diluted EPS from continuing operations beside a total that "
+            "includes discontinued operations, it is the one from continuing operations"
+            in efs._SYSTEM)
+
+
 @pytest.mark.asyncio
 async def test_the_model_reads_a_fenced_release_and_the_quote_it_copied_from_there_stands(watcher):
     release = (RELEASE.replace("Intel expects", "Intel\u2122 expects")

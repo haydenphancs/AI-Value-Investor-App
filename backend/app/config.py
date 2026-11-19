@@ -147,6 +147,18 @@ class Settings(BaseSettings):
             return value.strip() or "gemini-2.5-flash"
         return value
 
+    @field_validator("EARNINGS_LIVE_EXTRACT_MODEL", mode="before")
+    @classmethod
+    def _extract_model(cls, value: object) -> object:
+        """Trimmed like `_required_model` (a stray space reaches the SDK as typed and every release
+        read 404s); unset or blank → "gemini-3.8-flash", this setting's own default (the owner's
+        pick, 2026-11-19), never gemini-2.5-flash."""
+        if value is None:
+            return "gemini-3.8-flash"
+        if isinstance(value, str):
+            return value.strip() or "gemini-3.8-flash"
+        return value
+
     @field_validator("REPORT_STAGE_A_MODEL", "REPORT_SYNTHESIS_MODEL", mode="before")
     @classmethod
     def _optional_model(cls, value: object) -> Optional[str]:
@@ -679,9 +691,19 @@ class Settings(BaseSettings):
     # 50 already fills the loop's minute. 0 reads nothing from SEC. The day's ceiling is under
     # SEC LOAD in earnings_filing_service.py.
     EARNINGS_LIVE_SEC_MAX_SYMBOLS: int = Field(25, ge=0, le=50)
-    # The model that reads a press release. Flash, at temperature 0 and no thinking budget:
-    # this is extraction, and every figure it returns is checked verbatim against the text.
-    EARNINGS_LIVE_EXTRACT_MODEL: str = "gemini-2.5-flash"
+    # The model that reads a press release, at no thinking budget (0 goes on the wire as 0 to
+    # gemini-3.8-flash): this is extraction, and every figure it returns is checked verbatim
+    # against the text. gemini-3.8-flash since 2026-11-19 (owner: "3.8 Flash"), replayed on 34
+    # stored real releases (verified revenue / adjusted EPS / GAAP EPS / outlook): the shipped
+    # prompt 29/19/30/8 and 29/18/30/10 on two runs (3.x ignores temperature); before its
+    # continuing-operations line (the run the owner chose on) 29/19/31/10. Against 2.5-flash
+    # 28/18/29/12, 3.5-flash-lite 22/16/22/11, and 2.5-flash as Google serves it from 2026-12-01
+    # 21/16/23/10. So the most figures but fewer outlooks (the one item FMP never fills in later),
+    # and slower: a read's median 3.3-4.4 s (p90 6-10 s; 3 of 102 reads over 20 s, one 53 s) against
+    # ~1.2-1.7 s, which a round reading one release after another adds up in a 4:05 PM burst. The
+    # model step's deadline is GEMINI_REQUEST_TIMEOUT_SECONDS + 15 s. About $0.0085 a read ($0.002
+    # for a short release to $0.016 for a long one), twice that from 2027-01-01.
+    EARNINGS_LIVE_EXTRACT_MODEL: str = "gemini-3.8-flash"
 
     # Gemini quota (429) handling. Instead of skipping retries on a rate-limit
     # error, back off and retry a bounded number of times — paired with the

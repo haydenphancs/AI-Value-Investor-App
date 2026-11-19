@@ -1288,6 +1288,14 @@ def history_extras_from(response: Any, report_day: date) -> HistoryExtras:
     The quarter being reported is the latest whose fiscal end is within
     `_CURRENT_QUARTER_MAX_DAYS` of the report date (10-Q / 10-K deadlines are 40–90 days);
     it is excluded whether or not FMP has filled it yet.
+
+    Residual (2026-11-19 merge review): a release that comes more than about a quarter after
+    its period end (a late or NT 10-K filer) is paired with the wrong year-ago quarter, and the
+    quarter it reports can show among the past ones: by then the next quarter has ended and is
+    taken as current. The tab's own `report_date` cannot name the reported quarter here: for
+    such a release it dates no quarter (92-98 days late, before the 10-K's income row) or the
+    next one (111+ days, with it), and nothing else in the response tells a late filer from
+    FMP's own gap on the quarter before. Rare, and only the year-ago line and the past strip.
     """
     eps_q = list(getattr(response, "eps_quarters", None) or [])
     rev_q = list(getattr(response, "revenue_quarters", None) or [])

@@ -23,7 +23,9 @@ import pytest
 from app.config import settings
 from app.integrations.gemini import GeminiClient, _TTLCache, _thinking_config
 # The client under test is gemini-2.5-flash, which (via Google's 2026-12-01 reroute to
-# gemini-3.5-flash-lite) refuses thinking_budget=0: the encoder sends 1 = no thinking.
+# gemini-3.5-flash-lite) refuses thinking_budget=0: the encoder sends budget 1, the smallest value
+# both sides of the reroute accept (not a guaranteed "off" once 3.5-flash-lite serves it; a request
+# naming gemini-3.5-flash-lite gets thinking_level "minimal" instead).
 # test_gemini_budget_zero_refused.py pins that remap; here it is only the expected wire value.
 from app.integrations.gemini import _BUDGET_OFF_ON_REFUSING_MODELS as _OFF
 
@@ -158,7 +160,9 @@ def test_none_sends_no_thinking_config_at_all():
     for model in ("gemini-2.5-flash", "gemini-3.8-flash"):
         assert _thinking_config(None, model=model) is None
         assert _thinking_config(512, model=model).thinking_budget == 512
-    # 0 = "off": sent as 0 where the model takes it, as 1 where it refuses 0.
+    # 0 = "off": sent as 0 where the model takes it, as budget 1 on gemini-2.5-flash (which
+    # refuses 0 after the reroute and every thinking_level), and as thinking_level "minimal" on
+    # gemini-3.5-flash-lite (tests/test_gemini_budget_zero_refused.py).
     assert _thinking_config(0, model="gemini-3.8-flash").thinking_budget == 0
     assert _thinking_config(0, model="gemini-2.5-flash").thinking_budget == _OFF
 

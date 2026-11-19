@@ -1083,7 +1083,9 @@ async def _continue_cut_answer(
     signals["continuation"] = "failed"
     got_text = False
     cut_again: Optional[str] = None
-    from app.services.chat_service import WEB_UNAVAILABLE_ASKED_TAIL, _chat_thinking_budget
+    from app.services.chat_service import (
+        WEB_UNAVAILABLE_ASKED_TAIL, _chat_thinking_budget, _chat_thinking_level_kwargs,
+    )
     # The continuation never re-asks for the "a web search is not available right now" sentence
     # (2026-11-14): the partial answer already said it, and asking again would repeat it mid-answer
     # against "add no preamble". The plain unavailable line (never claim a search) stays.
@@ -1113,6 +1115,7 @@ async def _continue_cut_answer(
             model_name=model_name,
             max_output_tokens=max_output_tokens,
             thinking_budget=_chat_thinking_budget(model_name),
+            **_chat_thinking_level_kwargs(model_name),
             usage_tag=usage_tag,
         ):
             if kind == "answer" and text:
@@ -2464,7 +2467,9 @@ async def stream_chat_message(
     async def event_gen():
         nonlocal delivered, unanswered_task, unanswered_judged
         import time as _time
-        from app.services.chat_service import ChatService, _chat_thinking_budget
+        from app.services.chat_service import (
+            ChatService, _chat_thinking_budget, _chat_thinking_level_kwargs,
+        )
         from app.integrations.gemini import (
             _is_quota_error,
             is_transient_gemini_error,
@@ -2849,6 +2854,9 @@ async def stream_chat_message(
                     # the model spent 1150 of 1200 thinking and the answer got 40 tokens.
                     # Resolved per model: the cheap route must not have thinking switched ON.
                     thinking_budget=_chat_thinking_budget(answer_model),
+                    # The same per-model rule for the level (CHAT_THINKING_LEVEL; none on the
+                    # cheap route, and no keyword at all while the setting is unset).
+                    **_chat_thinking_level_kwargs(answer_model),
                     # Correlates the GEMINI_USAGE line to a turn: without the route you
                     # cannot tell which lens (and so which model) served this answer.
                     usage_tag=f"{session_id}:{route['specialists'][0]}",

@@ -2908,6 +2908,12 @@ Separate each category with "===CATEGORY===" followed by the category name.
 ===CATEGORY===Risks
 [regulatory risks, technical/security risks, competition, adoption challenges]"""
 
+            # Both read per call (Railway variables). The model defaults to "gemini-2.5-flash",
+            # the string hard-coded here until 2026-11-16. No thinking budget is sent (the
+            # model thinks dynamically), and a level goes out only when
+            # CRYPTO_AI_THINKING_LEVEL is set — unset, the request (and its response-cache
+            # key) is exactly what it was.
+            thinking_level = settings.CRYPTO_AI_THINKING_LEVEL
             ai_response = await gemini.generate_text(
                 prompt=prompt,
                 # Wrapped: IDENTITY_RULE + ADVICE_BOUNDARY (see persona_config).
@@ -2918,7 +2924,8 @@ Separate each category with "===CATEGORY===" followed by the category name.
                     "Mention specific names, dates, and technical details. "
                     "Do NOT include any current market prices or volatile data."
                 ),
-                model_name="gemini-2.5-flash",
+                model_name=settings.CRYPTO_AI_MODEL,
+                **({"thinking_level": thinking_level} if thinking_level else {}),
             )
 
             text = ai_response.get("text", "")

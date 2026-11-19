@@ -32,7 +32,8 @@ Contract with the build step (pinned by `tests/test_learn_weekly_writer.py`):
   preceded by `before_call()`;
 * every prompt opens with the nonce `REQUEST {generation_id} round {n} ({stage})` and every call
   passes `cache=False`: a rejected draft is never served back from the response cache;
-* the writer model is `settings.LEARN_WRITER_MODEL`, thinking `LEARN_WRITER_THINKING_BUDGET`, and
+* the writer model is `settings.LEARN_WRITER_MODEL`, thinking `LEARN_WRITER_THINKING_BUDGET` (plus
+  `LEARN_WRITER_THINKING_LEVEL` only when set — unset, no level is sent), and
   its system instruction is `neutral_system_instruction(prompts.SYSTEM_BODY)` (identity + advice
   guards; `tests/test_identity_rule_coverage.py`). The persona module is imported LAZILY: importing
   `agents` loads the research agent and the FMP client, which no learn_weekly module but `signals`
@@ -280,6 +281,7 @@ class _Generation:
         self.judge_mode = judge_mode
         self.model = str(settings.LEARN_WRITER_MODEL or "").strip()
         self.thinking = _thinking_budget()
+        self.thinking_level = _thinking_level()
         self.calls = 0
         self.tokens = 0
         self.rounds: List[Dict[str, Any]] = []
@@ -359,6 +361,10 @@ class _Generation:
                 thinking_budget=self.thinking,
                 usage_tag=USAGE_TAG,
                 cache=False,
+                # Only when LEARN_WRITER_THINKING_LEVEL is set: unset, the call is today's byte for
+                # byte (no new keyword). Through the router a Claude-first role ignores it
+                # (`llm_provider._ask_claude` reads named keys only); its Gemini fallback gets it.
+                **({"thinking_level": self.thinking_level} if self.thinking_level else {}),
             )
         except asyncio.CancelledError:
             raise
@@ -800,6 +806,22 @@ def _thinking_budget() -> Optional[int]:
     return value
 
 
+def _thinking_level() -> Optional[str]:
+    """`LEARN_WRITER_THINKING_LEVEL` (minimal / low / medium / high, validated at start-up), or None:
+    send no level at all, today's request. The Gemini encoder sends a level only to a model that
+    accepts one; on gemini-2.5-flash low / medium / high are ignored and the budget above rules,
+    while "minimal" means off (budget 0 → 1 there). A non-text value (only a test or
+    a code edit can make one) is ignored, logged — never a crash in the middle of a build."""
+    value = settings.LEARN_WRITER_THINKING_LEVEL
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        logger.warning("learn writer: LEARN_WRITER_THINKING_LEVEL=%r is not text — no thinking level "
+                       "sent", value)
+        return None
+    return value.strip().lower() or None
+
+
 async def write_article(*, sheet: C.FactSheet, kind: str, category: str, topic_label: str,
                         served_titles: Iterable[str], in_flight_titles: Iterable[str],
                         generation_id: str,
@@ -844,8 +866,9 @@ async def write_article(*, sheet: C.FactSheet, kind: str, category: str, topic_l
         generation_id=str(generation_id), before_call=before_call, client=client,
         reject_reason=reject_reason, published_date=published_date, catalog=list(catalog or ()),
         on_progress=on_progress, judge_mode=mode)
-    logger.info("learn writer: generation %s starts (%s/%s, topic %r, %d facts, judge %s, model %s)",
-                gen.gen, kind, category, gen.topic_label[:80], len(sheet.facts), mode, gen.model)
+    logger.info("learn writer: generation %s starts (%s/%s, topic %r, %d facts, judge %s, model %s, "
+                "thinking level %s)", gen.gen, kind, category, gen.topic_label[:80], len(sheet.facts),
+                mode, gen.model, gen.thinking_level or "unset")
     try:
         outcome = await gen.run(resume if isinstance(resume, Mapping) else None)
     except _Stop as stop:

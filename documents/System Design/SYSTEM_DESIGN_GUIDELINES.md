@@ -3123,11 +3123,34 @@ and is deliberately *not* shown there, because it is not what Apple would charge
 > **0 means "off", not a wire value (2026-11-15).** Google routes every `gemini-2.5-flash` request
 > to `gemini-3.5-flash-lite` from 2026-12-01, and `gemini-3.5-flash-lite` answers
 > `thinking_budget=0` with 400 INVALID_ARGUMENT on every request shape (measured live). The thinking
-> encoders in `integrations/gemini.py` take the model the request goes to and send **1** to
-> `gemini-2.5-flash` and `gemini-3.5-flash-lite` (measured: 0 thought tokens on both), and 0 to every
-> other model (`gemini-3.8-flash` accepts 0; `gemini-2.5-flash-lite` is not deprecated). This is a
-> stopgap that works on both sides of the cutover. It does not choose the replacement model, and it
-> does not restore the thinking that calls without a `thinking_config` lose on 3.5-flash-lite.
+> encoders in `integrations/gemini.py` take the model the request goes to. A 0 sent to
+> `gemini-3.5-flash-lite` goes out as `thinking_level` **"minimal"**, its real off (0 thought tokens on
+> every prompt measured, 2026-11-16), with no budget beside it (a budget AND a level is a 400 on every
+> model). A 0 sent to `gemini-2.5-flash` goes out as budget **1**: 2.5-flash refuses any
+> `thinking_level`, so a positive budget is the only kind valid on both sides of the cutover, and 1
+> is the smallest. Every other model
+> gets 0 (`gemini-3.8-flash` accepts 0 and refuses "minimal"; `gemini-2.5-flash-lite` is not
+> deprecated).
+>
+> ⚠️ **Budget 1 is not "off" on 3.5-flash-lite** (corrected 2026-11-16; the 2026-11-15 note said
+> "0 thought tokens on both", which held only on short prompts). On real prompts 3.5-flash-lite reads
+> any budget from 1 to 512 like level "low": a Stage B narrative thinks ~450-900 tokens a call
+> (~16k per report; a deep report +56% if nothing else changes), and the 256-token Learn
+> cover-subject call stops at MAX_TOKENS. So a request still NAMING `gemini-2.5-flash` after the
+> reroute avoids the 400 but thinks; only a request naming `gemini-3.5-flash-lite` gets level
+> "minimal" for a 0 (every other model gets a budget for it). The
+> encoders do not choose the replacement model, and they do not restore the thinking that calls
+> without a `thinking_config` lose on 3.5-flash-lite.
+>
+> **Per-feature models and thinking levels (2026-11-16).** Every `GeminiClient` generation method
+> also takes an optional `thinking_level` (minimal / low / medium / high). The encoder sends a level
+> only to a model live-probed to accept it (`gemini-3.5-flash-lite`: all four; `gemini-3.8-flash`:
+> low / medium / high), and never beside a budget; on any other model "minimal" means budget 0 and
+> the other levels are ignored, so the feature's budget applies. The settings that feed it, and the
+> four models that used to be hard-coded (ETF hook, index stories, crypto snapshots, the marketing
+> writer's Gemini call), live in `backend/app/config.py` under "Per-feature models and thinking
+> levels". Every default keeps the pre-change request byte-identical; the owner's per-feature pick
+> is a Railway variable change (`documents/OWNER_TASKS.md`, the 2026-12-01 row).
 >
 > Measured with `backend/scripts/eval_report_thinking.py` on the real prompts
 > (MSFT / warren_buffett, `gemini-2.5-flash`), per report:

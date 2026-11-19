@@ -260,6 +260,25 @@ def _dividend_history_licensed() -> bool:
     return entitlement_error("dividends") is None
 
 
+#: `research_complete`'s `summary` description. BRIEF is the long-standing default; MEMO is asked
+#: for while `REPORT_AGENTIC_FINDINGS_MEMO` is on (measured 2026-11-16 on gemini-3.5-flash-lite: the
+#: brief ask gave ~470-char findings and a weaker Stage A; the memo gave ~2,700 chars and parity).
+RESEARCH_COMPLETE_SUMMARY_BRIEF = "Brief summary of key findings from your research"
+RESEARCH_COMPLETE_SUMMARY_MEMO = (
+    "A detailed research memo of 300-600 words: every figure you fetched with its period, "
+    "what changed, and what it means for the investment thesis"
+)
+
+
+def research_complete_summary_description() -> str:
+    """The `summary` description, read from settings when the declarations are BUILT (once per
+    deep run). Only a real `True` asks for the memo: anything else keeps today's brief ask, byte
+    for byte (fail closed to the default)."""
+    if settings.REPORT_AGENTIC_FINDINGS_MEMO is True:
+        return RESEARCH_COMPLETE_SUMMARY_MEMO
+    return RESEARCH_COMPLETE_SUMMARY_BRIEF
+
+
 def build_fmp_tool_declarations() -> types.Tool:
     """Build Gemini Tool with FMP function declarations for agentic research.
 
@@ -368,7 +387,7 @@ def build_fmp_tool_declarations() -> types.Tool:
                     properties={
                         "summary": types.Schema(
                             type=types.Type.STRING,
-                            description="Brief summary of key findings from your research",
+                            description=research_complete_summary_description(),
                         ),
                     },
                     required=["summary"],

@@ -334,6 +334,44 @@ def stage_a_thinking_budget() -> Optional[int]:
     return _resolve_budget(settings.REPORT_STAGE_A_THINKING_BUDGET)
 
 
+def _text_setting(name: str) -> Optional[str]:
+    """A model / thinking-level setting as text, read at CALL time (a test or a Railway change
+    takes effect without a re-import). None when unset or blank. A non-text value cannot pass
+    `config.Settings`' validation; if one appears anyway (a hand-patched settings object), it is
+    ignored with a warning and the call goes out exactly as it does with the setting unset."""
+    value = getattr(settings, name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        logger.warning("[report-model-setting] %s=%r ignored (not text)", name, value)
+        return None
+    return value.strip() or None
+
+
+def stage_a_model_kwargs() -> Dict[str, Any]:
+    """Stage A's model override for `generate_json`: `{"model_name": REPORT_STAGE_A_MODEL}` when
+    set, else `{}` — so the default call is byte-identical to before the setting existed (the
+    client default, GEMINI_MODEL), and a strict test fake without `model_name` still works."""
+    model = _text_setting("REPORT_STAGE_A_MODEL")
+    return {"model_name": model} if model else {}
+
+
+def synthesis_model_kwargs() -> Dict[str, Any]:
+    """The two post-assembly syntheses' (`synthesize_core_thesis`, `synthesize_critical_factors`)
+    overrides: `model_name=REPORT_SYNTHESIS_MODEL` and `thinking_level=
+    REPORT_SYNTHESIS_THINKING_LEVEL`, each only when set. `{}` by default, so neither the request
+    nor the response-cache key changes until the owner sets one. The level reaches the wire only
+    on a model that accepts it (`gemini._thinking_config`); these calls send no budget."""
+    kwargs: Dict[str, Any] = {}
+    model = _text_setting("REPORT_SYNTHESIS_MODEL")
+    if model:
+        kwargs["model_name"] = model
+    level = _text_setting("REPORT_SYNTHESIS_THINKING_LEVEL")
+    if level:
+        kwargs["thinking_level"] = level
+    return kwargs
+
+
 def agentic_thinking_budget() -> Optional[int]:
     """The deep-research tool loop (`ResearchAgent._agentic_research`) — up to five
     calls per deep report that had no budget knob at all until 2026-09-11."""
@@ -3450,6 +3488,7 @@ async def generate_stage_a_shell(
                     f"report_stage_a{'' if attempt == 1 else '_retry'}:{ticker}:{persona.key}"
                 ),
                 cache=False,
+                **stage_a_model_kwargs(),
             )
             text = result.get("text") or ""
             finish = result.get("finish_reason")
@@ -4358,6 +4397,7 @@ async def _synthesize_core_thesis(
             prompt=prompt,
             system_instruction=persona.system_prompt,
             usage_tag=f"report_thesis:{ticker}:{persona.key}",
+            **synthesis_model_kwargs(),
         )
         parsed = parse_stage_a_response(
             result.get("text") or "",
@@ -4545,6 +4585,7 @@ async def synthesize_critical_factors(
             prompt=prompt,
             system_instruction=persona.system_prompt,
             usage_tag=f"report_factors:{ticker}:{persona.key}",
+            **synthesis_model_kwargs(),
         )
         parsed = parse_stage_a_response(
             result.get("text") or "",

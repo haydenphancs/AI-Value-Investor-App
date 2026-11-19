@@ -1,4 +1,4 @@
-"""thinking_budget=0 is never sent to a model that refuses it (stopgap, 2026-11-15).
+"""thinking_budget=0 is never sent to a model that refuses it (stopgap 2026-11-15, corrected 2026-11-16).
 
 Google deprecated gemini-2.5-flash and from 2026-12-01 routes every request that names it to
 gemini-3.5-flash-lite. Measured live on 2026-11-15: gemini-3.5-flash-lite answers
@@ -6,10 +6,18 @@ gemini-3.5-flash-lite. Measured live on 2026-11-15: gemini-3.5-flash-lite answer
 (plain, JSON mode, response schema, tools, cached content, streaming with include_thoughts).
 The app sends 0 ("thinking off") on the report agentic loop, Stage A, Stage B, the ETF hook,
 index stories, the theme fit gate, the Learn writer/topic/cover subject and the marketing
-writer, so all of them would fail on the cutover. Budget 1 was measured as "off" (0 thought
-tokens) on BOTH gemini-2.5-flash and gemini-3.5-flash-lite, which makes it the one value that
-works before and after the reroute. gemini-3.8-flash ACCEPTS 0 (the judges rely on it) and
-gemini-2.5-flash-lite is not deprecated, so neither may change.
+writer, so all of them would fail on the cutover.
+
+Two encodings, by the model the request NAMES:
+* gemini-3.5-flash-lite: thinking_level "minimal", no budget. That is its real off (0 thought
+  tokens on every prompt measured 2026-11-15/16). Budget 1 is NOT off there: on real prompts it
+  thinks like level "low" (a Stage B narrative ~450-900 thought tokens per call).
+* gemini-2.5-flash: budget 1. 2.5-flash refuses ANY thinking_level, and 1 is the smallest budget
+  both sides of the reroute accept: 0 thought tokens on 2.5-flash itself, but "low"-like thinking
+  once 3.5-flash-lite serves it. Only naming 3.5-flash-lite reaches the level path.
+gemini-3.8-flash ACCEPTS 0 and REFUSES "minimal" (the judges rely on 0), and gemini-2.5-flash-lite
+is not deprecated, so neither may change. A budget AND a level in one config is a 400 on every
+model, so no config may carry both.
 
 Three layers: the encoder's table (every edge of the model name and the budget), each client
 method end to end through a recording fake SDK, and a source scan so a new call site cannot
@@ -34,21 +42,85 @@ OFF = gem._BUDGET_OFF_ON_REFUSING_MODELS
 # ── the encoder table ────────────────────────────────────────────────────────
 
 def test_the_off_value_is_one():
-    """1 is the value measured as "off" on both models. 0 is the refused value itself, and a
-    larger value would let 2.5-flash think (24 gave 21 thought tokens, 128 gave 98)."""
+    """1 is the smallest budget both sides of the reroute accept: 0 is the refused value itself,
+    and a larger value lets 2.5-flash think (24 gave 21 thought tokens, 128 gave 98). It is 0
+    thought tokens on gemini-2.5-flash, but NOT a guaranteed off once gemini-3.5-flash-lite serves
+    it (re-measured 2026-11-16: ~450-900 thought tokens on a Stage B prompt), which is why a request
+    naming 3.5-flash-lite gets thinking_level "minimal" instead (tests below)."""
     assert OFF == 1
 
 
-@pytest.mark.parametrize("model", [
-    "gemini-2.5-flash", "gemini-3.5-flash-lite",
-    "models/gemini-2.5-flash", "models/gemini-3.5-flash-lite",   # the context-cache spelling
-    "  Gemini-2.5-Flash  ", "MODELS/GEMINI-3.5-FLASH-LITE",       # case / whitespace
-])
-def test_zero_becomes_one_on_a_refusing_model(model):
+_TWO_FIVE = ["gemini-2.5-flash", "models/gemini-2.5-flash", "  Gemini-2.5-Flash  ", "MODELS/GEMINI-2.5-FLASH"]
+_LITE = ["gemini-3.5-flash-lite", "models/gemini-3.5-flash-lite",   # the context-cache spelling
+         "  Gemini-3.5-Flash-Lite  ", "MODELS/GEMINI-3.5-FLASH-LITE"]  # case / whitespace
+
+
+@pytest.mark.parametrize("model", _TWO_FIVE)
+def test_zero_becomes_budget_one_on_a_request_naming_two_five_flash(model):
     assert gem._wire_budget(0, model) == OFF
-    assert gem._thinking_config(0, model=model).thinking_budget == OFF
+    tc = gem._thinking_config(0, model=model)
+    assert tc.thinking_budget == OFF and tc.thinking_level is None
     stream = gem._stream_thinking_config(0, model=model)
     assert stream.thinking_budget == OFF and stream.include_thoughts is True
+    assert stream.thinking_level is None
+
+
+@pytest.mark.parametrize("model", _LITE)
+def test_zero_becomes_level_minimal_on_a_request_naming_three_five_lite(model):
+    """Its real off switch, and nothing else on the config: a budget beside a level is a 400."""
+    tc = gem._thinking_config(0, model=model)
+    assert tc.thinking_level == gem.types.ThinkingLevel.MINIMAL
+    assert tc.thinking_budget is None and tc.include_thoughts is None
+    stream = gem._stream_thinking_config(0, model=model)
+    assert stream.thinking_level == gem.types.ThinkingLevel.MINIMAL
+    assert stream.thinking_budget is None and stream.include_thoughts is True
+
+
+@pytest.mark.parametrize("model", _LITE)
+def test_the_budget_encoder_alone_still_never_sends_zero_to_three_five_lite(model):
+    """`_wire_budget` is the safety net for a direct caller: it never returns 0 for 3.5-flash-lite."""
+    assert gem._wire_budget(0, model) == OFF
+
+
+@pytest.mark.parametrize("budget", [1, 24, 512, 1024, 24576, -1, -500])
+@pytest.mark.parametrize("model", _LITE)
+def test_a_non_zero_budget_on_three_five_lite_stays_a_budget(model, budget):
+    """Only a 0 becomes the level. A real ceiling (chat's 1024, theme insights' 512) or -1 must stay
+    a budget on BOTH encoders — a level there would silently change how much the model thinks."""
+    tc = gem._thinking_config(budget, model=model)
+    assert tc.thinking_budget == budget and tc.thinking_level is None
+    stream = gem._stream_thinking_config(budget, model=model)
+    assert stream.thinking_budget == budget and stream.thinking_level is None
+    assert stream.include_thoughts is True
+
+
+def test_the_level_set_is_exactly_three_five_lite():
+    """2.5-flash refuses ANY thinking_level and 3.8-flash refuses "minimal" (both 400, live-probed
+    2026-11-15): adding either would break every request that names it."""
+    assert gem._LEVEL_OFF_MODELS == frozenset({"gemini-3.5-flash-lite"})
+    assert gem._LEVEL_OFF == gem.types.ThinkingLevel.MINIMAL
+    assert gem._LEVEL_OFF_MODELS <= gem._BUDGET_ZERO_REFUSED_MODELS
+
+
+_MATRIX_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.8-flash",
+                  "gemini-2.5-flash-lite", "models/gemini-3.5-flash-lite", "", None]
+
+
+@pytest.mark.parametrize("budget", [None, 0, 1, 512, 1024, -1, False])
+@pytest.mark.parametrize("model", _MATRIX_MODELS)
+def test_no_config_ever_carries_both_a_budget_and_a_level(model, budget):
+    for tc in (gem._thinking_config(budget, model=model), gem._stream_thinking_config(budget, model=model)):
+        if tc is not None:
+            assert tc.thinking_budget is None or tc.thinking_level is None
+
+
+@pytest.mark.parametrize("budget", [None, 0, 1, 512, 1024, -1])
+@pytest.mark.parametrize("model", ["gemini-2.5-flash", "models/gemini-2.5-flash", "gemini-3.8-flash",
+                                   "gemini-2.5-flash-lite", "gemini-3.5-flash-lite-preview", "", None])
+def test_only_three_five_lite_ever_gets_a_level(model, budget):
+    for tc in (gem._thinking_config(budget, model=model), gem._stream_thinking_config(budget, model=model)):
+        if tc is not None:
+            assert tc.thinking_level is None
 
 
 @pytest.mark.parametrize("model", [
@@ -85,9 +157,11 @@ def test_none_still_means_no_thinking_config(model):
 
 
 def test_a_bool_is_not_read_as_zero():
-    """False == 0 in Python; the remap must not fire on a wrong-typed value (it is passed through
+    """False == 0 in Python; neither remap may fire on a wrong-typed value (it is passed through
     exactly as before the stopgap, so the remap adds no new behaviour for it)."""
     assert gem._wire_budget(False, "gemini-2.5-flash") is False
+    assert gem._off_level(False, "gemini-3.5-flash-lite") is None
+    assert gem._thinking_config(False, model="gemini-3.5-flash-lite").thinking_level is None
 
 
 def test_the_model_argument_is_required_and_keyword_only():
@@ -118,6 +192,20 @@ def test_the_remap_logs_once_per_model(caplog, monkeypatch):
     assert len(lines) == 2
     assert any("model=gemini-2.5-flash " in m for m in lines)
     assert any("model=gemini-3.5-flash-lite " in m for m in lines)
+    # The line no longer claims budget 1 is "no thinking" (it is not, once 3.5-flash-lite serves it).
+    assert not any("no thinking" in m for m in lines)
+
+
+def test_the_level_remap_logs_once_per_model(caplog, monkeypatch):
+    monkeypatch.setattr(gem, "_level_off_logged", set())
+    with caplog.at_level(logging.INFO, logger=gem.logger.name):
+        for _ in range(3):
+            gem._thinking_config(0, model="gemini-3.5-flash-lite")
+        gem._stream_thinking_config(0, model="models/gemini-3.5-flash-lite")   # other spelling
+        gem._thinking_config(0, model="gemini-2.5-flash")                     # budget path: no level line
+    lines = [r.getMessage() for r in caplog.records if "thinking_level=minimal" in r.getMessage()]
+    assert lines == ["Gemini thinking_budget 0 sent as thinking_level=minimal for model=gemini-3.5-flash-lite "
+                     "(its off switch)"]
 
 
 # ── each client method, end to end through a recording fake SDK ──────────────
@@ -181,19 +269,32 @@ def _client(model="gemini-2.5-flash"):
     return c, seen
 
 
+#: The wire value expected for a caller's 0 on a request naming gemini-3.5-flash-lite.
+LEVEL = "level:minimal"
+
+
 def _budget(kw: dict) -> Any:
+    """The thinking setting on the wire: the budget, or LEVEL for thinking_level "minimal"
+    (asserting the config never carries both)."""
     tc = kw["config"].thinking_config
-    return None if tc is None else tc.thinking_budget
+    if tc is None:
+        return None
+    assert tc.thinking_budget is None or tc.thinking_level is None, "budget AND level is a 400"
+    if tc.thinking_level is not None:
+        assert tc.thinking_level == gem.types.ThinkingLevel.MINIMAL
+        return LEVEL
+    return tc.thinking_budget
 
 
-# (client model, model_name override, expected wire budget for a caller's 0)
+# (client model, model_name override, expected wire value for a caller's 0)
 _ROUTES = [
-    ("gemini-2.5-flash", None, OFF),                    # GEMINI_MODEL default: reports, Stage A/B
-    ("gemini-2.5-flash", "gemini-2.5-flash", OFF),      # hardcoded ETF / index / marketing writer
-    ("gemini-2.5-flash", "gemini-3.5-flash-lite", OFF), # an explicit switch to the new model
-    ("gemini-2.5-flash", "gemini-3.8-flash", 0),        # the judges: unchanged
-    ("gemini-2.5-flash", "gemini-2.5-flash-lite", 0),   # chat_answer_coverage: unchanged
-    ("gemini-3.8-flash", None, 0),                      # a client whose default accepts 0
+    ("gemini-2.5-flash", None, OFF),                      # GEMINI_MODEL default: reports, Stage A/B
+    ("gemini-2.5-flash", "gemini-2.5-flash", OFF),        # hardcoded ETF / index / marketing writer
+    ("gemini-2.5-flash", "gemini-3.5-flash-lite", LEVEL), # an explicit switch to the new model
+    ("gemini-3.5-flash-lite", None, LEVEL),               # GEMINI_MODEL switched to the new model
+    ("gemini-2.5-flash", "gemini-3.8-flash", 0),          # the judges: unchanged
+    ("gemini-2.5-flash", "gemini-2.5-flash-lite", 0),     # chat_answer_coverage: unchanged
+    ("gemini-3.8-flash", None, 0),                        # a client whose default accepts 0
 ]
 
 
@@ -224,7 +325,7 @@ async def test_the_two_streams_use_the_model_they_send_to(client_model, override
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("client_model,expected", [("gemini-2.5-flash", OFF), ("gemini-3.5-flash-lite", OFF),
+@pytest.mark.parametrize("client_model,expected", [("gemini-2.5-flash", OFF), ("gemini-3.5-flash-lite", LEVEL),
                                                    ("gemini-3.8-flash", 0)])
 async def test_the_cached_stage_b_call_and_the_tool_chat_use_the_client_model(client_model, expected):
     """Both always send `self.model_name` (the cache is created under it), so that is the model
@@ -241,7 +342,8 @@ async def test_the_cached_stage_b_call_and_the_tool_chat_use_the_client_model(cl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("override,expected", [(None, OFF), ("gemini-3.8-flash", 0)])
+@pytest.mark.parametrize("override,expected", [(None, OFF), ("gemini-3.8-flash", 0),
+                                               ("gemini-3.5-flash-lite", LEVEL)])
 async def test_generate_with_tools_uses_the_model_it_sends_to(override, expected):
     c, _ = _client("gemini-2.5-flash")
     configs: List[Any] = []
@@ -253,7 +355,7 @@ async def test_generate_with_tools_uses_the_model_it_sends_to(override, expected
     c._generate_content_retried = _fake  # type: ignore[assignment]
     await c.generate_with_tools("p", tools=[], tool_handlers={}, model_name=override, thinking_budget=0)
     assert configs and all(m == (override or "gemini-2.5-flash") for m, _ in configs)
-    assert all(cfg.thinking_config.thinking_budget == expected for _, cfg in configs)
+    assert all(_budget({"config": cfg}) == expected for _, cfg in configs)
 
 
 @pytest.mark.asyncio

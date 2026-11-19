@@ -8,6 +8,7 @@ Serves the IndexDetailView screen on iOS.
 import asyncio
 import logging
 import math
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -143,6 +144,18 @@ _INDEX_PROFILES: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _strip_story_headers(text: str) -> str:
+    """Remove the item markers and labels the AI-stories prompt asks for, and nothing else.
+
+    It used to run `text.replace("1.", "")` / `.replace("2.", "")` over the WHOLE answer, which
+    deleted those characters from every number: "+1.9%" became "+9%" and a macro description's
+    "CPI rose 2.4%" became "CPI rose 4%" — a wrong figure on the index screen, cached 7 days.
+    """
+    if not isinstance(text, str) or not text:
+        return ""
+    return _STORY_LABEL_RE.sub("", _STORY_MARKER_RE.sub("", text)).strip()
+
+
 def _proxy_for(symbol: str) -> str:
     """The entitled ETF that actually serves this screen.
 
@@ -175,6 +188,12 @@ def _proxy_for(symbol: str) -> str:
 _cache: Dict[str, Tuple] = {}
 _CACHE_TTL_SECONDS = 300  # default when a writer declares nothing
 _AI_CACHE_TTL_SECONDS = 3600  # 1 hour for AI-generated stories
+#: The prompt numbers its two items ("1. SECTOR STORY", "2. MACRO ITEMS"). A list marker is
+#: stripped only where it IS a marker — at the start of a line, not followed by a digit — so a
+#: figure such as "rose 1.9%" or "CPI at 2.4%" survives. The labels are the prompt's own
+#: upper-case words, removed wherever they appear, with an optional colon.
+_STORY_MARKER_RE = re.compile(r"(?m)^[ \t]*(?:[*#]+[ \t]*)?[12]\.(?!\d)[ \t]*")
+_STORY_LABEL_RE = re.compile(r"(?:\*\*)?(?:SECTOR STORY|MACRO ITEMS)(?:\*\*)?[ \t]*:?[ \t]*(?:\*\*)?")
 # A template fallback is cheap to regenerate but must not re-call Gemini on every request;
 # short enough that a transient quota failure does not pin prose for an hour.
 _AI_FALLBACK_TTL_SECONDS = 300
@@ -2273,9 +2292,8 @@ Write in a conversational, confident tone. Be specific and data-driven."""
             if len(parts) >= min_parts:
                 ai_sector = parts[0].strip()
 
-                # Clean up section headers
-                for header in ["1.", "2.", "SECTOR STORY", "MACRO ITEMS"]:
-                    ai_sector = ai_sector.replace(header, "").strip()
+                # Clean up section headers — markers only, never the digits of a figure.
+                ai_sector = _strip_story_headers(ai_sector)
 
                 if ai_sector and len(ai_sector) > 20:
                     has_placeholders = (
@@ -2289,9 +2307,7 @@ Write in a conversational, confident tone. Be specific and data-driven."""
 
                 # Parse macro from Gemini only if NOT cached
                 if not has_macro and len(parts) >= 2:
-                    ai_macro_raw = parts[1].strip()
-                    for header in ["2.", "MACRO ITEMS"]:
-                        ai_macro_raw = ai_macro_raw.replace(header, "").strip()
+                    ai_macro_raw = _strip_story_headers(parts[1])
 
                     import json
                     try:

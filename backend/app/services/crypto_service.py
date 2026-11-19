@@ -45,6 +45,15 @@ logger = logging.getLogger(__name__)
 
 
 # ── Static crypto profile metadata ────────────────────────────────
+#
+# `launch_date` is when the NETWORK or PROTOCOL went live: the mainnet / genesis block for a
+# chain (ADA, AVAX, DOT and NEAR all sold tokens years earlier and use their mainnet), the
+# protocol launch for an app token (UNI). Never a token sale, ICO, IEO or first-listing date.
+# It reaches two places verbatim: the iOS profile's "Launch Date" row and the AI snapshot
+# prompt ("Launch date: …"), whose answer is saved to `crypto_snapshots` PERMANENTLY — so a
+# sale date here becomes "its mainnet launched in 2017" in stored text (2026-11-16 model eval:
+# 5 of the snapshots the judge flagged were LINK's ICO date). CoinGecko-built profiles use
+# `genesis_date`, the same meaning.
 
 _CRYPTO_PROFILES: Dict[str, Dict[str, Any]] = {
     "BTC": {
@@ -196,7 +205,8 @@ _CRYPTO_PROFILES: Dict[str, Dict[str, Any]] = {
             "blockchains to external data sources, APIs, and payment systems. LINK is used "
             "to pay node operators for retrieving and delivering data."
         ),
-        "launch_date": "September 19, 2017",
+        # Mainnet on Ethereum. September 19, 2017 (held here until 2026-11-19) was the token sale.
+        "launch_date": "May 30, 2019",
         "consensus_mechanism": "Decentralized Oracle Network",
         "blockchain": "Ethereum (ERC-20)",
         "website": "chain.link",
@@ -211,7 +221,9 @@ _CRYPTO_PROFILES: Dict[str, Dict[str, Any]] = {
             "and is one of the most widely adopted scaling solutions in crypto, supporting "
             "thousands of dApps across DeFi, gaming, and NFTs."
         ),
-        "launch_date": "April 26, 2019",
+        # Matic PoS mainnet. April 26, 2019 (held here until 2026-11-19) was the token's
+        # Binance Launchpad sale and first listing.
+        "launch_date": "May 31, 2020",
         "consensus_mechanism": "Proof of Stake (PoS)",
         "blockchain": "Polygon / Ethereum L2",
         "website": "polygon.technology",
@@ -257,7 +269,9 @@ _CRYPTO_PROFILES: Dict[str, Dict[str, Any]] = {
             "low transaction fees. TRON has become the dominant network for USDT stablecoin "
             "transfers, processing more stablecoin volume than any other blockchain."
         ),
-        "launch_date": "September 2017",
+        # Mainnet (Odyssey 2.0); its genesis block followed on June 25, 2018. "September 2017"
+        # (held here until 2026-11-19) was the ERC-20 token sale.
+        "launch_date": "May 31, 2018",
         "consensus_mechanism": "Delegated Proof of Stake (DPoS)",
         "blockchain": "TRON",
         "website": "tron.network",

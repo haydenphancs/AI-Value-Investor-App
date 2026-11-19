@@ -322,8 +322,10 @@ enum APIEndpoint: Sendable {
     case getPortfolioInsights
     /// One report's live results for the Alerts sheet (`EarningsLiveResponse`). `reportDate`
     /// ("YYYY-MM-DD") picks the report; nil lets the server choose today's / the previous
-    /// trading day's / the next one.
-    case getEarningsLive(ticker: String, reportDate: String?)
+    /// trading day's / the next one. `history` false leaves out the year-ago quarter and the
+    /// last four quarters, which the server then never builds (4 FMP calls on report day): the
+    /// Tracking card's own ask, which draws neither (`TrackingViewModel.refreshLiveEarningsCards`).
+    case getEarningsLive(ticker: String, reportDate: String?, history: Bool = true)
 
     // MARK: - Portfolios
     case getPortfolios
@@ -665,7 +667,7 @@ enum APIEndpoint: Sendable {
             return "/api/v1/tracking/assets/holdings"
         case .getPortfolioInsights:
             return "/api/v1/tracking/portfolio-insights"
-        case .getEarningsLive(let ticker, _):
+        case .getEarningsLive(let ticker, _, _):
             return "/api/v1/tracking/earnings/\(ticker)/live"
 
         // Portfolios
@@ -884,10 +886,13 @@ enum APIEndpoint: Sendable {
         case .lookupNotification(let dedupKey):
             return ["dedup_key": dedupKey]
 
-        case .getEarningsLive(_, let reportDate):
-            // Omitted when nil so the server picks the report.
-            guard let reportDate, !reportDate.isEmpty else { return nil }
-            return ["report_date": reportDate]
+        case .getEarningsLive(_, let reportDate, let history):
+            // Each omitted when it says nothing: no date lets the server pick the report, and
+            // the sheet's ask (history on) keeps the request line it always had.
+            var q: [String: String] = [:]
+            if let reportDate, !reportDate.isEmpty { q["report_date"] = reportDate }
+            if !history { q["history"] = "false" }
+            return q.isEmpty ? nil : q
 
         case .listCreditHistory(let limit, let before):
             var q = ["limit": String(limit)]

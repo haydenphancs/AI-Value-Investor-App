@@ -150,10 +150,10 @@ forgotten must never reach it again, or it reads as new on every round.
     record is still held for, and shared: the rows of one hand-out look at one instant, and a
     read answers every look whose window opens before the tick after it.
 
-A REPORT FMP MOVES. Each day is judged on its own rows, so a report moved off its date would
-stay there: LIVE with FMP's fetch and an SEC slot until 22:00, then a card the next morning
-saying results are not in for a report that has not happened. So own fetches end the reports
-they stop listing (`_end_unlisted`): a record goes once they have left its symbol out for
+A REPORT FMP MOVES. Each day is judged on its own rows, so a report moved off its date would stay
+there: LIVE from 03:00 ET that day, with FMP's fetch and an SEC slot until 22:00, then a card the
+next morning saying results are not in for a report that has not happened. So own fetches end the
+reports they stop listing (`_end_unlisted`): a record goes once they have left its symbol out for
 `EARNINGS_LIVE_UNLISTED_END_SECONDS` (10 min), unless it holds a raw figure from either source.
   * Never on one answer. A short answer looks exactly like a move, and it hits every report
     with no figure on the day at once, while the record is what carries `seen_pending` and keeps
@@ -185,6 +185,13 @@ they stop listing (`_end_unlisted`): a record goes once they have left its symbo
     the days after today first, at most 14 calls per answer it rests on. Only a reader does: the
     tick's round reads today and tomorrow alone, bar its rare reads of the whole window, so a new
     date's card further out can take the memo's 6 h to appear.
+  * Not before 06:00 ET. The label starts at 03:00 and the own fetches at 06:00, so nothing can
+    end a record in between: a report FMP moves overnight reads LIVE on its old date, at a 30 s
+    poll, from 03:00 until the first own fetches after 06:00 have left it out for the 10 min
+    (about 06:15). The feed's card follows the memo's row from the memo's next round; a sheet
+    pinned to the old date, and a card already drawn LIVE that the iOS round keeps asking about
+    by that date, keep it until then. A known limit of the 03:00 start (2026-11-14), which kept
+    the reads' hours and so their FMP calls as they were.
   A stale row FMP leaves beside the new date is NOT seen while nothing is in: its status, its SEC
   slot and its card compare no dates, because a company reporting EARLIER leaves the later date
   pending, so the row dated today can be the real one. Nor is a lone leftover row dated today
@@ -192,7 +199,11 @@ they stop listing (`_end_unlisted`): a record goes once they have left its symbo
   TWO DATES.
 
 ONE REPORT, TWO DATES. FMP's leftover row one trading day after a report is a record of its own,
-with a date and a dedup key of its own, and the owner's rule is one push per report.
+with a date and a dedup key of its own, and the owner's rule is one push per report. Until the
+earlier report holds a figure the leftover reads as a report of its own: when that report had none
+at midnight, its figures come with the 06:00 read of the previous trading day (no memo holds a day
+before today), so from 03:00 until then (about 06:02) the leftover dated today reads LIVE beside
+the earlier report's `awaiting` card (the 03:00 start's limit, A REPORT FMP MOVES).
   * The push is the ledger's call, in the dispatcher, for each user
     (`earnings_live_sender`, ONE REPORT, TWO DATES). A landing here decides nothing about it.
   * An 8-K accepted the evening before never reaches the later row (`find_results_filings`).
@@ -272,15 +283,21 @@ open (THE MEMO). Never an older day: the sheet refuses its date, and each refres
     still takes the figures away.
   * In the first seconds after boot, before the first tick, a card reads what it always did.
 
-STATUSES (no time of day exists on `/stable` rows, so the window is the report day):
-  * `upcoming` — a later date, or today before 06:00 ET with nothing in yet.
-  * `live`     — today, 06:00–22:00 ET, results not complete. LIVE is drawn ONLY then, and
-                 it is true: SEC is checked every minute in the release windows, and FMP
-                 every 3 min in the windows its company uses and every 15 min otherwise. On
-                 a weekend, when EDGAR accepts nothing, FMP alone.
+STATUSES (no time of day exists on `/stable` rows, so the window is the report day, ET):
+  * `upcoming` — a later date, or today before 03:00 ET with nothing in yet.
+  * `live`     — today from 03:00 ET to midnight ET (and earlier once a figure is in), results
+                 not complete: LIVE says the results come out today (owner, 2026-11-14: "make the
+                 'live' all day long, the day that company report earning", then "3 AM New
+                 York": 03:00 ET is midnight on the US West Coast, so "reports today" holds
+                 across the mainland US). The reads keep
+                 their own hours: from 06:00 to 22:00 ET SEC is checked every minute in the
+                 release windows, and FMP every 3 min in the windows its company uses and every
+                 15 min otherwise; on a weekend, when EDGAR accepts nothing, FMP alone. Before
+                 06:00 and from 22:00 ET the loop reads nothing, but a polled card or sheet
+                 still reads the shared Tracking memo (THE SHEET'S POLL).
   * `reported` — complete (EPS, plus revenue when a revenue estimate exists, shown or
-                 guard-only), or the live window ended with at least one figure in.
-  * `awaiting` — the window ended with nothing in. "Results not in yet" — never "late", a
+                 guard-only), or the report day ended with at least one figure in.
+  * `awaiting` — the report day ended with nothing in. "Results not in yet" — never "late", a
                  status `earnings_window_service` deliberately does not have (FMP lag and
                  reschedule duplicates make it misleading). An awaiting card stays up until
                  12:00 ET on the first trading day after its report, and drops once.
@@ -289,15 +306,28 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
   pending row beside a reported one is a leftover and never hides the figures. The sheet
   opened with no date takes the same pick, and still answers a report whose card has dropped.
 
-THE SHEET'S POLL (`sheet_poll_seconds`, `poll_seconds` on the wire). 30 s while `live`. 120 s
-while `reported` with a preliminary figure on show, inside `fmp_window_open`: FMP's fill is what
-replaces that figure, and the loop is still asking FMP then. None otherwise, past those hours
-too: the record moves too rarely to poll, and the next open reads it. The two rules ship as one,
-or the sheet would poll a record nothing updates. Where they say None, a record that still wants
-FMP (`needs_fmp`) asks again in 30 s while the loop has yet to load its day, or the day of the
-report it reads as (`awaits_first_load`, `EarningsLiveService.snapshot`): that load is on the
-loop's next round and brings FMP's answer, and a record the table gave back holds no consensus
-and no FMP figure until it comes (A RESTART).
+THE SHEET'S POLL (`sheet_poll_seconds`, `poll_seconds` on the wire). 30 s while `live` (03:00 ET, or
+earlier once a figure is in, to midnight on the report day). Before 06:00 and from 22:00 ET the loop
+reads nothing, but each poll (and the iOS Tracking round over LIVE cards, outside price hours)
+reads the shared Tracking memo: while someone is looking it pays a round every 30 min (today and
+tomorrow, 2 FMP calls; the later days every 6 h) and folds any late FMP fill, so an evening fill can
+still show before midnight, and a sheet left open at 05:59 shows the 06:00 read. Such a fold says
+when the memo read FMP (`_note_memo_read`), so the sheet's "updated" never stops at the loop's
+last read while the memo still reads. The sheet's ask also builds the report's history extras
+(`history_extras`, 4 FMP calls on report day): once per report for 6 h after a clean build, every
+5 min while the build is degraded or failing (`_EXTRAS_FAILURE_TTL_SECONDS`). The Tracking round
+asks with `history=false` and never builds them, since the card draws none (owner's question,
+2026-11-14: the API calls stay as they were). From 03:01 ET the round also asks about a report-day
+card an open tab still draws `upcoming` (no feed build runs before 04:00), until an answer settles
+it (a `keep` is asked again the next round), so the card turns LIVE about a minute after 03:00.
+120 s while `reported` with a preliminary figure on
+show, inside `fmp_window_open`: FMP's fill is what replaces that figure, and the loop is still
+asking FMP then. None otherwise, past those hours too: the record moves too rarely to poll, and the
+next open reads it. The two rules ship as one, or the sheet would poll a record nothing updates.
+Where they say None, a record that still wants FMP (`needs_fmp`) asks again in 30 s while the loop
+has yet to load its day, or the day of the report it reads as (`awaits_first_load`,
+`EarningsLiveService.snapshot`): that load is on the loop's next round and brings FMP's answer, and
+a record the table gave back holds no consensus and no FMP figure until it comes (A RESTART).
   One more 30 s, with no record at all: an answer this read could not tell (`recheck`). `none`
 says a day was read and lists no report, and iOS prints that and stops asking, so a day nobody
 has read reads as a report not in yet instead: `upcoming`, or `awaiting` before today, with no
@@ -474,9 +504,16 @@ EARNINGS_LIVE_UNLISTED_END_SECONDS = 600
 #: How long a first look listing nothing on a trading day stays no answer (THE MEMO in the module
 #: docstring). The same 10 min, for the same blip, and it has an end because a sheet waits on it.
 EARNINGS_LIVE_BLANK_LOAD_WAIT_SECONDS = 600
-#: The live window on the report day, in ET hours: [start, end).
+#: The hours a report day is read at the report-day pace, in ET: [start, end) — FMP's fast fetch
+#: (`fmp_window_open`), the SEC round and the morning memo round. The LIVE label has its own
+#: hours (`EARNINGS_LIVE_LABEL_START_HOUR_ET`, `live_status`).
 EARNINGS_LIVE_START_HOUR_ET = 6
 EARNINGS_LIVE_END_HOUR_ET = 22
+#: The ET hour the LIVE label starts on the report day; it ends at midnight ET. 03:00 ET is
+#: midnight on the US West Coast, so the card's "reports today" is true across the mainland US
+#: (owner, 2026-11-14: "3 AM New York", after "make the 'live' all day long"). A figure in before
+#: it makes the card LIVE at once.
+EARNINGS_LIVE_LABEL_START_HOUR_ET = 3
 #: An `awaiting` card stays up until this ET hour on the first trading day after its report.
 EARNINGS_LIVE_PREV_DAY_UNTIL_HOUR_ET = 12
 #: When the tick owes the Tracking memo a round on a trading day, as ET (hour, minute)
@@ -1037,17 +1074,21 @@ def tick_refreshes_memo(n: datetime, stored_ago: Optional[float]) -> bool:
 
 def live_status(day: date, today: date, now_et: datetime, eps: LiveMetric,
                 revenue: LiveMetric) -> str:
-    """PURE. The status of a report dated `day`, seen at `now_et` (see the module docstring)."""
+    """PURE. The status of a report dated `day`, seen at `now_et` (see STATUSES in the module
+    docstring). LIVE runs from `EARNINGS_LIVE_LABEL_START_HOUR_ET` (03:00 ET) to midnight ET on
+    the report day, until the results are complete, and from earlier once a figure is in: the
+    label tells users the results come out today (owner, 2026-11-14: "make the 'live' all day
+    long, the day that company report earning", then "3 AM New York"). The loop's own reads keep
+    their hours (`fmp_window_open`); before 06:00 and from 22:00 ET a polled card or sheet still
+    reads the shared Tracking memo (THE SHEET'S POLL in the module docstring)."""
     if day > today:
         return STATUS_UPCOMING
     any_in = has_results(eps, revenue)
     if day == today:
         if is_complete(eps, revenue):
             return STATUS_REPORTED
-        if now_et.hour < EARNINGS_LIVE_START_HOUR_ET:
-            return STATUS_LIVE if any_in else STATUS_UPCOMING
-        if now_et.hour >= EARNINGS_LIVE_END_HOUR_ET:
-            return STATUS_REPORTED if any_in else STATUS_AWAITING
+        if now_et.hour < EARNINGS_LIVE_LABEL_START_HOUR_ET and not any_in:
+            return STATUS_UPCOMING
         return STATUS_LIVE
     return STATUS_REPORTED if any_in else STATUS_AWAITING
 
@@ -1661,6 +1702,20 @@ def _too_old_to_open(stored_at: Optional[float]) -> bool:
             and time.monotonic() - stored_at >= EARNINGS_LIVE_HELD_ROWS_MAX_AGE_SECONDS)
 
 
+def _note_memo_read(rec: _Record, now: datetime, stored_at: Optional[float]) -> None:
+    """Move `checked_at` on to the moment the Tracking memo read the rows just folded from FMP:
+    the memo's own stamp `stored_at` (monotonic) as a wall time, never `now`, since the rows can
+    be 30 min old and "updated just now" over them would be false. LIVE runs to midnight ET while
+    the loop's own reads stop at 22:00, so after that the memo is the one reader left, and a
+    `checked_at` left at the last own read would put "updated 2 h ago" over a fill it just
+    brought (2026-11-14 review). Rows of unknown age never move it, and it never moves back."""
+    if stored_at is None:
+        return
+    read_at = now - timedelta(seconds=max(0.0, time.monotonic() - stored_at))
+    if rec.checked_at is None or read_at > rec.checked_at:
+        rec.checked_at = read_at
+
+
 def _settled(actual: Optional[float], estimate: Optional[float],
              pick: Optional[Tuple[Dict[str, Any], float]], rows: List[Dict[str, Any]],
              estimate_of: Callable[[Dict[str, Any]], Optional[float]],
@@ -1800,8 +1855,9 @@ class EarningsLiveService:
         ``fetched`` is True only for an answer just read from FMP, the one moment the sources
         were actually checked: this module's OWN fetch, or the daily pass's
         (`earnings_sender._fold_into_live_records`). Rows folded in from the Tracking memo (they
-        can be hours old) must not move `checked_at`, or the sheet would say "updated just now"
-        over an old answer.
+        can be hours old) move `checked_at` only to the moment the memo read them
+        (`_note_memo_read`), never to now, or the sheet would say "updated just now" over an old
+        answer.
 
         ``stored_at`` is when the memo stored these rows, on the clock of `_fetched`
         (`tracking_service.earnings_day_stored_at`); an own fetch ignores it. The newest FMP
@@ -1843,6 +1899,8 @@ class EarningsLiveService:
             took[symbol] = self._fold_report(rec, _rows_to_fold(ranked, today), now,
                                              fetched=fetched)
             self._note_landing(rec, now)
+            if not fetched:
+                _note_memo_read(rec, now, stored_at)
         if unopened:
             logger.warning(
                 "[earnings-live] %s: memo rows held %.0f h opened no record for %d report(s) "

@@ -5298,24 +5298,32 @@ EPS from (`eps_row_per_report`).
 **Statuses and the sheet's poll** (no row carries a time of day, so the window is the report
 day, ET):
 
-- `upcoming` — a later date, or today before 06:00 ET with nothing in yet;
-- `live` — today, 06:00–22:00 ET, results incomplete, and before 06:00 too once a figure is in,
-  though nothing is read at the report-day pace until 06:00. From 06:00 the red LIVE label is
-  true: SEC is read every minute in the company's own release windows (in a burst of releases
-  the most-watched first, the others waiting their turn) and FMP every 3 min in a window its
-  company uses (Costs); on a weekend, when EDGAR accepts nothing, FMP alone;
-- `reported` — complete (EPS, plus revenue when any revenue consensus exists), or the window
+- `upcoming` — a later date, or today before 03:00 ET with nothing in yet;
+- `live` — today from 03:00 ET to midnight ET, results incomplete, and before 03:00 too once a
+  figure is in: the red LIVE label says the results come out today (owner, 2026-11-14: "make the
+  'live' all day long", then "3 AM New York": 03:00 ET is midnight on the US West Coast, so the
+  card's "reports today" holds across the mainland US). The reads keep their own hours: from 06:00
+  to 22:00 ET SEC is read every minute in the company's own release windows (in a burst of releases
+  the most-watched first, the others waiting their turn) and FMP every 3 min in a window its company
+  uses (Costs); on a weekend, when EDGAR accepts nothing, FMP alone. Before 06:00 and from 22:00 the
+  loop reads nothing, but a polled card or sheet still reads the shared Tracking memo (below);
+- `reported` — complete (EPS, plus revenue when any revenue consensus exists), or the report day
   ended with a figure in;
-- `awaiting` — the window ended with nothing in: "results not in yet", never "late" (FMP lag and
-  reschedule duplicates make that misleading). The card stays up until 12:00 ET on the first
-  trading day after its report, so a Friday card stays until Monday noon;
+- `awaiting` — the report day ended with nothing in: "results not in yet", never "late" (FMP lag and
+  reschedule duplicates make that misleading). The card stays up until 12:00 ET on the first trading
+  day after its report, so a Friday card stays until Monday noon;
 - `none` — the sheet asked about a ticker with nothing listed in the window.
 
-A symbol draws ONE card from the days before today: its newest reported report, else the newest
-one still up (`newest_report`); the sheet opened with no date takes the same pick. The sheet asks
-again as `poll_seconds` says (`sheet_poll_seconds`): 30 s while `live`; 120 s while `reported` with
-a preliminary figure on show, during the hours FMP is still asked (`fmp_window_open`); 30 s for a
-record still wanting FMP whose day the loop has yet to load (`awaits_first_load`); null otherwise.
+A symbol draws ONE card from the days before today: its newest reported report, else the newest one
+still up (`newest_report`); the sheet opened with no date takes the same pick. The sheet asks again
+as `poll_seconds` says (`sheet_poll_seconds`): 30 s while `live`, 03:00 ET (or earlier once a figure
+is in) to midnight on the report day (at night each poll, like the iOS round over LIVE cards outside
+price hours, reads the shared Tracking memo, which pays a round every 30 min while someone is
+looking, 2 FMP calls, and folds any late FMP fill; such a fold moves `checked_at` to when the memo
+read FMP, never to the moment it folded, so the sheet's "updated" keeps moving after the loop's own
+reads stop at 22:00); 120 s while `reported` with a preliminary figure on show, during the hours FMP is
+still asked (`fmp_window_open`); 30 s for a record still wanting FMP whose day the loop has yet to
+load (`awaits_first_load`); null otherwise.
 A day nobody has read is never `none`, which iOS prints and stops asking on: it answers
 `upcoming`, or `awaiting` before today, with no figures and a 30 s recheck, and a calendar outage
 answers the same, never a 502. With `EARNINGS_LIVE_ENABLED` off the loop idles: the sheet returns
@@ -5325,7 +5333,11 @@ no results card.
 **A report FMP moves.** Own fetches end a report they stop listing once they have left it out for
 10 min (`_end_unlisted`), never on one answer (a short answer looks exactly like a move) and never
 while the record holds a raw figure from either source; a report moved off today settles within
-about 45 min, and a sheet pinned to the old date follows the report to its next listed date. A
+about 45 min, and a sheet pinned to the old date follows the report to its next listed date. Not
+before 06:00, when the own fetches start: a report FMP moves overnight reads LIVE on its old date
+from 03:00 until about 06:15, and a leftover row beside a report with no figure at midnight reads
+LIVE beside that report's `awaiting` card until its 06:00 read (about 06:02), a known limit of the
+03:00 start, which kept the reads' hours and their FMP calls. A
 memo row held 12 h or longer opens no record (FMP may have moved the report since, and an open
 record is a report day: LIVE, FMP's fetch, an SEC slot, then a card), so a tick about to open one
 on rows that old pays the memo a round first (`old_rows_would_open`). A record with no figures of
@@ -5496,16 +5508,22 @@ the sheet). An answer that settles the card's own report (`live`, `reported`, or
 `poll_seconds`) is written onto the card; one the server could not settle yet (`poll_seconds` set)
 leaves it LIVE for the next round; a report that moved to another date or left the calendar
 (`none`), and a 404 or a 400, hand that round to one feed build, since which cards stand is then
-the feed's to say.
+the feed's to say. The round asks with `history=false`: the card draws no year-ago quarter and no
+last four quarters, so the route never builds them for it. LIVE starts at 03:00 ET, before the
+04:00 feed builds (none at all on a closed day), so the round also asks about a report-day card the
+tab still draws `upcoming`, from 03:01 ET, until one answer settles it, once a day
+(`TrackingViewModel.labelStartReports`); the phone's clock only picks when to ask.
 
 **Costs.** Only the live loop asks FMP at the paces below. Feed builds, the sheet and the Tracking
 poll's asks about LIVE cards read through the Tracking memo, which pays its own rounds (§7.1), and
 the sheet's route adds up to 14 calls when it is about to answer `none` (`later_days_since`), its
-extras (`earnings_service.get_earnings`, once per report for 6 h), and one look on the loop's next
-round for a day past the live days the loop has not read (`sheet_asked`). So outside price hours a
-viewer's Tracking tab costs one route read per LIVE card every 30 s (at most 8 a round), with no
-FMP call once the memo and the report's extras are warm, plus one feed build when a report moves
-under a LIVE card or its route refuses it.
+extras (`earnings_service.get_earnings`, 4 FMP calls on report day: once per report for 6 h after a
+clean build, every 5 min while the build is degraded or failing; the Tracking round's
+`history=false` asks never build them), and one look on the loop's next round for
+a day past the live days the loop has not read (`sheet_asked`). So outside price hours a viewer's
+Tracking tab costs one route read per LIVE card every 30 s (at most 8 a round), with no FMP call
+once the memo is warm, plus one feed build when a report moves under a LIVE card or its route
+refuses it.
 
 - **FMP**, at the report-day pace (`_fmp_cadence`, the owner's design of 2026-11-11). A report day
   is asked about only while a watched report on it still wants FMP (`needs_fmp`: it lacks results,

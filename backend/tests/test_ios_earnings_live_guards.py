@@ -8,15 +8,19 @@ screen's contract is:
     the backend may send, or a key an older backend leaves out, never fails a decode; each
     status decodes from the backend's own word;
   * the route: `APIEndpoint.getEarningsLive` is the backend's path, signed-in only;
-  * the honesty rule: LIVE is drawn from the SERVER's status, never from date math on the
-    device (`LiveNewsHeader`: nothing live on screen, no "Live"), and only on the live card;
+  * the label rule: LIVE is drawn from the SERVER's status (the report day, 03:00 ET, or earlier
+    once a figure is in, to midnight ET, until the results are complete: "the results come out
+    today"), never from date math on the device, and only on the live card, hung from its glyph
+    clear of the bell;
   * the poll: it stops when the server stops asking, its starter cancels before re-arming (two
     pollers would double the traffic), it never reads the status, and a failed first load retries
     by itself, bounded. The Tracking tab's 30 s poll builds the whole feed only while a price on
-    it can move; otherwise it asks each LIVE card's own route, which costs no FMP call per
-    holding, and a card takes an answer only when it settles that card's own report: one the
-    server could not settle leaves the card LIVE, and a moved or unlisted report is the feed's
-    to redraw;
+    it can move; otherwise it asks each LIVE card's own route with `history: false`, which costs
+    no FMP call per holding and builds no history the card never draws, and a card takes an
+    answer only when it settles that card's own report: one the server could not settle leaves
+    the card LIVE, and a moved or unlisted report is the feed's to redraw. A report-day card the
+    tab still draws `upcoming` is asked about from 03:01 ET until an answer settles it, once a day
+    per identity, the phone's clock picking only when to ask;
   * the route: "See live results" is offered only while the endpoint serves that report;
   * the sheet: its header follows the card's own answer, it claims nothing before the first
     answer, it says "Waiting…" only while the report is live, it stops saying LIVE when the
@@ -643,8 +647,21 @@ def test_the_feed_response_decodes_the_recent_earnings_list():
 
 def test_the_endpoint_is_the_backend_route_and_sign_in_only():
     src = _code("Core/Services/APIEndpoint.swift")
-    assert 'return "/api/v1/tracking/earnings/\\(ticker)/live"' in src
-    assert '["report_date": reportDate]' in src
+    assert "case getEarningsLive(ticker: String, reportDate: String?, history: Bool = true)" in src
+    assert 'case .getEarningsLive(let ticker, _, _): return "/api/v1/tracking/earnings/\\(ticker)/live"' in _norm(src)
+    # The query arm whole: no date lets the server pick, and only `history: false` adds a key, so
+    # the sheet's request line stays as it was (pinned against the route in
+    # `test_tracking_earnings_live_endpoint.py::test_the_cards_ask_never_builds_the_history`).
+    query = src[src.index("var queryParameters"):]
+    arm = query[query.index("case .getEarningsLive("):]
+    arm = _norm(arm[: arm.index("\n        case ", 1)]).strip()
+    assert arm == (
+        "case .getEarningsLive(_, let reportDate, let history): "
+        "var q: [String: String] = [:] "
+        'if let reportDate, !reportDate.isEmpty { q["report_date"] = reportDate } '
+        'if !history { q["history"] = "false" } '
+        "return q.isEmpty ? nil : q"
+    ), arm
     policy = src[src.index("var authPolicy: AuthPolicy"):]
     # The arm that holds the Tracking feed itself: from its `case` line to its `return`.
     at = policy.index(".getTrackingAssets")
@@ -673,13 +690,38 @@ def test_the_live_badge_is_drawn_on_the_live_card_alone():
     live earnings card asks it for the badge. The arm that draws it, and the words VoiceOver
     reads, are pinned whole: `leadingBadge == nil` draws LIVE on every other row and never on the
     live one, and a deleted overlay or "Live. " drops the owner's label with every guard green.
+    The placement is pinned too: hung from the glyph by its TOP, 2 pt over the circle, clear of
+    the bell (owner, 2026-11-14: "move it down a bit … it's too close to the bell"; an `.offset`
+    from the bottom edge sat ~3 pt under the bell and grew up over it at large text sizes). The
+    top is pinned by a zero-height frame, never `.alignmentGuide`: the Simulator ignored one in
+    this overlay (2026-11-14) and drew the badge bottom-aligned, over the bell. And it is pinned
+    to the view it hangs from: the glyph's own ZStack, the overlay its very next modifier, so an
+    overlay moved onto the card or a padding put between moves the badge with this test red
+    (2026-11-14 review: the content-only pin passed both).
     Across the app the badge is drawn only there, in the sheet's header and in its own preview,
     and only `AlertCardView` asks a row for it."""
     row = _struct_block(_code(_ACTIVITY_ROW), "ActivityRow")
     assert ".overlay(alignment: .bottom) {" in row, "no row draws the LIVE label any more"
-    assert _norm(_bracketed(row, ".overlay(alignment: .bottom) {")).strip() == (
-        "if leadingBadge == .live { LiveBadge() .offset(y: 9) }"
+    overlay = _norm(_bracketed(row, ".overlay(alignment: .bottom) {")).strip()
+    assert "alignmentGuide" not in overlay, "an alignment guide was ignored here: badge over bell"
+    assert overlay == (
+        "if leadingBadge == .live { LiveBadge() .fixedSize() "
+        ".frame(height: 0, alignment: .top) .offset(y: -2) }"
     )
+    glyph_opener = "ZStack(alignment: .topLeading) {"
+    assert row.count(glyph_opener) == 1
+    glyph = _body(row, glyph_opener)
+    assert "AlertCategoryIcon(" in glyph, "the ZStack the badge hangs from is not the glyph"
+    after_glyph = row[row.index(glyph_opener) + len(glyph_opener) - 1 + len(glyph):]
+    assert _norm(after_glyph).lstrip().startswith(
+        ".overlay(alignment: .bottom) { if leadingBadge == .live { LiveBadge() .fixedSize() "
+        ".frame(height: 0, alignment: .top) .offset(y: -2) } }"
+    ), "the LIVE overlay must be the glyph's very next modifier"
+    preview = _code("Views/Atoms/LiveBadge.swift")
+    preview = preview[preview.index("#Preview"):]
+    assert _norm(_bracketed(preview, ".overlay(alignment: .bottom) {")).strip() == (
+        "LiveBadge() .fixedSize() .frame(height: 0, alignment: .top) .offset(y: -2)"
+    ), "the atom's preview shows the badge where the row hangs it"
     assert row.count("LiveBadge(") == 1
     assert _norm(_bracketed(row, ".accessibilityLabel", "(", ")")).strip() == (
         '"\\(isNew ? "New. " : "")\\(leadingBadge == .live ? "Live. " : "")\\(title). \\(subtitle)"'
@@ -843,7 +885,10 @@ def test_the_report_date_reaches_the_endpoint_from_both_doors():
         vm, "init(ticker: String, reportDate: String?, apiClient: APIClient = .shared) {")
     assert "endpoint: .getEarningsLive(ticker: ticker, reportDate: reportDate)," in _body(
         vm, "private func load() async {")
-    assert 'guard let reportDate, !reportDate.isEmpty else { return nil }' in _code(
+    # The sheet draws the year-ago quarter and the last four, so it never turns them off (only
+    # the Tracking card's round does: `test_a_live_card_is_asked_about_through_its_own_route_alone`).
+    assert "history:" not in vm
+    assert 'if let reportDate, !reportDate.isEmpty { q["report_date"] = reportDate }' in _code(
         "Core/Services/APIEndpoint.swift")
 
 
@@ -960,7 +1005,8 @@ def test_the_poll_builds_the_feed_only_while_a_price_can_move():
         "let assets = self.trackedAssets "
         "if MarketHoursUtil.shouldRefreshPrices( assetTypes: assets.map(\\.assetType), "
         "symbols: assets.map(\\.ticker) ) { await self.loadTrackingFeed() } "
-        "else if self.filteredAlerts.contains(where: \\.isLiveEarnings) { "
+        "else if self.filteredAlerts.contains(where: \\.isLiveEarnings) "
+        "|| !self.labelStartReports().isEmpty { "
         "await self.refreshLiveEarningsCards() } } } }"
     )
 
@@ -985,16 +1031,25 @@ def test_a_live_card_is_asked_about_through_its_own_route_alone():
     assert refresh == (
         "{ let generation = loadGeneration let revision = alertsRevision "
         "let reports: [LiveCardReport] = filteredAlerts.compactMap { Self.liveCardReport($0) } "
-        "guard !reports.isEmpty else { return } "
+        "let starting: [LiveCardReport] = Array( "
+        "labelStartReports().prefix(Self.maxLiveCardsPerRound) ) "
+        "let startingIds: Set<String> = Set(starting.map(\\.id)) "
+        "var batch: [LiveCardReport] = starting "
+        "if !reports.isEmpty { "
         "let start: Int = liveCardCursor % reports.count "
         "let rotated: [LiveCardReport] = Array(reports[start...]) + Array(reports[..<start]) "
-        "let batch: [LiveCardReport] = Array(rotated.prefix(Self.maxLiveCardsPerRound)) "
-        "liveCardCursor = start + batch.count "
+        "let room: Int = Self.maxLiveCardsPerRound - batch.count "
+        "let taken: [LiveCardReport] = Array(rotated.prefix(room)) "
+        "liveCardCursor = start + taken.count batch += taken } "
+        "guard !batch.isEmpty else { return } "
         "for report in batch { do { let answer: EarningsLiveResponse = try await apiClient.request( "
-        "endpoint: .getEarningsLive(ticker: report.ticker, reportDate: report.reportDate), "
+        "endpoint: .getEarningsLive(ticker: report.ticker, reportDate: report.reportDate, "
+        "history: false), "
         "responseType: EarningsLiveResponse.self ) "
         "guard !Task.isCancelled, generation == loadGeneration, revision == alertsRevision else { return } "
-        "switch Self.liveCardStep(answer, about: report) { "
+        "let step: LiveCardStep = Self.liveCardStep(answer, about: report) "
+        "if step != .keep { settleLabelStart(report, among: startingIds) } "
+        "switch step { "
         "case .write: guard let index = alerts.firstIndex(where: { $0.id == report.id }), "
         "case .earnings(let data) = alerts[index] else { continue } "
         "alerts[index] = .earnings(data.updated(with: answer)) "
@@ -1005,8 +1060,10 @@ def test_a_live_card_is_asked_about_through_its_own_route_alone():
         "guard !Task.isCancelled, generation == loadGeneration, revision == alertsRevision else { return } "
         "let appError = AppError.from(error) "
         "logLiveCardFailure(error, as: appError, report: report) "
-        "if case .notFound = appError { await loadTrackingFeed() return } "
-        "if case .validationFailed = appError { await loadTrackingFeed() return } } } }"
+        "if case .notFound = appError { settleLabelStart(report, among: startingIds) "
+        "await loadTrackingFeed() return } "
+        "if case .validationFailed = appError { settleLabelStart(report, among: startingIds) "
+        "await loadTrackingFeed() return } } } }"
     )
     assert _norm(_body(vm, "private static func liveCardReport(_ alert: AppAlert) -> LiveCardReport? {")) == (
         "{ guard case .earnings(let data) = alert, data.status == .live, "
@@ -1019,6 +1076,70 @@ def test_a_live_card_is_asked_about_through_its_own_route_alone():
     )
     for declared in ("private var alertsRevision = 0", "private var liveCardCursor = 0"):
         assert declared in vm, declared
+
+
+def test_a_report_day_card_drawn_upcoming_is_asked_about_at_the_label_start():
+    """LIVE starts at 03:00 ET, before the 04:00 feed builds (none at all on a closed day), and the
+    round asks only about LIVE cards, so a tab loaded before 03:00 kept today's card `upcoming`
+    until 04:00, or all day on a closed day (2026-11-14 review). From 03:01 ET the round asks
+    about a card drawn `upcoming` on its own report day, and the answer decides whether it reads
+    LIVE. Settled by any answer but `keep` and by a refusal, then not asked again that day for
+    this identity, never once per feed answer: with the live switch off the server keeps
+    answering `upcoming`, and a backend without the route would make each 404 a feed build every
+    30 s."""
+    vm = _code(_TRACKING_VM)
+    assert _norm(_body(
+        vm, "private static func labelStartReport(_ alert: AppAlert, day: String) -> LiveCardReport? {"
+    )) == (
+        "{ guard case .earnings(let data) = alert, data.status == .upcoming, "
+        "data.reportDate == day, !data.ticker.isEmpty else { return nil } "
+        "return LiveCardReport(id: alert.id, ticker: data.ticker, reportDate: day) }"
+    ), "only a card drawn upcoming on its own report day, by its own ticker and that day"
+    assert _norm(_body(vm, "private func labelStartReports() -> [LiveCardReport] {")) == (
+        "{ guard let day = MarketHoursUtil.liveLabelAskDayKey() else { return [] } "
+        'let scope: String = "\\(day)#\\(loadGeneration)" '
+        "if scope != labelStartScope { labelStartScope = scope labelStartAnswered = [] } "
+        "return filteredAlerts .compactMap { Self.labelStartReport($0, day: day) } "
+        ".filter { !labelStartAnswered.contains($0.id) } }"
+    ), "asked until settled, once a day per identity: never keyed on the feed's revision"
+    assert _norm(_body(
+        vm, "private func settleLabelStart(_ report: LiveCardReport, among starting: Set<String>) {"
+    )) == "{ if starting.contains(report.id) { labelStartAnswered.insert(report.id) } }"
+    for declared in ('private var labelStartScope = ""',
+                     "private var labelStartAnswered: Set<String> = []"):
+        assert declared in vm, declared
+    # "Once a day per identity" holds only while `loadGeneration` moves on an identity change
+    # alone: a bump per feed build would empty the set after every refusal's feed build, and that
+    # card would be asked again 30 s later, a feed build each time (2026-11-14 review; Home pins
+    # its own the same way in test_ios_home_signals_refresh_guards.py).
+    writes = re.findall(r"\bloadGeneration\s*(&?[+-]=|=(?!=))", vm)
+    assert writes == ["=", "&+="], (
+        f"loadGeneration is written outside its declaration and handleIdentityChange: {writes}")
+    assert "loadGeneration &+= 1" in _body(vm, "func handleIdentityChange(isActiveTab: Bool) async {")
+
+
+def test_the_label_start_ask_follows_the_backends_label_hour_in_new_york():
+    """One minute after the backend's `EARNINGS_LIVE_LABEL_START_HOUR_ET`, so a phone clock a
+    little ahead of the server's never spends the ask on an answer still `upcoming`, on New
+    York's date and clock, never the phone's own zone."""
+    import app.services.earnings_live_service as els
+
+    hours = _code(_HOURS)
+    found = re.search(
+        r"nonisolated static let liveLabelAskMinuteOfDay: Int = (\d+) \* 60 \+ (\d+)\n", hours)
+    assert found, "the ask's minute is not declared as hour * 60 + minute"
+    assert (int(found.group(1)), int(found.group(2))) == (els.EARNINGS_LIVE_LABEL_START_HOUR_ET, 1)
+    assert _norm(_body(
+        hours, "nonisolated static func liveLabelAskDayKey(at instant: Date = Date()) -> String? {"
+    )) == (
+        "{ let calendar: Calendar = etCalendar let parts: DateComponents = calendar.dateComponents( "
+        "[.year, .month, .day, .hour, .minute], from: instant ) "
+        "let minuteOfDay: Int = (parts.hour ?? 0) * 60 + (parts.minute ?? 0) "
+        "guard minuteOfDay >= liveLabelAskMinuteOfDay else { return nil } "
+        'return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0) }'
+    )
+    calendar_zone = _norm(_bracketed(hours, "nonisolated private static let etCalendar: Calendar = {"))
+    assert 'TimeZone(identifier: "America/New_York")' in calendar_zone
 
 
 def test_a_failed_live_card_ask_is_logged_with_its_report_and_the_raw_error():
@@ -1075,7 +1196,7 @@ def test_a_live_cards_answer_is_written_only_when_it_settles_its_report():
         (("live", asked, 30), "write"),
         (("reported", asked, None), "write"),
         (("reported", asked, 120), "write"),     # a preliminary figure FMP can still confirm
-        (("awaiting", asked, None), "write"),    # 22:00 ET with nothing in
+        (("awaiting", asked, None), "write"),    # the day after, with nothing in
         (("upcoming", asked, None), "write"),    # the live loop off: the feed draws the same
         (("upcoming", asked, 30), "keep"),       # nobody has read the day yet
         (("awaiting", asked, 30), "keep"),
@@ -1219,18 +1340,22 @@ class _Round:
         self.service = ts.TrackingService.__new__(ts.TrackingService)
         self.service.fmp = self.calendar
 
-    def at(self, hour: int, minute: int = 0) -> None:
+    def at(self, hour: int, minute: int = 0, *, days_after: int = 0) -> None:
         import app.services.tracking_service as ts
 
-        at = datetime(_ROUND_DAY.year, _ROUND_DAY.month, _ROUND_DAY.day, hour, minute, tzinfo=ET)
+        day = _ROUND_DAY + timedelta(days=days_after)
+        at = datetime(day.year, day.month, day.day, hour, minute, tzinfo=ET)
         self._monkeypatch.setattr(ts, "datetime", _FrozenClock(at))
+        self._monkeypatch.setattr(ts, "_et_today", lambda: day)
 
     async def cards(self, ticker: str) -> list:
         return [_card(alert) for alert in await self.service._get_earnings_alerts([ticker])]
 
     async def ask(self, card: dict):
+        """As the round asks: by the card's own date, with no history (`history: false`)."""
         return await self.service.get_earnings_live(card["ticker"],
-                                                    date.fromisoformat(card["report_date"]))
+                                                    date.fromisoformat(card["report_date"]),
+                                                    history=False)
 
     @staticmethod
     def forget() -> None:
@@ -1351,13 +1476,13 @@ async def test_an_answer_the_server_could_not_settle_leaves_a_live_card_as_it_is
 @pytest.mark.parametrize("before,after,asked_at,status", [
     ({"revenueActual": 17.1e9}, None, (20, 30), "live"),
     ({"revenueActual": 17.1e9}, {"revenueActual": 17.1e9, "epsActual": 0.44}, (20, 30), "reported"),
-    ({}, None, (22, 30), "awaiting"),
-], ids=["still_live", "complete", "the_window_closed_with_nothing_in"])
+    ({}, None, (22, 30), "live"),
+], ids=["still_live", "complete", "still_live_after_the_reads_stop"])
 async def test_an_answer_that_settles_the_cards_own_report_is_written_as_the_feed_draws_it(
         live_round, before, after, asked_at, status):
     """The card takes the answer for its own report, with the id it had, and reads what a feed
-    build at the same moment draws: its status (LIVE goes when the server stops saying it, and
-    with it the round's asks) and its figures."""
+    build at the same moment draws: its status (LIVE goes when the server stops saying it, at the
+    report day's end, midnight ET, and with it the round's asks) and its figures."""
     world = live_round
     world.calendar.rows = [_calendar_row("XYZ", _ROUND_DAY, **before),
                            _calendar_row("ZZZZ", _ROUND_DAY)]
@@ -1379,12 +1504,74 @@ async def test_an_answer_that_settles_the_cards_own_report_is_written_as_the_fee
 
 
 @pytest.mark.asyncio
+async def test_a_live_card_with_nothing_in_turns_awaiting_when_its_day_ends(live_round):
+    """LIVE from 03:00 to midnight ET on the report day (owner, 2026-11-14: "make the 'live' all
+    day long", then "3 AM New York"). The loop reads a report day itself while it lasts, so after
+    midnight the route
+    answers `awaiting` with no recheck, and the card takes it as the feed draws it: LIVE ends
+    with the day, and with it the round's asks."""
+    import app.services.earnings_live_service as els
+
+    world = live_round
+    rows = [_calendar_row("XYZ", _ROUND_DAY), _calendar_row("ZZZZ", _ROUND_DAY)]
+    world.calendar.rows = rows
+    world.at(19, 59)
+    (card,) = await world.cards("XYZ")
+    assert card["status"] == "live"
+    world.at(23, 59)
+    assert (await world.ask(card)).status == "live"
+
+    # The loop's own read of the day, at its report-day pace (`fmp_window_open`): what marks the
+    # day read, so no first-load wait answers for it after midnight.
+    read_at = datetime(2026, 11, 17, 21, 57, tzinfo=ET)
+    await els.get_earnings_live_service()._fetch(read_at, world.calendar, [_ROUND_DAY])
+    world.at(0, 30, days_after=1)
+    answer = await world.ask(card)
+    assert (answer.status, answer.report_date, answer.poll_seconds) == (
+        "awaiting", _ROUND_DAY.isoformat(), None)
+    assert _live_card_step(answer, card["report_date"]) == "write"
+    written = _updated(card, answer)
+    # From midnight the report is a day before today: the feed draws it from the recent cards
+    # (`_get_recent_earnings_alerts`, gathered beside `_get_earnings_alerts`), not as upcoming.
+    assert await world.cards("XYZ") == []
+    (drawn,) = [_card(alert) for alert in
+                await world.service._get_recent_earnings_alerts(["XYZ"])]
+    assert _card_id(written) == _card_id(card)
+    assert written == drawn
+
+
+@pytest.mark.asyncio
+async def test_a_card_drawn_upcoming_before_03_turns_live_at_the_label_start(live_round):
+    """A tab loaded at 02:55 ET draws today's card `upcoming`; no feed build comes before 04:00.
+    The round's ask at the label's start (from 03:01 ET, `labelStartReports`) gets LIVE, which
+    settles the card, written as the feed would draw it then: the LIVE label from 03:00, on a
+    tab already open (2026-11-14 review)."""
+    world = live_round
+    world.calendar.rows = [_calendar_row("XYZ", _ROUND_DAY), _calendar_row("ZZZZ", _ROUND_DAY)]
+    world.at(2, 55)
+    (card,) = await world.cards("XYZ")
+    assert card["status"] == "upcoming"
+    assert (await world.ask(card)).status == "upcoming", "before 03:00 the server says upcoming"
+    world.at(3, 1)
+    answer = await world.ask(card)
+    assert (answer.status, answer.report_date, answer.poll_seconds) == (
+        "live", _ROUND_DAY.isoformat(), 30)
+    assert _live_card_step(answer, card["report_date"]) == "write"
+    written = _updated(card, answer)
+    (drawn,) = await world.cards("XYZ")
+    assert written == drawn and written["status"] == "live"
+    assert _card_id(written) == _card_id(card)
+
+
+@pytest.mark.asyncio
 async def test_asking_a_live_cards_route_again_costs_no_fmp_call(monkeypatch):
     """What makes the poll's round cheap: the route reads the shared Tracking memo and the live
     record, so asking again inside the memo's own pace makes no FMP call at all, whatever the user
     holds. Asked as the round asks: after 20:00 ET on the report day, about a report the server
-    calls LIVE, and every answer the same as the first. The fake FMP client offers the calendar
-    alone, so any other call fails the test."""
+    calls LIVE, with `history=False`, and every answer the same as the first. The fake FMP client
+    offers the calendar alone, so any other call fails the test, and the history the card never
+    draws is never built (on report day 4 FMP calls a build, which an earlier stub here hid:
+    2026-11-14 review)."""
     import app.services.earnings_live_service as els
     import app.services.tracking_service as ts
 
@@ -1399,7 +1586,10 @@ async def test_asking_a_live_cards_route_again_costs_no_fmp_call(monkeypatch):
                    "companyName": "Intel Corporation"}
             return [row] if from_date <= row["date"] <= to_date else []
 
-    async def _no_extras(self, symbol, report_day, *, loader=None):
+    built: list = []
+
+    async def _history_built(self, symbol, report_day, *, loader=None):
+        built.append((symbol, report_day))
         return None
 
     # One client, as in production (`get_fmp_client` is a singleton): the memo is the client's.
@@ -1407,20 +1597,21 @@ async def test_asking_a_live_cards_route_again_costs_no_fmp_call(monkeypatch):
     monkeypatch.setattr(ts, "_et_today", lambda: day)
     monkeypatch.setattr(ts, "datetime", _FrozenClock(datetime(2026, 11, 17, 20, 30, tzinfo=ET)))
     monkeypatch.setattr(ts, "get_fmp_client", lambda: fmp)
-    monkeypatch.setattr(els.EarningsLiveService, "history_extras", _no_extras)
+    monkeypatch.setattr(els.EarningsLiveService, "history_extras", _history_built)
     els.get_earnings_live_service().reset()
     ts.reset_earnings_calendar_cache()
     try:
-        first = await ts.TrackingService().get_earnings_live("INTC", day)
+        first = await ts.TrackingService().get_earnings_live("INTC", day, history=False)
         assert (first.status, first.report_date, first.poll_seconds) == (
             "live", day.isoformat(), 30), "the round asks only about a LIVE card"
         assert (first.company_name, first.revenue.actual) == ("Intel Corporation", 17.1e9)
         warmed = len(calls)
         assert warmed >= 1, "the first ask reads the memo"
         for _ in range(10):
-            again = await ts.TrackingService().get_earnings_live("INTC", day)
+            again = await ts.TrackingService().get_earnings_live("INTC", day, history=False)
             assert again == first
         assert len(calls) == warmed, f"asking again called FMP {len(calls) - warmed} more times"
+        assert built == [], "the round's ask built the history the card never draws"
     finally:
         els.get_earnings_live_service().reset()
         ts.reset_earnings_calendar_cache()
@@ -2638,9 +2829,9 @@ def test_a_held_figure_reads_the_same_on_the_card_and_the_sheet():
 
 
 def test_a_held_figure_is_not_called_absent_once_the_window_has_closed():
-    """Every figure held and none shown reads `awaiting` from 22:00 ET and on later days: the
-    flags must still reach the sentence, or the header says the results aren't in above a row
-    saying "Confirming…"."""
+    """Every figure held and none shown reads `awaiting` once the report day is over (from
+    midnight ET): the flags must still reach the sentence, or the header says the results aren't
+    in above a row saying "Confirming…"."""
     sentence = _body(_code(_TRACKING_MODELS),
                      "static func earningsDescription(_ data: EarningsData) -> String {")
     arm = sentence[sentence.index("case .awaiting:"):]
@@ -2685,9 +2876,9 @@ def test_a_poll_that_gave_up_says_so_and_a_try_again_clears_it():
 
 
 def test_nothing_on_the_sheet_says_live_once_the_device_has_stopped_asking():
-    """`LiveBadge`: LIVE only while it is genuinely being checked. With the retry over, the status
-    the card reads is a last word from before that, and the sheet stays open for as long as
-    the user leaves it."""
+    """`LiveBadge`: LIVE only while the device is still asking the server, which says LIVE from
+    03:00 to midnight ET on the report day. With the retry over, the status the card reads is a last
+    word from before that, and the sheet stays open for as long as the user leaves it."""
     card = _code(_CARD)
     assert "private var isLiveNow: Bool { status == .live && !viewModel.pollEnded }" in card
     assert card.count("LiveBadge()") == 1

@@ -2,15 +2,18 @@
 //  LiveBadge.swift
 //  ios
 //
-//  Atom: the red "LIVE" capsule — a report whose results are coming in right now (Tracking →
-//  Alerts → Upcoming, and the live results sheet). Owner request 2026-10-29: "mark a 'live'
-//  red color label at the card on the left, so users can know this is live".
+//  Atom: the red "LIVE" capsule — a report whose results come out today (Tracking → Alerts →
+//  Upcoming, and the live results sheet). Owner request 2026-10-29: "mark a 'live' red color
+//  label at the card on the left, so users can know this is live".
 //
 //  Red TEXT (`AppColors.loss`, text-safe) on an OPAQUE `cardBackgroundLight` capsule — never
 //  red on its own tint, which no text token survives in light mode (`TintedTagBadge` header).
 //  The pulsing dot is `LiveIndicator`, the one `LiveNewsHeader` uses; with Reduce Motion it is
-//  a still dot. Shown ONLY for `EarningsLiveStatus.live`, which the server sets only while it
-//  is genuinely checking for results — the same honesty rule as the "Live News" header.
+//  a still dot. Shown ONLY for `EarningsLiveStatus.live`, which the server sets from 03:00 ET
+//  (earlier once a figure is in) to midnight ET on the report day until the results are
+//  complete (owner, 2026-11-14: "make the
+//  'live' all day long, the day that company report earning", then "3 AM New York"), never from
+//  a clock on the device.
 //
 
 import SwiftUI
@@ -52,8 +55,14 @@ struct LiveBadge: View {
 #Preview {
     VStack(spacing: 20) {
         LiveBadge()
+        // As `ActivityRow` hangs it from the glyph.
         AlertCategoryIcon(systemName: "bell.fill", color: AppColors.primaryBlue)
-            .overlay(alignment: .bottom) { LiveBadge().offset(y: 9) }
+            .overlay(alignment: .bottom) {
+                LiveBadge()
+                    .fixedSize()
+                    .frame(height: 0, alignment: .top)
+                    .offset(y: -2)
+            }
     }
     .padding(40)
     .background(AppColors.cardBackground)

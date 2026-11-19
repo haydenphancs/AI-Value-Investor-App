@@ -14417,19 +14417,20 @@ async def test_a_version_move_reads_a_pending_filing_while_the_watch_is_open(liv
 async def test_a_version_move_after_the_watch_closes_leaves_a_pending_report_to_fmp(live, cache,
                                                                                     hour, minute):
     """EDGAR takes nothing after 22:00 ET, so the watch has stopped, and by the morning the report
-    is a day before today, off the watch for good. It reads as results not in, never as the row
-    the move refused, and FMP's fill brings the figures back but not the outlook or the link."""
+    is a day before today, off the watch for good. It reads as still to come (LIVE until midnight
+    ET) and then as results not in, never as the row the move refused, and
+    FMP's fill brings the figures back but not the outlook or the link."""
     cache.hold(_kept_by_an_older_verifier())
     sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
     gem = _Gemini()
     night = _on_the_report_day(hour, minute)
     morning = datetime(2026, 10, 30, 9, 1, tzinfo=ET).astimezone(timezone.utc)
-    for at in (night, morning):
+    for at, status in ((night, els.STATUS_LIVE), (morning, els.STATUS_AWAITING)):
         live.observe_rows(REPORT, [_pending("INTC")], at)
         await els.earnings_filing_tick(at, watched=["INTC"], sec=sec, gemini=gem)
         assert (sec.calls, gem.calls, cache.writes) == ([], 0, [])
         snap = live.snapshot("INTC", REPORT, at)
-        assert snap.status == els.STATUS_AWAITING
+        assert snap.status == status
         assert (snap.eps.actual, snap.revenue.actual, snap.filing) == (None, None, None)
 
     filled = dict(_pending("INTC"), epsActual=0.46, revenueActual=17.2e9)
@@ -14486,7 +14487,8 @@ async def test_a_restore_that_keeps_failing_after_the_watch_closes_leaves_the_re
         await els.earnings_filing_tick(night, watched=["INTC"], sec=sec, gemini=gem)
         assert sec.calls == read and gem.calls == 1
         snap = live.snapshot("INTC", REPORT, night)
-        assert snap.status == els.STATUS_AWAITING and snap.eps.actual is None
+        # Still the report day (LIVE until midnight ET), with nothing read back.
+        assert snap.status == els.STATUS_LIVE and snap.eps.actual is None
         cache.read_error = None   # the table is back, and the retry has yet to come round
     assert len(cache.reads) - reads == 1, "one read per wait, not one per tick"
 

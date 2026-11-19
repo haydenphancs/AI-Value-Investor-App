@@ -519,6 +519,7 @@ _LIVE_TICKER_RE = re.compile(r"[A-Z0-9][A-Z0-9.\-]{0,11}")
 async def get_earnings_live(
     ticker: str,
     report_date: Optional[str] = None,
+    history: bool = True,
     user: dict = Depends(get_watchlist_identity),
     # The sheet polls every 30 s at most, while a report is LIVE or its day has not been read
     # yet — 2/min, like the feed.
@@ -529,7 +530,9 @@ async def get_earnings_live(
     and the last four quarters. Signed-in only: FMP's Order Form licenses display on the
     authenticated app alone (the same wall `/tracking/assets` is behind).
 
-    It never makes the live loop's fetches itself, so a poll costs a memo read.
+    It never makes the live loop's fetches itself, so a poll costs a memo read. `history=false`
+    leaves out the year-ago quarter and the last four quarters, and never builds them: the
+    Tracking card's own ask, which draws neither (`TrackingService.get_earnings_live`).
     """
     sym = (ticker or "").strip().upper()
     if not _LIVE_TICKER_RE.fullmatch(sym):
@@ -547,7 +550,7 @@ async def get_earnings_live(
     try:
         # A calendar outage is not an error here: the service answers it as a report not in yet,
         # which the sheet asks about again, so it never reaches the branches below.
-        return await TrackingService().get_earnings_live(sym, requested)
+        return await TrackingService().get_earnings_live(sym, requested, history=history)
     except _ReportDateOutOfWindow as e:
         return make_error_response(ErrorCode.INVALID_INPUT, message=str(e))
     except Exception as e:

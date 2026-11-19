@@ -55,15 +55,24 @@ def _status(rec: els._Record, now_et: datetime) -> str:
 
 def test_a_future_report_is_upcoming():
     assert _status(_rec(day=NEXT), _et(REPORT, 12)) == els.STATUS_UPCOMING
+    assert _status(_rec(day=NEXT), _et(REPORT, 23, 59, 59)) == els.STATUS_UPCOMING
 
 
-def test_report_day_before_six_et_is_still_upcoming():
-    assert _status(_rec(), _et(REPORT, 5, 59)) == els.STATUS_UPCOMING
+@pytest.mark.parametrize("hour,minute,second", [
+    (3, 0, 0), (5, 59, 59), (6, 0, 0), (16, 5, 0), (21, 59, 59), (22, 0, 0), (23, 59, 59)])
+def test_report_day_is_live_from_three_et_to_midnight_until_results_complete(hour, minute, second):
+    """The owner, 2026-11-14: "make the 'live' all day long, the day that company report
+    earning", then "3 AM New York". From 03:00 ET (midnight on the US West Coast) to the day's
+    last second, before 06:00 and from 22:00 too, when the loop reads nothing."""
+    assert els.EARNINGS_LIVE_LABEL_START_HOUR_ET == 3
+    assert _status(_rec(), _et(REPORT, hour, minute, second)) == els.STATUS_LIVE
 
 
-def test_report_day_is_live_from_six_until_results_complete():
-    assert _status(_rec(), _et(REPORT, 6)) == els.STATUS_LIVE
-    assert _status(_rec(), _et(REPORT, 16, 5)) == els.STATUS_LIVE
+@pytest.mark.parametrize("hour,minute,second", [(0, 0, 0), (2, 59, 59)])
+def test_report_day_before_three_et_is_still_upcoming(hour, minute, second):
+    """Before 03:00 ET it is still the day before on the US West Coast, so a card saying LIVE and
+    "reports today" there would be false (the 2026-11-14 review): upcoming until 03:00."""
+    assert _status(_rec(), _et(REPORT, hour, minute, second)) == els.STATUS_UPCOMING
 
 
 def test_whatever_lands_first_keeps_the_card_live_until_both_are_in():
@@ -96,9 +105,21 @@ def test_a_held_revenue_is_not_in_even_with_no_estimate_to_show():
     assert _status(rec, _et(REPORT, 16, 30)) == els.STATUS_LIVE
 
 
-def test_after_twenty_two_et_a_report_with_nothing_is_awaiting_never_late():
-    assert _status(_rec(), _et(REPORT, 22)) == els.STATUS_AWAITING
-    assert _status(_rec(fmp_revenue=17.1e9), _et(REPORT, 22)) == els.STATUS_REPORTED
+def test_the_report_day_ends_at_midnight_et_awaiting_never_late():
+    """LIVE to the day's last second, with nothing in or a partial report. From midnight ET the
+    report is a day before today: `awaiting` (never "late") with nothing in, `reported` with a
+    figure."""
+    for rec in (_rec(), _rec(fmp_revenue=17.1e9)):
+        assert _status(rec, _et(REPORT, 22)) == els.STATUS_LIVE
+        assert _status(rec, _et(REPORT, 23, 59, 59)) == els.STATUS_LIVE
+    assert _status(_rec(), _et(NEXT, 0)) == els.STATUS_AWAITING
+    assert _status(_rec(fmp_revenue=17.1e9), _et(NEXT, 0)) == els.STATUS_REPORTED
+
+
+@pytest.mark.parametrize("hour", [0, 5, 23])
+def test_a_report_complete_outside_the_reading_hours_is_reported_not_live(hour):
+    """Complete is complete at any hour: LIVE is for results still to come."""
+    assert _status(_filed(), _et(REPORT, hour)) == els.STATUS_REPORTED
 
 
 def test_the_morning_after_a_partial_report_is_reported_and_an_empty_one_awaiting():
@@ -107,9 +128,13 @@ def test_the_morning_after_a_partial_report_is_reported_and_an_empty_one_awaitin
     assert _status(_rec(), now) == els.STATUS_AWAITING
 
 
-def test_an_early_filing_before_six_makes_the_card_live_not_upcoming():
+@pytest.mark.parametrize("hour,minute", [(2, 30), (5, 30), (23, 30)])
+def test_a_partial_report_stays_live_at_any_hour_of_its_day(hour, minute):
+    """A figure in and the report not complete: LIVE, not `reported`, before 03:00 (results are
+    coming in), before 06:00 and after 22:00 as at noon (the old rule turned a partial report
+    `reported` at 22:00)."""
     rec = _rec(filing=_filing(revenue=17.1e9))
-    assert _status(rec, _et(REPORT, 5, 30)) == els.STATUS_LIVE
+    assert _status(rec, _et(REPORT, hour, minute)) == els.STATUS_LIVE
 
 
 @pytest.mark.parametrize("hour,visible", [(8, True), (11, True), (12, False), (18, False)])
@@ -1422,12 +1447,19 @@ def test_a_next_morning_report_with_one_filing_figure_and_a_held_one_still_polls
 
 @pytest.mark.parametrize("rec,at", [
     (_rec(day=NEXT), _et(REPORT, 12)),
-    (_rec(), _et(REPORT, 5)),
+    (_rec(), _et(REPORT, 2)),
     (_rec(), _et(NEXT, 8)),
     (_rec(filing=_filing()), _et(NEXT, 8)),
-], ids=["upcoming", "before_the_window", "awaiting", "a_filing_with_no_figures"])
+], ids=["upcoming", "before_the_label", "awaiting", "a_filing_with_no_figures"])
 def test_a_report_with_nothing_to_confirm_never_polls(rec, at):
     assert _poll(rec, at) is None
+
+
+@pytest.mark.parametrize("hour", [3, 5, 22, 23])
+def test_a_live_report_day_polls_outside_the_reading_hours_too(hour):
+    """LIVE polls while it lasts (THE SHEET'S POLL), outside the loop's reading hours too: a
+    sheet left open at 05:59 shows the 06:00 read, and an evening poll can bring a late fill."""
+    assert _poll(_rec(), _et(REPORT, hour)) == els.EARNINGS_LIVE_POLL_SECONDS
 
 
 @pytest.mark.parametrize("rec,wanted", [

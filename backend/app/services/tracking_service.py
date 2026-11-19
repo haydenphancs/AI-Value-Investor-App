@@ -1894,7 +1894,7 @@ class TrackingService:
             return []
 
     async def get_earnings_live(
-        self, symbol: str, requested: Optional[date] = None
+        self, symbol: str, requested: Optional[date] = None, *, history: bool = True,
     ) -> EarningsLiveResponse:
         """`GET /tracking/earnings/{ticker}/live` — one report's live results for the sheet.
 
@@ -1927,6 +1927,12 @@ class TrackingService:
         With EARNINGS_LIVE_ENABLED off the loop is idle, so nothing live is read, written or
         built: the memo row's consensus is the whole answer, `upcoming` for a row and `none`
         for no row, and no poll, because nothing a poll could wait for is coming.
+
+        ``history`` False leaves the last four quarters and the year-ago block out, and so never
+        builds them (`history_extras`: on report day 4 FMP calls a build, once its 6 h are up,
+        or every 5 min while the build is degraded or failing). The Tracking card's round asks
+        that way: it draws neither, and asks every 30 s outside price hours, 03:00 ET to
+        midnight on the report day (2026-11-14 review).
         """
         sym = symbol.upper()
         today = _et_today()
@@ -2014,7 +2020,8 @@ class TrackingService:
         if recheck:
             logger.info("[Tracking] earnings live %s: %s has not been read yet, so the sheet "
                         "asks again", sym, day.isoformat())
-        extras = await live.history_extras(sym, day) if live is not None and found else None
+        extras = (await live.history_extras(sym, day)
+                  if history and live is not None and found else None)
         payload = live_payload(
             sym, day, snap,
             company_name=company,

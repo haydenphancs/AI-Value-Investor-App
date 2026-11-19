@@ -18,9 +18,12 @@ import SwiftUI
 
 /// Where one report stands. Mirrors `earnings_live_service.STATUS_*`.
 ///
-/// `.live` is drawn ONLY while the server is genuinely checking — report day, 06:00–22:00 ET,
-/// results not complete — so the red LIVE label never claims something that is not
-/// happening (the `LiveNewsHeader` rule: nothing live on screen, no "Live").
+/// `.live` comes from the server alone, never from the device clock: the report day from 03:00 ET
+/// (midnight on the US West Coast), or earlier once a figure is in, to midnight ET, until its
+/// results are complete (`earnings_live_service.live_status`), so the red LIVE label says the
+/// results come out today.
+/// The server's own checks (SEC, FMP at the report-day pace) run 06:00–22:00 ET; a card or sheet
+/// asked outside them still reads the shared calendar memo.
 enum EarningsLiveStatus: String {
     case upcoming
     case live

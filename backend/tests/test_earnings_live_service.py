@@ -2904,9 +2904,9 @@ def test_a_held_fmp_figure_is_still_re_read():
     assert PREV in svc.due_days(_et(REPORT, 8), ["INTC"])
 
 
-def test_only_the_live_memos_own_fetch_moves_checked_at():
+def test_memo_rows_of_unknown_age_never_move_checked_at():
     """Rows folded in from the Tracking memo can be 30 min old: "updated just now" over them
-    would be false."""
+    would be false, and rows of unknown age have no moment of their own to give."""
     svc = _svc()
     svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
     assert svc.snapshot("INTC", REPORT, _et(REPORT, 9)).checked_at is None
@@ -2914,6 +2914,53 @@ def test_only_the_live_memos_own_fetch_moves_checked_at():
     assert svc.snapshot("INTC", REPORT, _et(REPORT, 9, 5)).checked_at == _et(REPORT, 9, 5)
     svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9, 30))
     assert svc.snapshot("INTC", REPORT, _et(REPORT, 9, 30)).checked_at == _et(REPORT, 9, 5)
+
+
+def _seconds_off(at: Optional[datetime], expected: datetime) -> float:
+    assert at is not None
+    return abs((at - expected).total_seconds())
+
+
+def test_a_memo_fold_moves_checked_at_to_when_the_memo_read_fmp():
+    """LIVE runs to midnight ET, and the loop's own reads stop at 22:00: after that only the
+    memo reads FMP, so the sheet's "updated" says when it did (2026-11-14 review), never the
+    fold's own moment, never back. The 21:50 own fetch is put 95 min before the 23:25 fold on
+    the monotonic clock the memo stamps its rows with."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 21, 50), fetched=True)
+    rec = svc._records[("INTC", REPORT)]
+    rec.fmp_fetched_mono = time.monotonic() - 95 * 60
+    assert rec.checked_at == _et(REPORT, 21, 50)
+
+    # 23:25: rows the memo read from FMP at 23:20 bring a late fill.
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], _et(REPORT, 23, 25),
+                     stored_at=time.monotonic() - 5 * 60)
+    snap = svc.snapshot("INTC", REPORT, _et(REPORT, 23, 25))
+    assert (snap.status, snap.eps.actual) == (els.STATUS_LIVE, 0.44)
+    assert _seconds_off(snap.checked_at, _et(REPORT, 23, 20)) < 5, "when the memo read FMP"
+
+    # A filing read at 23:24 is newer than a memo answer from 23:22: that one never moves it back.
+    rec.checked_at = _et(REPORT, 23, 24)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], _et(REPORT, 23, 25),
+                     stored_at=time.monotonic() - 3 * 60)
+    assert rec.checked_at == _et(REPORT, 23, 24)
+
+    # Rows of unknown age, and rows older than the own fetch, are skipped and move nothing.
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], _et(REPORT, 23, 40))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], _et(REPORT, 23, 40),
+                     stored_at=time.monotonic() - 2 * 3600)
+    assert rec.checked_at == _et(REPORT, 23, 24)
+
+
+def test_a_record_the_memo_opens_says_when_the_memo_read_fmp():
+    """03:05, before any own fetch: the memo's row opens today's record and the sheet's LIVE line
+    says when the memo read FMP, not nothing and not the fold's moment."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 3, 5),
+                     stored_at=time.monotonic() - 60)
+    snap = svc.snapshot("INTC", REPORT, _et(REPORT, 3, 5))
+    assert snap.status == els.STATUS_LIVE
+    assert _seconds_off(snap.checked_at, _et(REPORT, 3, 4)) < 5
 
 
 @pytest.mark.asyncio
@@ -3790,13 +3837,19 @@ async def _own_fetch_corrects_the_memo(monkeypatch) -> ts.TrackingService:
 
 
 async def _assert_every_door_reads(svc_obj: ts.TrackingService, at: datetime, monkeypatch,
-                                   eps: float, estimate: float = 1.65) -> None:
-    """The tick's snapshot first: the other two doors fold again on their way to an answer."""
+                                   eps: float, estimate: float = 1.65,
+                                   checked: Optional[datetime] = None) -> None:
+    """The tick's snapshot first: the other two doors fold again on their way to an answer.
+    `checked` is when FMP was last asked: the 16:35 own fetch, unless a memo round read it later
+    (`_note_memo_read`)."""
     monkeypatch.setattr(ts, "datetime", _FrozenDatetime(at))
     snap = _svc().snapshot("AVGO", REPORT, at)
     assert (snap.status, snap.eps.actual, snap.eps.estimate, snap.eps.checking) == (
         els.STATUS_REPORTED, eps, estimate, False)
-    assert snap.checked_at == _et(REPORT, 16, 35), "a memo fold never moves `checked_at`"
+    expected = checked or _et(REPORT, 16, 35)
+    assert snap.checked_at is not None and abs((snap.checked_at - expected).total_seconds()) < 5, (
+        f"`checked_at` {snap.checked_at} is not when FMP was last asked ({expected}): memo rows "
+        "older than the own fetch never move it, and a memo round after it moves it to its read")
     (card,) = await svc_obj._get_earnings_alerts(["AVGO"])
     assert (card.earnings_status, card.eps_actual, card.eps_estimate) == (
         els.STATUS_REPORTED, eps, estimate)
@@ -3838,7 +3891,8 @@ async def test_a_memo_refreshed_after_the_own_fetch_wins_once_the_loop_stops_fet
     svc_obj.fmp.by_day[REPORT] = [_avgo(1.72, eps_est=1.70)]
     _memo_days_owe_the_tick_a_round(at, REPORT)
     await _through(door, svc_obj, at, monkeypatch)
-    await _assert_every_door_reads(svc_obj, at, monkeypatch, eps=1.72, estimate=1.70)
+    # The memo read FMP at 16:50, after the 16:35 own fetch: the sheet says so.
+    await _assert_every_door_reads(svc_obj, at, monkeypatch, eps=1.72, estimate=1.70, checked=at)
 
 
 def _a_day_goes_down(fmp: _FMP, day: date) -> None:

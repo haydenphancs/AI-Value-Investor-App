@@ -65,8 +65,9 @@ struct EarningsLiveResultsCard: View {
         live?.liveStatus ?? fallback?.status ?? .upcoming
     }
 
-    /// The report reads LIVE and this device is still asking. Anything that claims a check is
-    /// under way reads this, never `status` alone (`LiveBadge`'s honesty rule).
+    /// The report reads LIVE and this device is still asking. What says the sheet is waiting or
+    /// checking (the badge, "Checking for results", a metric's "Waiting…") reads this, never
+    /// `status` alone: once the device stops asking, nothing on screen can change.
     private var isLiveNow: Bool { status == .live && !viewModel.pollEnded }
 
     private var eps: EarningsMetricOutcome {

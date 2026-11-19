@@ -581,6 +581,55 @@ def test_the_same_read_with_live_on_answers_from_the_record(
     assert ("INTC", REPORT) in els.get_earnings_live_service()._records
 
 
+_HISTORY = els.HistoryExtras(
+    last_quarters=(els.QuarterOutcome("Q3 2025", "beat", 4.2),),
+    year_ago_quarter="Q3 2025", year_ago_revenue=13.3e9, year_ago_eps=0.17,
+    year_ago_eps_comparable=True,
+)
+
+
+@pytest.mark.parametrize("query,builds", [
+    ("", True),
+    ("?history=true", True),
+    ("?history=false", False),
+    ("?report_date=2026-10-29&history=false", False),
+    ("?history=0", False),
+], ids=["sheet", "true", "card", "card_by_date", "zero"])
+def test_the_cards_ask_never_builds_the_history(client, monkeypatch, query, builds):
+    """The Tracking card's round asks with `history=false` every 30 s outside price hours, 03:00
+    ET to midnight on the report day, and draws no history: on report day a build is 4 FMP calls
+    (2026-11-14 review). The sheet's ask, with no flag, still builds it and shows it."""
+    calls: List[tuple] = []
+
+    async def _built(self, symbol, report_day, *, loader=None):
+        calls.append((symbol, report_day))
+        return _HISTORY
+
+    monkeypatch.setattr(els.EarningsLiveService, "history_extras", _built)
+    monkeypatch.setattr(ts, "datetime", _FrozenDatetime(_et(REPORT, 3, 5)))
+    resp = client.get(f"/api/v1/tracking/earnings/INTC/live{query}")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert set(body) == EXPECTED_KEYS
+    assert (body["status"], body["poll_seconds"]) == ("live", 30), "LIVE from 03:00 ET"
+    if builds:
+        assert calls == [("INTC", REPORT)]
+        assert body["last_quarters"] == [
+            {"quarter": "Q3 2025", "result": "beat", "surprise_pct": 4.2}]
+        assert body["year_ago"]["revenue"] == 13.3e9
+    else:
+        assert calls == [], "the card's ask built the history it never draws"
+        assert body["last_quarters"] == [] and body["year_ago"] is None
+
+
+def test_a_history_flag_that_is_not_a_bool_is_refused_on_the_error_contract(client, extras_calls):
+    resp = client.get("/api/v1/tracking/earnings/INTC/live?history=maybe")
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["error_code"] and body["message"] and body["user_message"]
+    assert extras_calls == []
+
+
 @pytest.mark.parametrize("query,day", [("?report_date=2026-10-28", "2026-10-28"),
                                        ("", "2026-10-29")], ids=["by_date", "no_date"])
 def test_live_off_never_reads_a_held_record(live_off, monkeypatch, query, day):

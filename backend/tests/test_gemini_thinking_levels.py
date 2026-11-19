@@ -551,3 +551,44 @@ async def test_two_levels_on_the_same_prompt_are_never_served_to_each_other():
         await c.generate_json(prompt="same", thinking_level=level)
     assert [_config_wire(kw)["thinking_level"] for kw in seen] == ["LOW", "HIGH", "MINIMAL"]
     assert c._response_cache.size == 3
+
+
+# ── The log lines name what is actually SENT (2026-11-19 review) ─────────────────────────────
+#
+# The "level not accepted" WARNING printed the caller's raw budget ("using thinking_budget=0") while
+# the wire carried 1 (2.5-flash), or nothing at all (budget None); and the remap INFO line said
+# gemini-2.5-flash "refuses 0", which it does not — only its 2026-12-01 reroute target does.
+
+
+@pytest.mark.parametrize("budget,model,expected", [
+    (0, _TWO_FIVE, "sending thinking_budget=1 instead"),
+    (None, _TWO_FIVE, "sending no thinking budget or level instead"),
+    (512, _TWO_FIVE, "sending thinking_budget=512 instead"),
+    (0, _THREE_EIGHT, "sending thinking_budget=0 instead"),
+])
+def test_the_ignored_level_warning_names_the_wire_value(caplog, monkeypatch, budget, model, expected):
+    monkeypatch.setattr(gem, "_level_ignored_logged", set())
+    level = "low" if model == _TWO_FIVE else "nonsense-is-not-ignored-here"
+    if model == _THREE_EIGHT:
+        level = "minimal"   # refused by 3.8-flash → "off" → budget 0: not an ignored level, no line
+    with caplog.at_level(logging.WARNING, logger=gem.logger.name):
+        fields = gem._thinking_fields(budget, level, model)
+    lines = [r.getMessage() for r in caplog.records if "is not accepted by model=" in r.getMessage()]
+    if model == _THREE_EIGHT:
+        assert lines == [] and fields == {"thinking_budget": 0}
+        return
+    assert len(lines) == 1 and lines[0].endswith(expected), lines
+
+
+def test_the_remap_line_says_which_side_of_the_reroute_refuses_zero(caplog, monkeypatch):
+    monkeypatch.setattr(gem, "_budget_zero_remap_logged", set())
+    with caplog.at_level(logging.INFO, logger=gem.logger.name):
+        gem._wire_budget(0, _TWO_FIVE)
+        gem._wire_budget(0, _LITE)          # a direct caller; the encoders send its level instead
+    lines = [r.getMessage() for r in caplog.records if "thinking_budget 0 sent as" in r.getMessage()]
+    assert len(lines) == 2
+    two_five = next(m for m in lines if "model=gemini-2.5-flash " in m)
+    lite = next(m for m in lines if "model=gemini-3.5-flash-lite " in m)
+    assert "rerouted to on 2026-12-01 refuses 0" in two_five and "(it refuses 0" not in two_five
+    assert "(it refuses 0;" in lite
+    assert all("no thinking" not in m for m in lines)

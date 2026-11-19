@@ -25,7 +25,7 @@ import pytest
 from google.genai import types
 
 from app.config import Settings, settings
-from app.integrations.gemini import GeminiClient, _TTLCache
+from app.integrations.gemini import _BUDGET_OFF_ON_REFUSING_MODELS, GeminiClient, _TTLCache
 from app.services import ticker_report_service as trs
 from app.services.agents import fmp_tools
 from app.services.agents import narrative_prompts as np_
@@ -433,7 +433,10 @@ async def test_e2e_stage_a_default_model_is_the_client_default(defaults, monkeyp
     await _stage_a("direct", client)
     assert calls and calls[0]["model"] == "gemini-2.5-flash"
     thinking = calls[0]["config"].thinking_config
-    assert thinking.thinking_level is None and thinking.thinking_budget is not None
+    # The exact wire value: a 0 that reached gemini-2.5-flash unchanged would 400 once Google serves
+    # it with gemini-3.5-flash-lite, so "not None" (which 0 passes) is not enough.
+    assert thinking.thinking_level is None
+    assert thinking.thinking_budget == _BUDGET_OFF_ON_REFUSING_MODELS
 
 
 # ── research_complete: REPORT_AGENTIC_FINDINGS_MEMO ─────────────────────────

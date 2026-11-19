@@ -648,6 +648,18 @@ CURATION: dict[str, TableDoc] = {
              "USD rows. A row trailing the charted quarter by > 7 days is refetched (at most "
              "hourly); while SEC fails a row up to 30 days old is served as stale. Public "
              "SEC data, still service_role only. Owner: sec_concept_service.py."),
+    "public.earnings_filing_cache": T("market-cache",
+        purpose="What each company's own 8-K earnings release said, so a restart neither loses a "
+                "live earnings figure nor reads the filing again.",
+        key=("symbol", "report_date", "accession", "verifier_version", "revenue", "eps_adjusted",
+             "guidance", "computed_at"),
+        note="Migration 209. Figures from SEC filings only, never FMP data. One row per (symbol, "
+             "report date), written when a verified filing reaches its record and read back "
+             "once per process for the days a record stays readable (the live days and the "
+             "trading day before them), so report_date is its TTL: no expires_at and "
+             "no clean-up job. A restored figure is never a landing, and a row of another "
+             "verifier_version reads as no row. service_role only. Owner: "
+             "earnings_live_service.py."),
     "public.ticker_volatility_cache": T("market-cache",
         purpose="Daily sigma per ticker, used to decide whether a price move is notable enough "
                 "to explain.",

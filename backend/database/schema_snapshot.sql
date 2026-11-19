@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict yBMVRHmWipmlCMLC9Z3ty1IXUB8HFwz3AHCeeuddBBC6d7OIvfzJN4czlxKrrmr
+\restrict MeHyzUjfriTIK7EPbNCovC09k4EG2AqELB3obhhw1dzhCGec1U7KVJnd9F3W1Ik
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -4353,6 +4353,14 @@ declare
     -- previous identity values for update/delete
     old_columns realtime.wal_column[];
 
+    -- the same values as wal2json sent them, which is what filters compare against
+    raw_columns realtime.wal_column[] =
+        array_agg((x->>'name', x->>'type', x->>'typeoid', x->'value', null, null)::realtime.wal_column)
+        from jsonb_array_elements(wal -> 'columns') x;
+    raw_old_columns realtime.wal_column[] =
+        array_agg((x->>'name', x->>'type', x->>'typeoid', x->'value', null, null)::realtime.wal_column)
+        from jsonb_array_elements(wal -> 'identity') x;
+
     error_record_exceeds_max_size boolean = octet_length(wal::text) > max_record_bytes;
 
     -- Primary jsonb output for record
@@ -4511,10 +4519,10 @@ begin
                         subs.entity = entity_
                         and subs.claims_role = working_role
                         and (
-                            realtime.is_visible_through_filters(columns, subs.filters)
+                            realtime.is_visible_through_filters(raw_columns, subs.filters)
                             or (
                               action = 'DELETE'
-                              and realtime.is_visible_through_filters(old_columns, subs.filters)
+                              and realtime.is_visible_through_filters(raw_old_columns, subs.filters)
                             )
                         )
             ) loop
@@ -4938,6 +4946,18 @@ begin
 
     return case when negate then not res else res end;
 end;
+$$;
+
+
+--
+-- Name: filters_hash(realtime.user_defined_filter[]); Type: FUNCTION; Schema: realtime; Owner: -
+--
+
+CREATE FUNCTION realtime.filters_hash(filters realtime.user_defined_filter[]) RETURNS bytea
+    LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+    AS $$
+  select pg_catalog.int8send(pg_catalog.hash_array_extended(filters, 0))
+      || pg_catalog.int8send(pg_catalog.hash_array_extended(filters, 1))
 $$;
 
 
@@ -9107,6 +9127,133 @@ CREATE TABLE public.earnings_cache (
 
 
 --
+-- Name: earnings_filing_cache; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.earnings_filing_cache (
+    symbol text NOT NULL,
+    report_date date NOT NULL,
+    accession text NOT NULL,
+    verifier_version integer NOT NULL,
+    accepted_at timestamp with time zone,
+    url text,
+    revenue double precision,
+    eps_adjusted double precision,
+    eps_gaap double precision,
+    fiscal_period text,
+    guidance text,
+    revenue_rounding double precision,
+    eps_rounding double precision,
+    computed_at timestamp with time zone DEFAULT now() NOT NULL
+);
+
+
+--
+-- Name: TABLE earnings_filing_cache; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.earnings_filing_cache IS 'What each company''s own 8-K Item 2.02 earnings release said, for the live earnings card: FMP can take until the next morning to fill the same figures, and FMP never carries the outlook or the filing link. One row per (symbol, report date), written when a verified filing reaches its record and read back once per process for the days a record stays readable (the live days and the trading day before them), so a restart neither loses a figure nor reads the filing again. A row of another verifier_version reads as no row. Figures from SEC filings only, never FMP data. report_date is its TTL: no expires_at and no clean-up job. service_role only. Written and read only by app/services/earnings_live_service.py.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.symbol; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.symbol IS 'The ticker, upper case, as the live records key it.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.report_date; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.report_date IS 'The report''s date on the earnings calendar: the ET day whose record holds this filing.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.accession; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.accession IS 'SEC accession number of the 8-K, e.g. 0000050863-26-000123. A restored accession is not read again.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.verifier_version; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.verifier_version IS 'earnings_filing_service.FILING_VERIFIER_VERSION when the row was kept. A row of another version reads as no row, so what an older verifier kept never comes back after a fix.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.accepted_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.accepted_at IS 'When EDGAR accepted the filing. NULL when SEC gave no readable time.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.url; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.url IS 'The filing''s index page on sec.gov, behind "View the filing".';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.revenue; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.revenue IS 'Quarterly revenue in dollars, the number printed in the release. NULL when none verified.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.eps_adjusted; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.eps_adjusted IS 'Adjusted (non-GAAP) diluted EPS as printed. NULL when none verified.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.eps_gaap; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.eps_gaap IS 'GAAP diluted EPS as printed. NULL when none verified.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.fiscal_period; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.fiscal_period IS 'The quarter as the release names it, e.g. Q3 2026.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.guidance; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.guidance IS 'One sentence of the company''s own outlook, grounded in a verbatim quote.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.revenue_rounding; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.revenue_rounding IS 'Half the last digit revenue was printed to, in dollars: $17.1 billion is any figure within $50M, so a consensus inside that band is neither beaten nor missed.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.eps_rounding; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.eps_rounding IS 'Half the last digit adjusted EPS was printed to, in dollars. Same rule as revenue_rounding.';
+
+
+--
+-- Name: COLUMN earnings_filing_cache.computed_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.earnings_filing_cache.computed_at IS 'The moment the figures reached their record. The sheet''s "updated" time comes back from it.';
+
+
+--
 -- Name: etf_snapshot_cache; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -12452,7 +12599,8 @@ CREATE TABLE realtime.messages (
     inserted_at timestamp without time zone DEFAULT timezone('utc'::text, clock_timestamp()) NOT NULL,
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     binary_payload bytea,
-    skip_broadcast boolean DEFAULT false NOT NULL
+    skip_broadcast boolean DEFAULT false NOT NULL,
+    expires_at timestamp without time zone
 )
 PARTITION BY RANGE (inserted_at);
 
@@ -13507,6 +13655,14 @@ ALTER TABLE ONLY public.device_tokens
 
 ALTER TABLE ONLY public.earnings_cache
     ADD CONSTRAINT earnings_cache_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: earnings_filing_cache earnings_filing_cache_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.earnings_filing_cache
+    ADD CONSTRAINT earnings_filing_cache_pkey PRIMARY KEY (symbol, report_date);
 
 
 --
@@ -15470,6 +15626,13 @@ CREATE UNIQUE INDEX idx_earnings_cache_ticker ON public.earnings_cache USING btr
 
 
 --
+-- Name: idx_earnings_filing_cache_report_date; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_earnings_filing_cache_report_date ON public.earnings_filing_cache USING btree (report_date);
+
+
+--
 -- Name: idx_etf_snapshot_cache_symbol; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16527,17 +16690,17 @@ CREATE INDEX ix_realtime_subscription_entity ON realtime.subscription USING btre
 
 
 --
--- Name: messages_inserted_at_topic_index; Type: INDEX; Schema: realtime; Owner: -
+-- Name: messages_replay_index; Type: INDEX; Schema: realtime; Owner: -
 --
 
-CREATE INDEX messages_inserted_at_topic_index ON ONLY realtime.messages USING btree (inserted_at DESC, topic) WHERE ((extension = 'broadcast'::text) AND (private IS TRUE));
+CREATE INDEX messages_replay_index ON ONLY realtime.messages USING btree (topic, inserted_at DESC, COALESCE(expires_at, 'infinity'::timestamp without time zone)) WHERE ((extension = 'broadcast'::text) AND (private = true));
 
 
 --
--- Name: subscription_subscription_id_entity_filters_action_filter_selec; Type: INDEX; Schema: realtime; Owner: -
+-- Name: subscription_subscription_id_entity_filters_hash_key; Type: INDEX; Schema: realtime; Owner: -
 --
 
-CREATE UNIQUE INDEX subscription_subscription_id_entity_filters_action_filter_selec ON realtime.subscription USING btree (subscription_id, entity, filters, action_filter, COALESCE(selected_columns, '{}'::text[]));
+CREATE UNIQUE INDEX subscription_subscription_id_entity_filters_hash_key ON realtime.subscription USING btree (subscription_id, entity, realtime.filters_hash(filters), action_filter, COALESCE(selected_columns, '{}'::text[]));
 
 
 --
@@ -17847,6 +18010,19 @@ ALTER TABLE public.earnings_cache ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY earnings_cache_service_role_all ON public.earnings_cache TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: earnings_filing_cache; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.earnings_filing_cache ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: earnings_filing_cache earnings_filing_cache_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY earnings_filing_cache_service_all ON public.earnings_filing_cache TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -20277,6 +20453,17 @@ GRANT ALL ON FUNCTION realtime.check_equality_op(op realtime.equality_op, type_ 
 
 
 --
+-- Name: FUNCTION filters_hash(filters realtime.user_defined_filter[]); Type: ACL; Schema: realtime; Owner: -
+--
+
+GRANT ALL ON FUNCTION realtime.filters_hash(filters realtime.user_defined_filter[]) TO postgres;
+GRANT ALL ON FUNCTION realtime.filters_hash(filters realtime.user_defined_filter[]) TO dashboard_user;
+GRANT ALL ON FUNCTION realtime.filters_hash(filters realtime.user_defined_filter[]) TO anon;
+GRANT ALL ON FUNCTION realtime.filters_hash(filters realtime.user_defined_filter[]) TO authenticated;
+GRANT ALL ON FUNCTION realtime.filters_hash(filters realtime.user_defined_filter[]) TO service_role;
+
+
+--
 -- Name: FUNCTION is_visible_through_filters(columns realtime.wal_column[], filters realtime.user_defined_filter[]); Type: ACL; Schema: realtime; Owner: -
 --
 
@@ -20381,7 +20568,6 @@ GRANT ALL ON FUNCTION realtime.wal2json_escape_identifier(name text) TO dashboar
 --
 
 REVOKE ALL ON FUNCTION storage.delete_lifecycle_objects(object_ids uuid[]) FROM PUBLIC;
-GRANT ALL ON FUNCTION storage.delete_lifecycle_objects(object_ids uuid[]) TO postgres;
 GRANT ALL ON FUNCTION storage.delete_lifecycle_objects(object_ids uuid[]) TO service_role;
 
 
@@ -20397,7 +20583,6 @@ REVOKE ALL ON FUNCTION storage.protect_active_lifecycle_states() FROM PUBLIC;
 --
 
 REVOKE ALL ON FUNCTION storage.reconcile_lifecycle_state(target_bucket_id text, policy_changed boolean) FROM PUBLIC;
-GRANT ALL ON FUNCTION storage.reconcile_lifecycle_state(target_bucket_id text, policy_changed boolean) TO postgres;
 GRANT ALL ON FUNCTION storage.reconcile_lifecycle_state(target_bucket_id text, policy_changed boolean) TO service_role;
 
 
@@ -20941,6 +21126,13 @@ GRANT SELECT,USAGE ON SEQUENCE public.device_tokens_id_seq TO service_role;
 --
 
 GRANT ALL ON TABLE public.earnings_cache TO service_role;
+
+
+--
+-- Name: TABLE earnings_filing_cache; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.earnings_filing_cache TO service_role;
 
 
 --
@@ -21686,8 +21878,8 @@ GRANT USAGE ON SEQUENCE realtime.subscription_id_seq TO service_role;
 -- Name: TABLE bucket_lifecycle_states; Type: ACL; Schema: storage; Owner: -
 --
 
-GRANT ALL ON TABLE storage.bucket_lifecycle_states TO postgres;
 GRANT ALL ON TABLE storage.bucket_lifecycle_states TO service_role;
+GRANT SELECT ON TABLE storage.bucket_lifecycle_states TO postgres;
 
 
 --
@@ -21724,8 +21916,8 @@ GRANT SELECT ON TABLE storage.buckets_vectors TO authenticated;
 -- Name: TABLE lifecycle_abandoned_artifacts; Type: ACL; Schema: storage; Owner: -
 --
 
-GRANT ALL ON TABLE storage.lifecycle_abandoned_artifacts TO postgres;
 GRANT ALL ON TABLE storage.lifecycle_abandoned_artifacts TO service_role;
+GRANT SELECT ON TABLE storage.lifecycle_abandoned_artifacts TO postgres;
 
 
 --
@@ -21999,5 +22191,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict yBMVRHmWipmlCMLC9Z3ty1IXUB8HFwz3AHCeeuddBBC6d7OIvfzJN4czlxKrrmr
+\unrestrict MeHyzUjfriTIK7EPbNCovC09k4EG2AqELB3obhhw1dzhCGec1U7KVJnd9F3W1Ik
 

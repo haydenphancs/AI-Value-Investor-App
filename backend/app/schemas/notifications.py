@@ -28,6 +28,10 @@ class NotificationEventResponse(BaseModel):
 
     created_at: str = Field(description="ISO-8601. When the notification was DECIDED.")
     read_at: Optional[str] = None
+    # When the buzz went out, once it did. Hours after `created_at` for a row quiet hours or
+    # the night hold deferred, and that later time is the one the user's phone showed. Null
+    # for a row never delivered. The inbox is still ordered by `created_at`.
+    sent_at: Optional[str] = None
 
     # Why the buzz did or didn't happen. Surfaced so a support question ("I never got
     # it") is answerable from the app itself rather than from server logs:
@@ -62,7 +66,8 @@ class NotificationLookupResponse(BaseModel):
 
 
 class MarkReadRequest(BaseModel):
-    """What to mark read. Empty selectors + `all=True` marks everything.
+    """What to mark read. Empty selectors + `all=True` marks everything but a held row, one still
+    waiting for its wake (`NotificationInboxService.mark_read`).
 
     `dedup_keys` addresses rows by the other half of the `(user_id, dedup_key)` unique
     key. The notification's own "Mark as Read" action has no `notification_events.id` —

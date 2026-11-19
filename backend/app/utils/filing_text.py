@@ -44,7 +44,8 @@ __all__ = [
 
 #: ``html_to_text``'s default cap (the Learn reader's), in characters of collapsed text.
 FILING_TEXT_MAX_CHARS = 200_000
-#: A verified span is 40-400 characters long after normalisation.
+#: A verified span is 40-400 characters long after normalisation, unless its caller proves it some
+#: other way and lowers the floor (``verify_peg_span``'s ``min_chars``).
 PEG_SPAN_MIN_CHARS = 40
 PEG_SPAN_MAX_CHARS = 400
 
@@ -194,7 +195,13 @@ def normalize_peg_text(text: str) -> str:
     return _collapse(text.translate(_QUOTES))
 
 
-def verify_peg_span(span: Any, text: Any, *, normalized: Optional[str] = None) -> bool:
+def verify_peg_span(
+    span: Any,
+    text: Any,
+    *,
+    normalized: Optional[str] = None,
+    min_chars: int = PEG_SPAN_MIN_CHARS,
+) -> bool:
     """True when ``span`` is a verbatim quote of ``text`` (the filing's plain text).
 
     Only whitespace runs, zero-width characters and curly vs straight quotes are normalised;
@@ -204,12 +211,28 @@ def verify_peg_span(span: Any, text: Any, *, normalized: Optional[str] = None) -
     run of the span is a whole number of the text at the matched position ("$13" quoted from
     "$130.5 billion" is refused).
 
+    ``min_chars`` lowers the 40 for a caller whose span carries a proof of its own beside being
+    verbatim. A short span is easy to find anywhere, so nothing else here eases with it. The
+    earnings verifier does this for a figure, which must also print the number and name it.
+
     ``normalized`` is ``normalize_peg_text(text)``, computed once by a caller that verifies
     many spans against one document; the answer is the same with or without it. The span is
     matched in ``normalized`` when it is given, so it must be THIS text's normalisation and
     never a window of it: a window can cut a number at its edge, and the cut would look
     whole there. A value longer than ``text`` cannot be its normalisation and is refused.
+
+    Raises:
+        ValueError: ``min_chars`` is not a positive int up to ``PEG_SPAN_MAX_CHARS`` (a caller's
+            bug, never a document's).
     """
+    if (
+        isinstance(min_chars, bool) or not isinstance(min_chars, int)
+        or not 1 <= min_chars <= PEG_SPAN_MAX_CHARS
+    ):
+        raise ValueError(
+            f"verify_peg_span: min_chars must be an int from 1 to {PEG_SPAN_MAX_CHARS}, "
+            f"got {min_chars!r}"
+        )
     if not isinstance(span, str) or not isinstance(text, str):
         return False
     if normalized is not None:
@@ -225,7 +248,7 @@ def verify_peg_span(span: Any, text: Any, *, normalized: Optional[str] = None) -
     if len(span) > PEG_SPAN_MAX_CHARS * 4:  # cheap bound before any normalisation work
         return False
     needle = normalize_peg_text(span)
-    if not PEG_SPAN_MIN_CHARS <= len(needle) <= PEG_SPAN_MAX_CHARS:
+    if not min_chars <= len(needle) <= PEG_SPAN_MAX_CHARS:
         return False
     if any(ch.isdigit() and not ("0" <= ch <= "9") for ch in needle):
         return False

@@ -26,6 +26,9 @@ struct AlertDestination: Identifiable, Hashable {
         case ticker(symbol: String, assetType: MarketTickerType, destination: TickerDestination)
         case whale(id: String)
         case report(ticker: String, persona: String?, reportId: String?)
+        /// One report's live results (`EarningsLiveScreen`). `reportDate` is "YYYY-MM-DD".
+        /// `destinations(for:)` offers this only for a row with a date the endpoint still serves.
+        case earningsLive(ticker: String, reportDate: String?)
     }
 
     var id: String { "\(label)|\(systemImage)|\(String(describing: target))" }
@@ -41,7 +44,7 @@ struct AlertDestination: Identifiable, Hashable {
             return .ticker(symbol: symbol, assetType: assetType, destination: destination)
         case .report(let ticker, let persona, let reportId):
             return .report(id: reportId ?? "", ticker: ticker, persona: persona)
-        case .whale:
+        case .whale, .earningsLive:
             return nil
         }
     }
@@ -121,6 +124,25 @@ extension AlertDestination {
 
         guard !symbol.isEmpty else { return out }
 
+        // An earnings result leads with its own live results — the figures the banner was
+        // about, estimate vs actual — before the ticker screen.
+        //
+        // ONLY while the endpoint serves that report. It answers 400 for a date before the first
+        // of its `sheet_days`, two trading days back (`MarketHoursUtil.liveResultsFloorKey`):
+        // the live days and the trading day before them, so a result held for the user's
+        // morning still opens on the day it wakes. The inbox keeps a row for 90 days, and a row
+        // with no date would be answered with some other report. Both keep "Open" and "See the
+        // numbers", which show that quarter's figures. Keyed on the route's date, never
+        // `createdAt`: a pushed copy's `createdAt` is its delivery time.
+        if isEarningsResult(item.kind), let reportDate = route["report_date"],
+           reportDate >= MarketHoursUtil.liveResultsFloorKey() {
+            out.append(AlertDestination(
+                label: "See live results",
+                systemImage: "bolt.horizontal.circle",
+                target: .earningsLive(ticker: symbol, reportDate: reportDate)
+            ))
+        }
+
         out.append(AlertDestination(
             label: "Open \(symbol)",
             systemImage: "chart.line.uptrend.xyaxis",
@@ -153,6 +175,11 @@ extension AlertDestination {
         return out
     }
 
+    /// The two kinds that announce a report's RESULTS (`earnings_result`, `earnings_live`).
+    static func isEarningsResult(_ kind: String) -> Bool {
+        kind == "earnings_result" || kind == "earnings_live"
+    }
+
     /// The extra tab this KIND of alert is about, beyond the ticker's default screen.
     ///
     /// ⚠️ Every kind registered in `backend/app/services/notification_kinds.py` must have an arm
@@ -166,7 +193,7 @@ extension AlertDestination {
         switch kind {
         case "ticker_move":
             return ("Read the news", "newspaper", TickerDestination(tab: .news, section: nil))
-        case "earnings_upcoming", "earnings_result":
+        case "earnings_upcoming", "earnings_result", "earnings_live":
             return ("See the numbers", "chart.bar.doc.horizontal",
                     TickerDestination(tab: .financials, section: nil))
         case "insider_trade":

@@ -78,6 +78,8 @@ struct AlertDestinationCover: ViewModifier {
         switch destination.target {
         case .whale(let whaleId):
             WhaleProfileView(whaleId: whaleId)
+        case .earningsLive(let ticker, let reportDate):
+            EarningsLiveScreen(ticker: ticker, reportDate: reportDate)
         default:
             if let route = destination.route {
                 NotificationRouteContent(route: route)

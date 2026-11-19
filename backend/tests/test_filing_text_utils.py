@@ -572,6 +572,53 @@ def test_many_spans_against_one_big_document_stay_cheap():
     assert elapsed < 1.0, f"30 checks took {elapsed:.2f}s of CPU"
 
 
+# ── min_chars= ──────────────────────────────────────────────────────────
+
+
+_SHORT = "EPS of $0.91"
+_SHORT_TEXT = f"Bank of America reported net income of $6.9 billion; {_SHORT} for the quarter."
+
+
+def test_the_floor_stays_forty_unless_a_caller_lowers_it():
+    assert not verify_peg_span(_SHORT, _SHORT_TEXT)
+    assert verify_peg_span(_SHORT, _SHORT_TEXT, min_chars=len(_SHORT))
+    assert not verify_peg_span(_SHORT, _SHORT_TEXT, min_chars=len(_SHORT) + 1)
+
+
+def test_the_default_floor_is_the_constant():
+    span = "x" * PEG_SPAN_MIN_CHARS
+    assert verify_peg_span(span, span)
+    assert verify_peg_span(span, span, min_chars=PEG_SPAN_MIN_CHARS)
+    assert not verify_peg_span(span[:-1], span)
+
+
+def test_a_lower_floor_changes_nothing_else():
+    assert not verify_peg_span("EPS of $0.9", "EPS of $0.91 in all", min_chars=5)    # a cut number
+    assert not verify_peg_span("EPS of $9.99", _SHORT_TEXT, min_chars=5)             # not in the text
+    assert not verify_peg_span("eps of $0.91", _SHORT_TEXT, min_chars=5)             # case matters
+    assert not verify_peg_span("EPS of $\u0660.91", "EPS of $\u0660.91", min_chars=5)  # a homoglyph
+    long_span = "x" * (PEG_SPAN_MAX_CHARS + 1)
+    assert not verify_peg_span(long_span, long_span, min_chars=5)                    # the ceiling
+
+
+def test_a_lower_floor_answers_the_same_with_normalized():
+    norm = normalize_peg_text(_SHORT_TEXT)
+    assert verify_peg_span(_SHORT, _SHORT_TEXT, normalized=norm, min_chars=12)
+    assert not verify_peg_span(_SHORT, _SHORT_TEXT, normalized=norm)
+
+
+def test_a_floor_of_one_reads_one_character_and_never_an_empty_span():
+    assert verify_peg_span("x", "a x b", min_chars=1)
+    assert not verify_peg_span("", "a x b", min_chars=1)
+    assert not verify_peg_span("   ", "a x b", min_chars=1)
+
+
+@pytest.mark.parametrize("floor", [0, -1, PEG_SPAN_MAX_CHARS + 1, True, 1.5, "12", None])
+def test_a_floor_that_is_no_floor_is_the_callers_bug(floor):
+    with pytest.raises(ValueError, match="min_chars"):
+        verify_peg_span(_SHORT, _SHORT_TEXT, min_chars=floor)
+
+
 # ── sec_facts after the lift: whole-name document checks ─────────────────
 
 UA = "Caydex Test sec-contact-test@example.com"

@@ -25,6 +25,21 @@ struct AlertDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
 
+    /// The newest answer of the results card below.
+    @State private var liveAnswer: EarningsLiveResponse? = nil
+    /// The results card's poll gave up: it has stopped saying LIVE, so the header stops waiting.
+    @State private var liveCheckEnded = false
+
+    /// The alert as the sheet draws it. `alert` is the copy taken at the tap, and the results
+    /// card polls on its own, so the sheet reads the card's answer: the Tracking feed would
+    /// leave it up to a minute behind the card after each landing, and for good if a poll failed.
+    private var headerAlert: AppAlert {
+        guard case .earnings(var data) = alert else { return alert }
+        if let liveAnswer { data = data.updated(with: liveAnswer) }
+        data.liveCheckEnded = liveCheckEnded
+        return .earnings(data)
+    }
+
     var body: some View {
         ZStack {
             AppColors.background
@@ -38,11 +53,11 @@ struct AlertDetailView: View {
 
                     // Title & Description
                     VStack(spacing: AppSpacing.sm) {
-                        Text(alert.title)
+                        Text(headerAlert.title)
                             .font(AppTypography.titleCompact)
                             .foregroundColor(AppColors.textPrimary)
 
-                        Text(alert.description)
+                        Text(headerAlert.description)
                             .font(AppTypography.body)
                             .foregroundColor(AppColors.textSecondary)
                             .multilineTextAlignment(.center)
@@ -61,7 +76,7 @@ struct AlertDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(alert.title)
+                Text(headerAlert.title)
                     .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
             }
@@ -112,7 +127,7 @@ struct AlertDetailView: View {
 
     @ViewBuilder
     private var detailContent: some View {
-        switch alert {
+        switch headerAlert {
         case .earnings(let data):
             earningsDetail(data)
         case .market(let data):
@@ -130,19 +145,32 @@ struct AlertDetailView: View {
 
     private func earningsDetail(_ data: AppAlert.EarningsData) -> some View {
         VStack(spacing: AppSpacing.md) {
-            detailRow(label: "Ticker", value: data.ticker)
-            detailRow(label: "Company", value: data.companyName)
-            if let timing = data.reportTime {
-                detailRow(label: "Report Time", value: timing.displayText.capitalized)
+            // Estimate vs actual, each metric the moment it lands (owner request 2026-10-29).
+            // It polls its own endpoint while the report is LIVE and opens on this card's own
+            // figures, so the sheet is never blank and never a snapshot frozen at the tap.
+            // A card with no report date has no live results to show: the feature is off, or
+            // the backend predates it, and the card would ask about a report nobody watches.
+            if data.reportDate != nil {
+                EarningsLiveResultsCard(ticker: data.ticker, reportDate: data.reportDate,
+                                        fallback: data, onAnswer: { liveAnswer = $0 },
+                                        onPollEnded: { liveCheckEnded = $0 })
             }
-            if !data.consensus.isEmpty {
-                detailRow(label: "Consensus", value: data.consensus)
+
+            VStack(spacing: AppSpacing.md) {
+                detailRow(label: "Ticker", value: data.ticker)
+                detailRow(label: "Company", value: data.companyName)
+                if let timing = data.reportTime {
+                    detailRow(label: "Report Time", value: timing.displayText.capitalized)
+                }
+                if !data.consensus.isEmpty {
+                    detailRow(label: "Consensus", value: data.consensus)
+                }
+                detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
+                destinationRows(for: data.ticker)
             }
-            detailRow(label: "Date", value: "\(data.formattedMonth) \(data.formattedDay)")
-            destinationRows(for: data.ticker)
+            .padding(AppSpacing.lg)
+            .cardSurface(cornerRadius: AppCornerRadius.large)
         }
-        .padding(AppSpacing.lg)
-        .cardSurface(cornerRadius: AppCornerRadius.large)
     }
 
     // MARK: - Market Detail

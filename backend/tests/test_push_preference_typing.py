@@ -70,7 +70,9 @@ def test_unreadable_type_defaults_to_opted_in_and_does_not_raise():
 # shapes DELIVERY rather than selecting a category, so no NotificationKind references it
 # and `preference_enabled` never looks it up in normal operation — which is exactly how
 # an off-by-default key gets forgotten. It is declared anyway so both sides agree on
-# what its absence means. See `notification_kinds.DELIVERY_PREFERENCE_DEFAULTS`.
+# what its absence means: off. See `notification_kinds.DELIVERY_PREFERENCE_DEFAULTS`, which
+# also says what this default cannot: to the night hold an absent key is not a stored False
+# (`quiet_hours.quiet_hours_never_set`), and test_ios_settings_push_paths.py keeps it absent.
 
 _OFF_BY_DEFAULT = [
     "notify_market_volatility",

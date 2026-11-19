@@ -29,6 +29,12 @@
 
 import SwiftUI
 
+/// Something riding ON the row's glyph, saying what state the item is in right now.
+enum ActivityRowBadge: Equatable {
+    /// An earnings report whose results come out today (`LiveBadge`, under the glyph).
+    case live
+}
+
 struct ActivityRow<Trailing: View>: View {
     let systemName: String
     let iconColor: Color
@@ -39,6 +45,9 @@ struct ActivityRow<Trailing: View>: View {
     var footnote: String?
     /// Draws the unread dot. Only the notification rows use it.
     var isNew: Bool = false
+    /// Drawn ON the glyph (like the unread dot), so a LIVE card is as wide as any other and
+    /// adjacent titles still line up. Only live earnings cards set it.
+    var leadingBadge: ActivityRowBadge? = nil
     var onTap: (() -> Void)?
     @ViewBuilder var trailing: () -> Trailing
 
@@ -61,6 +70,24 @@ struct ActivityRow<Trailing: View>: View {
                                 Circle().strokeBorder(AppColors.cardBackground, lineWidth: 2)
                             )
                             .offset(x: -2, y: -2)
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    if leadingBadge == .live {
+                        // Hangs from the glyph's lower edge, its TOP 2 pt over the circle, so the
+                        // bell keeps 9 pt of room above it, measured in the Simulator (owner,
+                        // 2026-11-14: "move it down a bit … it's too close to the bell"; it was
+                        // `.offset(y: 9)`, ~3 pt).
+                        // The zero-height frame pins the badge's TOP to the glyph's bottom edge,
+                        // so a larger text size grows it downward, never up over the bell. Not
+                        // `.alignmentGuide(.bottom)`: in this overlay the Simulator ignored it
+                        // (2026-11-14) and drew the badge bottom-aligned, over the bell. At the
+                        // default size it reaches 14 pt below the glyph, inside the row's 16 pt
+                        // padding even on a row no taller than the glyph.
+                        LiveBadge()
+                            .fixedSize()
+                            .frame(height: 0, alignment: .top)
+                            .offset(y: -2)
                     }
                 }
 
@@ -98,7 +125,9 @@ struct ActivityRow<Trailing: View>: View {
         // `.contain`, not `.combine`: the trailing view can hold its own controls (the
         // price rules' toggle and delete button), and combining would swallow them.
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(isNew ? "New. " : "")\(title). \(subtitle)")
+        .accessibilityLabel(
+            "\(isNew ? "New. " : "")\(leadingBadge == .live ? "Live. " : "")\(title). \(subtitle)"
+        )
     }
 }
 
@@ -111,11 +140,13 @@ extension ActivityRow where Trailing == EmptyView {
         subtitle: String,
         footnote: String? = nil,
         isNew: Bool = false,
+        leadingBadge: ActivityRowBadge? = nil,
         onTap: (() -> Void)? = nil
     ) {
         self.init(
             systemName: systemName, iconColor: iconColor, title: title,
-            subtitle: subtitle, footnote: footnote, isNew: isNew, onTap: onTap,
+            subtitle: subtitle, footnote: footnote, isNew: isNew,
+            leadingBadge: leadingBadge, onTap: onTap,
             trailing: { EmptyView() }
         )
     }

@@ -64,7 +64,7 @@ def _code_only(src: str) -> str:
         if line.strip().startswith("//"):
             out.append("")
             continue
-        out.append(re.sub(r"\s//.*$", "", line))
+        out.append(re.sub(r"(?<!:)//.*$", "", line))
     return "\n".join(out)
 
 
@@ -791,6 +791,17 @@ def test_every_registered_kind_declares_its_tab_destination():
     assert not missing, (
         f"notification kinds with no arm in `tabDestination(forKind:)`: {missing}. Add an "
         f"explicit case — returning nil is a fine answer, but it has to be written down."
+    )
+
+
+def test_every_registered_kind_declares_its_icon():
+    """A kind with no arm falls to the neutral `app.badge.fill`: a Live Results row in the Earnings
+    group would wear the App Activity glyph beside its `earnings_result` sibling."""
+    body = _balanced(_read(_NOTIF_MODELS), "var iconName: String {")
+    missing = sorted(k for k in _registered_kinds() if f'"{k}"' not in body)
+    assert not missing, f"notification kinds with no arm in `iconName`: {missing}"
+    assert re.search(r'"earnings_live":\s+return "calendar\.badge\.clock"', body), (
+        "a Live Results row must wear its Earnings group's glyph"
     )
 
 

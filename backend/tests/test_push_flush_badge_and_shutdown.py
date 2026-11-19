@@ -97,7 +97,7 @@ def _wire(svc, rows, *, unread=None, devices=None, marks=None):
     svc._category_counts_bulk = lambda ids, category, cutoffs: {}
     if marks is not None:
         svc.mark_state = (
-            lambda uid, key, state, error=None, sent=False, only_if_state=None:
+            lambda uid, key, state, error=None, sent=False, only_if_state=None, attempts=None:
                 marks.append((uid, key, state, only_if_state))
         )
     else:
@@ -184,6 +184,21 @@ async def test_a_suppressed_row_does_not_bump_the_badge():
     stats = await svc.flush_deferred()
     assert stats["suppressed"] == 1 and stats["sent"] == 1, stats
     assert [c["badge"] for c in push.calls] == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_row_read_before_its_wake_neither_buzzes_nor_moves_the_badge():
+    """The inbox lists a held row, so it can be read before it buzzes. It is not buzzed, and the
+    unread row after it for the same user still carries `unread + 1`: the server's count holds no
+    read row, and the icon must say what the inbox says."""
+    push = _FakePush()
+    read = {**_row("u1", "a"), "read_at": datetime.now(timezone.utc).isoformat()}
+    marks = []
+    svc = _wire(_svc(push), [read, _row("u1", "b")], unread={"u1": 0}, marks=marks)
+    stats = await svc.flush_deferred()
+    assert (stats["suppressed"], stats["sent"]) == (1, 1), stats
+    assert [(c["user_id"], c["badge"]) for c in push.calls] == [("u1", 1)]
+    assert marks[0] == ("u1", "a", STATE_FAILED, None)
 
 
 @pytest.mark.asyncio
@@ -380,19 +395,29 @@ def test_the_claim_guard_keeps_the_future_and_returns_rows_on_cancel():
 
 
 def test_return_to_deferred_is_conditional_on_pending_and_spends_no_attempt():
+    """The claim RPC counted a hand-out the redeploy cut off: it is given back, so neither the
+    attempts ceiling nor a night-hold row's one night hold is spent on what was not the row's
+    fault. A row with no count to give back is returned as it is."""
     svc = _svc()
     seen = []
     svc.mark_state = (
-        lambda uid, key, state, error=None, sent=False, only_if_state=None:
-            seen.append((uid, key, state, sent, only_if_state))
+        lambda uid, key, state, error=None, sent=False, only_if_state=None, attempts=None:
+            seen.append((uid, key, state, sent, only_if_state, attempts))
     )
+    uncounted = {**_row("u5", "k5"), "attempts": None}
+    third = {**_row("u6", "k6"), "attempts": 3}
+    flagged = {**_row("u7", "k7"), "attempts": True}
     n = svc._return_to_deferred(
-        [_row("u1", "k1"), {"user_id": "", "dedup_key": "k"}, {"user_id": "u3"}, _row("u4", "k4")],
+        [_row("u1", "k1"), {"user_id": "", "dedup_key": "k"}, {"user_id": "u3"}, _row("u4", "k4"),
+         uncounted, third, flagged],
         reason="r",
     )
-    assert n == 2
-    assert seen == [("u1", "k1", STATE_DEFERRED, False, STATE_PENDING),
-                    ("u4", "k4", STATE_DEFERRED, False, STATE_PENDING)]
+    assert n == 5
+    assert seen == [("u1", "k1", STATE_DEFERRED, False, STATE_PENDING, 0),
+                    ("u4", "k4", STATE_DEFERRED, False, STATE_PENDING, 0),
+                    ("u5", "k5", STATE_DEFERRED, False, STATE_PENDING, None),
+                    ("u6", "k6", STATE_DEFERRED, False, STATE_PENDING, 2),
+                    ("u7", "k7", STATE_DEFERRED, False, STATE_PENDING, None)]
     # AST, not text: the docstring legitimately NAMES `_requeue_or_fail` to say why it
     # is not used, so a substring scan would fail on prose.
     import ast, textwrap

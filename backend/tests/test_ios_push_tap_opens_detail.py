@@ -266,14 +266,23 @@ def test_a_report_push_opens_the_report_and_marks_it_read():
     )
 
 
-def test_only_quiet_hours_is_still_explained_on_a_row_or_the_detail():
+def test_only_a_held_buzz_is_explained_on_a_row_or_the_detail():
     """ "not sent to this device" / "couldn't be delivered" were removed on request: the row IS
     the delivery, and the recent `failed` rows were dev noise (a laptop backend with no APNs
-    keys). Quiet hours stays — it is the user's own setting."""
+    keys). A held buzz stays explained, in words true of every hold that promise nothing: the
+    user's own Quiet Hours, and the night hold an earnings result gets when they never set any.
+    "Quiet hours" would send that user to a Settings toggle that reads Off, "until morning" is
+    false for a daytime window the user chose, and "delivered later" or "not sent yet" is false
+    for a row the wake re-checks and never sends (a figure that moved, a category turned off,
+    the day's cap)."""
     foot = _block(_read(_INBOX_SECTION), "private static func footnote(for item: NotificationEventDTO) -> String")
     note = _block(_read(_DETAIL), "private func deliveryNote(_ event: NotificationEventDTO) -> String?")
-    for body, name in ((foot, "footnote"), (note, "deliveryNote")):
-        assert '"deferred"' in body, f"{name} lost the quiet-hours note"
+    for body, name, held in ((foot, "footnote", r'case "deferred":\s*note = "held back"'),
+                             (note, "deliveryNote", r'case "deferred":\s*return "Held back"')):
+        assert re.search(held, body), f"{name} lost the held note, or changed its words"
+        words = " ".join(re.findall(r'"([^"\n]*)"', body)).lower()
+        for untrue in ("quiet", "morning", "overnight", "deliver", "later", "will", "soon", "yet"):
+            assert untrue not in words, f"{name} says {untrue!r}: it names one hold or promises a buzz"
         for gone in ('"no_device"', '"failed"', "not sent to this device", "couldn't be delivered",
                      "Not sent to this device", "Couldn't be delivered"):
             assert gone not in body, f"{name} shows {gone} again"
@@ -434,9 +443,16 @@ def test_the_block_reader_stops_at_its_own_brace():
 #   R4  `groupKey` no longer excludes reports                           → test_report_rows_are_never_collapsed
 #   R5  the report push is not marked read                              → test_a_report_push_opens_the_report_and_marks_it_read
 #   R6  the report push assigns `pushDetail` (detail) instead           → test_a_report_push_opens_the_report_and_marks_it_read
-#   R7  "not sent to this device" re-added to the row footnote          → test_only_quiet_hours_is_still_explained_on_a_row_or_the_detail
-#   R8  "Couldn't be delivered" re-added to the detail                  → test_only_quiet_hours_is_still_explained_on_a_row_or_the_detail
+#   R7  "not sent to this device" re-added to the row footnote          → test_only_a_held_buzz_is_explained_on_a_row_or_the_detail
+#   R8  "Couldn't be delivered" re-added to the detail                  → test_only_a_held_buzz_is_explained_on_a_row_or_the_detail
 #   R9  isReport drops the `research_complete` kind fallback            → test_one_rule_decides_what_is_a_report
 #                                                                        (+ badge_and_filters::test_a_report_notification_opens_the_report)
 #   R10 destinations(for:) inlines its own report rule again            → same two
-#   R11 the quiet-hours note dropped                                    → test_only_quiet_hours_is_still_explained_on_a_row_or_the_detail
+#   R11 the held note dropped                                           → test_only_a_held_buzz_is_explained_on_a_row_or_the_detail
+#
+# A held buzz in words true of every hold (the user's Quiet Hours, an earnings result's night
+# hold) that promise nothing, since the wake re-checks a held row and may never send it:
+#   R12 the row footnote says "held during quiet hours" again           → test_only_a_held_buzz_is_explained_on_a_row_or_the_detail
+#   R13 the detail says "Held until morning"                            → test_only_a_held_buzz_is_explained_on_a_row_or_the_detail
+#   R14 the row footnote says "held, delivered later" again             → test_only_a_held_buzz_is_explained_on_a_row_or_the_detail
+#   R15 the detail says "Held, not sent yet"                            → test_only_a_held_buzz_is_explained_on_a_row_or_the_detail

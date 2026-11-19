@@ -141,6 +141,20 @@ class TrackingViewModel: ObservableObject {
     /// Bumped by every identity change. A load (or a feed answer) that started under the
     /// previous identity publishes nothing and latches nothing.
     private var loadGeneration = 0
+    /// Bumped each time a feed answer replaces `alerts` whole (an identity change is
+    /// `loadGeneration`'s). A LIVE card's own answer asked for before that writes nothing: the
+    /// newer list may already hold a newer copy of the card (`refreshLiveEarningsCards`).
+    private var alertsRevision = 0
+    /// Where the next round of LIVE-card asks starts, so cards past one round's limit take turns.
+    private var liveCardCursor = 0
+    /// The New York day and identity (`loadGeneration`) `labelStartAnswered` belongs to
+    /// (`labelStartReports`). Deliberately not the feed answer (`alertsRevision`): a refusal
+    /// hands the round to a feed build, and a set cleared by every build would ask that card
+    /// again 30 s later, a feed build each time.
+    private var labelStartScope = ""
+    /// The report-day cards drawn `upcoming` that the round's asks at the LIVE label's start have
+    /// settled for the day and identity in `labelStartScope`.
+    private var labelStartAnswered: Set<String> = []
 
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
@@ -1249,7 +1263,15 @@ class TrackingViewModel: ObservableObject {
             )
             guard generation == loadGeneration else { return false }
             self.trackedAssets = feed.assets.map { $0.toTrackedAsset() }
-            self.alerts = feed.alerts.map { $0.toAppAlert() }
+            // The previous trading day's earnings cards first (reported overnight, or still
+            // awaiting until noon ET), then today's and the upcoming ones — the order a user
+            // reads "what just happened" before "what is next". Merged by id so a card can
+            // never appear twice if a row ever sat in both lists across a day roll.
+            let recent = (feed.recentEarningsAlerts ?? []).map { $0.toAppAlert() }
+            let current = feed.alerts.map { $0.toAppAlert() }
+            let currentIds = Set(current.map(\.id))
+            self.alerts = recent.filter { !currentIds.contains($0.id) } + current
+            self.alertsRevision &+= 1
             self.lastLiveFeedBody = body
             self.hasLiveFeed = true
             self.assetsErrorMessage = nil
@@ -1277,6 +1299,7 @@ class TrackingViewModel: ObservableObject {
             if case .signInRequired = appError {
                 self.trackedAssets = []
                 self.alerts = []
+                self.alertsRevision &+= 1
                 self.assetsErrorMessage = nil
                 // The saved snapshot comes down too, and stays down: stored holdings never sit
                 // over an account gate (the seed's precondition refuses while it is up). The
@@ -1707,6 +1730,18 @@ class TrackingViewModel: ObservableObject {
     /// every evening and all weekend — exactly when a crypto holder checks. It
     /// now also refreshes whenever the tracked set contains a round-the-clock
     /// asset, mirroring the backend's `asset_class.trades_extended_hours`.
+    ///
+    /// Outside those hours a report-day earnings card on screen is the one thing left that can
+    /// change: an after-close report's figures can land late in the evening, and the server says
+    /// LIVE from 03:00 to midnight ET on the report day until the results are complete; at night
+    /// the server's own checks stop, but each ask reads the shared calendar memo, which can still
+    /// bring a late fill. The poll then asks about those cards alone
+    /// (`refreshLiveEarningsCards`), not the whole feed, whose build pays FMP for every holding
+    /// to redraw prices that cannot move: one feed build only when a card's report moved or left
+    /// the calendar, or its route refused for good, since which cards stand is then the feed's to
+    /// say. LIVE starts at 03:00, before the 04:00 feed builds (and on a closed day none run), so
+    /// from 03:01 a card this tab drew `upcoming` on its report day is asked about until an
+    /// answer settles it, once a day (`labelStartReports`), and turns LIVE when the server says so.
     func startPriceRefreshTimer() {
         priceRefreshTask?.cancel()
         priceRefreshTask = Task { [weak self] in
@@ -1715,11 +1750,15 @@ class TrackingViewModel: ObservableObject {
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
                 let assets = self.trackedAssets
-                guard MarketHoursUtil.shouldRefreshPrices(
+                if MarketHoursUtil.shouldRefreshPrices(
                     assetTypes: assets.map(\.assetType),
                     symbols: assets.map(\.ticker)
-                ) else { continue }
-                await self.loadTrackingFeed()
+                ) {
+                    await self.loadTrackingFeed()
+                } else if self.filteredAlerts.contains(where: \.isLiveEarnings)
+                            || !self.labelStartReports().isEmpty {
+                    await self.refreshLiveEarningsCards()
+                }
             }
         }
     }
@@ -1731,6 +1770,201 @@ class TrackingViewModel: ObservableObject {
     func stopPriceRefreshTimer() {
         priceRefreshTask?.cancel()
         priceRefreshTask = nil
+    }
+
+    // MARK: - LIVE earnings cards
+
+    /// One LIVE card's report, as `refreshLiveEarningsCards` asks about it.
+    private struct LiveCardReport {
+        let id: String
+        let ticker: String
+        let reportDate: String
+    }
+
+    /// At most this many cards are asked about in one round. Their route shares the per-user
+    /// limit of 60 requests a minute with every other screen, the sheet's own poll over this tab
+    /// included; more cards take turns (`liveCardCursor`).
+    private static let maxLiveCardsPerRound = 8
+
+    /// The report a LIVE card is about, or nil for any other card.
+    private static func liveCardReport(_ alert: AppAlert) -> LiveCardReport? {
+        guard case .earnings(let data) = alert, data.status == .live,
+              let date = data.reportDate, !date.isEmpty, !data.ticker.isEmpty else { return nil }
+        return LiveCardReport(id: alert.id, ticker: data.ticker, reportDate: date)
+    }
+
+    /// The report of an earnings card drawn `upcoming` on its own report day `day`, or nil.
+    private static func labelStartReport(_ alert: AppAlert, day: String) -> LiveCardReport? {
+        guard case .earnings(let data) = alert, data.status == .upcoming,
+              data.reportDate == day, !data.ticker.isEmpty else { return nil }
+        return LiveCardReport(id: alert.id, ticker: data.ticker, reportDate: day)
+    }
+
+    /// Report-day cards this tab still draws `upcoming` once New York is past 03:00, not yet
+    /// settled today for this identity (2026-11-14 review). The server says LIVE from 03:00 ET
+    /// on the report day, but no feed build runs before 04:00 (and none on a closed day), and
+    /// the round asks only about LIVE cards, so a tab loaded before 03:00 would keep the card
+    /// `upcoming` until its next build. Each is asked about until one answer settles it, then
+    /// not again that day: with the live switch off the server keeps answering `upcoming`, and a
+    /// backend without the route refuses it (a feed build each time, were it asked again). The
+    /// phone's clock only picks when to ask (`MarketHoursUtil.liveLabelAskDayKey`); the answer
+    /// says whether the card is LIVE.
+    private func labelStartReports() -> [LiveCardReport] {
+        guard let day = MarketHoursUtil.liveLabelAskDayKey() else { return [] }
+        let scope: String = "\(day)#\(loadGeneration)"
+        if scope != labelStartScope {
+            labelStartScope = scope
+            labelStartAnswered = []
+        }
+        return filteredAlerts
+            .compactMap { Self.labelStartReport($0, day: day) }
+            .filter { !labelStartAnswered.contains($0.id) }
+    }
+
+    /// `report`, when it is one of this round's `labelStartReports`, has its answer for today.
+    private func settleLabelStart(_ report: LiveCardReport, among starting: Set<String>) {
+        if starting.contains(report.id) { labelStartAnswered.insert(report.id) }
+    }
+
+    /// What one answer about a LIVE card's report does to the card (`liveCardStep`).
+    private enum LiveCardStep {
+        /// The answer says how the card's own report stands: the card takes it.
+        case write
+        /// The server could not tell yet and asks to be asked again: the card stays as it is,
+        /// still LIVE, so the next round asks again, as the sheet does.
+        case keep
+        /// The report left the card's date, or the calendar: which cards stand is the feed's to
+        /// say, so the round ends in one feed build.
+        case askTheFeed
+    }
+
+    /// The step `answer` makes for the card asked about as `report`.
+    ///
+    /// The card is asked by its own date, so an answer about another date says the report
+    /// moved, and `none` says it left the calendar. Neither is written: the moved card would take
+    /// the id of the card the feed already lists on the new date (two cards with one id in the
+    /// list), and the other would say "no report in the next two weeks" under its own date, where
+    /// the feed draws no card. `live` and `reported` settle the report. Any other status that
+    /// still asks to be asked again (`poll_seconds`) is a read the server could not settle yet,
+    /// a restart whose first calendar read failed: written, it would turn a card holding figures
+    /// into "reports earnings … after market close", with no LIVE label to keep it asked about.
+    private static func liveCardStep(_ answer: EarningsLiveResponse,
+                                     about report: LiveCardReport) -> LiveCardStep {
+        let status: EarningsLiveStatus = answer.liveStatus
+        if answer.reportDate != report.reportDate || status == .notScheduled { return .askTheFeed }
+        if status == .live || status == .reported { return .write }
+        if let seconds = answer.pollSeconds, seconds > 0 { return .keep }
+        return .write
+    }
+
+    /// Asks about each LIVE earnings card on screen through its own route,
+    /// `GET /tracking/earnings/{ticker}/live`. An answer that settles the card's own report is
+    /// written onto the card the way the sheet's header reads it
+    /// (`AppAlert.EarningsData.updated(with:)`); one the server could not settle yet leaves the
+    /// card as it is; a moved or unlisted report is the feed's to redraw (`liveCardStep`).
+    ///
+    /// The poll's round when no price on the tab can move. The route reads the shared Tracking
+    /// memo and the live record, with no FMP call per holding, so a LIVE card costs only its own
+    /// company, on its report day (the owner's rule, 2026-11-11). It asks with `history: false`:
+    /// the card draws no year-ago quarter or last four quarters, and on report day building them
+    /// is 4 FMP calls (2026-11-14 review; the sheet's own ask still builds them). A report moving
+    /// under a LIVE card costs one feed build. The report-day cards still drawn `upcoming` once
+    /// New York is past 03:00 (`labelStartReports`) go first, until an answer settles each.
+    ///
+    /// Fenced like the feed: an answer that lands after an identity change, or after a feed
+    /// answer replaced the list, writes nothing. A refusal asking again cannot change (a 404 from
+    /// a backend without the route, a 400 for a date outside its window) hands the round to the
+    /// feed, which says how the card stands. Any other failure keeps the card as it is, logged,
+    /// and the next round asks again.
+    private func refreshLiveEarningsCards() async {
+        let generation = loadGeneration
+        let revision = alertsRevision
+        let reports: [LiveCardReport] = filteredAlerts.compactMap { Self.liveCardReport($0) }
+        // The LIVE label's start first; the LIVE cards take turns in the room left.
+        let starting: [LiveCardReport] = Array(
+            labelStartReports().prefix(Self.maxLiveCardsPerRound)
+        )
+        let startingIds: Set<String> = Set(starting.map(\.id))
+        var batch: [LiveCardReport] = starting
+        if !reports.isEmpty {
+            let start: Int = liveCardCursor % reports.count
+            let rotated: [LiveCardReport] = Array(reports[start...]) + Array(reports[..<start])
+            let room: Int = Self.maxLiveCardsPerRound - batch.count
+            let taken: [LiveCardReport] = Array(rotated.prefix(room))
+            liveCardCursor = start + taken.count
+            batch += taken
+        }
+        guard !batch.isEmpty else { return }
+        for report in batch {
+            do {
+                let answer: EarningsLiveResponse = try await apiClient.request(
+                    endpoint: .getEarningsLive(ticker: report.ticker, reportDate: report.reportDate,
+                                               history: false),
+                    responseType: EarningsLiveResponse.self
+                )
+                guard !Task.isCancelled, generation == loadGeneration,
+                      revision == alertsRevision else { return }
+                let step: LiveCardStep = Self.liveCardStep(answer, about: report)
+                // A `keep` answer (the server could not tell yet) and a passing failure leave
+                // the card to be asked again next round, as a LIVE card is.
+                if step != .keep { settleLabelStart(report, among: startingIds) }
+                switch step {
+                case .write:
+                    guard let index = alerts.firstIndex(where: { $0.id == report.id }),
+                          case .earnings(let data) = alerts[index] else { continue }
+                    alerts[index] = .earnings(data.updated(with: answer))
+                case .keep:
+                    continue
+                case .askTheFeed:
+                    logLiveCardHandedToTheFeed(answer, report: report)
+                    await loadTrackingFeed()
+                    return
+                }
+            } catch {
+                // `APIClient` wraps a cancellation (a tab-away stops the poll) into a network
+                // error, so the task's own flag is read before the error is mapped.
+                guard !Task.isCancelled, generation == loadGeneration,
+                      revision == alertsRevision else { return }
+                let appError = AppError.from(error)
+                logLiveCardFailure(error, as: appError, report: report)
+                if case .notFound = appError {
+                    settleLabelStart(report, among: startingIds)
+                    await loadTrackingFeed()
+                    return
+                }
+                if case .validationFailed = appError {
+                    settleLabelStart(report, among: startingIds)
+                    await loadTrackingFeed()
+                    return
+                }
+            }
+        }
+    }
+
+    /// One line a failed ask can be diagnosed from with no repro: which card's report, how the
+    /// app read the failure, and the raw error. `.error` for an answer that did not decode
+    /// (backend↔iOS contract drift), `.warning` for the handled rest. Public: a ticker, a date
+    /// and an error's description carry no personal data.
+    private func logLiveCardFailure(_ error: Error, as appError: AppError, report: LiveCardReport) {
+        let symbol: String = report.ticker
+        let date: String = report.reportDate
+        let code: String = appError.analyticsCode
+        let detail: String = "\(String(describing: type(of: error))): \(String(describing: error))"
+        if let apiError = error as? APIError, case .decodingError = apiError {
+            Self.log.error("tracking: live card \(symbol, privacy: .public) report_date=\(date, privacy: .public): the answer did not decode (\(code, privacy: .public)): \(detail, privacy: .public)")
+        } else {
+            Self.log.warning("tracking: live card \(symbol, privacy: .public) report_date=\(date, privacy: .public) failed (\(code, privacy: .public)): \(detail, privacy: .public)")
+        }
+    }
+
+    /// One line for a card handed to the feed, which costs a feed build: the date asked, and the
+    /// status and date the route answered. Public, like the failure line.
+    private func logLiveCardHandedToTheFeed(_ answer: EarningsLiveResponse, report: LiveCardReport) {
+        let symbol: String = report.ticker
+        let asked: String = report.reportDate
+        let status: String = answer.status
+        let answered: String = answer.reportDate
+        Self.log.info("tracking: live card \(symbol, privacy: .public) report_date=\(asked, privacy: .public) answered \(status, privacy: .public) for \(answered, privacy: .public): the feed redraws the cards")
     }
 
     /// Called when the Whales tab appears — retries loading if the list is still empty.

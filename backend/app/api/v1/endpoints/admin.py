@@ -955,8 +955,9 @@ async def preview_notification(
 
     Returns the resolved audience size plus a per-user `{send, reason}`, where
     `reason` is one of `ok`, `preference_off:<key>`, `cap_reached:<category>:<n>`,
-    or `quiet_hours` (with the wake time). That vocabulary is what makes "I didn't
-    get my alert" answerable.
+    `quiet_hours` (with the wake time), or `preferences_unread` (a night-hold kind whose
+    settings read failed, parked for the next flush's read). That vocabulary is what makes
+    "I didn't get my alert" answerable.
     """
     _authorize_admin(user, x_admin_token)
 

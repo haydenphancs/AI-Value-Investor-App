@@ -135,6 +135,26 @@ def test_an_invalid_kind_is_rejected_at_construction():
         NotificationKind(**{**base, "preference_key": "x_alerts"})
 
 
+def test_only_the_two_result_kinds_hold_for_morning_by_default():
+    """Owner decision 2026-11-05. A third kind joining this list changes when a default-settings
+    user is woken, so it has to be a decision, not a side effect."""
+    held = {k.key for k in NOTIFICATION_KINDS.values() if k.night_hold_by_default}
+    assert held == {"earnings_result", "earnings_live"}
+
+
+def test_a_night_hold_on_a_kind_that_bypasses_quiet_hours_is_rejected_at_construction():
+    """`decide` never reaches the hold for such a kind, so the flag would do nothing, silently."""
+    base = dict(
+        key="x", preference_key="notify_x", master_preference_key=None,
+        default_on=True, category="app", interruption_level="active",
+        thread_id="t", route_kind="ticker", label="X", night_hold_by_default=True,
+    )
+    NotificationKind(**base, respects_quiet_hours=True)  # the control: valid, must not raise
+
+    with pytest.raises(ValueError, match="night_hold_by_default"):
+        NotificationKind(**base, respects_quiet_hours=False)
+
+
 # ── caps ─────────────────────────────────────────────────────────────────────
 
 def test_report_ready_is_uncapped():

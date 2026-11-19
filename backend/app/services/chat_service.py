@@ -243,7 +243,8 @@ def _chat_thinking_level(model_name: Optional[str] = None) -> Optional[str]:
     the CHEAP route keeps None whatever the setting says (it never thinks), every other call
     reads `settings.CHAT_THINKING_LEVEL` at CALL time (validated at start-up to minimal / low /
     medium / high). The encoder (`gemini._thinking_fields`) sends a level only to a model that
-    accepts it; on any other model the budget above still applies.
+    accepts it; on any other model low / medium / high are ignored and the budget above applies,
+    while "minimal" means off there (budget 0 rules).
     """
     if model_name and model_name == settings.CHAT_CHEAP_MODEL:
         return None

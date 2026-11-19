@@ -57,8 +57,10 @@ def _spec_level(level: Any) -> Optional[str]:
 
 
 def _pre_level(budget: Any, model: Any) -> Dict[str, Any]:
-    """The budget-only encoding every caller got before levels existed: None → nothing; an int 0 →
-    level "minimal" on a request naming gemini-3.5-flash-lite (its real off), budget 1 on one
+    """The budget-only encoding this branch gives a caller that passes NO level (level=None): None →
+    nothing; an int 0 → level "minimal" on a request naming gemini-3.5-flash-lite (its real off;
+    before this branch that request went out as budget 1, and production never names that model
+    today), budget 1 on one
     naming gemini-2.5-flash (the smallest budget both sides of the reroute accept), 0 elsewhere;
     every other value (bools included) passed through as sent."""
     if budget is None:

@@ -809,7 +809,8 @@ def _thinking_budget() -> Optional[int]:
 def _thinking_level() -> Optional[str]:
     """`LEARN_WRITER_THINKING_LEVEL` (minimal / low / medium / high, validated at start-up), or None:
     send no level at all, today's request. The Gemini encoder sends a level only to a model that
-    accepts one; on gemini-2.5-flash the budget above still rules. A non-text value (only a test or
+    accepts one; on gemini-2.5-flash low / medium / high are ignored and the budget above rules,
+    while "minimal" means off (budget 0 → 1 there). A non-text value (only a test or
     a code edit can make one) is ignored, logged — never a crash in the middle of a build."""
     value = settings.LEARN_WRITER_THINKING_LEVEL
     if value is None:

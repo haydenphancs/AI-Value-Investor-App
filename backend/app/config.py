@@ -97,8 +97,9 @@ class Settings(BaseSettings):
     # for a 300-600-word memo instead: on 3.5-flash-lite the default gave ~470-char findings and a
     # Stage A that lost 4-12 to today's end to end; the memo gave 2,742 chars and parity (8-1-7).
     REPORT_AGENTIC_FINDINGS_MEMO: bool = False
-    # Chat's flagship route (the cheap route never thinks). CHAT_THINKING_BUDGET still applies on a
-    # model that takes no level.
+    # Chat's flagship route (the cheap route never thinks). On a model that takes no level, low /
+    # medium / high are ignored and CHAT_THINKING_BUDGET applies; "minimal" means off there
+    # (budget 0 rules: 1 on gemini-2.5-flash).
     CHAT_THINKING_LEVEL: Optional[str] = None
     # The web-only Insights grounding judge (INSIGHT_WEB_ONLY_JUDGE_MODEL above).
     INSIGHT_WEB_ONLY_JUDGE_THINKING_LEVEL: Optional[str] = None

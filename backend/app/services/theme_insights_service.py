@@ -1722,7 +1722,8 @@ class ThemeInsightsService:
         prompt = build_summary_prompt(theme, perf, corpus, window_hours, as_of)
         # Read at CALL time. Unset (the default) sends no `thinking_level` keyword at all, so the
         # request stays exactly what it was; set, the encoder sends the level to a model that
-        # takes one and THEME_INSIGHTS_THINKING_BUDGET to any other (never both).
+        # takes one; on any other model low / medium / high fall back to
+        # THEME_INSIGHTS_THINKING_BUDGET and "minimal" means off (budget 0 rules). Never both.
         level = settings.THEME_INSIGHTS_THINKING_LEVEL
         try:
             response = await self.gemini.generate_json(

@@ -1013,9 +1013,10 @@ def _thinking_config(budget: Optional[int], *, model: Optional[str],
     NONE at all.
 
     ONE encoder for all three generation helpers so they are provably identical.
-    `None` means "attach no thinking_config", which is byte-identical on the wire
-    to a pre-cap request — that is what makes it a safe rollback value. `0`
-    disables thinking; a positive value is a ceiling in tokens.
+    A `None` budget with no usable level means "attach no thinking_config", which is
+    byte-identical on the wire to a pre-cap request — that is what makes it a safe rollback
+    value (a `level` the model accepts is sent even with a `None` budget). `0` disables
+    thinking; a positive value is a ceiling in tokens.
 
     `model` is the model the request goes to, and it is required (keyword-only) so a new
     call site cannot forget it: a 0 sent to gemini-3.5-flash-lite goes out as
@@ -1036,8 +1037,9 @@ def _stream_thinking_config(budget: Optional[int], *, model: Optional[str],
 
     The two chat stream methods render `include_thoughts=True` parts as the thinking
     card, so they cannot use `_thinking_config` (which omits the flag and would blank
-    the card). `None` keeps today's request byte-identical (thoughts on, no ceiling —
-    the rollback value); `0` disables thinking, which also empties the card; a
+    the card). A `None` budget with no usable level keeps today's request byte-identical
+    (thoughts on, no ceiling — the rollback value); `0` disables thinking, which also empties
+    the card; a
     positive value is the ceiling. Encoded here once so both methods stay identical.
     `model` is required for the same reason as in `_thinking_config`, and a budget and a
     level are encoded by the same rules (`_thinking_fields`).

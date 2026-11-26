@@ -222,6 +222,15 @@ CURATION: dict[str, TableDoc] = {
              "(migration 200), on a refund row: what an Apple-refund clawback had already paid "
              "for of the charge — delta + covered is what the refund settled, and a replay "
              "reports any shortfall."),
+    "public.deleted_account_fingerprints": T("billing",
+        purpose="Keyed fingerprints of DELETED accounts, so a returning account does not get "
+                "the free welcome credits a second time.",
+        key=("fingerprint", "kind", "expires_at", "times_matched"),
+        note="Migration 211 (audit CC-01). HMAC-SHA256 (Vault key deleted_account_fingerprint_"
+             "key) of the canonical email and each Apple/Google subject; no user id, no email. "
+             "Written by record_deleted_account() from DELETE /users/me before the auth row "
+             "goes; read by the DEFERRED sign-up trigger trg_withhold_returning_welcome, which "
+             "also withholds from an alias of a live account. Kept 90 days (owner, 2026-11-26)."),
     "public.credit_purchases": T("billing",
         purpose="One row per consumable App Store purchase, and the exactly-once guard for it.",
         key=("user_id", "transaction_id", "environment", "product_id", "credits", "revoked_at"),

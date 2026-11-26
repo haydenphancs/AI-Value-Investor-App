@@ -66,6 +66,7 @@ _REPO = Path(__file__).resolve().parents[2]
 _TEMPLATES = _REPO / "documents" / "legal" / "supabase-email-templates"
 _CONFIRM = _TEMPLATES / "confirm-signup.html"
 _RESET = _TEMPLATES / "reset-password.html"
+_CHANGE = _TEMPLATES / "change-email.html"
 _README = _TEMPLATES / "README.md"
 _CHECKLIST = _REPO / "documents" / "legal" / "LAUNCH_CHECKLIST.md"   # GITIGNORED — local only
 _RUNBOOK = _REPO / "documents" / "legal" / "LAUNCH_RUNBOOK.md"       # GITIGNORED — local only
@@ -81,6 +82,7 @@ _CONFIRM_LINK_SOURCE = _CONFIRM_LINK.replace("&", "&amp;")
 _SUBJECTS = {
     "Confirm signup": ("Confirm your Caydex email", "confirm-signup.html"),
     "Reset Password": ("Reset your Caydex password", "reset-password.html"),
+    "Change Email Address": ("Confirm your Caydex email change", "change-email.html"),
 }
 
 #: Every `{{ … }}` action, with any spacing. Go templates are case-sensitive: `{{ .token }}`
@@ -178,7 +180,7 @@ def _readme_rows() -> dict[str, tuple[str, str]]:
 # The two template files
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("path", [_CONFIRM, _RESET], ids=["confirm", "reset"])
+@pytest.mark.parametrize("path", [_CONFIRM, _RESET, _CHANGE], ids=["confirm", "reset", "change"])
 def test_each_template_is_well_formed_html_with_no_comments_scripts_or_remote_resources(path):
     c = _parse(path)
     assert not c.errors and not c.stack, f"{path.name}: unbalanced tags {c.errors} open={c.stack}"
@@ -248,13 +250,62 @@ def test_reset_password_carries_the_code_only_and_never_confirm_wording():
         assert required in text, f"reset-password.html lost the line {required!r}"
 
 
-@pytest.mark.parametrize("path", [_CONFIRM, _RESET], ids=["confirm", "reset"])
+@pytest.mark.parametrize("path", [_CONFIRM, _RESET, _CHANGE], ids=["confirm", "reset", "change"])
 def test_templates_never_state_a_code_length(path):
     """The length is the dashboard's Email OTP Length (8 today; 6 in the old docs). The backend
     accepts 6–12, so the copy must not promise one — "6-digit" is exactly the drift (SB-7)."""
     text = _read(path)
     assert not re.search(r"\b\d+\s*-?\s*digit", text, re.I), f"{path.name} states a code length"
     assert not re.search(r"\b(six|seven|eight|nine|ten)[\s-]+digit", text, re.I), path.name
+
+
+def test_change_email_carries_the_code_and_the_new_address_only():
+    """Audit CC-09 (2026-11-26). Supabase sends this ONE template twice per change — to the
+    current address and to the new one, each with its own `{{ .Token }}` — so it may use exactly
+    the code and the new address. `{{ .Email }}` (the CURRENT address) would tell whoever owns a
+    mistyped new address whose account it is; `{{ .ConfirmationURL }}` is the implicit-flow
+    session leak (CC-02) and, for an app that asks for codes, a dead end."""
+    actions = _actions(_CHANGE)
+    assert sorted(actions) == [".NewEmail", ".Token"], (
+        f"change-email.html may use exactly `{{{{ .Token }}}}` and `{{{{ .NewEmail }}}}` once each; "
+        f"found {actions}"
+    )
+    c = _parse(_CHANGE)
+    assert not c.hrefs, f"change-email.html must carry no link at all; found {c.hrefs}"
+    raw = _read(_CHANGE)
+    assert "ConfirmationURL" not in raw and ".Email }}" not in raw.replace(".NewEmail }}", "")
+    assert not re.search(r"reset", raw, re.I), "change-email.html says 'reset'"
+    text = _flat(" ".join(c.text))
+    for required in (
+        "Someone asked to change the email address of a Caydex account to",
+        "To approve it, enter this code in the Caydex app:",
+        "We sent one code to the account's current email and another to the new one.",
+        "The app asks for both. The codes expire shortly.",
+        "If you didn't ask for this, don't share this code. Without it the email stays the same.",
+    ):
+        assert required in text, f"change-email.html lost the line {required!r}"
+
+
+def test_readme_says_secure_email_change_stays_on():
+    """The app asks for TWO codes. With Secure email change off, Supabase sends one (to the new
+    address only): the app would wait forever, and a password alone would move the account."""
+    text = _flat(_read(_README))
+    assert "keep **Secure email change** ON" in text
+    assert "double_confirm_changes = true" in text
+    assert "[auth.email.template.email_change]" in text
+    assert "POST /api/v1/auth/change-email/confirm" in text
+
+
+def test_the_change_email_codes_land_on_real_routes():
+    routes = _routes()
+    assert "POST" in routes.get("/api/v1/auth/change-email", set())
+    assert "POST" in routes.get("/api/v1/auth/change-email/confirm", set())
+
+
+def test_owner_tasks_points_at_the_change_email_template():
+    text = _read(_OWNER_TASKS)
+    assert "documents/legal/supabase-email-templates/change-email.html" in text
+    assert "Secure email change" in text
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -887,6 +887,24 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 || code == "AUTH_PASSWORD_ALREADY_SET" {
                 return .validationFailed(message: message)
             }
+            // 400s from the email change (`/auth/change-email`, audit CC-09): the address typed
+            // is already the account's, or the identity provider refused the address itself.
+            // Both are what the user typed — `.validationFailed` keeps the server's sentence,
+            // points at the form and is outside `isAuthError`, so no credential is touched. Never
+            // `.apiError`, whose `.retry` would resend an identical request refused identically.
+            // (An address another account holds is NOT one of these: that answer is a 200, and a
+            // confirm with nothing pending reads as AUTH_CODE_INVALID, so nothing here can tell
+            // anyone which addresses have accounts.)
+            if code == "AUTH_EMAIL_UNCHANGED" {
+                return .validationFailed(
+                    message: message.isEmpty ? "That's already the email on your account." : message
+                )
+            }
+            if code == "AUTH_EMAIL_REJECTED" {
+                return .validationFailed(
+                    message: message.isEmpty ? "That email address can't be used. Try a different one." : message
+                )
+            }
 
             // ── Codes that used to fall through to the generic branch below ──────────────
             //

@@ -155,6 +155,10 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # Only the backend reads or writes it, as service_role. 205 also adds the origin / finding
     # columns to trillion_club_stakes, whose grants (175) it does not touch.
     "205": ("trillion_club_stake_findings",),
+    # 211: keyed fingerprints of deleted accounts (audit CC-01). No user id and no email, but a
+    # client that could read it could test guesses against it, and one that could write it could
+    # deny another person's welcome grant. Read and written only by SECURITY DEFINER functions.
+    "211": ("deleted_account_fingerprints",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

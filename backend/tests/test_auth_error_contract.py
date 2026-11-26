@@ -197,6 +197,11 @@ _EXPECTED_ACTIONS = {
     # reset/set-password AFTER the code verified and the write failed (not a refused password):
     # the field holds a dead code; the cure is a new one — fix_input, never retry_later.
     ErrorCode.AUTH_CODE_USED: "fix_input",
+    # The email change (CC-09): the address typed IS the current one, or the provider refused
+    # the address itself. The user's to fix on the form they are looking at — never a retry of
+    # the identical request, never a session action.
+    ErrorCode.AUTH_EMAIL_UNCHANGED: "fix_input",
+    ErrorCode.AUTH_EMAIL_REJECTED: "fix_input",
     # Sign-in refused until the address is confirmed: the action opens the confirmation step.
     ErrorCode.EMAIL_NOT_CONFIRMED: "confirm_email",
 }

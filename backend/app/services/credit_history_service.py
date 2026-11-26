@@ -83,6 +83,7 @@ _REPORT_CHAT_PREFIX = "report_chat:"
 #:   report_precharge_unconfirmed  endpoints/research.py, endpoints/ticker_report.py
 #:   chat_*                   endpoints/chat.py (ticker_report.py's report-chat route was deleted 2026-09-11)
 #:   grant / monthly_reset    SQL: create_user_credits(), ensure_credit_period()
+#:   welcome_withheld         SQL: withhold_returning_welcome_credits() (migration 211)
 #:   monthly_expired          SQL: ensure_credit_period() (migrations 194, 196)
 #:   plan_period/_reinstated  SQL: ensure_credit_period() (migration 196)
 #:   tier_upgrade/_revoked    SQL: ensure_credit_period() (196; grant_tier_upgrade() before it),
@@ -139,6 +140,11 @@ _REASONS: Dict[str, Tuple[str, str, str]] = {
     "feedback_reward": (KIND_GRANT, "Issue report reward", _REF_NONE),
     # removals
     "tier_revoked": (KIND_REVOKE, "Plan credits removed", _REF_NONE),
+    # A NEW account whose email, Apple ID or Google account belonged to a deleted Caydex account
+    # (90 days), or whose email is an alias of a live one: its untouched welcome grant is taken
+    # back at sign-up, beside the `grant` row (SQL: withhold_returning_welcome_credits(),
+    # migration 211, audit CC-01). The monthly allowance still arrives at the next ET 1st.
+    "welcome_withheld": (KIND_REVOKE, "Welcome credits already claimed", _REF_NONE),
     # expiries — GRANTED credits only (purchased credits never expire, App Store 3.1.1). Each
     # boundary ledgers what the old period still held right before its new allocation's row
     # (`monthly_reset` on the 1st or at a lapse, `plan_period` when a paid period starts — 196),

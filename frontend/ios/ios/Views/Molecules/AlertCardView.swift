@@ -21,8 +21,9 @@ struct AlertCardView: View {
             title: alert.title,
             subtitle: alert.description,
             // The red LIVE label on the left (owner request 2026-10-29): only while the
-            // server says the report is live — never inferred from the date on the device.
-            leadingBadge: alert.isLiveEarnings ? .live : nil,
+            // server says the report is live, or wears its LIVE label on its own day to midnight
+            // ET (2026-11-20) — never inferred from the date on the device.
+            leadingBadge: alert.showsLiveLabel ? .live : nil,
             onTap: onTap,
             trailing: { trailingView }
         )

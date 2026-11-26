@@ -15,6 +15,11 @@
 //  a 400 (a `report_date` can age out under an open sheet) or a 404 (a backend without this
 //  route: an older one, after a rollback).
 //  Either way nothing is asking any more, so the card stops saying LIVE (`pollEnded`).
+//  A failed ask over a shown answer asks again on that same 30 s retry, never after the answer's
+//  own interval: a report in on its own day asks once more just after midnight ET, to take its
+//  LIVE label off, and that one ask lost to a blip would keep yesterday's LIVE on the sheet for
+//  most of a day. Bounded the same way (`maxFailedLoads`), then at most every 5 min
+//  (`staleAnswerRetrySeconds`): that answer's interval may count down to a moment long passed.
 //  `start()` clears all of it, so Try Again and a return to the foreground always ask again.
 //  Every failure is logged through `os.Logger` with the ticker, the report date and the raw
 //  error (`logFailure`).
@@ -48,6 +53,8 @@ final class EarningsLiveViewModel: ObservableObject {
     private var pollTask: Task<Void, Never>?
     /// Failed loads in a row with no answer to show.
     private var failedLoads = 0
+    /// Failed asks in a row over a shown answer, which the retry then asks again for.
+    private var failedAsksOverAnswer = 0
     /// The server refused this request for good (a 400 for a date outside its window, a 404 from
     /// a backend without the route), so asking again gets the same answer.
     private var refused = false
@@ -61,6 +68,9 @@ final class EarningsLiveViewModel: ObservableObject {
     private static let noAnswerRetrySeconds = 30
     /// Ten minutes of `noAnswerRetrySeconds`. Past that, the notice's Try Again is the way back.
     private static let maxFailedLoads = 20
+    /// The longest wait after `maxFailedLoads` failed asks over a shown answer: its own interval
+    /// may count down to a midnight long passed, and a LIVE label would stay on until then.
+    private static let staleAnswerRetrySeconds = 300
 
     init(ticker: String, reportDate: String?, apiClient: APIClient = .shared) {
         self.ticker = ticker.uppercased()
@@ -87,6 +97,7 @@ final class EarningsLiveViewModel: ObservableObject {
         loadFailed = false
         pollEnded = false
         failedLoads = 0
+        failedAsksOverAnswer = 0
         refused = false
         pollTask = Task { [weak self] in
             guard let self else { return }
@@ -111,13 +122,21 @@ final class EarningsLiveViewModel: ObservableObject {
     /// Seconds to the next ask, or nil when this loop is over.
     ///
     /// A real answer rules: `poll_seconds` null means the server stopped asking (finished,
-    /// upcoming, awaiting), and one answer is the whole story. The retry takes over only with
-    /// no answer at all. Never a status borrowed from the Tracking card: that would keep
-    /// polling a report that finished under a sheet opened while it was LIVE.
+    /// upcoming, awaiting), and one answer is the whole story. The retry takes over with no
+    /// answer at all, and after a failed ask over a shown one, for at most `maxFailedLoads`
+    /// asks in a row: then every `staleAnswerRetrySeconds` at most, never the answer's own
+    /// interval, which may count down to a moment long passed. Never a status borrowed from the
+    /// Tracking card: that would keep polling a report that finished under a sheet opened
+    /// while it was LIVE.
     private var nextPollSeconds: Int? {
         if refused { return nil }
         if let live {
             guard let seconds = live.pollSeconds, seconds > 0 else { return nil }
+            if failedAsksOverAnswer > 0 {
+                let retry: Int = failedAsksOverAnswer < Self.maxFailedLoads
+                    ? Self.noAnswerRetrySeconds : Self.staleAnswerRetrySeconds
+                return min(seconds, retry)
+            }
             return seconds
         }
         guard loadFailed, failedLoads < Self.maxFailedLoads else { return nil }
@@ -133,6 +152,7 @@ final class EarningsLiveViewModel: ObservableObject {
             live = response
             loadFailed = false
             failedLoads = 0
+            failedAsksOverAnswer = 0
         } catch {
             // `APIClient` wraps a cancellation into `APIError.networkError`, so `stop()` and a
             // superseding `start()` land here. Neither is a failure.
@@ -146,7 +166,7 @@ final class EarningsLiveViewModel: ObservableObject {
             // 30 s apart.
             if case .validationFailed = appError { refused = true }
             if case .notFound = appError { refused = true }
-            if live == nil { failedLoads += 1 }
+            if live == nil { failedLoads += 1 } else { failedAsksOverAnswer += 1 }
             loadFailed = live == nil || refused
         }
     }

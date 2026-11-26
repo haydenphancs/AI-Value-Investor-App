@@ -31,7 +31,8 @@ import SwiftUI
 
 /// Something riding ON the row's glyph, saying what state the item is in right now.
 enum ActivityRowBadge: Equatable {
-    /// An earnings report whose results come out today (`LiveBadge`, under the glyph).
+    /// An earnings report on its report day, its results coming or in (`LiveBadge`, under the
+    /// glyph), to midnight ET.
     case live
 }
 

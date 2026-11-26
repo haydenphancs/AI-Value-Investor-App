@@ -155,6 +155,12 @@ class TrackingViewModel: ObservableObject {
     /// The report-day cards drawn `upcoming` that the round's asks at the LIVE label's start have
     /// settled for the day and identity in `labelStartScope`.
     private var labelStartAnswered: Set<String> = []
+    /// The identity (`loadGeneration`) `labelEndNotBefore` belongs to.
+    private var labelEndScope = -1
+    /// Cards whose ask at the LIVE label's end came back still labelled (a phone clock ahead of
+    /// the server's midnight), each with when it may be asked again: the answer's own
+    /// `poll_seconds`, the server's time to its midnight (`labelEndReports`).
+    private var labelEndNotBefore: [String: Date] = [:]
 
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
@@ -1756,7 +1762,8 @@ class TrackingViewModel: ObservableObject {
                 ) {
                     await self.loadTrackingFeed()
                 } else if self.filteredAlerts.contains(where: \.isLiveEarnings)
-                            || !self.labelStartReports().isEmpty {
+                            || !self.labelStartReports().isEmpty
+                            || !self.labelEndReports().isEmpty {
                     await self.refreshLiveEarningsCards()
                 }
             }
@@ -1826,6 +1833,53 @@ class TrackingViewModel: ObservableObject {
         if starting.contains(report.id) { labelStartAnswered.insert(report.id) }
     }
 
+    /// The report of an earnings card still wearing the server's LIVE label after its own day
+    /// (`today` is New York's date), or nil. A card still `live` is the LIVE rotation's.
+    private static func labelEndReport(_ alert: AppAlert, today: String) -> LiveCardReport? {
+        guard case .earnings(let data) = alert, data.liveLabel, data.status != .live,
+              let date = data.reportDate, !date.isEmpty, date < today,
+              !data.ticker.isEmpty else { return nil }
+        return LiveCardReport(id: alert.id, ticker: data.ticker, reportDate: date)
+    }
+
+    /// Cards still wearing the LIVE label once New York is past midnight (2026-11-20, "LIVE all
+    /// day until midnight"). The label stays on a report whose results are in until midnight ET,
+    /// and the round asks only about cards whose results are still to come, with no feed build
+    /// before 04:00 (and none on a closed day), so a resumed tab would keep a Friday card LIVE
+    /// until Monday's first build. Each is asked about until an answer takes the label off: that
+    /// answer is written onto the card, which leaves this list. The phone's clock only picks when
+    /// to ask (`MarketHoursUtil.liveLabelEndAskDayKey`); the answer says whether the label stands.
+    /// An answer still labelled (a phone clock running ahead of the server's) holds that card
+    /// until the answer's own `poll_seconds`, the server's time to its midnight
+    /// (`noteLabelEndAnswer`), so a fast clock costs one ask, not one every 30 s.
+    private func labelEndReports(at now: Date = Date()) -> [LiveCardReport] {
+        guard let today = MarketHoursUtil.liveLabelEndAskDayKey(at: now) else { return [] }
+        if labelEndScope != loadGeneration {
+            labelEndScope = loadGeneration
+            labelEndNotBefore = [:]
+        }
+        return filteredAlerts
+            .compactMap { Self.labelEndReport($0, today: today) }
+            .filter { labelEndNotBefore[$0.id].map { now >= $0 } ?? true }
+    }
+
+    /// How long a card asked about at the LIVE label's end waits when the answer still carries the
+    /// label and no `poll_seconds`, which the server never sends with it: a floor, not a cadence.
+    private static let labelEndFallbackSeconds: Int = 300
+
+    /// `answer`, about a card asked at the LIVE label's end, still says LIVE: that card waits for
+    /// the server's own midnight before it is asked again. An answer with the label off clears it.
+    private func noteLabelEndAnswer(_ answer: EarningsLiveResponse, for report: LiveCardReport,
+                                    among ending: Set<String>, at now: Date = Date()) {
+        guard ending.contains(report.id) else { return }
+        guard answer.liveLabel == true else {
+            labelEndNotBefore[report.id] = nil
+            return
+        }
+        let seconds: Int = max(answer.pollSeconds ?? Self.labelEndFallbackSeconds, 1)
+        labelEndNotBefore[report.id] = now.addingTimeInterval(TimeInterval(seconds))
+    }
+
     /// What one answer about a LIVE card's report does to the card (`liveCardStep`).
     private enum LiveCardStep {
         /// The answer says how the card's own report stands: the card takes it.
@@ -1886,6 +1940,12 @@ class TrackingViewModel: ObservableObject {
         )
         let startingIds: Set<String> = Set(starting.map(\.id))
         var batch: [LiveCardReport] = starting
+        // Then the LIVE label's end, in the room the start leaves.
+        let ending: [LiveCardReport] = Array(
+            labelEndReports().prefix(Self.maxLiveCardsPerRound - batch.count)
+        )
+        let endingIds: Set<String> = Set(ending.map(\.id))
+        batch += ending
         if !reports.isEmpty {
             let start: Int = liveCardCursor % reports.count
             let rotated: [LiveCardReport] = Array(reports[start...]) + Array(reports[..<start])
@@ -1908,6 +1968,7 @@ class TrackingViewModel: ObservableObject {
                 // A `keep` answer (the server could not tell yet) and a passing failure leave
                 // the card to be asked again next round, as a LIVE card is.
                 if step != .keep { settleLabelStart(report, among: startingIds) }
+                noteLabelEndAnswer(answer, for: report, among: endingIds)
                 switch step {
                 case .write:
                     guard let index = alerts.firstIndex(where: { $0.id == report.id }),

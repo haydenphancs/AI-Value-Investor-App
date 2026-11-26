@@ -290,7 +290,10 @@ _DTO_PAIRS = (
 _ADDED_TO_SHIPPED_RESPONSES = {
     "AlertDTO": ("earnings_status", "report_date", "eps_actual", "revenue_actual",
                  "eps_surprise_pct", "revenue_surprise_pct", "eps_basis", "results_preliminary",
-                 "results_checked_at", "eps_checking", "revenue_checking"),
+                 "results_checked_at", "eps_checking", "revenue_checking",
+                 "earnings_live_label"),
+    # The LIVE label (2026-11-20): the sheet's route shipped without it, so iOS keeps it optional.
+    "EarningsLiveResponse": ("live_label",),
     "TrackingFeedResponse": ("recent_earnings_alerts",),
     "NotificationEventDTO": ("sent_at",),
 }
@@ -616,7 +619,8 @@ def test_the_feed_row_reaches_the_card_field_by_field():
         'revenueSurprisePct: revenueSurprisePct, epsIsGAAP: epsBasis == "gaap", '
         'isPreliminary: resultsPreliminary ?? false, '
         'checkedAt: EarningsLiveDates.parse(resultsCheckedAt), '
-        'epsChecking: epsChecking ?? false, revenueChecking: revenueChecking ?? false ))'
+        'epsChecking: epsChecking ?? false, revenueChecking: revenueChecking ?? false, '
+        'liveLabel: earningsLiveLabel ?? false ))'
     )
     times = _norm(_bracketed(_bracketed(tracking, "enum EarningsReportTime"), "var displayText: String"))
     assert ('case .beforeOpen: return "before market open" '
@@ -680,8 +684,15 @@ def test_live_is_drawn_from_the_server_status_only():
     assert body == "{ if case .earnings(let data) = self { return data.status == .live } return false }"
     for token in ("Date()", "Calendar", "isMarketActive", "hour"):
         assert token not in body, f"LIVE is inferred on the device again ({token})"
+    # The badge (2026-11-20, "LIVE all day until midnight"): the status or the SERVER's label,
+    # nothing else. `|| data.status == .reported` here would draw LIVE on every past report.
+    label = _norm(_body(_code(_TRACKING_MODELS), "var showsLiveLabel: Bool {"))
+    assert label == ("{ if case .earnings(let data) = self { return data.status == .live || "
+                     "data.liveLabel } return false }"), label
+    for token in ("Date()", "Calendar", "isMarketActive", "hour", ".reported", ".awaiting"):
+        assert token not in label, f"the LIVE label is inferred on the device ({token})"
     card = _code(_ALERT_CARD)
-    assert "leadingBadge: alert.isLiveEarnings ? .live : nil" in card
+    assert "leadingBadge: alert.showsLiveLabel ? .live : nil" in card
     assert "ActivityRow(" in card
 
 
@@ -743,7 +754,7 @@ def test_the_live_badge_is_drawn_on_the_live_card_alone():
     assert "LiveBadge(" not in atom[: atom.index("#Preview")], "the atom draws itself outside its preview"
     assert asked == {
         _ACTIVITY_ROW: ["ActivityRowBadge? = nil", "ActivityRowBadge? = nil", "leadingBadge"],
-        _ALERT_CARD: ["alert.isLiveEarnings ? .live : nil"],
+        _ALERT_CARD: ["alert.showsLiveLabel ? .live : nil"],
     }, asked
 
 
@@ -826,10 +837,17 @@ def test_the_sheet_poll_stops_when_the_server_stops_asking():
     assert "try? await Task.sleep(nanoseconds: wait)" in loop, "the retry fires with no wait"
     next_poll = _norm(_body(vm, "private var nextPollSeconds: Int? {"))
     assert ("if let live { guard let seconds = live.pollSeconds, seconds > 0 else { return nil } "
+            "if failedAsksOverAnswer > 0 { "
+            "let retry: Int = failedAsksOverAnswer < Self.maxFailedLoads "
+            "? Self.noAnswerRetrySeconds : Self.staleAnswerRetrySeconds "
+            "return min(seconds, retry) } "
             "return seconds }") in next_poll, (
         "poll_seconds null must end the poll, and any other value is the cadence: 120 s while "
-        "FMP confirms a reported report must not turn into the retry's 30 s"
+        "FMP confirms a reported report must not turn into the retry's 30 s; after a failed ask "
+        "the retry's 30 s for `maxFailedLoads` asks, then 5 min at most"
     )
+    assert "private static let staleAnswerRetrySeconds = 300" in vm, (
+        "past the bound the answer's own interval may count down to a moment long passed")
     assert "tatus" not in vm, (
         "the server's cadence alone decides: an `upcoming` or `awaiting` answer on a day nobody "
         "has read carries a poll, and a view model that reads the status would stop on it"
@@ -1006,7 +1024,8 @@ def test_the_poll_builds_the_feed_only_while_a_price_can_move():
         "if MarketHoursUtil.shouldRefreshPrices( assetTypes: assets.map(\\.assetType), "
         "symbols: assets.map(\\.ticker) ) { await self.loadTrackingFeed() } "
         "else if self.filteredAlerts.contains(where: \\.isLiveEarnings) "
-        "|| !self.labelStartReports().isEmpty { "
+        "|| !self.labelStartReports().isEmpty "
+        "|| !self.labelEndReports().isEmpty { "
         "await self.refreshLiveEarningsCards() } } } }"
     )
 
@@ -1035,6 +1054,10 @@ def test_a_live_card_is_asked_about_through_its_own_route_alone():
         "labelStartReports().prefix(Self.maxLiveCardsPerRound) ) "
         "let startingIds: Set<String> = Set(starting.map(\\.id)) "
         "var batch: [LiveCardReport] = starting "
+        "let ending: [LiveCardReport] = Array( "
+        "labelEndReports().prefix(Self.maxLiveCardsPerRound - batch.count) ) "
+        "let endingIds: Set<String> = Set(ending.map(\\.id)) "
+        "batch += ending "
         "if !reports.isEmpty { "
         "let start: Int = liveCardCursor % reports.count "
         "let rotated: [LiveCardReport] = Array(reports[start...]) + Array(reports[..<start]) "
@@ -1049,6 +1072,7 @@ def test_a_live_card_is_asked_about_through_its_own_route_alone():
         "guard !Task.isCancelled, generation == loadGeneration, revision == alertsRevision else { return } "
         "let step: LiveCardStep = Self.liveCardStep(answer, about: report) "
         "if step != .keep { settleLabelStart(report, among: startingIds) } "
+        "noteLabelEndAnswer(answer, for: report, among: endingIds) "
         "switch step { "
         "case .write: guard let index = alerts.firstIndex(where: { $0.id == report.id }), "
         "case .earnings(let data) = alerts[index] else { continue } "
@@ -1116,6 +1140,119 @@ def test_a_report_day_card_drawn_upcoming_is_asked_about_at_the_label_start():
     assert writes == ["=", "&+="], (
         f"loadGeneration is written outside its declaration and handleIdentityChange: {writes}")
     assert "loadGeneration &+= 1" in _body(vm, "func handleIdentityChange(isActiveTab: Bool) async {")
+
+
+def test_a_card_still_labelled_after_its_day_is_asked_at_the_label_end():
+    """The LIVE label stays on a report whose results are in until midnight ET (2026-11-20, "LIVE
+    all day until midnight"), and the round asks only about cards whose results are still to come,
+    with no feed build before 04:00 (none on a closed day): a resumed tab kept a Friday card LIVE
+    until Monday. From 00:01 ET the round asks about a card still wearing the server's label from an
+    earlier day, in the room the label's start leaves, before the LIVE rotation; the answer that
+    takes the label off is written onto the card, which then leaves the list."""
+    vm = _code(_TRACKING_VM)
+    assert _norm(_body(
+        vm, "private static func labelEndReport(_ alert: AppAlert, today: String) -> LiveCardReport? {"
+    )) == (
+        "{ guard case .earnings(let data) = alert, data.liveLabel, data.status != .live, "
+        "let date = data.reportDate, !date.isEmpty, date < today, "
+        "!data.ticker.isEmpty else { return nil } "
+        "return LiveCardReport(id: alert.id, ticker: data.ticker, reportDate: date) }"
+    ), "only a card the server labelled, its results in, from a day before New York's today"
+    assert _norm(_body(
+        vm, "private func labelEndReports(at now: Date = Date()) -> [LiveCardReport] {"
+    )) == (
+        "{ guard let today = MarketHoursUtil.liveLabelEndAskDayKey(at: now) else { return [] } "
+        "if labelEndScope != loadGeneration { labelEndScope = loadGeneration "
+        "labelEndNotBefore = [:] } "
+        "return filteredAlerts .compactMap { Self.labelEndReport($0, today: today) } "
+        ".filter { labelEndNotBefore[$0.id].map { now >= $0 } ?? true } }"
+    ), "every card still labelled, until an answer takes its label off, but one held to its time"
+    refresh = _norm(_body(vm, _REFRESH_LIVE))
+    start = refresh.index("var batch: [LiveCardReport] = starting")
+    end = refresh.index("labelEndReports().prefix(Self.maxLiveCardsPerRound - batch.count)")
+    rotation = refresh.index("if !reports.isEmpty {")
+    assert start < end < rotation, "the label's start, then its end, then the LIVE rotation"
+
+
+def test_an_answer_still_labelled_holds_its_card_to_the_servers_midnight():
+    """A phone clock running ahead of the server's: at server 23:52 a phone 10 min fast reads
+    00:02, asks, and the server still says LIVE. Asked again every 30 s, that was about 16 asks a
+    card, and a clock a day ahead asked all day (2026-11-20 review). The answer's own
+    `poll_seconds` is the server's time to its midnight: the card waits for it. Cleared by an
+    answer with the label off, and by an identity change."""
+    vm = _code(_TRACKING_VM)
+    note = _norm(_bracketed(vm, "private func noteLabelEndAnswer("))
+    assert note == (
+        " guard ending.contains(report.id) else { return } "
+        "guard answer.liveLabel == true else { labelEndNotBefore[report.id] = nil return } "
+        "let seconds: Int = max(answer.pollSeconds ?? Self.labelEndFallbackSeconds, 1) "
+        "labelEndNotBefore[report.id] = now.addingTimeInterval(TimeInterval(seconds)) "
+    )
+    assert "private static let labelEndFallbackSeconds: Int = 300" in vm
+    for declared in ("private var labelEndScope = -1",
+                     "private var labelEndNotBefore: [String: Date] = [:]"):
+        assert declared in vm, declared
+    refresh = _norm(_body(vm, _REFRESH_LIVE))
+    assert refresh.index("let step: LiveCardStep") < refresh.index(
+        "noteLabelEndAnswer(answer, for: report, among: endingIds)") < refresh.index("switch step {")
+
+
+@pytest.mark.parametrize("data,today,asked", [
+    ({"liveLabel": True, "status": "reported", "reportDate": "2026-11-20", "ticker": "BJ"},
+     "2026-11-21", True),
+    ({"liveLabel": True, "status": "reported", "reportDate": "2026-11-20", "ticker": "BJ"},
+     "2026-11-20", False),
+    ({"liveLabel": True, "status": "live", "reportDate": "2026-11-20", "ticker": "BJ"},
+     "2026-11-21", False),
+    ({"liveLabel": False, "status": "reported", "reportDate": "2026-11-20", "ticker": "BJ"},
+     "2026-11-21", False),
+    ({"liveLabel": True, "status": "reported", "reportDate": "", "ticker": "BJ"},
+     "2026-11-21", False),
+    ({"liveLabel": True, "status": "reported", "reportDate": "2026-11-20", "ticker": ""},
+     "2026-11-21", False),
+], ids=["labelled_yesterday", "labelled_today", "still_live", "no_label", "no_date", "no_ticker"])
+def test_which_cards_the_label_end_asks_about(data, today, asked):
+    """The guard of `labelEndReport`, read from the Swift itself clause by clause, run on the
+    cases it must tell apart: a clause dropped from the Swift drops from the predicate too, and one
+    this table cannot read fails it. "YYYY-MM-DD" compares as a date."""
+    body = _norm(_body(
+        _code(_TRACKING_VM),
+        "private static func labelEndReport(_ alert: AppAlert, today: String) -> LiveCardReport? {"))
+    guard = re.search(r"\{ guard (.*?) else \{ return nil \}", body)
+    assert guard, body
+    clauses = [clause.strip() for clause in guard.group(1).split(", ")]
+    unread = [clause for clause in clauses if clause not in _LABEL_END_CLAUSES]
+    assert not unread, f"clauses this table cannot read: {unread}"
+    port = all(_LABEL_END_CLAUSES[clause](data, today) for clause in clauses)
+    assert port is asked
+
+
+#: Each clause of `labelEndReport`'s guard, as Python over the case's card.
+_LABEL_END_CLAUSES = {
+    "case .earnings(let data) = alert": lambda data, today: True,
+    "data.liveLabel": lambda data, today: data["liveLabel"],
+    "data.status != .live": lambda data, today: data["status"] != "live",
+    "let date = data.reportDate": lambda data, today: data["reportDate"] is not None,
+    "!date.isEmpty": lambda data, today: bool(data["reportDate"]),
+    "date < today": lambda data, today: data["reportDate"] < today,
+    "!data.ticker.isEmpty": lambda data, today: bool(data["ticker"]),
+}
+
+
+def test_the_label_end_ask_follows_midnight_in_new_york():
+    """One minute after midnight ET, so a phone clock a little ahead of the server's never spends
+    the ask on an answer still labelled; New York's date and clock, never the phone's zone."""
+    hours = _code(_HOURS)
+    assert "nonisolated static let liveLabelEndAskMinuteOfDay: Int = 1\n" in hours
+    assert _norm(_body(
+        hours, "nonisolated static func liveLabelEndAskDayKey(at instant: Date = Date()) -> String? {"
+    )) == (
+        "{ let calendar: Calendar = etCalendar let parts: DateComponents = calendar.dateComponents( "
+        "[.year, .month, .day, .hour, .minute], from: instant ) "
+        "let minuteOfDay: Int = (parts.hour ?? 0) * 60 + (parts.minute ?? 0) "
+        "guard minuteOfDay >= liveLabelEndAskMinuteOfDay else { return nil } "
+        'return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0) }'
+    )
 
 
 def test_the_label_start_ask_follows_the_backends_label_hour_in_new_york():
@@ -1305,7 +1442,8 @@ def _card(alert) -> dict:
     label and its figures read."""
     return {"ticker": alert.ticker or "", "day": alert.day or 0, "month": alert.month or "",
             "status": _wire_status(alert.earnings_status), "report_date": alert.report_date,
-            "eps_actual": alert.eps_actual, "revenue_actual": alert.revenue_actual}
+            "eps_actual": alert.eps_actual, "revenue_actual": alert.revenue_actual,
+            "live_label": bool(alert.earnings_live_label)}
 
 
 def _updated(card: dict, answer) -> dict:
@@ -1325,7 +1463,7 @@ def _updated(card: dict, answer) -> dict:
         month = calendar.month_abbr[number].upper()
     return {**card, "day": day, "month": month, "status": status,
             "report_date": answer.report_date, "eps_actual": answer.eps.actual,
-            "revenue_actual": answer.revenue.actual}
+            "revenue_actual": answer.revenue.actual, "live_label": bool(answer.live_label)}
 
 
 class _Round:
@@ -1537,6 +1675,33 @@ async def test_a_live_card_with_nothing_in_turns_awaiting_when_its_day_ends(live
     (drawn,) = [_card(alert) for alert in
                 await world.service._get_recent_earnings_alerts(["XYZ"])]
     assert _card_id(written) == _card_id(card)
+    assert written == drawn
+
+
+@pytest.mark.asyncio
+async def test_a_card_with_its_results_in_keeps_live_to_midnight_and_the_first_ask_after_ends_it(
+        live_round):
+    """The LIVE label (2026-11-20, "LIVE all day until midnight"): a report whose results are in
+    keeps the label beside its figures all evening, the sheet asks once just after midnight, and
+    the round's ask from 00:01 ET (`labelEndReports`) takes the label off. What that ask writes
+    is what the next feed draws."""
+    world = live_round
+    world.calendar.rows = [_calendar_row("XYZ", _ROUND_DAY, epsActual=0.60, revenueActual=17.1e9),
+                           _calendar_row("ZZZZ", _ROUND_DAY)]
+    world.at(19, 59)
+    (card,) = await world.cards("XYZ")
+    assert (card["status"], card["live_label"]) == ("reported", True)
+    world.at(23, 59)
+    answer = await world.ask(card)
+    assert (answer.status, answer.live_label, answer.poll_seconds) == ("reported", True, 66)
+    world.at(0, 1, days_after=1)
+    answer = await world.ask(card)
+    assert (answer.status, answer.live_label, answer.poll_seconds) == ("reported", False, None)
+    assert _live_card_step(answer, card["report_date"]) == "write"
+    written = _updated(card, answer)
+    assert written["live_label"] is False, "the card leaves the label-end list"
+    (drawn,) = [_card(alert) for alert in
+                await world.service._get_recent_earnings_alerts(["XYZ"])]
     assert written == drawn
 
 
@@ -1950,10 +2115,38 @@ def test_the_retry_is_bounded_and_a_refusal_ends_the_poll_at_once():
     assert "if live == nil { failedLoads += 1 }" in load
     assert "loadFailed = live == nil || refused" in load
     start = _body(vm, "func start() {")
-    for reset in ("loadFailed = false", "failedLoads = 0", "refused = false"):
+    for reset in ("loadFailed = false", "failedLoads = 0", "failedAsksOverAnswer = 0",
+                  "refused = false"):
         assert start.index(reset) < start.index("pollTask = Task"), (
             f"Try Again must start clean: {reset}"
         )
+
+
+def test_a_failed_ask_over_a_shown_answer_asks_again_on_the_retry():
+    """A report in on its own day asks once more just after midnight ET, to take its LIVE label
+    off. That one ask lost to a blip (or a 502 in a late deploy), the sheet waited the old
+    answer's interval, about 17 h, with LIVE on yesterday's report and no notice (2026-11-20
+    review). So a failed ask over a shown answer counts, the next ask comes on the 30 s retry,
+    and an answer resets it."""
+    vm = _code(_VM)
+    load = _body(vm, "private func load() async {")
+    # After the answer arrives, never before the request: a reset at the top of the `do` block
+    # would end the count on every ask (the third 2026-11-20 review).
+    answered = load[load.index("live = response"): load.index("} catch {")]
+    caught = load[load.index("} catch {"):]
+    assert "failedAsksOverAnswer = 0" in answered, "an answer ends the retry"
+    assert load.index("failedAsksOverAnswer = 0") > load.index("try await apiClient.request(")
+    assert "defer" not in load, "a deferred reset runs on every ask, failed or not"
+    assert "if live == nil { failedLoads += 1 } else { failedAsksOverAnswer += 1 }" in caught
+    assert "private var failedAsksOverAnswer = 0" in vm
+    # The bound holds only if nothing else resets the count: exactly two resets, start()'s
+    # before its loop and the answer's (the second 2026-11-20 review: a reset at the top of each
+    # ask, or in the loop, kept the 30 s retry going for ever and passed every pin above).
+    resets = re.findall(r"(?<!var )\b(?:self\.)?failedAsksOverAnswer = 0", vm)
+    assert len(resets) == 2, resets
+    start = _body(vm, "func start() {")
+    assert start.index("failedAsksOverAnswer = 0") < start.index("pollTask = Task")
+    assert "failedAsksOverAnswer" not in _body(start, "while !Task.isCancelled {")
 
 
 def test_a_cancelled_load_is_dropped_before_the_error_is_mapped():
@@ -2086,7 +2279,8 @@ def test_the_header_is_rebuilt_from_every_field_it_reads():
         "epsSurprisePct: eps.surprisePct, revenueSurprisePct: revenue.surprisePct, "
         "epsIsGAAP: eps.isGAAP, isPreliminary: live.preliminary ?? isPreliminary, "
         "checkedAt: live.checkedDate ?? checkedAt, "
-        "epsChecking: eps.isChecking, revenueChecking: revenue.isChecking ) }"
+        "epsChecking: eps.isChecking, revenueChecking: revenue.isChecking, "
+        "liveLabel: live.liveLabel ?? false ) }"
     ), "updated(with:) must copy every field from the answer, each to its own label"
 
 
@@ -2607,6 +2801,9 @@ def test_the_card_draws_every_block_its_answer_has():
         "if let yearAgo = live?.yearAgo { yearAgoBlock(yearAgo) } "
         "if let quarters = live?.quarterResults, !quarters.isEmpty { lastQuartersBlock(quarters) } "
         "if let guidance = live?.guidance, !guidance.isEmpty { guidanceBlock(guidance) } "
+        # A release read after FMP's figures (2026-11-20, "Yes, read it once"): its link stands
+        # on a confirmed sheet too, after the Outlook; while preliminary the note carries it.
+        "if !isPreliminary, let url = live?.filingURL { filingLink(url) } "
         "footnote"
     )
 
@@ -2730,7 +2927,10 @@ def test_a_preliminary_figure_is_marked_and_links_its_filing():
     assert "@State private var browserLink: BrowserLink?" in card
     note = _body(card, "private var preliminaryNote: some View {")
     assert "Text(preliminaryText)" in _norm(note)
-    link = _norm(_body(note, "if let url = live?.filingURL {"))
+    assert _norm(_body(note, "if let url = live?.filingURL {")) == "{ filingLink(url) }"
+    # One link, both places (the note, and after the Outlook on a confirmed sheet): the button only
+    # sets `browserLink`, which the body presents.
+    link = _norm(_body(card, "private func filingLink(_ url: URL) -> some View {"))
     assert link.startswith(
         '{ Button { openExternal(url, into: &browserLink) } label: { Text("View the filing")'), link
     assert _norm(_body(card, "private var preliminaryText: String {")) == (
@@ -2881,8 +3081,15 @@ def test_nothing_on_the_sheet_says_live_once_the_device_has_stopped_asking():
     word from before that, and the sheet stays open for as long as the user leaves it."""
     card = _code(_CARD)
     assert "private var isLiveNow: Bool { status == .live && !viewModel.pollEnded }" in card
+    # The badge also shows the server's LIVE label on a finished report's own day (2026-11-20,
+    # "LIVE all day until midnight"), and never once the device has stopped asking.
+    assert ("private var showsLiveBadge: Bool { (status == .live || liveLabel) "
+            "&& !viewModel.pollEnded }") in card
+    label = _norm(_body(card, "private var liveLabel: Bool {"))
+    assert label == ("{ if let live { return live.liveLabel ?? false } "
+                     "return fallback?.liveLabel ?? false }"), label
     assert card.count("LiveBadge()") == 1
-    badge = _body(_body(card, "private var header: some View {"), "if isLiveNow {")
+    badge = _body(_body(card, "private var header: some View {"), "if showsLiveBadge {")
     assert "LiveBadge()" in badge
     line = _body(card, "private var statusLine: String {")
     arm = line[line.index("case .live:"): line.index("case .reported:")]

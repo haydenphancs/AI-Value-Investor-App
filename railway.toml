@@ -10,6 +10,10 @@
 # "warming" until then (see backend/railway.toml).
 # Pinned by backend/tests/test_deploy_command_parity.py. Owner check: Railway → service →
 # Settings → Config-as-code path should read `/backend/railway.toml`.
+[build]
+# The same watch path as backend/railway.toml: redeploy only when the backend changes.
+watchPatterns = ["/backend/**"]
+
 [deploy]
 startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 30"
 healthcheckPath = "/health/pdf"

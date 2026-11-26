@@ -60,7 +60,7 @@ _PATH_SAMPLE = {
 # ── THE ALLOW-LIST ───────────────────────────────────────────────────────────────────
 # (METHOD, path) that may answer a caller with no credential, and why. Nothing else may.
 _OPEN: dict[tuple[str, str], str] = {
-    # The eight auth flows. Gating any of these is an unbreakable loop: you cannot obtain the
+    # The nine auth flows. Gating any of these is an unbreakable loop: you cannot obtain the
     # token that would let you call the thing that grants the token. Password recovery in
     # particular exists FOR people who cannot sign in.
     ("POST", "/api/v1/auth/login"): "no token exists yet",
@@ -69,6 +69,9 @@ _OPEN: dict[tuple[str, str], str] = {
     ("POST", "/api/v1/auth/forgot-password"): "recovery for someone who cannot sign in",
     ("POST", "/api/v1/auth/reset-password"): "recovery for someone who cannot sign in",
     ("POST", "/api/v1/auth/resend-confirmation"): "pre-confirmation, so pre-session",
+    # Redeems the Confirm-signup email's code; the account cannot have a session until it runs.
+    # Serves no data: it answers tokens for the caller's own account or an error, nothing else.
+    ("POST", "/api/v1/auth/confirm-email"): "pre-confirmation, so pre-session",
     ("POST", "/api/v1/auth/oauth"): "exchanges an Apple/Google id_token for our session",
     ("POST", "/api/v1/auth/session-exchange"): "completes the OAuth web redirect",
     # Price catalogues. No FMP data and no user data — and PaywallSignInGate.swift renders the
@@ -219,9 +222,10 @@ def test_the_allow_list_has_no_stale_entries():
 
 
 def test_the_open_surface_stays_small():
-    """A tripwire on scope creep. Twelve routes are open; if that number climbs, someone is
-    re-opening the app one route at a time and each individual diff looks reasonable."""
-    assert len(_OPEN) <= 12, (
+    """A tripwire on scope creep. Thirteen routes are open; if that number climbs, someone is
+    re-opening the app one route at a time and each individual diff looks reasonable.
+    (12 → 13 on 2026-11-26: `/auth/confirm-email`, the missing half of email signup.)"""
+    assert len(_OPEN) <= 13, (
         f"{len(_OPEN)} routes are now public. Every addition needs a licence-level reason — "
         "market data cannot be among them."
     )

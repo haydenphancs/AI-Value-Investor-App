@@ -1164,16 +1164,24 @@ actor APIClient {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// Keys whose VALUE must never be printed, even in a debug build.
+    /// Keys whose VALUE must never be printed, even in a debug build. Matched on the whole key,
+    /// case-insensitively; any key ENDING in `_token` is redacted as well (`redact` below).
     ///
     /// These are not hypothetical. A launch log routinely contained a Supabase Storage signed
     /// URL complete with its `token=` query parameter (`/learn/books/audio`, `/learn/money-moves`)
     /// and the account's email address (`/users/me`); a sign-in would have printed the
     /// password in clear, since `SignInRequest` is `httpBody` like any other. Console output
     /// gets pasted into bug reports and chat windows.
-    private static let redactedKeys = [
+    ///
+    /// `code` / `otp`: the emailed one-time codes (confirm-email, reset, set-password). `nonce`:
+    /// Apple's raw sign-in nonce. The `_token` suffix covers `device_token` (the lockout
+    /// exemption) and `supabase_access_token` (exchangeable for a full session), which an
+    /// exact-key list missed (SEC-9, IOS-AUTH-11, SOC-11). Masking a harmless market `code`
+    /// field in a debug log is the accepted cost.
+    private static let redactedKeys: Set<String> = [
         "password", "current_password", "new_password",
         "token", "access_token", "refresh_token", "id_token", "identity_token",
+        "code", "otp", "nonce",
         "authorization", "api_key", "secret",
         "email", "audio_url", "avatar_url", "url",
         // Not a secret, but a ~120 KB base64 blob in the console buries every other logged
@@ -1181,22 +1189,43 @@ actor APIClient {
         "image_base64",
     ]
 
+    /// `"key": "value"` with a plain key of at most 64 characters. The value is a JSON string
+    /// body: any character but a quote or a backslash, OR a backslash and the character it
+    /// escapes. A plain `[^"]*` stopped at the first ESCAPED quote, so the password
+    /// `Abc"Secret9!` (JSONEncoder writes `Abc\"Secret9!`) logged as `"***"Secret9!"` — the tail
+    /// of the secret in clear (IOS-CONF-3). Linear: the two branches can never start on the same
+    /// character, and the possessive `*+` gives nothing back once the run ends. nil only if the
+    /// literal failed to compile, which `redact` treats as "print nothing".
+    private static let jsonStringPair = try? NSRegularExpression(
+        pattern: "\"([A-Za-z0-9_]{1,64})\"\\s*:\\s*\"(?:[^\"\\\\]|\\\\.)*+\""
+    )
+
     /// Replace the value of any sensitive key with `***`, and defang a signed URL wherever it
     /// appears. Deliberately a regex over the raw string rather than a JSON re-encode: the body
     /// may not be JSON, and a logger must never be able to throw or mutate what it reports.
+    ///
+    /// One pass over the string: every `"key": "value"` pair is visited once, left to right, and
+    /// the key decides (`redactedKeys`, or a `_token` suffix). A per-key pattern could not express "ends in
+    /// `_token`" — its leading quote anchor is exactly why `"device_token"` never matched
+    /// `"token"`.
     private static func redact(_ raw: String) -> String {
-        var out = raw
-        for key in redactedKeys {
-            out = out.replacingOccurrences(
-                of: "\"\(key)\"\\s*:\\s*\"[^\"]*\"",
-                with: "\"\(key)\":\"***\"",
-                options: [.regularExpression, .caseInsensitive]
-            )
+        guard let jsonStringPair else { return "<redaction unavailable>" }
+        let source = raw as NSString
+        var out = ""
+        var cursor = 0
+        for match in jsonStringPair.matches(in: raw, range: NSRange(location: 0, length: source.length)) {
+            let key = source.substring(with: match.range(at: 1))
+            let lowered = key.lowercased()
+            guard redactedKeys.contains(lowered) || lowered.hasSuffix("_token") else { continue }
+            out += source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            out += "\"\(key)\":\"***\""
+            cursor = match.range.location + match.range.length
         }
+        out += source.substring(from: cursor)
         // Query-string credentials (`?token=…`, `&signature=…`) survive the JSON pass above
         // when they are embedded inside a URL value that itself was not a redacted key.
         out = out.replacingOccurrences(
-            of: "([?&](?:token|signature|sig|key|apikey)=)[^&\"\\s]+",
+            of: "([?&](?:token|signature|sig|key|apikey|code)=)[^&\"\\s]+",
             with: "$1***",
             options: [.regularExpression, .caseInsensitive]
         )

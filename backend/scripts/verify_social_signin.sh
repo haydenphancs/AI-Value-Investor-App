@@ -84,19 +84,32 @@ else
 fi
 echo
 
-# ── 3. Is the app's callback URL allow-listed? ───────────────────────────────
-# A non-allow-listed redirect_to is silently replaced by the project's Site URL, so the app's
-# ASWebAuthenticationSession never sees its scheme and the sign-in appears to hang or error.
-echo "3. Redirect URL allow-list ($CALLBACK)"
+# ── 3. Is the app's callback URL allow-listed? (informational) ───────────────
+# A non-allow-listed redirect_to is silently replaced by the project's Site URL. That only
+# matters to the WEB Google fallback (ASWebAuthenticationSession), which never sees its scheme
+# then. Every shipped build carries a real GIDClientID, so Google sign-in is NATIVE and this
+# callback is meant to be REMOVED (OWNER_TASKS step 5, audit CC-11: `caydex` is not a
+# reverse-DNS scheme, so another app could claim it and receive the tokens in its fragment).
+# Neither answer is a failure: "NOT allow-listed" is the target state once step 5 is done.
+echo "3. Redirect URL allow-list ($CALLBACK) — informational"
 if printf '%s' "$loc" | grep -q 'accounts.google.com'; then
+  # GoTrue carries the redirect it will use inside the `state` JWT it hands Google (claim
+  # `referrer`); a redirect_to it refused is replaced there by the Site URL. A literal
+  # `redirect_to=` parameter is read as a fallback. Matched on the SCHEME, never a bare
+  # "caydex" substring: the Site URL (caydexinvest.com) contains that word too.
+  state=$(printf '%s' "$loc" | sed -n 's/.*[?&]state=\([^&]*\).*/\1/p')
+  payload=$(printf '%s' "$state" | cut -d. -f2 | tr '_-' '/+')
+  case $(( ${#payload} % 4 )) in 2) payload="$payload==" ;; 3) payload="$payload=" ;; esac
+  claims=$(printf '%s' "$payload" | base64 -D 2>/dev/null || printf '%s' "$payload" | base64 -d 2>/dev/null)
+  referrer=$(printf '%s' "$claims" | sed -n 's/.*"referrer":"\([^"]*\)".*/\1/p')
   inner=$(printf '%s' "$loc" | sed -n 's/.*redirect_to=\([^&]*\).*/\1/p')
-  if [ -n "$inner" ] && printf '%s' "$inner" | grep -qi 'caydex'; then
-    pass "allow-listed (Supabase preserved the app's scheme)"
+  target="${referrer:-$inner}"
+  if printf '%s' "$target" | grep -qiE '^caydex(:|%3A)(/|%2F)(/|%2F)auth-callback'; then
+    info "still allow-listed (Supabase preserved the app's scheme): the web Google fallback works."
+    info "OWNER_TASKS step 5 removes it once the native Google path is confirmed on the phone."
   else
-    fail "NOT allow-listed — Supabase dropped/replaced the app's redirect"
-    info "Fix: Supabase → Authentication → URL Configuration → Redirect URLs → add:"
-    info "     $CALLBACK"
-    info "Symptom if skipped: Google consent succeeds, then the app never regains control."
+    pass "NOT allow-listed — expected once OWNER_TASKS step 5 removed it (Google sign-in is native)."
+    info "Check Continue with Google on the phone; only the web fallback needed this redirect."
   fi
 else
   info "(skipped — enable the Google provider first)"

@@ -2325,15 +2325,256 @@ contract; no client should depend on any `X-RateLimit-*` header.
 
 ### 9.1 Authentication Flow
 
-**Token exchange.** Two routes mint app tokens, both via `_issue_app_tokens_for`:
-`POST /auth/oauth` (native Apple identity token) and `POST /auth/session-exchange` (web OAuth, e.g.
-Google). There is no `POST /auth/token`. Access tokens last 24 h, refresh tokens 7 d and rotate. The
-JWT carries `sub`, `email`, `iat`, `exp` — **not** a `tier` claim; tier is read from `public.users`
-so a plan change takes effect without waiting for a token to turn over.
+**Token exchange.** The app mints its own JWTs (`core/security.py`), signed with `SECRET_KEY`.
+These routes return them:
+- `POST /auth/login` (email + password);
+- `POST /auth/confirm-email` (the sign-up code, below);
+- `POST /auth/oauth` (a native Apple or Google identity token);
+- `POST /auth/session-exchange` (a Supabase access token from the web OAuth fallback);
+- `POST /auth/refresh`;
+- the two password routes that re-mint the caller's own tokens, `/auth/change-password` and
+  `/auth/set-password`;
+- `/auth/register`, but only while Supabase's *Confirm email* is OFF. It is ON in production, so
+  register returns no tokens there.
 
-**A password change evicts live sessions.** `users.password_changed_at` is compared against the
-token's `iat`, so any JWT minted before the change is rejected — a reset invalidates sessions an
-attacker may already hold.
+There is no `POST /auth/token`. Access tokens last 24 h, refresh tokens 7 d. The JWT carries `sub`,
+`email`, `iat`, `exp` — **not** a `tier` claim; tier is read from `public.users`, so a plan change
+takes effect without waiting for a token to turn over.
+
+**Refresh tokens are re-issued, not rotated.** Each `/auth/refresh` returns a new refresh token but
+never retires the one it was given:
+- refresh tokens carry no `jti`, and there is no reuse detection;
+- `/auth/logout` only logs.
+
+So a leaked refresh token keeps refreshing until the account's password changes or `SECRET_KEY` is
+rotated. An Apple/Google account can stop it only by setting a password. This is a recorded gap:
+server-side sessions (rotation with reuse detection, revocation on logout, "sign out of all
+devices") are a planned follow-up, not shipped behaviour.
+
+**Only `/auth/session-exchange` accepts a Supabase token (2026-11-26).** Every other route takes
+only an app-minted access token. Two fallbacks are gone:
+- the old path that let any route accept a Supabase JWT as a bearer;
+- the `SUPABASE_JWT_SECRET`-keyed 503 branch that came with it.
+
+The iOS client never sent a Supabase token as a bearer: it exchanges it at once.
+
+`verify_supabase_token` checks a Supabase token this way:
+- It accepts only a key from the project's JWKS (ES256 or RS256), and the algorithm must match
+  that key's type.
+- It refuses HS256 outright. The legacy shared secret was revoked on 2026-08-15, so an HS256
+  "Supabase" token can only be a forgery or a leaked-secret token.
+- It requires `exp`, `aud = authenticated`, the project's issuer and `sub`.
+- It answers any JOSE error with a refusal, never a 500.
+
+Session-exchange then refuses an anonymous Supabase user (`is_anonymous`) and a token issued
+before the account's last password change. If it cannot read that timestamp, it fails CLOSED
+(503 `AUTH_UNAVAILABLE`). Nothing reads `SUPABASE_JWT_SECRET` any more.
+
+**A password change evicts sessions, where the stamp is checked.**
+- **Who stamps it:** `/auth/reset-password`, `/auth/change-password`, `/auth/set-password`, and
+  `/auth/confirm-email` when it sets a password all stamp `users.password_changed_at`. A stamp that
+  fails is retried once, then logged at ERROR. The password change itself stands, because the
+  password has already changed by then.
+- **Who checks it:** a token whose `iat` predates the stamp is refused by `/auth/refresh`, by
+  `/auth/session-exchange`, and by the strict per-route dependencies `get_current_user` and
+  `get_current_user_or_guest`.
+- **Who does not:** the router-level `get_current_user_id` gate does NOT read the stamp. On a route
+  whose only auth dependency is that gate (most market-data routes), a pre-change access token
+  keeps working until it expires, at most 24 h. It can no longer refresh, and it cannot reach any
+  route that reads the account.
+
+So "a reset evicts an attacker" holds for refresh, for account data and for the Supabase door. It
+does not hold for the market-data routes, for up to a day.
+
+`/auth/refresh` fails CLOSED. When it cannot read the account's row, it answers 503
+`AUTH_UNAVAILABLE`, which the client retries without clearing its credential. Before 2026-11-26 it
+failed open, so one refresh during a database blip could turn a pre-reset token into a post-reset
+session.
+
+An expired refresh token is `AUTH_SESSION_EXPIRED`, logged at INFO. A malformed one is
+`AUTH_TOKEN_INVALID`.
+
+**Email confirmation is a code, with a link for old installs (2026-11-26).** Supabase's *Confirm
+email* is ON, so `/auth/register` returns no tokens and `/auth/login` answers 403
+`EMAIL_NOT_CONFIRMED` until the address is confirmed. The Confirm-signup email
+(`documents/legal/supabase-email-templates/confirm-signup.html`, which the owner pastes into the
+dashboard) carries two things:
+- the one-time code: 8 digits as configured, and the backend accepts 6–12;
+- a link to `https://caydexinvest.com/auth/confirm?token_hash=…&type=signup`.
+
+*Why it is built this way:* the template used to hold the password-reset wording and a code, while
+no route or screen could use a sign-up code. Every email/password sign-up dead-ended until a user
+found Forgot password.
+
+- **The code.** The app's code screen sends `POST /auth/confirm-email` with
+  `{email, code, password}`. The route:
+  1. applies the per-IP limit, then the per-email limit. A device proof does not relax them, and
+     none is minted here.
+  2. runs `verify_otp` with type `signup`. Never `email`, which would also accept a recovery code.
+     From this point the code is SPENT and the address is confirmed, whatever happens next.
+  3. signs in with the password.
+  4. sets the typed password when the sign-in says the stored one differs (below), then mints.
+
+  If the stored password differs, the route still finishes. That happens when the user registered
+  again with a new password, which GoTrue silently ignores for an unconfirmed address, or when
+  someone else pre-registered the address. The route then checks the password against the
+  password rule (below), SETS it through the admin client, stamps `password_changed_at` and signs
+  the caller in.
+
+  The route takes the same set-password path when the sign-in in step 3 fails for a GoTrue 429 or
+  an outage, because the spent code cannot be retried. Any other sign-in failure (the account still
+  reads as unconfirmed, or an unclassified 4xx) does not take it. On that path the route never
+  learned whether the typed password was the stored one, so if the rule or GoTrue refuses it, the
+  answer is the 503 "sign in, or use Forgot password" copy rather than the 400 "that password
+  can't be used".
+
+  Whoever proves the mailbox chooses the password. `/auth/reset-password` already grants the same
+  capability. Signing in on the code alone was rejected, because it would activate a squatter's
+  password.
+
+  **The link does not have this protection, and that is an accepted residual.** The link confirms
+  the address with whichever password GoTrue already holds, which is the FIRST registrant's. Two
+  cases follow:
+  - a user who registered again with a new password must sign in with the first one, or use Forgot
+    password;
+  - a victim who presses the button on a squatter's sign-up email confirms the squatter's password.
+
+  The code path sets the typed password instead. The page asks anyone who did not sign up to close
+  it, and its success copy points at Forgot password. The owner accepted this residual with "Code +
+  link": the link is meant only while installs without a code screen (1.02 and 1.03 in practice)
+  are in use. Closing it would need a password field on the page, which needs review because
+  caydexinvest.com is the passkey domain, or an account-linking guard on `/auth/oauth`.
+
+  Errors: see "An emailed code is spent once it verifies" below.
+- **The link** serves installs that have no code screen (1.0–1.03).
+  - `GET /auth/confirm` renders a static page with a "Confirm my email" button and verifies
+    nothing, so a mail scanner's prefetch cannot use the token up.
+  - The button's `POST` runs `verify_otp` with the token hash and type `signup` on the server and
+    discards the session. The token hash is format-checked before anything is rendered. The page
+    then shows one of two messages:
+    - success: "Your email is confirmed. Open the Caydex app and sign in. If your password doesn't
+      work, use Forgot password in the app."
+    - failure: "expired or already used". It explains that each new email replaces the earlier
+      ones, so the reader should open the newest one; that someone who already confirmed can just
+      sign in; and that anyone else should sign in to the app to get a new email.
+  - The page carries no script, `Cache-Control: no-store`, `Referrer-Policy: no-referrer`, and the
+    landing page's CSP plus `form-action 'self'`. Its POST is rate-limited per IP.
+  - The token hash is masked in the backend's own logs, including uvicorn's access log (see
+    "Credentials stay out of the auth logs" below). Railway's edge may keep its own HTTP log of
+    the URL, which the app cannot reach. That is one more reason the token is single-use and
+    expires.
+  - The template never uses Supabase's default confirmation URL. That implicit-flow link would put
+    a live Supabase session in the browser's address bar and history, and session-exchange would
+    turn it into a lasting Caydex session.
+- **No automatic resend.** The app never re-sends the email on its own:
+  - A sign-in on an unconfirmed address opens the code screen and sends nothing.
+  - "Send a new code" is a tap with a cooldown, because every send replaces the previous code.
+    The backend allows 3 sends per address per hour.
+  - Arriving from sign-up, the code screen shows the backend's own message: "Check your email to
+    confirm your address. Already have an account? Sign in or reset your password." So an
+    existing user is not left waiting for a code that never comes.
+  - The screen's sign-in button reads "Already confirmed, or have an account? Sign in".
+- **The dashboard is unversioned state.** The repository holds the canonical template files and
+  the exact settings table: the launch checklist's §5b(a), kept out of git. That table covers
+  Confirm email, OTP length and expiry, Site URL, Redirect URLs, rate limits, IP Address
+  Forwarding and Apple's Hide My Email relay. `tests/test_auth_email_template_doc_parity.py` pins
+  those files and documents, never the live dashboard. So after any change on the dashboard's
+  Emails screen, the owner registers a fresh address AND runs Forgot password, and reads both
+  emails (OWNER_TASKS §2.4).
+
+**An emailed code is spent once it verifies, and the error code says which side of that line a
+failure is on (2026-11-26).** All three code routes (`/auth/confirm-email`, `/auth/reset-password`,
+`/auth/set-password`) share this table:
+
+| When | Code | Status | Action | Meaning for the client |
+|---|---|---|---|---|
+| The code is wrong or expired | `AUTH_CODE_INVALID` | 400 | `fix_input` | Re-enter it, or send a new one. Never a credential failure, never a token refresh. |
+| GoTrue is down or answers 429 **before** the code verifies | `AUTH_UNAVAILABLE` | 503 | `retry_later` | The code is still good, so the same code may be retried. A 429 is logged with the greppable `GOTRUE_RATE_LIMITED` marker, never the address. |
+| `/auth/confirm-email`: anything fails **after** the code verified | `AUTH_CONFIRMED_SIGN_IN_FAILED` | 503, or 400 when a password that differed from the stored one was refused | `sign_in` | The address IS confirmed and the code is gone. `user_message` always begins "Your email is confirmed", then says to sign in, or to use Forgot password when that password cannot be used. |
+| `/auth/reset-password`, `/auth/set-password`: the new password is refused **after** the code verified (a breached password, or any other GoTrue refusal of the password itself) | `AUTH_PASSWORD_REJECTED` | 400 | `fix_input` | "That password can't be used. Send a new code, then choose a different password." |
+| `/auth/reset-password`, `/auth/set-password`: anything else fails **after** the code verified, GoTrue's `validation_failed` on the admin update included. One exception: a set-password code that resolves to a different account stays a 403 `AUTH_FORBIDDEN`, a security refusal that must stand out in the logs | `AUTH_CODE_USED` | 503 | `fix_input` | "We couldn't set your new password, and that code has now been used. Send a new code and try again." |
+
+What the app does with each:
+- On `AUTH_CONFIRMED_SIGN_IN_FAILED`, the confirm screen locks its code field and its Confirm and
+  Send-a-new-code buttons, and shows the message. Its main action becomes Sign in, which re-runs
+  sign-in with the password still in memory, and it keeps Forgot password.
+- On `AUTH_CODE_USED` or `AUTH_PASSWORD_REJECTED`, the reset and set-password screens clear the
+  code field, show the message and stay on the code step, with Send a new code available.
+
+All three screens branch on the raw code string from `APIError.businessError`, as they already do
+for `AUTH_CODE_INVALID`.
+
+*Why it is built this way:* until 2026-11-26 the same 503 `AUTH_UNAVAILABLE` meant both "retry
+this code" and "this code is gone". The app could not tell them apart, so it asked the user to
+retry a code that could only fail.
+
+**One password rule, Supabase's own (2026-11-26).** Every route that sets a NEW password checks it
+with `_validate_password_strength` (`backend/app/schemas/auth.py`): register, reset-password,
+change-password, set-password and the set-password step of confirm-email. The iOS forms show the
+same rule as a live checklist (`PasswordRule` in
+`frontend/ios/ios/Views/Molecules/PasswordRequirementsView.swift`). Sign-in never
+checks it, and neither does confirm-email's request schema, where the typed password may be an
+older one that only has to sign in. The rule:
+- at least 8 characters;
+- at most 72 UTF-8 **bytes**. GoTrue refuses anything longer ("Password cannot be longer than 72
+  characters"), and an accented letter or an emoji takes 2–4 bytes;
+- no leading or trailing whitespace;
+- at least one ASCII lowercase letter `a–z`, one ASCII uppercase letter `A–Z` and one ASCII digit
+  `0–9`;
+- at least one symbol from exactly these 32: `` !@#$%^&*()_+-=[]{};':"|<>?,./`~\ ``
+
+Any other character (a space inside the password, an accented letter, an emoji) is allowed but
+counts toward no class: GoTrue refused `Aa1 bbbbbbbb`, whose only "symbol" is a space. A refusal
+names every missing class, and a password that is too long gets "Password is too long: 72 bytes at
+most (emoji and accented letters use more than one)." The app's checklist rows are "8+
+characters", "An uppercase letter (A–Z)", "A lowercase letter (a–z)", "A number (0–9)" and "A
+symbol such as ! @ # $ — spaces don't count". A warning row appears only past 72 bytes.
+
+*Why it is built this way:* the rule used to be a deliberate SUPERSET of GoTrue's. Any
+non-alphanumeric character counted as a symbol, and 128 characters were allowed, so that our side
+could never refuse a password GoTrue would accept. GoTrue still refused the rest, but on
+reset-password and set-password it did so only after `verify_otp` had spent the code. The user
+then needed a new code and was never told why. Matching GoTrue exactly moves the refusal before
+the code is touched. `tests/test_password_rule_parity.py` pins the backend and iOS copies together,
+and `tests/test_auth_email_template_doc_parity.py` pins this paragraph to the backend validator.
+
+**Credentials stay out of the auth logs (2026-11-26).** Every log line already passes
+`app/log_redaction.py`. Sign-up confirmation added four rules:
+- **uvicorn's access log.** The `uvicorn.access` logger has its own handler and does not
+  propagate, so the root redaction filter never saw it. Every GET of the email link therefore
+  wrote its live `token_hash` to Railway's stdout.
+  - A filter on that logger now rewrites the logged path in place. It edits the path argument and
+    never empties the arguments, because uvicorn's access formatter unpacks exactly five of them
+    and an emptied record loses the line to a logging error.
+  - The query-string redaction covers `token_hash` too.
+- **Sentry frames.** Frames in `app.api.v1.endpoints.auth` and `app.api.email_confirm_page` lose
+  all their locals; the confirm page's POST frame holds the parsed form, token hash included.
+  Elsewhere a credential-named field inside a repr is blanked. So is every string inside a list or
+  tuple under a credential-named key, the shape `parse_qs` returns.
+- **Sentry's `EventScrubber`** keeps sentry's default PII denylist and adds `sb-forwarded-for` and
+  `client_ip`, so the forwarded end-user address never reaches an event. Passing a denylist
+  REPLACES the default, so the code passes the default plus those two.
+- **An expired token is not a warning.** `decode_token` logs an expired signature at DEBUG, since
+  it is the normal end of a session and `/auth/refresh` logs its own INFO line. Every other JWT
+  error stays a WARNING.
+
+**Supabase sees each caller's address only once the owner's switch is ON.** Every GoTrue verb
+leaves from the backend's single Railway address through `database.run_gotrue`.
+- **What the backend sends (2026-11-26).** The auth router and the `/auth/confirm` POST bind the
+  trusted client address per request: `trusted_client_ip`, the rightmost `X-Forwarded-For` entry,
+  which Railway's edge appended. `run_gotrue` sends it as `Sb-Forwarded-For` on every non-admin
+  verb. Admin verbs never carry it, because GoTrue does not rate-limit them by IP.
+- **When Supabase uses it.** Supabase honours the header only with a secret (`sb_secret_`) API
+  key, and only while the project's **IP Address Forwarding** is ON. That is an owner switch
+  (OWNER_TASKS §2.1). Until it is ON, GoTrue ignores the header and its per-IP auth limits bind
+  every user at once.
+- **Sizing the Supabase limits.** The owner sizes the sign-in and verification limits for
+  single-IP traffic only while the switch is OFF; once it is ON, they are per user. The
+  emails-per-hour limit covers the whole project either way.
+- **What stays the same.** The backend's own per-IP and per-email limiters on the credential
+  routes remain the per-user control.
+- **The assumption.** Railway's edge is the only proxy. A CDN in front of it would put every user
+  behind a few edge addresses again.
 
 **The session heals itself.** The client recovers from five triggers, not just a failed request:
 launch, foreground, network-path restored (`NetworkMonitor`), a bounded backoff, and any auth
@@ -2412,7 +2653,8 @@ signal**: an admin password write does not necessarily create an `email` identit
 identity-based check would go stale after the very flow below.
 
 `POST /auth/set-password` creates a FIRST password for a signed-in account that has none. The
-emailed 6-digit recovery OTP is the proof, not the bearer token — accepting the session alone
+emailed recovery code (from `documents/legal/supabase-email-templates/reset-password.html`: 8
+digits as configured, and the backend accepts 6–12) is the proof, not the bearer token — accepting the session alone
 would make a stolen access token sufficient to take permanent ownership of the account, which is
 exactly what change-password's current-password requirement prevents and what this route has no
 current password to fall back on. It re-mints the caller's tokens after stamping
@@ -2429,9 +2671,9 @@ no proof of the current one). Pinned by `tests/test_set_password_oauth.py`.
 *Both generation doors must stay gated or the gate is cosmetic* — they cost the same on a cache miss.
 
 ⚠️ **This paragraph used to end "everything else is guest-capable by design, which is also an App
-Store requirement".** That is no longer true: **137 of 148** iOS endpoint cases are
-`.signInRequired`, leaving ten `.public` (the eight pre-session auth flows plus the two price
-catalogues) and one `.guestAllowed` (`trackEvents`, backed by `get_identity_only_user`, the one
+Store requirement".** That is no longer true: every iOS endpoint case but twelve is
+`.signInRequired`, leaving eleven `.public` (the nine pre-session auth flows, `confirmEmail`
+included since 2026-11-26, plus the two price catalogues) and one `.guestAllowed` (`trackEvents`, backed by `get_identity_only_user`, the one
 dependency that must never raise). On the backend the same line is drawn with router-level
 dependencies — `APIRouter(dependencies=[Depends(get_current_user_id)])` — so a route added to a
 market-data module is closed by default rather than relying on the author to remember.
@@ -2460,7 +2702,7 @@ Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 
 | Data | iOS storage | Backend storage | Notes |
 |---|---|---|---|
-| Auth tokens | **Keychain** (`Core/Services/AuthService.swift::KeychainService`), `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` | n/a | The live in-process copy is `APIClient.currentAuthToken()`, which **deliberately diverges** from the Keychain during `.restoring` — never read the Keychain directly (`.claude/rules/auth.md` §8). |
+| Auth tokens | **Keychain** (`Core/Services/AuthService.swift::KeychainService`), `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` | n/a | The live in-process copy is `APIClient.currentAuthToken()`, which **deliberately diverges** from the Keychain during `.restoring` — never read the Keychain directly (`.claude/rules/auth.md` §8). **A fresh install purges the session an earlier install left behind (2026-11-26).** Keychain items outlive the app, so a reinstall used to restore the previous user's session. `AuthService.purgeSessionLeftByAnEarlierInstall` runs first in the launch Task, before the one launch Keychain read. It clears the two session tokens only when BOTH traces of an earlier launch are missing: the UserDefaults marker `auth.install-marker.v1`, and the App Group key `widget.api.baseURL`, which every build since 2026-08-28 writes at each launch and which iOS deletes with the app. An update keeps the session: it arrives without the marker but with the App Group key. An unreadable App Group also keeps it (logged as a warning). The device proof and the guest install id are never cleared. |
 | User profile | **In memory only** — `UserState.profile` | `public.users` (RLS) | Re-fetched from the backend each launch. Not persisted. |
 | Research reports | **In memory only** — `ResearchState.reports` | `research_reports` (service-role; the in-code `user_id` filter is the effective wall) | Not persisted client-side. |
 | Last Home dashboard (Market Pulse, scanners, signals as served, themes, the watchlist strip — active group name, tickers and prices — and the Trillion group) | **On disk** since 2026-10-01: the raw `GET /home/dashboard` response under Library/Caches/HomeDashboard (`HomeDashboardSnapshotStore`), `.completeFileProtectionUntilFirstUserAuthentication`, never backed up | nothing new — built per request from the existing tables | The account's watchlist tickers and their prices now survive app termination. Owner-stamped with the stored token's `sub`, shown for at most 96 h, deleted at session end, on a change of account and by Settings › Clear Cache (§7.1). Pro signals are kept exactly as served; the server's redaction remains the gate. |

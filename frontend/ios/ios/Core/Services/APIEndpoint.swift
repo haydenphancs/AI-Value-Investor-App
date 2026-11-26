@@ -115,6 +115,9 @@ enum APIEndpoint: Sendable {
     case setPassword(code: String, newPassword: String)
     /// Re-send the signup confirmation email.
     case resendConfirmation(email: String)
+    /// Confirm a new account's address with the emailed code and sign in with the password
+    /// (`POST /auth/confirm-email` → TokenResponse). Pre-session, so `.public`.
+    case confirmEmail(email: String, code: String, password: String)
     /// Native social sign-in with a provider identity token (Sign in with Apple).
     case oauthSignIn(provider: String, idToken: String, nonce: String?, displayName: String?)
     /// Exchange a Supabase access token for app tokens (web OAuth flow, e.g. Google).
@@ -482,6 +485,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/auth/set-password"
         case .resendConfirmation:
             return "/api/v1/auth/resend-confirmation"
+        case .confirmEmail:
+            return "/api/v1/auth/confirm-email"
         case .oauthSignIn:
             return "/api/v1/auth/oauth"
         case .sessionExchange:
@@ -827,7 +832,7 @@ enum APIEndpoint: Sendable {
         case .trackEvents,
              .signIn, .signUp, .refreshToken, .signOut,
              .forgotPassword, .resetPassword, .changePassword, .setPassword,
-             .resendConfirmation, .oauthSignIn, .sessionExchange, .verifyPurchase,
+             .resendConfirmation, .confirmEmail, .oauthSignIn, .sessionExchange, .verifyPurchase,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage, .streamChatMessage,
              .completeLearnItem, .addBookBookmark,
@@ -1051,6 +1056,9 @@ enum APIEndpoint: Sendable {
         case .resendConfirmation(let email):
             return ResendConfirmationRequest(email: email)
 
+        case .confirmEmail(let email, let code, let password):
+            return ConfirmEmailRequest(email: email, code: code, password: password)
+
         case .oauthSignIn(let provider, let idToken, let nonce, let displayName):
             return OAuthSignInRequest(
                 provider: provider, idToken: idToken, nonce: nonce, displayName: displayName
@@ -1186,7 +1194,7 @@ enum APIEndpoint: Sendable {
         switch self {
         case .signIn, .signUp, .refreshToken, .signOut,
              .forgotPassword, .resetPassword,
-             .resendConfirmation, .oauthSignIn, .sessionExchange:
+             .resendConfirmation, .confirmEmail, .oauthSignIn, .sessionExchange:
             return true
         // .changePassword and .setPassword are deliberately NOT here: both are authenticated
         // requests, so they should still get the 401 -> refresh -> retry interceptor. Safe for
@@ -1217,6 +1225,9 @@ enum APIEndpoint: Sendable {
     /// The address a per-EMAIL rate limit applies to on this route, so `APIClient` can attach
     /// the install's lockout exemption (`X-Device-Token`, see `DeviceProofStore`). Exactly the
     /// three credential routes the backend limits per email; nil everywhere else.
+    ///
+    /// `.confirmEmail` is limited per email too, but deliberately WITHOUT the proof relaxation:
+    /// its secret is an emailed code, and a proof would widen the guessing budget for it.
     nonisolated var deviceProofEmail: String? {
         switch self {
         case .signIn(let email, _), .forgotPassword(let email), .resetPassword(let email, _, _):
@@ -1231,16 +1242,18 @@ enum APIEndpoint: Sendable {
 
         // ── Public: reachable with no credential ────────────────────────────────────────
         //
-        // TEN cases, and the list is deliberately hard to grow. Everything else in the app is
+        // ELEVEN cases, and the list is deliberately hard to grow. Everything else in the app is
         // `.signInRequired` — see the licence note under "Account-only" below.
 
         // Pre-session auth flows. Password recovery in particular must be reachable
         // WITHOUT a token — it exists for people who cannot sign in. Gating any of these is
         // an unbreakable loop: `APIClient.buildRequest` throws `APIError.authRequired` before
         // any network I/O, so you could never obtain the token that grants the token.
+        // `.confirmEmail` (2026-11-26) is the ninth: confirming a new account's address is
+        // what produces its FIRST session, so gating it would strand every new account.
         case .signIn, .signUp, .refreshToken,
              .forgotPassword, .resetPassword,
-             .resendConfirmation, .oauthSignIn, .sessionExchange:
+             .resendConfirmation, .confirmEmail, .oauthSignIn, .sessionExchange:
             return .public
 
         // The two price catalogues. They carry no FMP data and no user data, and
@@ -1551,6 +1564,14 @@ nonisolated struct SetPasswordRequest: Encodable, Sendable {
 
 nonisolated struct ResendConfirmationRequest: Encodable, Sendable {
     let email: String
+}
+
+/// `{email, code, password}`. The password is the one the user just typed; the server checks
+/// the code FIRST, so a password alone never confirms anything.
+nonisolated struct ConfirmEmailRequest: Encodable, Sendable {
+    let email: String
+    let code: String
+    let password: String
 }
 
 nonisolated struct OAuthSignInRequest: Encodable, Sendable {

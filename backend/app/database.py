@@ -4,6 +4,8 @@ No SQLAlchemy. Uses Supabase Python client for all DB operations.
 """
 
 import asyncio
+import contextvars
+import ipaddress
 from typing import Any, Callable, Optional
 import httpx
 from supabase import create_client, Client
@@ -168,7 +170,14 @@ def _reset_to_service_role(client: Client) -> Client:
             sub = getattr(client, attr, None)
             session = getattr(sub, "session", None)
             headers = getattr(session, "headers", None)
-            if headers is None or headers.get("Authorization") == bearer:
+            if headers is None:
+                continue
+            # A sub-client rebuilt while `run_gotrue` had a caller's address in the shared dict
+            # SNAPSHOTS it (the same way it snapshots a user JWT). Only GoTrue reads the header,
+            # but one user's address must not ride on every later query. The sub-session's own
+            # copy only — never the shared dict, which a locked GoTrue call may be using.
+            headers.pop(GOTRUE_FORWARDED_FOR_HEADER, None)
+            if headers.get("Authorization") == bearer:
                 continue
             headers["Authorization"] = bearer
             logger.warning(
@@ -265,6 +274,115 @@ def _gotrue_lock() -> asyncio.Lock:
     return _GOTRUE_LOCK
 
 
+# ── The end user's address, forwarded to Supabase Auth (SEC-7 / AUTH-BE-09) ──────────────────
+#
+# Every GoTrue call leaves from the Railway container, so GoTrue's per-IP limits (sign-ups and
+# sign-ins 30 / 5 min, `verify` 30 / 5 min, `token` 150 / 5 min by default) were ONE bucket for
+# every user of the app: a handful of junk logins from one attacker address answered every real
+# user's sign-in with a 429 → 503 AUTH_UNAVAILABLE. Supabase documents a fix for exactly this
+# shape ("Rate limits" guide, § Sb-Forwarded-For): a server sends the end user's address in
+# `Sb-Forwarded-For`, and Auth keys its rate limits on it. Three conditions, all from those docs:
+#   1. the request must be made with a SECRET API key (`sb_secret_…`) — publishable and legacy
+#      anon / service_role JWT keys are not honoured. `SUPABASE_SERVICE_ROLE_KEY` has held an
+#      `sb_secret_` key since the 2026-08-15 key rotation;
+#   2. the project must have IP Address Forwarding ENABLED (Auth → Rate limits, or the
+#      Management API's `security_sb_forwarded_for_enabled`) — an OWNER action. Until then
+#      GoTrue ignores the header, so sending it is harmless;
+#   3. Auth uses the FIRST value and falls back to the connection address on an invalid one —
+#      so only one normalised address is ever sent.
+# The address is `core.security.trusted_client_ip` (the rightmost X-Forwarded-For entry, the one
+# Railway's edge appended — never a caller-chosen value), bound per request by the FastAPI
+# dependency `dependencies.forward_client_ip_to_gotrue`. Outside a request (a job, a script)
+# nothing is bound and no header is sent.
+GOTRUE_FORWARDED_FOR_HEADER = "Sb-Forwarded-For"
+_gotrue_client_ip: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "gotrue_client_ip", default=None
+)
+
+
+def normalise_client_ip(value: Any) -> Optional[str]:
+    """`value` as a canonical IP address string, or None when it is not exactly one address.
+
+    Validating is what keeps the header injection-proof (no CR/LF, no commas, no second value)
+    and keeps GoTrue from silently falling back on a malformed one. An IPv4-mapped IPv6 address
+    is unwrapped to its IPv4 form so one client never has two buckets.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    if not candidate or len(candidate) > 64:
+        return None
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        address = mapped
+    if address.is_unspecified:
+        return None
+    return str(address)
+
+
+def bind_gotrue_client_ip(value: Any) -> Optional[str]:
+    """Bind the end user's address for the GoTrue calls of THIS request (this asyncio task).
+
+    Returns what was bound (None when `value` is not a valid address — nothing is forwarded
+    then). A contextvar, not a module global: every request runs in its own task with its own
+    copy of the context, so one request's address can never ride on another's call.
+    """
+    address = normalise_client_ip(value)
+    if address is None and value not in (None, "", "unknown"):
+        logger.warning(
+            "run_gotrue: the caller's address is not a valid IP — GoTrue will rate-limit this "
+            "request on the backend's egress address instead",
+        )
+    _gotrue_client_ip.set(address)
+    return address
+
+
+def _is_admin_api(owner: Any) -> bool:
+    """`auth.admin.*` verbs get no forwarded address.
+
+    GoTrue does not rate-limit `/admin/*` by IP, so there is nothing to gain — and the admin
+    client's headers dict is also read OUTSIDE `run_gotrue` (`users.py`'s account deletion calls
+    `admin.delete_user` directly), where a header left in it could ride on another user's call.
+    """
+    return "admin" in type(owner).__name__.lower()
+
+
+async def _await_holding_lock(work: "asyncio.Future[Any]") -> Any:
+    """Await the worker thread to completion even if the awaiting task is cancelled.
+
+    `asyncio.to_thread` cannot stop a running thread: cancelling the awaiting task used to
+    return control — and release `_GOTRUE_LOCK` — while the verb was still running. The next
+    caller then rewrote the shared headers dict (its `Authorization` reset, its forwarded
+    address) under a request that had not been sent yet. Holding the lock until the thread
+    returns is what makes "the lock spans the call" true; the cancellation is re-raised after.
+    """
+    cancelled: Optional[BaseException] = None
+    while not work.done():
+        try:
+            await asyncio.shield(work)
+        except asyncio.CancelledError as e:
+            if work.done():
+                cancelled = cancelled or e
+                break
+            cancelled = e
+            continue
+        except BaseException:  # noqa: BLE001 — the verb's own error; `work.result()` re-raises it
+            if not work.done():
+                raise  # KeyboardInterrupt / SystemExit on the awaiting side: the process is going down
+            break
+    if cancelled is not None:
+        if not work.cancelled():
+            work.exception()  # mark the worker's outcome retrieved; the task is still cancelled
+        raise cancelled
+    return work.result()
+
+
 async def run_gotrue(verb: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Run a synchronous GoTrue verb OFF the event loop, serialised process-wide.
 
@@ -278,19 +396,40 @@ async def run_gotrue(verb: Callable[..., Any], *args: Any, **kwargs: Any) -> Any
     runs in the same loop turn, because a sign-in that completed in between rewrote the
     shared dict. Best-effort on the owner's internals, like `_reset_to_service_role`; a test
     fake without them is simply run.
+
+    The end user's address (`bind_gotrue_client_ip`) is written into that same dict as
+    `Sb-Forwarded-For` for a non-admin verb, and ALWAYS removed again in `finally`. That is
+    race-free only because the lock spans the whole call — the SDK reads the dict when it
+    builds the request, inside the worker thread — which `_await_holding_lock` keeps true even
+    when the awaiting request is cancelled mid-call.
     """
+    # Sentry keeps the end user's address out of events BY NAME: `client_ip` and the header name
+    # are on `log_redaction`'s PII key list and the SDK scrubber's `pii_denylist` (TOKSEC-2) —
+    # rename either one there too (tests/test_log_redaction.py pins the pairing).
+    client_ip = _gotrue_client_ip.get()
     async with _gotrue_lock():
         owner = getattr(verb, "__self__", None)
+        headers = getattr(owner, "_headers", None)
+        if not isinstance(headers, dict):
+            headers = None
         try:
-            headers = getattr(owner, "_headers", None)
-            if isinstance(headers, dict):
+            if headers is not None:
                 headers["Authorization"] = f"Bearer {settings.SUPABASE_SERVICE_ROLE_KEY}"
+                # Never inherit an address a crashed call left behind.
+                headers.pop(GOTRUE_FORWARDED_FOR_HEADER, None)
+                if client_ip and not _is_admin_api(owner):
+                    headers[GOTRUE_FORWARDED_FOR_HEADER] = client_ip
             if getattr(owner, "_in_memory_session", None) is not None:
                 owner._in_memory_session = None
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("run_gotrue: could not reset the auth client to service_role "
                            "(%s: %s)", type(e).__name__, e)
-        return await asyncio.to_thread(verb, *args, **kwargs)
+        try:
+            work = asyncio.ensure_future(asyncio.to_thread(verb, *args, **kwargs))
+            return await _await_holding_lock(work)
+        finally:
+            if headers is not None:
+                headers.pop(GOTRUE_FORWARDED_FOR_HEADER, None)
 
 
 def resolve_admin_client(*candidates) -> Client:

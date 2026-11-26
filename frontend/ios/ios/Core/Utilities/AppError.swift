@@ -62,6 +62,19 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
     /// and treating it as one would sign out a user who never got signed in.
     case emailNotConfirmed(message: String)
 
+    /// The emailed code WORKED — the address is confirmed and the code is spent — but signing
+    /// the user in afterwards failed (AUTH_CONFIRMED_SIGN_IN_FAILED: 503 for an outage, 400 when
+    /// the typed password could not be set). Only `/auth/confirm-email` sends it.
+    ///
+    /// Its own case because the client must do something none of the others say: STOP asking
+    /// for the code and sign in. `.authUnavailable` is retryable, and a retry sends a dead code
+    /// (AUTH_CODE_INVALID, then a "new code" that never comes, because the address is already
+    /// confirmed — IOS-CONF-1). `.sessionEnded` / `.unauthorized` are `isAuthError`, which can
+    /// clear a Keychain; there is no session here to clear. `.validationFailed` would title a
+    /// success "Invalid Input". So: the server's sentence, `.signIn`, not retryable, not an
+    /// auth error.
+    case emailConfirmedSignInFailed(message: String)
+
     // Business errors
     case insufficientCredits(required: Int, available: Int)
     /// The caller's PLAN doesn't allow this action (WHALE_FOLLOW_LOCKED, HTTP 403).
@@ -179,6 +192,7 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .sessionEnded: return "session_ended"
         case .authUnavailable: return "auth_unavailable"
         case .emailNotConfirmed: return "email_not_confirmed"
+        case .emailConfirmedSignInFailed: return "email_confirmed_sign_in_failed"
         case .insufficientCredits: return "insufficient_credits"
         case .planUpgradeRequired: return "plan_upgrade_required"
         case .notFound(let r): return "not_found_\(r)"
@@ -218,6 +232,8 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             return "Couldn't Verify Account"
         case .emailNotConfirmed:
             return "Confirm Your Email"
+        case .emailConfirmedSignInFailed:
+            return "Email Confirmed"
         case .insufficientCredits:
             return "Insufficient Credits"
         case .planUpgradeRequired:
@@ -277,8 +293,14 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 ? "We couldn't verify your account just now. Please try again in a moment."
                 : message
         case .emailNotConfirmed(let message):
+            // No "link": the confirmation email carries a code, and the sign-in screen routes
+            // this error to the code screen before any copy is shown.
             return message.isEmpty
-                ? "Please confirm your email address, then sign in again. Check your inbox for the link."
+                ? "Your email isn't confirmed yet. Enter the code from the confirmation email we sent you."
+                : message
+        case .emailConfirmedSignInFailed(let message):
+            return message.isEmpty
+                ? "Your email is confirmed, but we couldn't sign you in just now. Please sign in."
                 : message
         case .insufficientCredits(let required, let available):
             // required <= 0 → the amount/balance wasn't plumbed (the backend
@@ -316,7 +338,9 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .tickerDelisted(let message):
             return message.isEmpty ? "This stock is no longer listed." : message
         case .rateLimited(let seconds):
-            return "Please wait \(seconds) seconds before trying again."
+            // Human units (IOS-AUTH-04): the credential routes refuse for 15 minutes to an
+            // hour, and "Please wait 3600 seconds" is not something a person can act on.
+            return "Please wait \(Self.waitPhrase(seconds: seconds)) before trying again."
         case .apiError(_, let msg):
             return msg
         case .unknown(let msg):
@@ -324,6 +348,20 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         case .cancelled:
             return ""
         }
+    }
+
+    /// A `Retry-After` in words: "a moment", "a minute", "about 15 minutes", "about an hour",
+    /// "about 3 hours". Rounded to the nearest unit and never more precise than the server's
+    /// sliding window deserves. Garbage (0 or negative) reads as "a moment" rather than a
+    /// number the user cannot act on.
+    static func waitPhrase(seconds: Int) -> String {
+        if seconds <= 0 { return "a moment" }
+        if seconds <= 90 { return "a minute" }
+        let minutes = Int((Double(seconds) / 60).rounded())
+        if minutes < 45 { return "about \(minutes) minutes" }
+        if minutes < 90 { return "about an hour" }
+        let hours = Int((Double(seconds) / 3600).rounded())
+        return "about \(hours) hours"
     }
 
     // MARK: - Suggested Actions
@@ -346,6 +384,10 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
         // tries again. Not `.fixInput`: nothing on the form is wrong.
         case .emailNotConfirmed:
             return .retry
+        // `.signIn`, NOT `.retry`: the code is spent, so the only way forward is an ordinary
+        // sign-in (or Forgot password when the password itself was refused).
+        case .emailConfirmedSignInFailed:
+            return .signIn
         case .insufficientCredits, .planUpgradeRequired:
             return .upgrade
         case .notFound:
@@ -802,6 +844,49 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "EMAIL_NOT_CONFIRMED" {
                 return .emailNotConfirmed(message: message)
             }
+            // 400 AUTH_CODE_INVALID: an emailed code — sign-up confirmation, password reset or
+            // set-password — was wrong, expired or already used. The user fixes the field or asks
+            // for a new code: `.validationFailed` points at the input, keeps the backend wording
+            // and is outside `isAuthError`, so no credential is ever touched. Never `.apiError`,
+            // whose `.retry` would resend a dead code. (It used to be a bare-string 400 that
+            // decoded to `.unknown`.)
+            if code == "AUTH_CODE_INVALID" {
+                return .validationFailed(
+                    message: message.isEmpty
+                        ? "That code is invalid or has expired. Check the newest email from us, or send a new code."
+                        : message
+                )
+            }
+            // 503 (or 400) AUTH_CONFIRMED_SIGN_IN_FAILED, from `/auth/confirm-email` only: the code
+            // was checked and SPENT and the address is confirmed, then the sign-in after it
+            // failed. Never `.authUnavailable` (the same 503 status): that is retryable, and a
+            // retry sends a dead code. `ConfirmEmailView` keys its locked "confirmed, sign in"
+            // state off the raw code; this case gives every other reader the right action.
+            if code == "AUTH_CONFIRMED_SIGN_IN_FAILED" {
+                return .emailConfirmedSignInFailed(message: message)
+            }
+            // 503 (or 400) AUTH_CODE_USED, from `/auth/reset-password` and `/auth/set-password`:
+            // the code was checked and SPENT, then setting the password failed for a reason other
+            // than the password itself. The user must send a new code — `.validationFailed`
+            // points at the form (`.fixInput`) and is not retryable, where `.authUnavailable`
+            // (the status's usual reading) would offer Try Again with a dead code.
+            if code == "AUTH_CODE_USED" {
+                return .validationFailed(
+                    message: message.isEmpty
+                        ? "We couldn't set your new password, and that code has now been used. Send a new code and try again."
+                        : message
+                )
+            }
+            // The three password codes arrive HERE, not on the `.authError` arm: their status is
+            // 400, and only a 401 reaches `.authError` (IOS-AUTH-08). Their branches there are
+            // kept for an older backend that sent a 401. Same mapping, same reasons: what the user
+            // chose, or the account's state, is the problem — never the session, and never a
+            // retry of an identical request.
+            if code == "AUTH_PASSWORD_REJECTED"
+                || code == "AUTH_PASSWORD_NOT_SET"
+                || code == "AUTH_PASSWORD_ALREADY_SET" {
+                return .validationFailed(message: message)
+            }
 
             // ── Codes that used to fall through to the generic branch below ──────────────
             //
@@ -1007,6 +1092,7 @@ extension AppError {
         case .sessionEnded:        return "session_ended"
         case .authUnavailable:     return "auth_unavailable"
         case .emailNotConfirmed:   return "email_not_confirmed"
+        case .emailConfirmedSignInFailed: return "email_confirmed_sign_in_failed"
         case .insufficientCredits: return "insufficient_credits"
         case .planUpgradeRequired: return "plan_upgrade_required"
         case .notFound:            return "not_found"

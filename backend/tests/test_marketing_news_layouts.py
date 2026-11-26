@@ -1857,11 +1857,12 @@ def test_the_2b_word_caps_are_the_widest_W_runs_that_fit_at_the_floor(engine):
         assert font.getlength(max(_F13_NAME_ALPHABET, key=font.getlength)) == font.getlength("W"), style
     # news-v23: every server word cap still fits its worker column at the floor — the look's columns are as wide or
     # wider (its floors are 22 px or more), so the caps are SAFE bounds now, no longer each one's exact maximum:
-    # the grid's line cap is the tightest (18 "W" in 416 px at 22 px — the old 17 px floor no longer exists)
+    # the grid's line cap is the tightest — 17 "W" in 416 px at 22 px under RAQM, the production worker's engine
+    # (HarfBuzz kerning widens "WW": 18 draw 419.1 px; BASIC, this Mac's engine, fits 18) — so it is exact under RAQM
     assert _w_cap(nl.PAIR_NAME_STYLE, _PAIR_HALF, engine) >= T.PAIR_NAME_WORD_MAX_CHARS
     assert _w_cap(nl.HEADLINE_STYLE, _PAIR_HEAD, engine) >= T.PAIR_NAME_WORD_MAX_CHARS   # the investor's headline
     assert _w_cap(nl.GRID_NAME_STYLE, _GRID_TEXT, engine) >= T.GRID_NAME_WORD_MAX_CHARS
-    assert _w_cap(nl.GRID_LINE_STYLE, _GRID_TEXT, engine) == T.GRID_LINE_WORD_MAX_CHARS
+    assert _w_cap(nl.GRID_LINE_STYLE, _GRID_TEXT, engine) == T.GRID_LINE_WORD_MAX_CHARS + (engine == "basic")
     assert _w_cap(nl.SPOT_NAME_STYLE, _SPOT_NAME, engine) >= T.NAME_WORD_MAX_CHARS        # header names
     assert _w_cap(nl.HEADLINE_STYLE, _F13_COLUMN, engine) >= T.NAME_WORD_MAX_CHARS
     assert _w_cap(nl.PAIR_LINE_STYLE, _PAIR_LINE, engine) >= T.NAME_WORD_MAX_CHARS       # a stake's source line
@@ -2402,17 +2403,25 @@ def test_phase3_the_ranked_image_and_cover_fit_the_servers_worst(engine, shipped
     _lay_out_list_post(out, engine)
 
 
+#: How many "W" past the server's widest ranked name the worker's floor column still lays out, per engine (measured
+#: 2026-11-26): BASIC (this Mac) 3; RAQM — the production worker image, run in a Debian bookworm container — 2
+#: (HarfBuzz kerning widens "WW"), and 3 overflow. Either way the server's bound is the conservative side.
+_RANKED_NAME_SLACK = {"basic": 3, "raqm": 2}
+
+
 @pytest.mark.parametrize("engine", _F13_ENGINES)
 def test_phase3_a_ranked_name_past_the_servers_bound_overflows_never_clips(engine, shipped_pair_grid):
     """Anti-vacuity: the server refuses one "W" past the widest one-line name (`slot_rejected`); the worker's column
-    at the floor is a little wider (recorded: three "W" more still lay out — the server's bound is the conservative
-    side, text_metrics' upper bound and the narrowest chip/value column), and four more overflow at every step."""
+    at the floor is a little wider (recorded per engine, `_RANKED_NAME_SLACK`: that many "W" more still lay out — the
+    server's bound is the conservative side, text_metrics' upper bound and the narrowest chip/value column), and one
+    more overflows at every step."""
     rec, widest = _ranked_worst()
     out = _compose(rec, date(2026, 11, 25))
     nl.layout_template(_f13_image(out)[0], font_path=FONT, layout_engine=engine)
     with pytest.raises(T.NewsTemplateRefused, match="slot_rejected"):
         _compose(_ranked_worst({3: widest + "W"})[0], date(2026, 11, 25))
-    for extra, fits in ((3, True), (4, False)):
+    slack = _RANKED_NAME_SLACK[engine]
+    for extra, fits in ((slack, True), (slack + 1, False)):
         bad = json.loads(json.dumps(out))
         bad["image_spec"]["rows"][3]["name"] = widest + "W" * extra
         if fits:
@@ -2546,9 +2555,11 @@ def _lay_cover(card: Dict[str, Any], names: Dict[str, str], engine: str):
 
 def _assert_the_chip_fits(card: Dict[str, Any], names: Dict[str, str], engine: str) -> int:
     """The cover lays out with room to spare and draws its chip whole — exactly what the server allows;
-    without the chip it is never taller (the chip is really drawn: its line costs room). Returns the step."""
+    without the chip it is never taller (the chip is really drawn: its line costs room). Returns the step. "Room to
+    spare" is before the floor step under BASIC (this Mac); under RAQM, the production worker's engine, the widest Money
+    Map cover needs the floor step itself (measured 2026-11-26 in a Debian bookworm container) — it still fits whole."""
     layout = _lay_cover(card, names, engine)
-    assert layout.step < cards.RAMP_STEPS, (card["chip"], card["headline"], layout.step)
+    assert layout.step < cards.RAMP_STEPS + (engine == "raqm"), (card["chip"], card["headline"], layout.step)
     assert " ".join(layout.field_lines("label")) == card["chip"]
     logos = [{"key": k, "name": n, "url": None, "sha256": None} for k, n in names.items()]
     assert card["chip"] in tos.opening_strings(card, logos)
@@ -5360,7 +5371,9 @@ def test_r5_the_money_map_cover_fits_at_its_widest(engine):
         for figure in (T.SUB_CENT, "$100.00"):
             for label_id in ("mm.open.profit", "mm.open.loss"):
                 card, layout = _money_map_cover(name, figure, T.LEXICON[label_id], "WWWWW-W", engine)
-                assert layout.step < cards.RAMP_STEPS, (name, figure, layout.step)
+                # before the floor under BASIC (this Mac); RAQM, the production worker's engine, needs the floor step
+                # itself for the worst of them (measured 2026-11-26 in a Debian bookworm container) — it still fits
+                assert layout.step < cards.RAMP_STEPS + (engine == "raqm"), (name, figure, layout.step)
                 _assert_the_chip_fits(card, {"WWWWW-W": name}, engine)
                 assert " ".join(layout.field_lines("body")) == T.LEXICON[label_id]
                 assert " ".join(layout.field_lines("label")) == "WWWWW-W"
@@ -5377,7 +5390,8 @@ def test_r5_the_money_map_cover_fits_at_its_widest(engine):
         step = cards.layout_card(spec, font_path=FONT, layout_engine=engine).step
     except cards.CardOverflow:
         step = cards.RAMP_STEPS + 1
-    assert step >= cards.RAMP_STEPS
+    # Under RAQM the worst cover itself takes the floor step, so there the five-times label must not fit at all.
+    assert step >= cards.RAMP_STEPS + (engine == "raqm"), (engine, step)
 
 
 def _ins_worst_roundup(n_rows: int, role: str):

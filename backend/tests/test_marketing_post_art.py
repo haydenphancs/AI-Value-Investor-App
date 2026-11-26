@@ -1285,13 +1285,15 @@ async def test_a_record_or_log_failure_never_raises(monkeypatch, caplog):
     def broken_record(self, reason):
         raise TypeError("record bug")
 
-    monkeypatch.setattr(pa._ArtRun, "record", broken_record)
-    rec = await _make()
+    # A nested context undoes ONLY this patch. (A bare monkeypatch.undo() also took back the autouse fixtures' settings —
+    # `_env`'s test Claude key included — so the second half passed only where backend/.env held a real key: it failed
+    # in a clean Linux container on 2026-11-26.)
+    with monkeypatch.context() as m:
+        m.setattr(pa._ArtRun, "record", broken_record)
+        rec = await _make()
     assert rec["status"] == "failed" and rec["reason"] == "internal_error"
     assert rec["usage"]["estimated_micros"] is None                         # unpriceable: the cap fails closed
     assert rec["usage"]["images"] == 1                                      # what was spent is still said
-    monkeypatch.undo()
-    keep_art_on_money_map(monkeypatch)                  # the undo also took back the kept-art set (_kept_art_pipeline)
 
     def broken_log(*a, **k):
         raise ValueError("log bug")

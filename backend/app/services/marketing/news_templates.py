@@ -474,10 +474,15 @@ STAKE_BACKGROUND_IN_CAPTIONS = False
 #: a grid tile's company name and its segment line beside the plate (GRID_NAME_WORD_MAX_CHARS,
 #: GRID_LINE_WORD_MAX_CHARS). A longer word is refused `slot_rejected` — or, for a theme member, the
 #: member is left off the grid and counted in its "+k more" (it is still listed in every long caption).
+#: Since news-v23 no template reads the two GRID_* caps or GRID_MAX_LINES: the theme tiles are measured
+#: with `text_metrics` (an upper bound under both layout engines). They stay as tested bounds.
 NAME_WORD_MAX_CHARS = 20
 PAIR_NAME_WORD_MAX_CHARS = 15
 GRID_NAME_WORD_MAX_CHARS = 14
-GRID_LINE_WORD_MAX_CHARS = 18
+#: The grid LINE's cap is no longer read by any template (news-v23 measures each tile line with `text_metrics`, which
+#: bounds both layout engines); it stays the widest "W" run that fits at the floor under BOTH engines — 17, the
+#: production worker's RAQM (HarfBuzz kerning widens "WW": 18 "W" draw 419.1 px in the 416 px column; BASIC 414 px).
+GRID_LINE_WORD_MAX_CHARS = 17
 #: A video text card's TITLE draws at most this many "W"s a line at the floor (its body: more than
 #: NAME_WORD_MAX_CHARS): a theme card titled with member names falls back to its generic title, the
 #: names moving to the body, when a name word is longer.

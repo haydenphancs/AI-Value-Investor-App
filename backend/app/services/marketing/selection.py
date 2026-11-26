@@ -46,6 +46,26 @@ One gap is accepted: right after a switch from seven days back to four the read 
 weeks of seven-day history — every lesson of today's 34-item pool, but not of a pool above ~35 in weeks
 whose only lesson is Saturday's. A week without "sat" posts a lesson only when a news day falls through
 to it (the parse warns). tests/test_marketing_selection.py simulates the switches.
+
+The SPOTLIGHT lane (owner decision 2026-11-15, "Add a second daily post" on "Tue, Thu, Sat") is a second run
+on some days, claimed as its own row (migration 210: UNIQUE (run_date, lane)). Everything about it here is
+read at CALL time and is inert while its switch is off: `spotlight_on()` (MARKETING_SPOTLIGHT_ENABLED),
+`spotlight_weekdays()` (MARKETING_SPOTLIGHT_WEEKDAYS — fail-closed: an unreadable value is NO day, never the
+default), `spotlight_lane_open()` (the switch, a day listed, the hour rule spotlight hour +
+MARKETING_MAX_RUN_ATTEMPTS <= MARKETING_RUN_HOUR_ET, and a news class enabled — a closed lane is logged at
+ERROR once) and `is_spotlight_day(d)`. `spotlight_plan_for(d)` is its calendar: the spotlight series (the insider
+LIST and the 13F list since the owner decisions of 2026-11-20 — never one company — with the theme right after the
+insider list), then Money Map, ending in the terminal SKIP — never the lesson (the main lane posts the week's), and
+never the weekly Form 4 roundups (their window and ledger key roll with the run date, so a spotlight day would
+re-post Monday's roundup). Both lanes are gated by the same per-series switch (`parse_news_series`) and class
+switch through `enabled_chain`, which keeps SKIP as a terminal exactly like LESSON. `news_recent_limit()` sizes
+the ledger read for both lanes' rows while the lane is open; closed, it is today's, byte for byte.
+
+C0 (2026-11-16): the spotlight never competes for a series the MAIN lane would use that day. `spotlight_chain(d)`
+drops every series of the main lane's enabled chain that day (`main_lane_series`) from the spotlight's, and a date
+whose spotlight chain is left with no series is NOT a spotlight day (`spotlight_day_problem` /
+`is_spotlight_day`, the one predicate the claim gate, the kick and the digest share): no run row, no alert. Before,
+a spotlight Money Map sent the main lane's same-day Money Map to the lesson — a second lesson that week.
 """
 
 from __future__ import annotations
@@ -58,6 +78,8 @@ from typing import Any, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 # FMP-free (the settings object only, as smart_link reads it): the posting days are read at call time.
 from app.config import settings
+# Pure (pydantic only): the class switch's parse, read by the spotlight lane's open check.
+from app.schemas.marketing import NEWS_CLASSES, parse_content_classes
 from app.services.daily_rotation import pick_for_day
 # Pure (no FMP, no I/O): the SEC's 13F due dates on the federal business-day calendar.
 from app.services.trillion_club.rules import previous_quarter, sec_13f_due_date
@@ -194,9 +216,15 @@ def post_weekdays() -> Tuple[int, ...]:
 
 def news_recent_limit() -> int:
     """How many ledger rows a day's selection reads (`script_service`: the lesson rotation and the
-    template build's exclude set): RECENT_WINDOW posting days of history at the CURRENT cadence —
-    240 at the default four days a week, 420 at seven. Read at call time, like `post_weekdays()`."""
-    return RECENT_WINDOW * len(post_weekdays())
+    template build's exclude set): RECENT_WINDOW run days of history at the CURRENT cadence — the main
+    lane's posting days, plus the spotlight lane's days while that lane is open (`spotlight_lane_open`),
+    since each of its runs writes a ledger row too. 240 at the default four days a week with the lane
+    closed (today's value, byte for byte), 420 at seven, 420 at four + three spotlight days, and at most
+    840 (seven + seven) — under PostgREST's ~1,000-row page. Read at call time, like `post_weekdays()`."""
+    days = len(post_weekdays())
+    if spotlight_lane_open():
+        days += len(spotlight_weekdays())
+    return RECENT_WINDOW * days
 
 
 def _calendar(weekdays: Optional[Iterable[int]]) -> Tuple[int, ...]:
@@ -301,6 +329,13 @@ def choose(pool: Iterable[str], run_date: date, recent: Iterable[str] = (), *,
 
 #: The chain step that ends every posting day: the Learn lesson (class A, `choose` above).
 LESSON = "lesson"
+#: The chain step that ends every SPOTLIGHT day (`spotlight_plan_for`, 2026-11-15): nothing qualified, so
+#: the run skips — `script_service` writes a `rejected` script with reject_reason `nothing_qualified` and the
+#: run closes `skipped`. A terminal like LESSON (`enabled_chain` keeps it whatever the classes say and keeps
+#: nothing after it), never a series id, never a template id, and never followed by the lesson.
+SKIP = "skip"
+#: The chain terminals: a main day ends in LESSON, a spotlight day in SKIP.
+CHAIN_TERMINALS: FrozenSet[str] = frozenset({LESSON, SKIP})
 #: The `source_ref` prefixes of a lesson (pinned == content_pool.MONEY_MOVES / JOURNEY).
 LESSON_KINDS: Tuple[str, ...] = ("money_moves", "journey")
 #: The weekly lesson's templates while a news class is on (plan §3: myth-vs-fact / question-hook).
@@ -327,17 +362,34 @@ SERIES: Tuple[Series, ...] = (
     Series("earnings", "F", "Earnings vs Estimates"),
     Series("money_map", "F", "Money Map"),
     Series("theme_explainer", "F", "Theme explainer"),
+    # The spotlight lane's series (2026-11-15; since the owner decisions of 2026-11-20 both are LISTS — the insider
+    # spotlight 3-5 issuers, the 13F spotlight 2-8 holdings — never one company per post). Registered
+    # here first (so `spotlight_plan_for`, the config's id literal and `content_class_of` knew them) and
+    # SHIPPED with their collectors and templates (news-v22). The per-series switch keeps both OFF until the
+    # owner lists them in MARKETING_NEWS_SERIES; until then a spotlight day's chain falls through them.
+    Series("insider_spotlight", "C", "Insider Spotlight"),
+    Series("thirteen_f_spotlight", "C", "13F Spotlight"),
 )
 SERIES_BY_ID = {s.id: s for s in SERIES}
+#: The series only the spotlight lane runs (`spotlight_plan_for`); `plan_for`, the main lane, never names one.
+SPOTLIGHT_SERIES: FrozenSet[str] = frozenset({"insider_spotlight", "thirteen_f_spotlight"})
+#: The weekly Form 4 roundups: their window ([run_date − 7, run_date − 1]) and ledger key
+#: (news:<series>:<window start>) roll with the run date, so the same week's roundup posted on another day
+#: never matches the main lane's key. A spotlight chain must never hold one (it would re-post Monday's).
+WEEKLY_ROUNDUP_SERIES: FrozenSet[str] = frozenset({"ceo_buys", "insider_buys"})
 #: The series whose collector, template and image layout exist. A series missing here is skipped by
 #: `enabled_chain` and its day falls through to the next step of the chain. Drop 2a shipped the first
 #: four; drop 2b (2026-10-10) ships the other four with their `pair` / `grid` layouts — in CODE only:
 #: production runs a series only while the per-series switch lists it too (`parse_news_series`; the
 #: web setting MARKETING_NEWS_SERIES defaults to the 2a four, so the 2b series stay off until the
-#: owner lists them). Pinned == `company_news_adapter.COLLECTORS` and ⊆ `news_templates.SERIES_SPECS`.
+#: owner lists them). Pinned == `company_news_adapter.COLLECTORS` and ⊆ `news_templates.SERIES_SPECS`. The two
+#: spotlight series (2026-11-15) ship with their collectors and templates (news-v22) — in CODE only, like 2b: the
+#: switch's default leaves them off, they run only on the spotlight lane (`spotlight_plan_for`), and their
+#: `feature` picture only for a holder that declared `layout_feature` (`script_service.FEATURE_LAYOUT_SERIES`).
 SHIPPED_SERIES: FrozenSet[str] = frozenset({
     "ceo_buys", "insider_buys", "thirteen_f", "money_map",                       # drop 2a
     "congress_count", "company_stakes", "earnings", "theme_explainer",          # drop 2b
+    "insider_spotlight", "thirteen_f_spotlight",                                # the spotlight lane (2026-11-15)
 })
 
 
@@ -345,10 +397,13 @@ def parse_news_series(raw: Any) -> FrozenSet[str]:
     """The news series the per-series switch (the web setting MARKETING_NEWS_SERIES) leaves on NOW:
     the setting's ids ∩ SHIPPED_SERIES, the shipped set read at call time (like `enabled_chain`'s
     default). Pass it to `enabled_chain(..., shipped=...)`, and `run_service.create_posts` re-reads it
-    before recording a template's posts. Pure, never raises.
+    before recording a template's posts. It gates BOTH lanes (2026-11-15): a series pulled here stops in
+    the main lane and the spotlight lane alike — there is no separate spotlight series switch. Pure, never
+    raises.
 
     Comma-separated; each token stripped and lower-cased; empty tokens skipped; duplicates collapse.
-    (Every series has shipped since drop 2b; "not shipped" below is a rollback that withdraws one.)
+    ("Not shipped" below is a series registered ahead of its code — as the two spotlight series were until
+    news-v22 — or a rollback that withdraws one.)
     A token that names no series ("lesson" included: the lesson is no series and is always on) or a
     series that has not shipped yet (its collector and template do not exist) is DROPPED and logged at
     ERROR — an early id or a typo can only narrow the week, never open a series without its code and
@@ -447,34 +502,63 @@ def in_earnings_season(d: date) -> bool:
 @dataclass(frozen=True)
 class DayPlan:
     rest_day: bool
-    #: Series ids in fallback order, always ending in LESSON; () on a rest day.
+    #: Series ids in fallback order, ending in a terminal: LESSON on a main day (`plan_for`), SKIP on a
+    #: spotlight day (`spotlight_plan_for`); () on a rest day.
     chain: Tuple[str, ...] = ()
     #: rest | monday | tuesday[_congress][_13f] | {wednesday,thursday,friday}_{earnings,off} | saturday | sunday
     #: (lesson_only: `plan_for`'s guard, unreachable while every weekday has a branch there)
+    #: | spotlight | spotlight_13f | spotlight_13f_lead (`spotlight_plan_for`)
     reason: str = "rest"
 
 
-_MONDAY: Tuple[str, ...] = ("ceo_buys", "insider_buys", "money_map", "theme_explainer", LESSON)
-_TUESDAY_TAIL: Tuple[str, ...] = ("company_stakes", "theme_explainer", "money_map", LESSON)
-_THURSDAY_TAIL: Tuple[str, ...] = ("money_map", "theme_explainer", LESSON)
+#: Owner decisions 2026-11-20 ("i pick option 1: 3-5, but if it's a quite week - if we don't have enough data, then use
+#: different topic like posting the theme (cyber war, AI chip,....)"): the THEME post comes right AFTER the insider
+#: series in every chain that holds them — a week with fewer than three qualifying companies posts a theme instead.
+_MONDAY: Tuple[str, ...] = ("ceo_buys", "insider_buys", "theme_explainer", "money_map", LESSON)
+_TUESDAY_TAIL: Tuple[str, ...] = ("company_stakes", "money_map", LESSON)
+_THURSDAY_TAIL: Tuple[str, ...] = ("money_map", LESSON)
 #: Batch 3: the tail of every day that has no series of its own — Thursday's, shared by Wednesday, Friday, Sunday.
 _MONEY_MAP_TAIL: Tuple[str, ...] = _THURSDAY_TAIL
-#: The weekdays that lead with earnings while in season (owner decision 3, 2026-10-15), by `date.weekday()`.
+#: The weekdays that lead with earnings while in season (owner decision 3, 2026-10-15), by `date.weekday()`. news-v23
+#: phase 3 (owner 2026-11-19, the weekly theme post): Wednesday LEADS with the theme and keeps earnings right after it
+#: (a fallback when no theme qualifies), so earnings LEADS on Thursday and Friday only.
 _EARNINGS_DAYS = {2: "wednesday", 3: "thursday", 4: "friday"}
+#: news-v23 phase 3 (owner decision 2026-11-19, recorded in the proposed rules): the day a theme post LEADS the main
+#: chain. Owner decisions 2026-11-20 (the quiet-week fallback): it also runs right after the insider series — Monday's
+#: ceo_buys → insider_buys → theme_explainer, and the spotlight lane's insider_spotlight → theme_explainer — so a theme
+#: may post on a Monday or a spotlight day too; the per-theme 28-day rule (`company_news_rules.THEME_REPEAT_DAYS`, read
+#: over BOTH lanes' theme keys: `run_service.theme_refs_between`) keeps any one theme to one post in four weeks.
+THEME_WEEKDAY = 2
+
+
+def earnings_leads(d: date, weekdays: Optional[Iterable[int]] = None) -> bool:
+    """Does an earnings post LEAD `d`'s chain? A Thursday or Friday in earnings season — and, news-v23 phase 3, the
+    Thursday right after a season that ended on its Wednesday while Wednesday is a posting day of the calendar: that
+    Wednesday now posts the theme first, and Thursday's widened window (`company_news_rules.earnings_window_days`, 8
+    days) takes the reports it used to cover. Wednesday never leads with earnings (its theme does)."""
+    weekday = d.weekday()
+    if weekday not in (3, 4):
+        return False
+    if in_earnings_season(d):
+        return True
+    return weekday == 3 and THEME_WEEKDAY in _calendar(weekdays) and in_earnings_season(d - timedelta(days=1))
 
 
 def plan_for(d: date, weekdays: Optional[Iterable[int]] = None) -> DayPlan:
     """The day's series chain (before the class switch and the shipped set are applied), on the calendar
     of `weekdays` — by default the setting read NOW (MARKETING_POST_WEEKDAYS: a day it leaves out rests).
 
-    Mon: CEO buys → insider buys → Money Map → theme explainer → lesson.
-    Tue: [Congress Count on its Tuesday] + [13F Season while in season] + company stakes → theme
-         explainer → Money Map → lesson.
-    Wed, Thu, Fri: [earnings while in season] + Money Map → theme explainer → lesson (Wed / Fri post only
-         when the setting lists them; their calendar is Thursday's, as the owner's "earnings leads
-         Wed/Thu/Fri" asks).
+    Mon: CEO buys → insider buys → the THEME post (owner 2026-11-20: a quiet Form 4 week posts a theme) → Money Map →
+         lesson.
+    Tue: [Congress Count on its Tuesday] + [13F Season while in season] + company stakes → Money Map → lesson.
+    Wed: the THEME post (news-v23 phase 3, owner 2026-11-19: weekly theme posts) → [earnings while in season] →
+         Money Map → lesson.
+    Thu, Fri: [earnings while in season — `earnings_leads`] + Money Map → lesson (Fri posts only when the setting
+         lists it).
     Sat: the lesson — the week's one lesson-only day.
-    Sun: Money Map → theme explainer → lesson; never earnings (it leads Wed/Thu/Fri only)."""
+    Sun: Money Map → lesson; never earnings (it leads Thu/Fri only).
+    The theme explainer LEADS on Wednesday (THEME_WEEKDAY) and is Monday's fallback after the insider series (owner
+    2026-11-20); the spotlight lane's chains hold it too (`spotlight_plan_for`)."""
     if not is_posting_day(d, weekdays):
         return DayPlan(rest_day=True)
     weekday = d.weekday()
@@ -486,9 +570,13 @@ def plan_for(d: date, weekdays: Optional[Iterable[int]] = None) -> DayPlan:
         head = (("congress_count",) if congress else ()) + (("thirteen_f",) if season else ())
         reason = "tuesday" + ("_congress" if congress else "") + ("_13f" if season else "")
         return DayPlan(False, head + _TUESDAY_TAIL, reason)
+    if weekday == THEME_WEEKDAY:
+        if in_earnings_season(d):
+            return DayPlan(False, ("theme_explainer", "earnings") + _MONEY_MAP_TAIL, "wednesday_earnings")
+        return DayPlan(False, ("theme_explainer",) + _MONEY_MAP_TAIL, "wednesday_off")
     if weekday in _EARNINGS_DAYS:
         name = _EARNINGS_DAYS[weekday]
-        if in_earnings_season(d):
+        if earnings_leads(d, weekdays):
             return DayPlan(False, ("earnings",) + _MONEY_MAP_TAIL, f"{name}_earnings")
         return DayPlan(False, _MONEY_MAP_TAIL, f"{name}_off")
     if weekday == 5:
@@ -504,15 +592,16 @@ def enabled_chain(chain: Iterable[str], classes: FrozenSet[str],
                   shipped: Optional[FrozenSet[str]] = None) -> Tuple[str, ...]:
     """`chain` with every series dropped whose class is not in `classes`, that has not shipped
     (`shipped`, default SHIPPED_SERIES read at call time; script_service passes the per-series
-    switch, `parse_news_series(settings.MARKETING_NEWS_SERIES)`), or that is unknown; LESSON is kept
-    whatever `classes` says, duplicates are removed in order and nothing after the first LESSON is
-    kept (it could never run). With classes {"A"} a plan's chain is `(LESSON,)`."""
+    switch, `parse_news_series(settings.MARKETING_NEWS_SERIES)`), or that is unknown; the TERMINALS —
+    LESSON (a main day) and SKIP (a spotlight day) — are kept whatever `classes` says, duplicates are
+    removed in order and nothing after the first terminal is kept (it could never run — so a LESSON can
+    never follow a SKIP). With classes {"A"} a main plan's chain is `(LESSON,)`, a spotlight plan's `(SKIP,)`."""
     if shipped is None:
         shipped = SHIPPED_SERIES
     out: List[str] = []
     for step in chain:
-        if step == LESSON:
-            out.append(LESSON)
+        if step in CHAIN_TERMINALS:
+            out.append(step)
             break
         series = SERIES_BY_ID.get(step)
         if series is None or series.content_class not in classes or step not in shipped or step in out:
@@ -533,3 +622,284 @@ def lesson_refs(recent: Iterable[str]) -> List[str]:
         if sep and kind in LESSON_KINDS:
             out.append(ref)
     return out
+
+
+# ── The spotlight lane (owner decision 2026-11-15: "Add a second daily post" on "Tue, Thu, Sat") ─────────
+# A second run on a spotlight day, claimed as its own row (migration 210: UNIQUE (run_date, lane)). Every
+# setting below is read at CALL time; while MARKETING_SPOTLIGHT_ENABLED is off nothing here is read past the
+# switch and nothing is logged, so the main lane is byte for byte today's.
+
+#: The spotlight chains (`spotlight_plan_for`). Money Map is the one main-lane series a spotlight day may
+#: take: its ledger key is per (symbol, fiscal year), so the two lanes can never post the same one; the
+#: cross-lane exclusion (script_service) keeps them apart on the same company. Every chain ends in SKIP. Since C0
+#: (2026-11-16) the run walks `spotlight_chain`: Money Map only on a day the MAIN lane's chain does not hold it.
+#: Owner decisions 2026-11-20 (the quiet-week fallback): the THEME post right after the insider list — before the 13F
+#: spotlight (in season), Money Map and the SKIP; the 13F-lead day keeps the 13F spotlight first.
+_SPOTLIGHT_13F_LEAD: Tuple[str, ...] = ("thirteen_f_spotlight", "insider_spotlight", "theme_explainer", "money_map",
+                                        SKIP)
+_SPOTLIGHT_IN_SEASON: Tuple[str, ...] = ("insider_spotlight", "theme_explainer", "thirteen_f_spotlight", "money_map",
+                                         SKIP)
+_SPOTLIGHT_OFF_SEASON: Tuple[str, ...] = ("insider_spotlight", "theme_explainer", "money_map", SKIP)
+
+#: A bounded log value: a pasted blob can never flood the log.
+_LOG_CAP = 300
+
+
+def spotlight_on() -> bool:
+    """The spotlight lane's master switch NOW: True only when MARKETING_SPOTLIGHT_ENABLED is exactly True
+    (a pydantic bool in production; anything else — a patched string, None — is off). Read at call time."""
+    return settings.MARKETING_SPOTLIGHT_ENABLED is True
+
+
+def parse_spotlight_weekdays(raw: Any) -> Tuple[int, ...]:
+    """The spotlight days a MARKETING_SPOTLIGHT_WEEKDAYS value names, as sorted `date.weekday()` numbers
+    (0 = Monday). Pure, never raises — and FAIL-CLOSED, unlike `parse_post_weekdays`: it may return () (no
+    spotlight day, the lane closed) and never falls back to a default.
+
+    The same three-letter tokens (WEEKDAY_TOKENS), comma-separated; each stripped and lower-cased, empty
+    tokens skipped, duplicates collapsed. An unknown token is DROPPED (ERROR); a value with tokens but no known
+    day left is () (ERROR); a blank value is () silently (a deliberate "no day" — `spotlight_lane_open` still
+    names it at ERROR while the switch is on); a non-string is () (ERROR). Memoised on the raw string, so a bad
+    live value logs once; every logged token is bounded."""
+    if not isinstance(raw, str):
+        logger.error("MARKETING_SPOTLIGHT_WEEKDAYS: not a string (%s) — no spotlight day, the lane is closed",
+                     type(raw).__name__)
+        return ()
+    return _parse_spotlight_weekdays_text(raw)
+
+
+@functools.lru_cache(maxsize=16)
+def _parse_spotlight_weekdays_text(raw: str) -> Tuple[int, ...]:
+    """`parse_spotlight_weekdays` for a string: cached, so its logging happens once per distinct value."""
+    tokens = {t.strip().lower() for t in raw.split(",") if t.strip()}
+    unknown = sorted(tokens - set(WEEKDAY_TOKENS))
+    if unknown:
+        logger.error("MARKETING_SPOTLIGHT_WEEKDAYS: ignored unknown day(s) %s — the tokens are %s",
+                     ",".join(t[:24] for t in unknown[:10]), ",".join(WEEKDAY_TOKENS))
+    days = tuple(i for i, token in enumerate(WEEKDAY_TOKENS) if token in tokens)
+    if not days and tokens:
+        logger.error("MARKETING_SPOTLIGHT_WEEKDAYS: no known day left — no spotlight day, the lane is closed")
+    return days
+
+
+def spotlight_weekdays() -> Tuple[int, ...]:
+    """The spotlight days NOW: the web setting MARKETING_SPOTLIGHT_WEEKDAYS read from the settings object at
+    CALL time and parsed by `parse_spotlight_weekdays` — possibly () (no spotlight day). The switch is not
+    consulted here; `spotlight_lane_open` / `is_spotlight_day` combine the two."""
+    return parse_spotlight_weekdays(settings.MARKETING_SPOTLIGHT_WEEKDAYS)
+
+
+def spotlight_hours_problem(spotlight_hour: Any, max_attempts: Any, run_hour: Any) -> Optional[str]:
+    """Why the spotlight lane's hours cannot run beside the main lane's, or None. Pure, never raises.
+
+    The rule: `spotlight_hour + max_attempts <= run_hour` (MARKETING_SPOTLIGHT_HOUR_ET,
+    MARKETING_MAX_RUN_ATTEMPTS, MARKETING_RUN_HOUR_ET; 10 + 6 <= 16 with the defaults). The worker ticks hourly
+    at :15 and a run gets at most `max_attempts` claims, one per tick from its lane's hour, each ending inside
+    its hour (MARKETING_RUN_STALE_SECONDS is below the cron period) — so the spotlight's last attempt has ended
+    by `spotlight_hour + max_attempts` o'clock, before the main run's first tick. That keeps the two lanes'
+    builds apart (each reads the other's same-day ledger rows to exclude them) and lets the run-health checks,
+    timed from the main hour, judge both lanes. Every value must be a plain int (never a bool), each hour
+    0-23, and at least one attempt."""
+    named = (("MARKETING_SPOTLIGHT_HOUR_ET", spotlight_hour), ("MARKETING_MAX_RUN_ATTEMPTS", max_attempts),
+             ("MARKETING_RUN_HOUR_ET", run_hour))
+    for name, value in named:
+        if type(value) is not int:
+            return f"{name} is not an integer ({type(value).__name__})"
+    if not (0 <= spotlight_hour <= 23 and 0 <= run_hour <= 23):
+        return (f"an hour outside 0-23 (MARKETING_SPOTLIGHT_HOUR_ET {spotlight_hour}, "
+                f"MARKETING_RUN_HOUR_ET {run_hour})")
+    if max_attempts < 1:
+        return f"MARKETING_MAX_RUN_ATTEMPTS {max_attempts} is below 1"
+    if spotlight_hour + max_attempts > run_hour:
+        latest = run_hour - max_attempts
+        fix = (f"set the spotlight hour to {latest} or earlier, on the web and the worker together" if latest >= 0
+               else "no spotlight hour fits before the main run with this many attempts")
+        return (f"MARKETING_SPOTLIGHT_HOUR_ET {spotlight_hour} + MARKETING_MAX_RUN_ATTEMPTS {max_attempts} = "
+                f"{spotlight_hour + max_attempts} is after MARKETING_RUN_HOUR_ET {run_hour} — the spotlight's last "
+                f"attempts would run into the main run's ({fix})")
+    return None
+
+
+@functools.lru_cache(maxsize=32)
+def _log_lane_closed(problem: str) -> None:
+    """ERROR once per process per distinct reason (memoised): `spotlight_lane_open` runs on every kick, claim and
+    ledger-read sizing, and a standing misconfiguration must be loud without flooding the log."""
+    logger.error("marketing spotlight lane CLOSED although MARKETING_SPOTLIGHT_ENABLED is on: %s", problem[:_LOG_CAP])
+
+
+def spotlight_lane_open() -> bool:
+    """The spotlight lane may run NOW. Read at call time, never raises. Open only when ALL hold:
+
+    * MARKETING_SPOTLIGHT_ENABLED is on (`spotlight_on`) — off, nothing else is read and nothing is logged;
+    * MARKETING_SPOTLIGHT_WEEKDAYS names at least one day (`spotlight_weekdays`);
+    * the hour rule holds (`spotlight_hours_problem`: spotlight hour + MARKETING_MAX_RUN_ATTEMPTS <=
+      MARKETING_RUN_HOUR_ET);
+    * MARKETING_CONTENT_CLASSES holds a news class (C or F) — every spotlight series is one, so with the
+      lesson alone the day could only ever skip.
+
+    A lane closed while its switch is on is a misconfiguration: logged at ERROR once per distinct reason. The
+    claim gate answers `not_scheduled` on it, so the lane never claims a day it cannot post."""
+    if not spotlight_on():
+        return False
+    if not spotlight_weekdays():
+        problem: Optional[str] = "MARKETING_SPOTLIGHT_WEEKDAYS names no day"
+    else:
+        problem = spotlight_hours_problem(settings.MARKETING_SPOTLIGHT_HOUR_ET, settings.MARKETING_MAX_RUN_ATTEMPTS,
+                                          settings.MARKETING_RUN_HOUR_ET)
+    if problem is None and not parse_content_classes(settings.MARKETING_CONTENT_CLASSES) & frozenset(NEWS_CLASSES):
+        problem = ("MARKETING_CONTENT_CLASSES holds no news class (C or F) — every spotlight series is one, so the "
+                   "day could only skip")
+    if problem is not None:
+        _log_lane_closed(problem)
+        return False
+    return True
+
+
+#: Why `spotlight_day_problem` says a date is not a spotlight day (log words, never public copy).
+SPOTLIGHT_LANE_CLOSED = "lane_closed"
+SPOTLIGHT_WEEKDAY_NOT_LISTED = "weekday_not_listed"
+SPOTLIGHT_NO_SERIES = "no_spotlight_series"
+
+
+def spotlight_day_problem(run_date: date) -> Optional[str]:
+    """Why the spotlight lane does NOT run on `run_date`, or None when it does — THE one predicate the claim gate
+    (run_service), the kick (script_service) and the run-health checks / digest (digest_service) share, through
+    `is_spotlight_day`, so they always agree. Read at call time — like `is_posting_day`, a change of a setting
+    re-judges every date, past ones included. Never raises.
+
+    * SPOTLIGHT_LANE_CLOSED — the lane is closed NOW (`spotlight_lane_open`: its switch, a weekday listed, the hour
+      rule, a news class);
+    * SPOTLIGHT_WEEKDAY_NOT_LISTED — the date's weekday is not one of MARKETING_SPOTLIGHT_WEEKDAYS;
+    * SPOTLIGHT_NO_SERIES — its chain (`spotlight_chain_now`: the calendar, the class and per-series switches, and
+      the C0 fix of 2026-11-16 — no series the MAIN lane's chain holds that day) has no series left, only its SKIP.
+      Such a day could only ever skip, so the lane is not scheduled at all: no run row, no alert, no expected run."""
+    if not spotlight_lane_open():
+        return SPOTLIGHT_LANE_CLOSED
+    if run_date.weekday() not in spotlight_weekdays():
+        return SPOTLIGHT_WEEKDAY_NOT_LISTED
+    if not spotlight_chain_now(run_date).has_series:
+        return SPOTLIGHT_NO_SERIES
+    return None
+
+
+def is_spotlight_day(run_date: date) -> bool:
+    """The spotlight lane runs on `run_date`: `spotlight_day_problem` has nothing against it — the lane is open
+    NOW, the date's weekday is one of MARKETING_SPOTLIGHT_WEEKDAYS, and its chain holds a series once the main
+    lane's are dropped (`spotlight_chain_now`). An empty weekday set is no spotlight day. Read at call time."""
+    return spotlight_day_problem(run_date) is None
+
+
+def _spotlight_calendar(weekdays: Optional[Iterable[int]]) -> Tuple[int, ...]:
+    """The spotlight days a calendar call works on: `weekdays` as sorted, distinct `date.weekday()` numbers — or,
+    when None, the setting NOW (`spotlight_weekdays()`, possibly ()). An explicit value that is not weekday
+    numbers is a caller's bug: ValueError, never a silently different calendar. An explicit EMPTY set is allowed
+    (no spotlight day), unlike the posting calendar."""
+    if weekdays is None:
+        return spotlight_weekdays()
+    days = set(weekdays)
+    if not all(type(d) is int and 0 <= d <= 6 for d in days):
+        raise ValueError(f"spotlight weekdays must be date.weekday() numbers 0..6, not {sorted(map(repr, days))[:7]}")
+    return tuple(sorted(days))
+
+
+def spotlight_plan_for(d: date, weekdays: Optional[Iterable[int]] = None) -> DayPlan:
+    """The spotlight day's series chain (before the class switch and the per-series switch MARKETING_NEWS_SERIES
+    are applied by `enabled_chain`), on the calendar of `weekdays` — by default MARKETING_SPOTLIGHT_WEEKDAYS read
+    NOW (an empty set: every day rests). A pure CALENDAR: whether the lane is open (its switch, its hours, the
+    classes) is the caller's — `is_spotlight_day`, the claim gate, the kick.
+
+    In the 13F season (`thirteen_f_season`), on the week's LAST spotlight day (the latest listed weekday, the
+    week running Monday to Sunday): 13F spotlight → insider list → theme → Money Map → SKIP ("spotlight_13f_lead").
+    Every other spotlight day: insider list → theme → [13F spotlight, in season] → Money Map → SKIP ("spotlight_13f"
+    in season, "spotlight" off it). The theme (owner decisions 2026-11-20: a quiet Form 4 window posts a theme) is
+    dropped like any series the main lane's chain holds that day (`spotlight_chain`: a Monday or a Wednesday).
+
+    Never the lesson — the main lane posts the week's, so a spotlight day with nothing to post SKIPS — and never
+    the weekly Form 4 roundups (WEEKLY_ROUNDUP_SERIES): their window and ledger key roll with the run date, so a
+    spotlight day would re-post Monday's roundup under a new key. The chain a run WALKS is `spotlight_chain`'s: this
+    one without the switched-off series and without any series the main lane's chain holds that day (C0)."""
+    days = _spotlight_calendar(weekdays)
+    weekday = d.weekday()
+    if weekday not in days:
+        return DayPlan(rest_day=True)
+    if thirteen_f_season(d) is None:
+        return DayPlan(False, _SPOTLIGHT_OFF_SEASON, "spotlight")
+    if weekday == days[-1]:
+        return DayPlan(False, _SPOTLIGHT_13F_LEAD, "spotlight_13f_lead")
+    return DayPlan(False, _SPOTLIGHT_IN_SEASON, "spotlight_13f")
+
+
+# ── C0 (2026-11-16): the spotlight never competes for a series the MAIN lane would use that day ─────────────
+# Rule (c) of the cross-lane exclusion (script_service) let a spotlight Money Map push the main lane's same-day
+# Money Map — on an off-season Thursday its only series — into the LESSON: a second lesson that week, against the
+# owner's "One Learn lesson a week" (marketing.md §1). So the spotlight's chain is narrowed BEFORE it runs: every
+# series the main lane's enabled chain holds that day leaves it (`spotlight_chain`), and a spotlight day left with no
+# series is no spotlight day at all (`spotlight_day_problem`). Rule (c) stays as the guard for anything else.
+
+
+@dataclass(frozen=True)
+class SpotlightChain:
+    #: The spotlight calendar's plan (`spotlight_plan_for`); a rest day carries no chain.
+    plan: DayPlan
+    #: The chain the spotlight run walks: the plan's, narrowed by the class switch and the per-series switch
+    #: (`enabled_chain`) and without the main lane's series — it ends in SKIP; () on a rest day.
+    chain: Tuple[str, ...]
+    #: The spotlight series left out because the MAIN lane's enabled chain that day holds them, in chain order.
+    main_lane: Tuple[str, ...] = ()
+
+    @property
+    def has_series(self) -> bool:
+        """The chain holds at least one series (not only its terminal)."""
+        return any(s not in CHAIN_TERMINALS for s in self.chain)
+
+
+def main_lane_series(d: date, classes: FrozenSet[str], news_series: FrozenSet[str]) -> FrozenSet[str]:
+    """The series (never a terminal) the MAIN lane's chain on `d` holds once the class switch and the per-series
+    switch are applied — `plan_for(d)` through `enabled_chain`, the narrowing `script_service._select` applies
+    (before its worker-capability drops, which no calendar can know). Empty on a main rest day. Pure but for the
+    posting days (MARKETING_POST_WEEKDAYS), read at call time like `plan_for`."""
+    plan = plan_for(d)
+    if plan.rest_day:
+        return frozenset()
+    return frozenset(s for s in enabled_chain(plan.chain, classes, shipped=news_series) if s not in CHAIN_TERMINALS)
+
+
+def spotlight_chain(d: date, *, classes: FrozenSet[str], news_series: FrozenSet[str],
+                    weekdays: Optional[Iterable[int]] = None) -> SpotlightChain:
+    """The spotlight day's chain (C0, 2026-11-16): `spotlight_plan_for(d, weekdays)` narrowed by `enabled_chain` to
+    `classes` and `news_series` (the same switches as the main lane), then WITHOUT every series the main lane's
+    enabled chain holds that day (`main_lane_series`) — the spotlight never competes for one. Money Map is the only
+    series both calendars name: it stays on a spotlight day only when the main lane would not reach it (Saturday's
+    lesson-only main day, a main rest day, or a main chain the switches empty of it). The terminal SKIP always stays.
+    Pure but for the calendars' settings (the posting days; the spotlight days when `weekdays` is None)."""
+    plan = spotlight_plan_for(d, weekdays)
+    if plan.rest_day:
+        return SpotlightChain(plan, ())
+    chain = enabled_chain(plan.chain, classes, shipped=news_series)
+    main = main_lane_series(d, classes, news_series)
+    dropped = tuple(s for s in chain if s not in CHAIN_TERMINALS and s in main)
+    return SpotlightChain(plan, tuple(s for s in chain if s not in dropped), dropped)
+
+
+@functools.lru_cache(maxsize=16)
+def _news_series_once(raw: str, shipped: FrozenSet[str]) -> FrozenSet[str]:
+    """`parse_news_series` for the PREDICATE's reads (`spotlight_chain_now`), memoised on the value and the shipped set
+    read at call time — the claim gate, the digest and the run-health checks ask it for many dates, and a bad
+    MARKETING_NEWS_SERIES token must not log once per date (the kick's own read, `script_service`, logs every kick
+    as before)."""
+    return parse_news_series(raw)
+
+
+def spotlight_chain_now(d: date) -> SpotlightChain:
+    """`spotlight_chain` on the settings in force NOW: MARKETING_CONTENT_CLASSES and MARKETING_NEWS_SERIES (the latter
+    read only while a news class is on, exactly as the kick reads it), the posting days and the spotlight days.
+    Never raises."""
+    classes = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
+    raw = settings.MARKETING_NEWS_SERIES
+    if classes == frozenset({"A"}):
+        news_series: FrozenSet[str] = frozenset()
+    elif isinstance(raw, str):
+        news_series = _news_series_once(raw, SHIPPED_SERIES)
+    else:
+        news_series = parse_news_series(raw)
+    return spotlight_chain(d, classes=classes, news_series=news_series)

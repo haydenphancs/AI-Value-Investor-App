@@ -1,0 +1,1566 @@
+{
+ "_note": "FROZEN (owner decisions 2026-11-20: 'Drop it from insider posts', '3 - 5 companies at once'): outputs as the LAST composer that wrote these layouts (news-v23) composed them. 'feature': the one-issuer insider spotlight's four samples and four widest records — no series composes a feature picture any more; the worker's feature layout stays (with post_art) for a future art series. 'spotlight': a one-company Form 4 week's picture — never composed now (a Form 4 post is 3-5 companies), but an older web may still send one during a worker-first deploy. The worker's layout tests read these; regenerate only from that composer.",
+ "feature": {
+  "isp_cluster": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "Contoso's CEO and at least 2 other insiders disclosed buying the company's stock (CTSO).",
+    "facebook": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\nOther Contoso insiders who disclosed purchases on Form 4, filed Nov 17-18, include a director ($410,002) and the CFO ($250,008).\n\nHow Contoso makes money: its largest revenue line in fiscal 2025 was Cloud Services, at 54% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "instagram": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\nOther Contoso insiders who disclosed purchases on Form 4, filed Nov 17-18, include a director ($410,002) and the CFO ($250,008).\n\nHow Contoso makes money: its largest revenue line in fiscal 2025 was Cloud Services, at 54% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "linkedin": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\nOther Contoso insiders who disclosed purchases on Form 4, filed Nov 17-18, include a director ($410,002) and the CFO ($250,008).\n\nHow Contoso makes money: its largest revenue line in fiscal 2025 was Cloud Services, at 54% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "threads": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.",
+    "tiktok": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.",
+    "x": "Contoso's CEO and at least 2 other insiders disclosed buying the company's stock (CTSO).",
+    "youtube_description": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\nOther Contoso insiders who disclosed purchases on Form 4, filed Nov 17-18, include a director ($410,002) and the CFO ($250,008).\n\nHow Contoso makes money: its largest revenue line in fiscal 2025 was Cloud Services, at 54% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "youtube_title": "Contoso's CEO disclosed buying $2M of the company's stock"
+   },
+   "cards": [
+    {
+     "body": "The CEO of Contoso",
+     "title": "Who filed"
+    },
+    {
+     "body": "2 purchases · 14K shares · $2M",
+     "title": "The purchases"
+    },
+    {
+     "body": "Filed within two business days of an insider's trade",
+     "title": "What a Form 4 is"
+    },
+    {
+     "body": "At least 2 more company insiders disclosed buying its stock",
+     "title": "Other insiders"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Nov 19, 2026",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "Contoso's chief executive disclosed buying $2 million of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Nov 17–18, 2026",
+   "image_post": {
+    "paragraphs": [
+     "It shows $2M in 2 purchases, 14K shares in total.",
+     "It notes at least 2 other insiders who disclosed purchases.",
+     "Source: SEC Form 4 filings. Filed Nov 17–18, 2026."
+    ],
+    "title": "Contoso's CEO disclosed buying stock"
+   },
+   "image_spec": {
+    "facts": [
+     {
+      "label": "Trade dates",
+      "value": "Nov 16–17, 2026"
+     },
+     {
+      "label": "Shares",
+      "value": "14K"
+     },
+     {
+      "label": "Cost a share, as filed",
+      "value": "$142.10–$143.85"
+     },
+     {
+      "label": "Other insiders",
+      "value": "At least 2 more"
+     }
+    ],
+    "figure": "$2M",
+    "figure_label": "of stock by the CEO, per Form 4",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Nov 17–18, 2026",
+    "header": {
+     "chip": "CTSO",
+     "logo": "CTSO",
+     "name": "Contoso"
+    },
+    "headline": "Contoso's CEO and at least 2 other insiders disclosed buying stock",
+    "kicker": "FILED NOV 18 · FORM 4",
+    "layout": "feature",
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "CTSO",
+     "name": "Contoso"
+    }
+   ],
+   "opening_card": {
+    "chip": "CTSO",
+    "figure": "$2M",
+    "headline": "Contoso's CEO disclosed buying stock",
+    "kicker": "FILED NOV 18 · FORM 4",
+    "logos": [
+     "CTSO"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "Contoso's CEO and at least 2 other insiders disclosed buying the company's stock (CTSO).\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\nOther Contoso insiders who disclosed purchases on Form 4, filed Nov 17-18, include a director ($410,002) and the CFO ($250,008).\n\nHow Contoso makes money: its largest revenue line in fiscal 2025 was Cloud Services, at 54% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 19, 2026.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\nOther Contoso insiders who disclosed purchases on Form 4, filed Nov 17-18, include a director ($410,002) and the CFO ($250,008).\n\nHow Contoso makes money: its largest revenue line in fiscal 2025 was Cloud Services, at 54% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 19, 2026.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\nOther Contoso insiders who disclosed purchases on Form 4, filed Nov 17-18, include a director ($410,002) and the CFO ($250,008).\n\nHow Contoso makes money: its largest revenue line in fiscal 2025 was Cloud Services, at 54% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 19, 2026.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 19, 2026.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "Contoso's CEO and at least 2 other insiders disclosed buying the company's stock (CTSO).\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "Contoso's CEO disclosed buying $2 million of the company's stock (CTSO), and at least 2 other insiders disclosed buying it too, in Form 4s filed Nov 17-18.\n\nThe purchases were reported on Form 4 on Nov 18, with trade dates from Nov 16 to Nov 17. They total 14,000 shares at $142.10 to $143.85 a share, as filed, for $2 million.\n\nOther Contoso insiders who disclosed purchases on Form 4, filed Nov 17-18, include a director ($410,002) and the CFO ($250,008).\n\nHow Contoso makes money: its largest revenue line in fiscal 2025 was Cloud Services, at 54% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 19, 2026.",
+     "platform": "youtube",
+     "title": "Contoso's CEO disclosed buying $2M of the company's stock"
+    }
+   },
+   "run_date": "2026-11-19",
+   "series": "insider_spotlight",
+   "source_ref": "news:insider_spotlight:CTSO:2026-11-17",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filer is the company's chief executive, and the filing date is November 18th.",
+    "2 purchases are reported, 14,000 shares in total, for $2 million.",
+    "Officers and directors must file a Form 4 within two business days of a trade.",
+    "At least 2 other company insiders also disclosed buying the company's stock on Form 4."
+   ]
+  },
+  "isp_indirect": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "A director of Northwind and at least one other insider disclosed buying the company's stock (NWND).",
+    "facebook": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\nThe shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Northwind insiders who disclosed purchases on Form 4, filed Nov 20, include another director ($300,000).\n\nHow Northwind makes money: its largest revenue line in fiscal 2025 was the United States, at 61% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "instagram": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\nThe shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Northwind insiders who disclosed purchases on Form 4, filed Nov 20, include another director ($300,000).\n\nHow Northwind makes money: its largest revenue line in fiscal 2025 was the United States, at 61% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "linkedin": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\nThe shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Northwind insiders who disclosed purchases on Form 4, filed Nov 20, include another director ($300,000).\n\nHow Northwind makes money: its largest revenue line in fiscal 2025 was the United States, at 61% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "threads": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.",
+    "tiktok": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.",
+    "x": "A director of Northwind and at least one other insider disclosed buying the company's stock (NWND).",
+    "youtube_description": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\nThe shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Northwind insiders who disclosed purchases on Form 4, filed Nov 20, include another director ($300,000).\n\nHow Northwind makes money: its largest revenue line in fiscal 2025 was the United States, at 61% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "youtube_title": "A director of Northwind disclosed buying $1.3M of the company's stock"
+   },
+   "cards": [
+    {
+     "body": "A director of Northwind",
+     "title": "Who filed"
+    },
+    {
+     "body": "1 purchase · 50K shares · $1.3M",
+     "title": "The purchase"
+    },
+    {
+     "body": "Not in the director's own name, per the filing",
+     "title": "Held indirectly"
+    },
+    {
+     "body": "At least one more company insider disclosed buying its stock",
+     "title": "Other insiders"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Nov 21, 2026",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "A director of Northwind disclosed buying $1.3 million of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Nov 19–20, 2026",
+   "image_post": {
+    "paragraphs": [
+     "It shows $1.3M in 1 purchase of 50K shares.",
+     "It notes at least one other insider who disclosed a purchase.",
+     "Held indirectly.",
+     "Source: SEC Form 4 filings. Filed Nov 19–20, 2026."
+    ],
+    "title": "A director of Northwind disclosed buying stock"
+   },
+   "image_spec": {
+    "facts": [
+     {
+      "label": "Trade date",
+      "value": "Nov 18, 2026"
+     },
+     {
+      "label": "Shares",
+      "value": "50K"
+     },
+     {
+      "label": "Cost a share, as filed",
+      "value": "$25.00"
+     },
+     {
+      "label": "Held",
+      "value": "Indirectly"
+     }
+    ],
+    "figure": "$1.3M",
+    "figure_label": "of stock by a director, per Form 4",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Nov 19–20, 2026",
+    "header": {
+     "chip": "NWND",
+     "logo": "NWND",
+     "name": "Northwind"
+    },
+    "headline": "A director of Northwind and at least one other insider disclosed buying stock",
+    "kicker": "FILED NOV 19 · FORM 4",
+    "layout": "feature",
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "NWND",
+     "name": "Northwind"
+    }
+   ],
+   "opening_card": {
+    "chip": "NWND",
+    "figure": "$1.3M",
+    "headline": "A director of Northwind disclosed buying stock",
+    "kicker": "FILED NOV 19 · FORM 4",
+    "logos": [
+     "NWND"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "A director of Northwind and at least one other insider disclosed buying the company's stock (NWND).\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\nThe shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Northwind insiders who disclosed purchases on Form 4, filed Nov 20, include another director ($300,000).\n\nHow Northwind makes money: its largest revenue line in fiscal 2025 was the United States, at 61% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 21, 2026.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\nThe shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Northwind insiders who disclosed purchases on Form 4, filed Nov 20, include another director ($300,000).\n\nHow Northwind makes money: its largest revenue line in fiscal 2025 was the United States, at 61% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 21, 2026.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\nThe shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Northwind insiders who disclosed purchases on Form 4, filed Nov 20, include another director ($300,000).\n\nHow Northwind makes money: its largest revenue line in fiscal 2025 was the United States, at 61% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 21, 2026.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 21, 2026.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "A director of Northwind and at least one other insider disclosed buying the company's stock (NWND).\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "A director of Northwind disclosed buying $1.3 million of the company's stock (NWND), and at least one other insider disclosed buying it too, in Form 4s filed Nov 19-20.\n\nThe Form 4 was filed on Nov 19 and gives Nov 18 as the trade date. It reports 50,000 shares at $25.00 a share, as filed, for $1.3 million.\n\nThe shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Northwind insiders who disclosed purchases on Form 4, filed Nov 20, include another director ($300,000).\n\nHow Northwind makes money: its largest revenue line in fiscal 2025 was the United States, at 61% of revenue. A Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 21, 2026.",
+     "platform": "youtube",
+     "title": "A director of Northwind disclosed buying $1.3M of the company's stock"
+    }
+   },
+   "run_date": "2026-11-21",
+   "series": "insider_spotlight",
+   "source_ref": "news:insider_spotlight:NWND:2026-11-19",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filing is by a director of the company and was filed on November 19th.",
+    "It reports one purchase of 50,000 shares, for $1.3 million.",
+    "The shares are reported as held indirectly, not in the director's own name.",
+    "At least one other company insider also disclosed buying the company's stock on Form 4."
+   ]
+  },
+  "isp_named_outside_window": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "Tailspin Toys' CEO and at least one other insider disclosed buying the company's stock (TLSP).",
+    "facebook": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\nThe filings name Jordan Avery, the CEO of Tailspin Toys.\n\nOther Tailspin Toys insiders who disclosed purchases on Form 4, filed Jan 4, include the CFO, Casey Morgan ($145,000).\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "instagram": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\nThe filings name Jordan Avery, the CEO of Tailspin Toys.\n\nOther Tailspin Toys insiders who disclosed purchases on Form 4, filed Jan 4, include the CFO, Casey Morgan ($145,000).\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "linkedin": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\nThe filings name Jordan Avery, the CEO of Tailspin Toys.\n\nOther Tailspin Toys insiders who disclosed purchases on Form 4, filed Jan 4, include the CFO, Casey Morgan ($145,000).\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "threads": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.",
+    "tiktok": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.",
+    "x": "Tailspin Toys' CEO and at least one other insider disclosed buying the company's stock (TLSP).",
+    "youtube_description": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\nThe filings name Jordan Avery, the CEO of Tailspin Toys.\n\nOther Tailspin Toys insiders who disclosed purchases on Form 4, filed Jan 4, include the CFO, Casey Morgan ($145,000).\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "youtube_title": "Tailspin Toys' CEO disclosed buying $3.5M of the company's stock"
+   },
+   "cards": [
+    {
+     "body": "The CEO of Tailspin Toys",
+     "title": "Who filed"
+    },
+    {
+     "body": "3 purchases · 120K shares · $3.5M",
+     "title": "The purchases"
+    },
+    {
+     "body": "Filed within two business days of an insider's trade",
+     "title": "What a Form 4 is"
+    },
+    {
+     "body": "At least one more company insider disclosed buying its stock",
+     "title": "Other insiders"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Jan 5, 2027",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "Tailspin Toys' chief executive disclosed buying $3.5 million of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Dec 31, 2026–Jan 4, 2027",
+   "image_post": {
+    "paragraphs": [
+     "It shows $3.5M in 3 purchases, 120K shares in total.",
+     "It notes at least one other insider who disclosed a purchase.",
+     "Source: SEC Form 4 filings. Filed Dec 31, 2026–Jan 4, 2027."
+    ],
+    "title": "Tailspin Toys' CEO disclosed buying stock"
+   },
+   "image_spec": {
+    "facts": [
+     {
+      "label": "Trade dates",
+      "value": "Dec 30–31, 2026"
+     },
+     {
+      "label": "Shares",
+      "value": "120K"
+     },
+     {
+      "label": "Cost a share, as filed",
+      "value": "$28.75–$29.25"
+     },
+     {
+      "label": "Other insiders",
+      "value": "At least one more"
+     }
+    ],
+    "figure": "$3.5M",
+    "figure_label": "of stock by the CEO, per Form 4",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Dec 31, 2026–Jan 4, 2027",
+    "header": {
+     "chip": "TLSP",
+     "logo": "TLSP",
+     "name": "Tailspin Toys"
+    },
+    "headline": "Tailspin Toys' CEO and at least one other insider disclosed buying stock",
+    "kicker": "FILED DEC 31–JAN 4 · FORM 4",
+    "layout": "feature",
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "TLSP",
+     "name": "Tailspin Toys"
+    }
+   ],
+   "opening_card": {
+    "chip": "TLSP",
+    "figure": "$3.5M",
+    "headline": "Tailspin Toys' CEO disclosed buying stock",
+    "kicker": "FILED DEC 31–JAN 4 · FORM 4",
+    "logos": [
+     "TLSP"
+    ]
+   },
+   "persons": [
+    "Jordan Avery",
+    "Casey Morgan"
+   ],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "Tailspin Toys' CEO and at least one other insider disclosed buying the company's stock (TLSP).\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\nThe filings name Jordan Avery, the CEO of Tailspin Toys.\n\nOther Tailspin Toys insiders who disclosed purchases on Form 4, filed Jan 4, include the CFO, Casey Morgan ($145,000).\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\nThe filings name Jordan Avery, the CEO of Tailspin Toys.\n\nOther Tailspin Toys insiders who disclosed purchases on Form 4, filed Jan 4, include the CFO, Casey Morgan ($145,000).\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\nThe filings name Jordan Avery, the CEO of Tailspin Toys.\n\nOther Tailspin Toys insiders who disclosed purchases on Form 4, filed Jan 4, include the CFO, Casey Morgan ($145,000).\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "Tailspin Toys' CEO and at least one other insider disclosed buying the company's stock (TLSP).\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "Tailspin Toys' CEO disclosed buying $3.5 million of the company's stock (TLSP), and at least one other insider disclosed buying it too, in Form 4s filed Dec 31, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 31, 2026 to Jan 4, with trade dates from Dec 30, 2026 to Dec 31, 2026. They total 120,000 shares at $28.75 to $29.25 a share, as filed, for $3.5 million.\n\nThe filings name Jordan Avery, the CEO of Tailspin Toys.\n\nOther Tailspin Toys insiders who disclosed purchases on Form 4, filed Jan 4, include the CFO, Casey Morgan ($145,000).\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "youtube",
+     "title": "Tailspin Toys' CEO disclosed buying $3.5M of the company's stock"
+    }
+   },
+   "run_date": "2027-01-05",
+   "series": "insider_spotlight",
+   "source_ref": "news:insider_spotlight:TLSP:2026-12-30",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filings are by the company's chief executive and were filed from December 31st, 2026 to January 4th.",
+    "They report 3 purchases, 120,000 shares in total, for $3.5 million.",
+    "Officers and directors must file a Form 4 within two business days of a trade.",
+    "At least one other company insider also disclosed buying the company's stock on Form 4."
+   ]
+  },
+  "isp_single": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.",
+    "facebook": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "instagram": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "linkedin": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "threads": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.",
+    "tiktok": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.",
+    "x": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.",
+    "youtube_description": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "youtube_title": "Fabrikam's CFO disclosed buying $612.5K of the company's stock"
+   },
+   "cards": [
+    {
+     "body": "The CFO of Fabrikam",
+     "title": "Who filed"
+    },
+    {
+     "body": "2 purchases · 25K shares · $612.5K",
+     "title": "The purchases"
+    },
+    {
+     "body": "Nov 5–6, 2026 · filed Nov 16, 2026",
+     "title": "Trade dates"
+    },
+    {
+     "body": "Shares times the cost of each share, per the filing",
+     "title": "How the amount is counted"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Nov 17, 2026",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "Fabrikam's chief financial officer disclosed buying $612,500 of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Nov 16, 2026",
+   "image_post": {
+    "paragraphs": [
+     "It shows $612.5K in 2 purchases, 25K shares in total.",
+     "Source: SEC Form 4 filings. Filed Nov 16, 2026."
+    ],
+    "title": "Fabrikam's CFO disclosed buying stock"
+   },
+   "image_spec": {
+    "facts": [
+     {
+      "label": "Trade dates",
+      "value": "Nov 5–6, 2026"
+     },
+     {
+      "label": "Shares",
+      "value": "25K"
+     },
+     {
+      "label": "Cost a share, as filed",
+      "value": "$24.10–$24.90"
+     }
+    ],
+    "figure": "$612.5K",
+    "figure_label": "of stock, per Form 4",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Nov 16, 2026",
+    "header": {
+     "chip": "FBKM",
+     "logo": "FBKM",
+     "name": "Fabrikam"
+    },
+    "headline": "Fabrikam's CFO disclosed buying stock",
+    "kicker": "FILED NOV 16 · FORM 4",
+    "layout": "feature",
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "FBKM",
+     "name": "Fabrikam"
+    }
+   ],
+   "opening_card": {
+    "chip": "FBKM",
+    "figure": "$612.5K",
+    "headline": "Fabrikam's CFO disclosed buying stock",
+    "kicker": "FILED NOV 16 · FORM 4",
+    "logos": [
+     "FBKM"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 17, 2026.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 17, 2026.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 17, 2026.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 17, 2026.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "Fabrikam's CFO disclosed buying $612,500 of the company's stock (FBKM) on Form 4, filed Nov 16.\n\nThe purchases were reported on Form 4 on Nov 16, with trade dates from Nov 5 to Nov 6. They total 25,000 shares at $24.10 to $24.90 a share, as filed, for $612,500.\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 17, 2026.",
+     "platform": "youtube",
+     "title": "Fabrikam's CFO disclosed buying $612.5K of the company's stock"
+    }
+   },
+   "run_date": "2026-11-17",
+   "series": "insider_spotlight",
+   "source_ref": "news:insider_spotlight:FBKM:2026-11-14",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filer is the company's chief financial officer, and the filing date is November 16th.",
+    "2 purchases are reported, 25,000 shares in total, for $612,500.",
+    "The purchases are reported with trade dates from November 5th to November 6th.",
+    "Amounts are each filing's share count times the cost it reports for each share."
+   ]
+  },
+  "isp_worst_cluster": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww (WWWWA): a director disclosed buying $987.7 million of stock.",
+    "facebook": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "instagram": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "linkedin": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "threads": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.",
+    "tiktok": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.",
+    "x": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).",
+    "youtube_description": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "youtube_title": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7M of stock"
+   },
+   "cards": [
+    {
+     "body": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww",
+     "title": "Who filed"
+    },
+    {
+     "body": "3 purchases · 864K shares · $987.7M",
+     "title": "The purchases"
+    },
+    {
+     "body": "Dec 29, 2026–Jan 1, 2027 · filed Dec 30, 2026–Jan 4, 2027",
+     "title": "Trade dates"
+    },
+    {
+     "body": "At least 4 more company insiders disclosed buying its stock",
+     "title": "Other insiders"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Jan 5, 2027",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Dec 30, 2026–Jan 4, 2027",
+   "image_post": {
+    "paragraphs": [
+     "It shows $987.7M in 3 purchases, 864K shares in total.",
+     "It notes at least 4 other insiders who disclosed purchases.",
+     "Source: SEC Form 4 filings. Filed Dec 30, 2026–Jan 4, 2027."
+    ],
+    "title": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying stock"
+   },
+   "image_spec": {
+    "facts": [
+     {
+      "label": "Trade dates",
+      "value": "Dec 29, 2026–Jan 1, 2027"
+     },
+     {
+      "label": "Shares",
+      "value": "864K"
+     },
+     {
+      "label": "Cost a share, as filed",
+      "value": "$1,142.10–$1,143.85"
+     },
+     {
+      "label": "Other insiders",
+      "value": "At least 4 more"
+     }
+    ],
+    "figure": "$987.7M",
+    "figure_label": "of stock by a director, per Form 4",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Dec 30, 2026–Jan 4, 2027",
+    "header": {
+     "chip": "WWWWA",
+     "logo": "WWWWA",
+     "name": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww"
+    },
+    "headline": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying stock",
+    "kicker": "FILED DEC 30–JAN 4 · FORM 4",
+    "layout": "feature",
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "WWWWA",
+     "name": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww"
+    }
+   ],
+   "opening_card": {
+    "chip": "WWWWA",
+    "figure": "$987.7M",
+    "headline": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying stock",
+    "kicker": "FILED DEC 30–JAN 4 · FORM 4",
+    "logos": [
+     "WWWWA"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww (WWWWA): a director disclosed buying $987.7 million of stock.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "youtube",
+     "title": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7M of stock"
+    }
+   },
+   "run_date": "2027-01-05",
+   "series": "insider_spotlight",
+   "source_ref": "news:insider_spotlight:WWWWA:2026-12-29",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filings are by a director of the company and were filed from December 30th, 2026 to January 4th.",
+    "They report 3 purchases, 864,000 shares in total, for $987.7 million.",
+    "The filings give trade dates from December 29th, 2026 to January 1st.",
+    "At least 4 other company insiders also disclosed buying the company's stock on Form 4."
+   ]
+  },
+  "isp_worst_cost": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww (WWWWA): a director disclosed buying $987.7 million of stock.",
+    "facebook": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "instagram": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "linkedin": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "threads": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.",
+    "tiktok": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.",
+    "x": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).",
+    "youtube_description": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "youtube_title": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7M of stock"
+   },
+   "cards": [
+    {
+     "body": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww",
+     "title": "Who filed"
+    },
+    {
+     "body": "3 purchases · 1,380 shares · $987.7M",
+     "title": "The purchases"
+    },
+    {
+     "body": "Dec 29, 2026–Jan 1, 2027 · filed Dec 30, 2026–Jan 4, 2027",
+     "title": "Trade dates"
+    },
+    {
+     "body": "At least 4 more company insiders disclosed buying its stock",
+     "title": "Other insiders"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Jan 5, 2027",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Dec 30, 2026–Jan 4, 2027",
+   "image_post": {
+    "paragraphs": [
+     "It shows $987.7M in 3 purchases, 1,380 shares in total.",
+     "It notes at least 4 other insiders who disclosed purchases.",
+     "Source: SEC Form 4 filings. Filed Dec 30, 2026–Jan 4, 2027."
+    ],
+    "title": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying stock"
+   },
+   "image_spec": {
+    "facts": [
+     {
+      "label": "Trade dates",
+      "value": "Dec 29, 2026–Jan 1, 2027"
+     },
+     {
+      "label": "Shares",
+      "value": "1,380"
+     },
+     {
+      "label": "Cost a share, as filed",
+      "value": "$712,345.1234–$719,876.5432"
+     },
+     {
+      "label": "Other insiders",
+      "value": "At least 4 more"
+     }
+    ],
+    "figure": "$987.7M",
+    "figure_label": "of stock by a director, per Form 4",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Dec 30, 2026–Jan 4, 2027",
+    "header": {
+     "chip": "WWWWA",
+     "logo": "WWWWA",
+     "name": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww"
+    },
+    "headline": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying stock",
+    "kicker": "FILED DEC 30–JAN 4 · FORM 4",
+    "layout": "feature",
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "WWWWA",
+     "name": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww"
+    }
+   ],
+   "opening_card": {
+    "chip": "WWWWA",
+    "figure": "$987.7M",
+    "headline": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying stock",
+    "kicker": "FILED DEC 30–JAN 4 · FORM 4",
+    "logos": [
+     "WWWWA"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww (WWWWA): a director disclosed buying $987.7 million of stock.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 1,380 shares at $712,345.1234 to $719,876.5432 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "youtube",
+     "title": "A director of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww disclosed buying $987.7M of stock"
+    }
+   },
+   "run_date": "2027-01-05",
+   "series": "insider_spotlight",
+   "source_ref": "news:insider_spotlight:WWWWA:2026-12-29",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filings are by a director of the company and were filed from December 30th, 2026 to January 4th.",
+    "They report 3 purchases, 1,380 shares in total, for $987.7 million.",
+    "The filings give trade dates from December 29th, 2026 to January 1st.",
+    "At least 4 other company insiders also disclosed buying the company's stock on Form 4."
+   ]
+  },
+  "isp_worst_held": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA).",
+    "facebook": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nSome of the shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million).\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "instagram": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nSome of the shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million).\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "linkedin": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nSome of the shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million).\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "threads": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.",
+    "tiktok": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.",
+    "x": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO and at least one other insider disclosed buying the company's stock (WWWWA).",
+    "youtube_description": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nSome of the shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million).\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "youtube_title": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7M of the company's stock"
+   },
+   "cards": [
+    {
+     "body": "The CFO of Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww",
+     "title": "Who filed"
+    },
+    {
+     "body": "3 purchases · 864K shares · $987.7M",
+     "title": "The purchases"
+    },
+    {
+     "body": "Some of the shares, per the filing",
+     "title": "Partly held indirectly"
+    },
+    {
+     "body": "At least one more company insider disclosed buying its stock",
+     "title": "Other insiders"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Jan 5, 2027",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's chief financial officer disclosed buying $987.7 million of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Dec 30, 2026–Jan 4, 2027",
+   "image_post": {
+    "paragraphs": [
+     "It shows $987.7M in 3 purchases, 864K shares in total.",
+     "It notes at least one other insider who disclosed a purchase.",
+     "Partly held indirectly.",
+     "Source: SEC Form 4 filings. Filed Dec 30, 2026–Jan 4, 2027."
+    ],
+    "title": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying stock"
+   },
+   "image_spec": {
+    "facts": [
+     {
+      "label": "Trade dates",
+      "value": "Dec 29, 2026–Jan 1, 2027"
+     },
+     {
+      "label": "Shares",
+      "value": "864K"
+     },
+     {
+      "label": "Cost a share, as filed",
+      "value": "$1,142.10–$1,143.85"
+     },
+     {
+      "label": "Held",
+      "value": "Partly indirectly"
+     }
+    ],
+    "figure": "$987.7M",
+    "figure_label": "of stock by the CFO, per Form 4",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Dec 30, 2026–Jan 4, 2027",
+    "header": {
+     "chip": "WWWWA",
+     "logo": "WWWWA",
+     "name": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww"
+    },
+    "headline": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO and at least one other insider disclosed buying stock",
+    "kicker": "FILED DEC 30–JAN 4 · FORM 4",
+    "layout": "feature",
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "WWWWA",
+     "name": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww"
+    }
+   ],
+   "opening_card": {
+    "chip": "WWWWA",
+    "figure": "$987.7M",
+    "headline": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying stock",
+    "kicker": "FILED DEC 30–JAN 4 · FORM 4",
+    "logos": [
+     "WWWWA"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA).\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nSome of the shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million).\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nSome of the shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million).\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nSome of the shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million).\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO and at least one other insider disclosed buying the company's stock (WWWWA).\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7 million of the company's stock (WWWWA), and at least one other insider disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nSome of the shares are reported as held indirectly rather than in the buyer's own name.\n\nOther Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million).\n\nA Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "youtube",
+     "title": "Wwwwwwwwww Wwwwwwwwww Wwwwwwwwww's CFO disclosed buying $987.7M of the company's stock"
+    }
+   },
+   "run_date": "2027-01-05",
+   "series": "insider_spotlight",
+   "source_ref": "news:insider_spotlight:WWWWA:2026-12-29",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filings are by the company's chief financial officer and were filed from December 30th, 2026 to January 4th.",
+    "They report 3 purchases, 864,000 shares in total, for $987.7 million.",
+    "Some of the shares are reported as held indirectly.",
+    "At least one other company insider also disclosed buying the company's stock on Form 4."
+   ]
+  },
+  "isp_worst_words": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww (WWWWA): a director disclosed buying $987.7 million of stock.",
+    "facebook": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "instagram": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "linkedin": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?",
+    "threads": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.",
+    "tiktok": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.",
+    "x": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).",
+    "youtube_description": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "youtube_title": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7M of stock"
+   },
+   "cards": [
+    {
+     "body": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww",
+     "title": "Who filed"
+    },
+    {
+     "body": "3 purchases · 864K shares · $987.7M",
+     "title": "The purchases"
+    },
+    {
+     "body": "Dec 29, 2026–Jan 1, 2027 · filed Dec 30, 2026–Jan 4, 2027",
+     "title": "Trade dates"
+    },
+    {
+     "body": "At least 4 more company insiders disclosed buying its stock",
+     "title": "Other insiders"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Jan 5, 2027",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7 million of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Dec 30, 2026–Jan 4, 2027",
+   "image_post": {
+    "paragraphs": [
+     "It shows $987.7M in 3 purchases, 864K shares in total.",
+     "It notes at least 4 other insiders who disclosed purchases.",
+     "Source: SEC Form 4 filings. Filed Dec 30, 2026–Jan 4, 2027."
+    ],
+    "title": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying stock"
+   },
+   "image_spec": {
+    "facts": [
+     {
+      "label": "Trade dates",
+      "value": "Dec 29, 2026–Jan 1, 2027"
+     },
+     {
+      "label": "Shares",
+      "value": "864K"
+     },
+     {
+      "label": "Cost a share, as filed",
+      "value": "$1,142.10–$1,143.85"
+     },
+     {
+      "label": "Other insiders",
+      "value": "At least 4 more"
+     }
+    ],
+    "figure": "$987.7M",
+    "figure_label": "of stock by a director, per Form 4",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Dec 30, 2026–Jan 4, 2027",
+    "header": {
+     "chip": "WWWWA",
+     "logo": "WWWWA",
+     "name": "Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww"
+    },
+    "headline": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying stock",
+    "kicker": "FILED DEC 30–JAN 4 · FORM 4",
+    "layout": "feature",
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "WWWWA",
+     "name": "Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww"
+    }
+   ],
+   "opening_card": {
+    "chip": "WWWWA",
+    "figure": "$987.7M",
+    "headline": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying stock",
+    "kicker": "FILED DEC 30–JAN 4 · FORM 4",
+    "logos": [
+     "WWWWA"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww (WWWWA): a director disclosed buying $987.7 million of stock.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nWhich detail of a Form 4 do you read first: who filed, the trade dates or the amount?\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7 million of the company's stock (WWWWA), and at least 4 other insiders disclosed buying it too, in Form 4s filed Dec 30, 2026-Jan 4, 2027.\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww and at least 4 other insiders disclosed buying the company's stock (WWWWA).\n\nThe Form 4s were filed from Dec 30, 2026 to Jan 4, with trade dates from Dec 29, 2026 to Jan 1. They total 864,000 shares at $1,142.10 to $1,143.85 a share, as filed, for $987.7 million.\n\nOther Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww insiders who disclosed purchases on Form 4, filed Jan 4, include the CEO ($900 million), the CFO ($800 million), another director ($700 million) and another director ($600 million).\n\nHow Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww makes money: its largest revenue line in fiscal 2026 was Wwwwwwwww Wwwwwwwww Wwwwwwww, at more than 99% of revenue. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Jan 5, 2027.",
+     "platform": "youtube",
+     "title": "A director of Wwwwwwwwwwwwwwwwwwww Wwwwwwwwwww disclosed buying $987.7M of stock"
+    }
+   },
+   "run_date": "2027-01-05",
+   "series": "insider_spotlight",
+   "source_ref": "news:insider_spotlight:WWWWA:2026-12-29",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filings are by a director of the company and were filed from December 30th, 2026 to January 4th.",
+    "They report 3 purchases, 864,000 shares in total, for $987.7 million.",
+    "The filings give trade dates from December 29th, 2026 to January 1st.",
+    "At least 4 other company insiders also disclosed buying the company's stock on Form 4."
+   ]
+  }
+ },
+ "spotlight": {
+  "ceo_spotlight": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.",
+    "facebook": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "instagram": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "linkedin": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "threads": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.",
+    "tiktok": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "x": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.",
+    "youtube_description": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.",
+    "youtube_title": "GameStop's CEO disclosed buying $74.4M of the company's stock"
+   },
+   "cards": [
+    {
+     "body": "The CEO of GameStop",
+     "title": "Who filed"
+    },
+    {
+     "body": "2 purchases · 3M shares · $74.4M",
+     "title": "The purchases"
+    },
+    {
+     "body": "Filed within two business days of an insider's trade",
+     "title": "What a Form 4 is"
+    },
+    {
+     "body": "Shares times the cost of each share, per the filing",
+     "title": "How the amount is counted"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Nov 16, 2026",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "GameStop's chief executive disclosed buying $74.4 million of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Nov 9–15, 2026",
+   "image_post": {
+    "paragraphs": [
+     "It shows $74.4M in 2 purchases, 3M shares in total.",
+     "Source: SEC Form 4 filings. Filed Nov 9–15, 2026."
+    ],
+    "title": "GameStop's CEO disclosed buying stock"
+   },
+   "image_spec": {
+    "figure": "$74.4M",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Nov 9–15, 2026",
+    "header": {
+     "chip": "GME",
+     "logo": "GME",
+     "name": "GameStop"
+    },
+    "headline": "GameStop's CEO disclosed buying stock",
+    "kicker": "FILED LAST WEEK · FORM 4",
+    "layout": "spotlight",
+    "lines": [
+     "2 purchases · 3M shares",
+     "Filed Nov 10–11, 2026"
+    ],
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "GME",
+     "name": "GameStop"
+    }
+   ],
+   "opening_card": {
+    "chip": "GME",
+    "figure": "$74.4M",
+    "headline": "GameStop's CEO disclosed buying stock",
+    "kicker": "FILED LAST WEEK · FORM 4",
+    "logos": [
+     "GME"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "GameStop's CEO disclosed buying $74.4 million of the company's stock in Form 4s filed Nov 10-11.\n\nA Form 4 is the report a company's officers and directors file within two business days of a trade. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "youtube",
+     "title": "GameStop's CEO disclosed buying $74.4M of the company's stock"
+    }
+   },
+   "run_date": "2026-11-16",
+   "series": "ceo_buys",
+   "source_ref": "news:ceo_buys:2026-11-09",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filings are by the company's chief executive and were filed from November 10th to November 11th.",
+    "They report 2 purchases, 3 million shares in total, for $74.4 million.",
+    "Officers and directors must file a Form 4 within two business days of a trade.",
+    "Amounts are each filing's share count times the cost it reports for each share."
+   ]
+  },
+  "insider_late": {
+   "allow_x_url": false,
+   "authorship": "template",
+   "captions": {
+    "bluesky": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.",
+    "facebook": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "instagram": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "linkedin": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "threads": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.",
+    "tiktok": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "x": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.",
+    "youtube_description": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.",
+    "youtube_title": "A director of Hershey disclosed buying $150K of the company's stock"
+   },
+   "cards": [
+    {
+     "body": "A director of Hershey",
+     "title": "Who filed"
+    },
+    {
+     "body": "2 purchases · 812 shares · $150K",
+     "title": "The purchases"
+    },
+    {
+     "body": "Oct 14–17, 2026 · filed Nov 12, 2026",
+     "title": "Trade dates"
+    },
+    {
+     "body": "Shares times the cost of each share, per the filing",
+     "title": "How the amount is counted"
+    }
+   ],
+   "carousel_slides": [],
+   "content_class": "C",
+   "disclaimer_card": "Educational, impersonal information — not investment advice. Investing involves risk. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Caydex · Nov 16, 2026",
+   "dropped_outlets": {},
+   "first_line_prefix": null,
+   "first_line_prefix_on": false,
+   "hook": "A director of Hershey disclosed buying $150,000 of the company's stock.",
+   "image_footer": "Not investment advice · Source: SEC Form 4 · filed Nov 9–15, 2026",
+   "image_post": {
+    "paragraphs": [
+     "It shows $150K in 2 purchases, 812 shares in total.",
+     "Source: SEC Form 4 filings. Filed Nov 9–15, 2026."
+    ],
+    "title": "A director of Hershey disclosed buying stock"
+   },
+   "image_spec": {
+    "figure": "$150K",
+    "footer": "Not investment advice · Source: SEC Form 4 · filed Nov 9–15, 2026",
+    "header": {
+     "chip": "HSY",
+     "logo": "HSY",
+     "name": "Hershey"
+    },
+    "headline": "A director of Hershey disclosed buying stock",
+    "kicker": "FILED LAST WEEK · FORM 4",
+    "layout": "spotlight",
+    "lines": [
+     "2 purchases · 812 shares",
+     "Filed Nov 12, 2026"
+    ],
+    "version": 1
+   },
+   "logo_refs": [
+    {
+     "key": "HSY",
+     "name": "Hershey"
+    }
+   ],
+   "opening_card": {
+    "chip": "HSY",
+    "figure": "$150K",
+    "headline": "A director of Hershey disclosed buying stock",
+    "kicker": "FILED LAST WEEK · FORM 4",
+    "logos": [
+     "HSY"
+    ]
+   },
+   "persons": [],
+   "picture_outlets": [
+    "bluesky",
+    "facebook",
+    "linkedin",
+    "threads",
+    "x"
+   ],
+   "posts": {
+    "bluesky": {
+     "caption": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/bluesky\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "bluesky",
+     "title": null
+    },
+    "facebook": {
+     "caption": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/facebook\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "facebook",
+     "title": null
+    },
+    "instagram": {
+     "caption": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "instagram",
+     "title": null
+    },
+    "linkedin": {
+     "caption": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/linkedin\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "linkedin",
+     "title": null
+    },
+    "threads": {
+     "caption": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store. Learn more: https://caydexinvest.com/go/threads\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "threads",
+     "title": null
+    },
+    "tiktok": {
+     "caption": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies — on the App Store. Link in bio.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "tiktok",
+     "title": null
+    },
+    "x": {
+     "caption": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\n#secfilings\n\nCaydex: AI research on public companies — on the App Store.\n\nEducational only, not investment advice. Not affiliated with anyone named. Caydex",
+     "platform": "x",
+     "title": null
+    },
+    "youtube": {
+     "caption": "A director of Hershey disclosed buying $150,000 of the company's stock on Form 4, filed Nov 12.\n\nThe purchases are reported with trade dates from Oct 14 to Oct 17. A Form 4 is the report a company's officers and directors file on their own trades. Amounts are each filing's share count times the cost it reports for each share.\n\n#secfilings #investing #financialliteracy\n\nCaydex: AI research on public companies. Search Caydex on the App Store.\n\nCaydex · Educational, impersonal information — not investment advice, not a recommendation, not an offer. Investing involves risk, including loss of principal. Built by a fixed template from public data; narration voiced with AI. Not affiliated with anyone named. Nov 16, 2026.",
+     "platform": "youtube",
+     "title": "A director of Hershey disclosed buying $150K of the company's stock"
+    }
+   },
+   "run_date": "2026-11-16",
+   "series": "insider_buys",
+   "source_ref": "news:insider_buys:2026-11-09",
+   "store_state": "live",
+   "template_version": "news-v23",
+   "text_outlets": [],
+   "video_layout": "per_line",
+   "video_script": [
+    "The filer is a director of the company, and the filing date is November 12th.",
+    "2 purchases are reported, 812 shares in total, for $150,000.",
+    "The purchases are reported with trade dates from October 14th to October 17th.",
+    "Amounts are each filing's share count times the cost it reports for each share."
+   ]
+  }
+ },
+ "template_version": "news-v23"
+}

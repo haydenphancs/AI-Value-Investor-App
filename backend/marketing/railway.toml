@@ -15,9 +15,16 @@
 #   MARKETING_API_BASE_URL   https://caydexinvest.com (the PUBLIC URL; Railway private networking
 #                            is not a drop-in — the web binds IPv4 only)
 #   MARKETING_WORKER_TOKEN   same value as the web service's MARKETING_WORKER_TOKEN
-#   MARKETING_RUN_HOUR_ET    e.g. 16 — the ET hour from which a tick may start today's run. MIRRORED on
+#   MARKETING_RUN_HOUR_ET    e.g. 16 — the ET hour from which a tick may start today's MAIN run. MIRRORED on
 #                            the WEB service under the same name (its run-health timing): change BOTH
 #                            together (OWNER_TASKS "Marketing go-live" step 4)
+#   MARKETING_SPOTLIGHT_HOUR_ET  optional, default 10 — the ET hour from which a tick may start today's
+#                            SPOTLIGHT run (migration 210, the second post on the web's spotlight days).
+#                            MIRRORED on the WEB service under the same name (its claim gate: spotlight
+#                            hour + MARKETING_MAX_RUN_ATTEMPTS <= MARKETING_RUN_HOUR_ET): change BOTH
+#                            together. A bad value skips only the spotlight lane (ERROR in the log).
+#   MARKETING_RUN_LANE       optional, for manual runs only (with MARKETING_FORCE): "main" or
+#                            "spotlight" keeps every tick to that lane; unset = both. Never leave it set.
 #   MARKETING_DRY_RUN        false since 2026-10-01 (live); true makes the day's posts rehearsals that
 #                            never publish
 #   SUPABASE_PUBLISHABLE_KEY optional (designed to be client-exposed), sent on the signed-upload PUT
@@ -32,8 +39,9 @@ watchPatterns = ["/backend/marketing/**"]
 
 [deploy]
 # Hourly, on the quarter hour, UTC. Railway cron is UTC-only with no DST handling; the ET
-# decision ("is it after MARKETING_RUN_HOUR_ET yet?") is made by the job itself on every
-# tick, and a tick before the window exits in under a second. Hourly rather than daily so a
+# decision ("is it after MARKETING_RUN_HOUR_ET yet?" — and, for the spotlight lane,
+# MARKETING_SPOTLIGHT_HOUR_ET) is made by the job itself on every tick, one pipeline per
+# tick, and a tick with nothing to do exits in seconds. Hourly rather than daily so a
 # tick Railway skipped (previous run still alive) or a container killed mid-stage is retried
 # on the first tick after MARKETING_RUN_STALE_SECONDS (2700 s < the hourly period, on purpose)
 # — Railway cron does no compute-first and no retry of its own. A tick before the window

@@ -31,8 +31,34 @@ TEMPLATE BUILD, run as a background task the kick waits on for at most TEMPLATE_
 adapter for candidates, each candidate is composed by `news_templates` from its JSON round trip,
 re-checked as it will be stored, given its logos and its frozen formats, and the first that passes is
 inserted `accepted` — no writer, no lease, 0 tokens, first write wins. A series that yields nothing
-falls through to the next (recorded in `fact_sheet.selection.trail`); the chain always ends in the
+falls through to the next (recorded in `fact_sheet.selection.trail`); a MAIN chain always ends in the
 lesson.
+
+The spotlight lane (migration 210, 2026-11-15): a SPOTLIGHT run (`marketing_runs.lane`) reads its own calendar
+(`selection.spotlight_plan_for`), gated by the same classes and per-series switch, and its chain ends in a SKIP,
+never the lesson: a spotlight day where nothing qualifies (a holder that cannot draw a template included) writes
+ONE `rejected` script, reason `nothing_qualified`, carrying its selection trail, and the run closes `skipped`. Both
+lanes' template builds keep away from what the OTHER lane took (`_cross_lane`): its same-day ledger refs, the
+series it used that day (trail outcome `other_lane`) and the LEAD company it drew in the last
+CROSS_LANE_COMPANY_DAYS ET days (a spotlight checks both lanes' rows, the main lane only spotlight rows — so with
+no spotlight row the main lane's day is byte for byte what it was). An exclusion is never a template refusal: it
+never reaches the source's refusal memo (`_report_template_refusal`).
+
+The fix round C0 (2026-11-16, the second lane review): the spotlight's chain never holds a series the MAIN lane's
+chain holds that day (`selection.spotlight_chain` — a spotlight Money Map used to push the main lane's same-day Money
+Map into a second weekly lesson), and a day left with no spotlight series is no spotlight day (the claim gate, the
+kick and the run-health checks share `selection.spotlight_day_problem`); rule (b) compares a lead by its issuer root
+and display name (`lead_keys`), and a main run's cross-lane read reaches run_date + 1. The insider spotlight's checked
+Form 4 window rides on its trail entry (`TRAIL_WINDOW_KEY`) and anchors the next window
+(`runs.last_checked_window` → ``spotlight_checked_through``).
+
+Per-post art (workstream C, owner decisions 2026-11-15 — "Google draws, Claude checks"): with MARKETING_ART_ENABLED
+on, a template build makes ONE checked picture for its chosen record BEFORE its INSERT (`_attach_art` →
+`post_art.make_post_art`), under min(MARKETING_ART_BUDGET_SECONDS, what is left of TEMPLATE_DAY_BUDGET_SECONDS), gated
+on the monthly budget (the ET month's `output.art.usage`, two runs a day), the single-company record (decision 4), a
+picture or video post that day and the holder's `post_art` (read from the freeze's one holder read). The record and
+its spend ride in `output.art` (tokens_used stays 0); the read-back carries `art` only while the switch is on. Art
+never refuses, skips or fails a day.
 
 Why not a long request: a 20–90 s Gemini call inside the worker's 30 s HTTP timeout was retried
 up to three times CONCURRENTLY, and uvicorn's 30 s graceful shutdown cut it on every deploy. A
@@ -55,7 +81,9 @@ kick closes (the lease expiry is a real backstop at every count) — nothing is 
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import copy
+import functools
 import json
 import logging
 import math
@@ -63,7 +91,8 @@ import re
 import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
+from collections import OrderedDict
+from typing import Any, Collection, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from app.config import settings
 from app.schemas.marketing import (
@@ -74,6 +103,9 @@ from app.schemas.marketing import (
     IMAGE_PLATFORMS,
     LESSON_VIDEO_FEATURES,
     POST_FORMATS_BY_PLATFORM,
+    READBACK_LOOK,
+    RUN_LANE_MAIN,
+    RUN_LANE_SPOTLIGHT,
     SCRIPT_REJECT_REASONS,
     TEMPLATE_AUTHORSHIP,
     TEMPLATE_VIDEO_FEATURES,
@@ -86,12 +118,18 @@ from app.schemas.marketing import (
     VIDEO_LAYOUT_PER_LINE,
     VIDEO_LEGACY_CTA,
     VIDEO_POSTS_KEY,
+    WORKER_CAPABILITY_LAYOUT_FEATURE,
     WORKER_CAPABILITY_LAYOUTS_2B,
+    WORKER_CAPABILITY_LOOK_V23,
     WORKER_CAPABILITY_NEWS_TEMPLATES,
+    WORKER_CAPABILITY_POST_ART,
     WORKER_CAPABILITY_POST_IMAGE,
+    WORKER_CAPABILITY_THEME_ANGLES,
     WORKER_CAPABILITY_VIDEO_V2,
     WORKER_LAYOUTS_2B,
+    WORKER_LAYOUTS_FEATURE,
     image_post_problem,
+    layout_capabilities,
     normalize_image_post,
     parse_content_classes,
 )
@@ -101,6 +139,9 @@ from app.services.marketing import content_pool, post_copy, selection, smart_lin
 # adapter, is imported lazily inside `MarketingScriptService._news_source_fn` and nowhere else.
 from app.services.marketing import company_news_rules as news_rules
 from app.services.marketing import logo_check, news_templates, template_onscreen
+# Per-post art (workstream C, 2026-11-16): the art step of a template day (`_attach_art`). Model-free and FMP-free
+# at import (its Claude / Gemini clients load inside its functions).
+from app.services.marketing import post_art
 from app.services.marketing.generation_budget import (
     LEDGER_STATEMENT_SECONDS,
     MODEL_CALLS_PER_GENERATION,
@@ -112,6 +153,7 @@ from app.services.marketing.run_service import (
     MarketingRunNotFound,
     MarketingRunNotHeld,
     MarketingRunService,
+    MarketingRequestInvalid,
     claim_problem,
     data_card_strings,
     frozen_post_formats,
@@ -121,6 +163,7 @@ from app.services.marketing.run_service import (
     hook_card_problem,
     hook_card_text,
     run_date_et,
+    run_lane,
     run_worker_capabilities,
 )
 
@@ -276,6 +319,23 @@ TEMPLATE_KICK_WAIT_SECONDS = 20.0
 #: The whole build — every series of the day's chain, its candidates, their logos — from its start.
 #: Pinned < marketing/main.py SCRIPT_POLL_BUDGET_SECONDS: the worker polls at least this long.
 TEMPLATE_BUILD_BUDGET_SECONDS = 240.0
+#: Per-post art (workstream C, decision 11): the build AND its art step, from the build's start. The art step gets
+#: min(MARKETING_ART_BUDGET_SECONDS, what is left of this) and is not started with less than ART_MIN_START_SECONDS
+#: (no art: `timeout`, nothing spent). Why a shared ceiling rather than the art's own budget on top of the build's:
+#: the worker's render may START only until WORKER_DEADLINE − STAGE_START_MARGINS["rendered"] (1800 − 840 = 960 s
+#: into its tick), and before it come this build, the kicks that collect it (2 × TEMPLATE_KICK_WAIT_SECONDS) and the
+#: voice stage at its worst (`marketing.voice.worst_case_seconds`: 630 s) — 280 + 40 + 630 = 950 ≤ 960, pinned by
+#: tests/test_marketing_template_flow.py. The two budgets on top of each other (240 + 240 + 40 + 630) would defer a
+#: slow day's render to the next hourly tick, an attempt spent on art: a build that used its whole 240 s simply makes
+#: no art. The art's own ceiling still bounds the poll: TEMPLATE_BUILD_BUDGET_SECONDS + le(MARKETING_ART_BUDGET_SECONDS)
+#: + 2 × TEMPLATE_KICK_WAIT_SECONDS < SCRIPT_POLL_BUDGET_SECONDS (pinned too).
+TEMPLATE_DAY_BUDGET_SECONDS = 280.0
+#: The least time the art step starts with: the minimums of post_art's happy path (brief, image, normalise, check,
+#: store — 55 s), so a started run can always reach its store.
+ART_MIN_START_SECONDS = sum(post_art.STEP_SECONDS[s][0] for s in post_art.HAPPY_PATH)
+#: The process-local art memo's size (`_attach_art`, keyed (run_id, ref)): a rebuild of the same candidate in this
+#: process (a build that crashed after its art) reuses the record — failures included — and never pays twice.
+ART_MEMO_MAX = 32
 #: Per-series caps inside the build budget, each above the adapter's measured worst case for one
 #: `candidates()` call (the FMP client's own 5xx retries included). A series is started with
 #: min(its cap, what is left) and waited for 2 s past it; a later series of the chain gets what the
@@ -287,13 +347,41 @@ TEMPLATE_BUILD_BUDGET_SECONDS = 240.0
 #:                           thirteen_f its whole 150 s (pinned by a test).
 #:   company_stakes   45 s — ~3-5 s (club group + rows, one stakes read, 1 profile batch).
 #:   earnings         45 s — ~5-10 s (7 one-day calendar reads, 4 at a time, 1 profile batch); ~20 s worst.
-#:   theme_explainer  45 s — ~10-25 s (≤ 2 themes × 1 profile batch + ≤ 12 breakdowns); ~40 s worst.
+#:   theme_explainer 120 s — news-v23 phase 3 (the weekly theme post, Wednesday's lead): ~10-30 s normally (≤ 2 themes
+#:                           × 1 profile batch, then angles until one has 4 companies: breakdowns, ONE market-value batch,
+#:                           annual statements, per-issuer Form 4 reads or the Congress walk). Fix round 2026-11-20 (five
+#:                           angles, ≤ 5 attempts — the old 60 s / "~47 s worst" counted two angles): each angle runs under
+#:                           its OWN share (`company_news_adapter.THEME_ANGLE_BUDGET_SECONDS`: 21 / 8 / 16 / 28 / 32 s —
+#:                           phase 4, 2026-11-20: "how they make money" reads every member, two waves of 12 and one of
+#:                           older-years reads, the market-value batch beside them), so a slow source loses its angle's
+#:                           turn, never the series; the worst before a record is
+#:                           `company_news_adapter.theme_worst_seconds()` ≈ 118 s (2 profile rounds + the five shares).
+#:                           Wednesday's chain then still leaves earnings and Money Map their whole 45 s each (122 + 47 +
+#:                           45 ≤ 240 — pinned by a test). Owner decisions 2026-11-20 (the quiet-week fallback): it also
+#:                           runs right AFTER the insider series — Monday's ceo_buys → insider_buys (47 + 47 at their
+#:                           worst) and the spotlight's insider list (62) — and starts there with its WHOLE 120 s (pinned:
+#:                           94 + 122 ≤ 240, 62 + 122 ≤ 240); what follows it takes what is left at the worst (Monday's
+#:                           Money Map ≥ 24 s, an in-season spotlight's 13F spotlight ≥ 56 s — pinned). The one chain
+#:                           where the theme cannot have its whole 120 s is the 13F-LEAD spotlight day (13F spotlight 122
+#:                           + insider list 62): it starts with ≥ 56 s there (pinned), its angles' own shares cut short
+#:                           by the series' deadline ("a slow source loses its angle's turn").
+#: The spotlight lane (2026-11-15), declared with their collectors and shipped with their templates (news-v22):
+#:   insider_spotlight     60 s — ceo_buys' path: ≤ 2 walks (the second only when the feed is a day behind) of
+#:                           ≤ 3 pages, 1 profile batch, ≤ 11 per-issuer reads (memoized, one per issuer however
+#:                           many people; owner decisions 2026-11-20: the insider LIST keeps up to 8 issuers). The
+#:                           one-issuer post's revenue breakdowns are gone with it.
+#:   thirteen_f_spotlight 120 s — the roundup's walkers WITHOUT Berkshire (reserved for the main lane): the club's
+#:                           stored builds, then ≤ 2 live registry builds. On the 13F-lead spotlight day it runs FIRST
+#:                           with its whole 120 s (pinned); since the theme follows the insider list (owner decisions
+#:                           2026-11-20) Money Map is reached on that day only with what the three before it left.
 SERIES_BUDGET_SECONDS: Dict[str, float] = {
     "thirteen_f": 150.0,
     "congress_count": 60.0,
     "company_stakes": 45.0,
     "earnings": 45.0,
-    "theme_explainer": 45.0,
+    "theme_explainer": 120.0,
+    "insider_spotlight": 60.0,
+    "thirteen_f_spotlight": 120.0,
 }
 DEFAULT_SERIES_BUDGET_SECONDS = 45.0
 #: How long past its cap a series' `candidates()` is waited for (the adapter raises at its own
@@ -313,16 +401,53 @@ LOGO_FETCH_CONCURRENCY = 4
 #: `selection.news_recent_limit()` at call time (RECENT_WINDOW × the posting days a week: 240 at the default
 #: four, 420 at seven); this constant stays that default's value (240).
 NEWS_RECENT_LIMIT = RECENT_LIMIT * len(selection.POST_WEEKDAYS)
-#: A series' outcome in the day's fallback trail (`fact_sheet.selection.trail`, run `series_trail`).
+#: A series' outcome in the day's fallback trail (`fact_sheet.selection.trail`, run `series_trail`). `other_lane`
+#: (the spotlight lane, 2026-11-15): the other lane already used the series that day, or drew the lead company of
+#: every candidate it offered (`_cross_lane`) — an exclusion, never a refusal.
 SERIES_OUTCOMES = ("chosen", "no_candidates", "all_recent", "all_refused", "unavailable", "timeout",
-                   "error", "budget")
+                   "error", "budget", "other_lane")
+#: The trail outcome of a series the cross-lane rules kept out (`SERIES_OUTCOMES`).
+OTHER_LANE = "other_lane"
+#: Its reason when the series ran but the other lane had drawn the lead company of every candidate it offered.
+OTHER_LANE_COMPANY = "other_lane_company"
+#: Its reason when the other lane already used the series that day (the series is never started).
+OTHER_LANE_SERIES = "posted by the other lane today"
+#: Rule (b) of the cross-lane exclusion (the spotlight lane, 2026-11-15): a candidate whose LEAD company
+#: (`lead_company`, compared by `lead_keys` — its issuer root and display name, so GOOGL and GOOG are one company: C0,
+#: 2026-11-16) the other lane drew on a run dated within this many ET days before the run date — or on it —
+#: is not offered: [run_date − 2, run_date] covers at least 48 h between two posts about one company (Upload-Post's
+#: "similar content within 48 h" refusal). A spotlight run checks both lanes' rows (its own earlier days included);
+#: the main lane checks only spotlight rows (through run_date + 1), so with no spotlight row its day is unchanged.
+CROSS_LANE_COMPANY_DAYS = 2
 #: How many trail entries reach the run mirror and each post (`series_trail`) — run_service's bound.
 SERIES_TRAIL_MAX = RUN_SERIES_TRAIL_MAX
-#: The series whose post image is a drop-2b layout (WORKER_LAYOUTS_2B: company_stakes `pair`,
-#: theme_explainer `grid`), derived from the templates' own specs. Only a holder that declared
+#: The one series whose `candidates()` call takes the spotlight lane's ledger inputs (B decisions 5-6, 2026-11-15:
+#: `_spotlight_source_kw`): the insider spotlight's window start and issuer cooldown. Every other series — the 13F
+#: spotlight included, whose one-post-per-filer rule reads the `exclude` refs — is asked exactly as before.
+SPOTLIGHT_CONTEXT_SERIES = "insider_spotlight"
+#: The one series whose `candidates()` call takes the weekly theme post's inputs (news-v23 phase 3, `_theme_source_kw`):
+#: the build's own theme ledger read and the angles the run's worker can draw.
+THEME_CONTEXT_SERIES = "theme_explainer"
+#: The angle a holder without WORKER_CAPABILITY_THEME_ANGLES can draw: "how they make money", on the `grid` every
+#: drop-2b worker draws (sent without the new keys, `_without_theme_angles`).
+THEME_ANGLES_WITHOUT_CAPABILITY: Tuple[str, ...] = ("make_money",)
+#: The key of the CHECKED Form 4 window on that series' trail entry (C0, 2026-11-16: ``{"start", "end"}`` ISO dates,
+#: recorded whenever its collector checked a window — chosen, refused or nothing qualified — from
+#: `Candidates.checked_window`); the next insider spotlight's window starts the day after its end
+#: (`runs.last_checked_window`). Pinned == run_service.TRAIL_WINDOW_KEY. Never in a run / post `series_trail` mirror.
+TRAIL_WINDOW_KEY = "window"
+#: The series whose post image is a drop-2b layout (WORKER_LAYOUTS_2B: theme_explainer `grid`; company_stakes drew
+#: the `pair` until news-v23, a `rows` list since), derived from the templates' own specs. Only a holder that declared
 #: WORKER_CAPABILITY_LAYOUTS_2B draws them: `_select` drops them from the chain for any other holder.
 LAYOUTS_2B_SERIES: FrozenSet[str] = frozenset(
     sid for sid, spec in news_templates.SERIES_SPECS.items() if spec.layout in WORKER_LAYOUTS_2B)
+#: The series whose post image is the `feature` layout (WORKER_LAYOUTS_FEATURE, 2026-11-15: the spotlight
+#: series' art-band picture), derived from the templates' own specs exactly like LAYOUTS_2B_SERIES — empty until
+#: a SeriesSpec names that layout. Only a holder that declared WORKER_CAPABILITY_LAYOUT_FEATURE draws them:
+#: `_select` / `_select_spotlight` drop them from the chain for any other holder (WARNING; the chain falls
+#: through to its next series, as a refused series does — a spotlight chain ends in its SKIP, never the lesson).
+FEATURE_LAYOUT_SERIES: FrozenSet[str] = frozenset(
+    sid for sid, spec in news_templates.SERIES_SPECS.items() if spec.layout in WORKER_LAYOUTS_FEATURE)
 
 # Body states the worker branches on — part of the wire contract with backend/marketing/main.py.
 REST_DAY = "rest_day"
@@ -337,6 +462,8 @@ REASON_CONTENT = "content"
 REASON_WRITER_UNAVAILABLE = "writer_unavailable"
 REASON_EMPTY_POOL = "empty_pool"
 REASON_SOURCE_INELIGIBLE = "source_ineligible"
+#: A SPOTLIGHT day whose chain reached its SKIP terminal (migration 210): nothing qualified — never the lesson.
+REASON_NOTHING_QUALIFIED = "nothing_qualified"
 
 # `_finish` outcomes. Only WRITTEN may be logged as the outcome of a generation.
 WRITTEN = "written"
@@ -478,7 +605,8 @@ def _spent(exc: BaseException) -> int:
         return 0
 
 
-def worker_script(output: Dict[str, Any], *, run_id: Optional[str] = None) -> Dict[str, Any]:
+def worker_script(output: Dict[str, Any], *, run_id: Optional[str] = None,
+                  capabilities: Optional[Collection[str]] = None) -> Dict[str, Any]:
     """The subset the WORKER needs to voice and render (Phases 3-4). Captions are not in it:
     they are server-authored and reach the ledger only through `create_posts`.
 
@@ -490,7 +618,15 @@ def worker_script(output: Dict[str, Any], *, run_id: Optional[str] = None) -> Di
 
     Batch 2 adds `video_features` and `end_card_cta` (`worker_video_fields`) — on EVERY read-back, even
     as [] (their presence tells a Batch 2 worker this web knows the new end card) — and `data_card_slot`
-    (CARDS-B2-1): which of `cards` the data card replaces, None unless `video_features` carries data_card."""
+    (CARDS-B2-1): which of `cards` the data card replaces, None unless `video_features` carries data_card.
+
+    news-v23 (the restyle, 2026-11-19) adds `look` (READBACK_LOOK, on every read-back: the look's own strings are
+    allowed), sends a LESSON's `image_footer` as the code-owned IMAGE_FOOTER_HEAD (never the stored copy: one stored
+    before the restyle is the long footer), and — given the holder's `capabilities` (None: unknown, the spec as
+    stored) — strips the look's ticker chips (and, owner decision 2026-11-20, a Money Map loss year's costs card) from
+    the picture spec of a holder without WORKER_CAPABILITY_LOOK_V23 (`_without_look_chips`), and its costs cover
+    (`_without_costs_cover`), its list cover (`_without_list_cover`) and its figure label with the figure it explains
+    (`_without_figure_label`) from the opening card."""
     try:
         formats = frozen_post_formats(output)
     except ValueError as e:
@@ -498,6 +634,11 @@ def worker_script(output: Dict[str, Any], *, run_id: Optional[str] = None) -> Di
                      "the worker gets none; create_posts will refuse this run's posts", e)
         formats = None
     footer = output.get("image_footer")
+    lesson = output.get("authorship", post_copy.AUTHORSHIP_AI) == post_copy.AUTHORSHIP_AI
+    if isinstance(footer, str) and footer and lesson:
+        # news-v23: a LESSON's picture footer is the code-owned constant (`run_service._check_post_image_text` checks
+        # this one, never the stored copy) — a lesson accepted before the restyle stored the long footer
+        footer = post_copy.IMAGE_FOOTER_HEAD
     script = {
         "hook": output.get("hook") or "",
         "video_script": list(output.get("video_script") or []),
@@ -509,9 +650,122 @@ def worker_script(output: Dict[str, Any], *, run_id: Optional[str] = None) -> Di
         "image_post": normalize_image_post(output.get("image_post")) if formats is not None else None,
         "image_footer": footer if formats is not None and isinstance(footer, str) and footer else None,
         **_worker_template_fields(output),
+        "look": READBACK_LOOK,
     }
+    if capabilities is not None and WORKER_CAPABILITY_LOOK_V23 not in capabilities:
+        script["image_spec"] = _without_look_chips(script.get("image_spec"), run_id)
+        script["opening_card"] = _without_figure_label(
+            _without_list_cover(_without_costs_cover(script.get("opening_card"), run_id), run_id), run_id)
+    if capabilities is not None and WORKER_CAPABILITY_THEME_ANGLES not in capabilities:
+        script["image_spec"], script["opening_card"] = _without_theme_angles(
+            script.get("image_spec"), script.get("opening_card"), output.get("series"), run_id)
     script.update(worker_video_fields(output, script, run_id=run_id))
     return script
+
+
+#: The most rows an older worker's `rows` walker takes in one section (news-v22's cards.MAX_SECTION_ROWS; news-v23's
+#: 13F list draws six). Review of 2026-11-26: the cut itself moved to `template_onscreen` (pure), so the publisher can
+#: tell which picture a worker drew (`news_templates.picture_alt`); these names are its aliases.
+PRE_V23_MAX_SECTION_ROWS = template_onscreen.PRE_V23_MAX_SECTION_ROWS
+_PRE_V23_ROW_DROPS = template_onscreen.PRE_V23_ROW_DROPS
+_PRE_V23_SECTION_DROPS = template_onscreen.PRE_V23_SECTION_DROPS
+_pre_v23_section = template_onscreen.pre_v23_section
+
+
+def _without_look_chips(spec: Any, run_id: Optional[str]) -> Any:
+    """`spec` (the read-back's `image_spec`) without the news-v23 chips an older worker's CLOSED walker refuses as
+    unknown keys — every `rows` row's `chip` and a `bars` header's `chip` — for a holder that did not declare
+    WORKER_CAPABILITY_LOOK_V23, and a `rows` section of the 13F list cut to the rows that walker takes
+    (`template_onscreen.pre_v23_section`), and a Money Map loss year's costs card (owner decision 2026-11-20 — such a
+    worker draws today's flow card and callout, still in the spec). The cut is `template_onscreen.pre_v23_image_spec`
+    (pure; this logs). The picture it draws then holds a subset of the stored spec's strings (the server's
+    allow-list), so it still registers, and its alt text is the stored `image_post_pre_v23` when the output carries one
+    (`news_templates.picture_alt`, review of 2026-11-26). Never cut: a stake row's basis `label` and an earnings row's
+    `table` (final review of 2026-11-26 — such a worker re-claiming a run a newer one built gets them, its walker
+    refuses the picture and the render fails loudly, never a bare amount or a figureless name; PRE_V23_ROW_DROPS).
+    A copy; anything else is returned as it is."""
+    out = template_onscreen.pre_v23_image_spec(spec)
+    if out is not spec and out != spec:
+        logger.warning("marketing script run_id=%s: the run's holder did not declare %s — its %s picture is sent "
+                       "without the ticker chips, a loss year's costs card (and rows past %d in a section) its walker "
+                       "would refuse", run_id, WORKER_CAPABILITY_LOOK_V23, spec.get("layout"),
+                       PRE_V23_MAX_SECTION_ROWS)
+    return out
+
+
+def _without_costs_cover(card: Any, run_id: Optional[str]) -> Any:
+    """`card` (the read-back's `opening_card`) without a Money Map loss year's COSTS cover (owner decision 2026-11-20:
+    its `costs` card and the `subtitle` drawn above it), which an older worker's CLOSED opening-card walker refuses as
+    unknown keys, for a holder that did not declare WORKER_CAPABILITY_LOOK_V23 — such a worker then draws today's opening
+    card (`_without_figure_label` takes the figure and its label too): a subset of the stored card's strings, so the
+    video still registers. A copy; anything else as it is."""
+    if not isinstance(card, dict) or not ({"costs", "subtitle"} & set(card)):
+        return card
+    logger.warning("marketing script run_id=%s: the run's holder did not declare %s — its opening card is sent without "
+                   "the loss year's costs cover its walker would refuse (today's opening card)", run_id,
+                   WORKER_CAPABILITY_LOOK_V23)
+    return {k: v for k, v in card.items() if k not in ("costs", "subtitle")}
+
+
+def _without_list_cover(card: Any, run_id: Optional[str]) -> Any:
+    """`card` (the read-back's `opening_card`) without the news-v23 LIST cover (`list`: the 13F list, the Congress
+    Count, a Form 4 roundup's list — earnings and company stakes reach such a holder only by its re-claim of a run a
+    newer worker built, and then their picture fails its render loudly, `_without_look_chips`), which an older worker's
+    CLOSED opening-card walker refuses as an unknown key, for a holder that did not declare WORKER_CAPABILITY_LOOK_V23:
+    it then draws today's opening card — the kicker, the logo, the chip, the headline — whose strings are a subset of
+    the stored card's (the server's allow-list), so the video still registers. A copy; anything else as it is."""
+    if not isinstance(card, dict) or "list" not in card:
+        return card
+    logger.warning("marketing script run_id=%s: the run's holder did not declare %s — its list cover (13F / Congress "
+                   "Count / Form 4 roundup) is sent without the list its walker would refuse (today's opening card)",
+                   run_id,
+                   WORKER_CAPABILITY_LOOK_V23)
+    return {k: v for k, v in card.items() if k != "list"}
+
+
+def _without_figure_label(card: Any, run_id: Optional[str]) -> Any:
+    """`card` (the read-back's `opening_card`) without the news-v23 `figure_label` (the Money Map cover's "of every $100
+    of revenue was net income") — which an older worker's CLOSED opening-card walker refuses as an unknown key — AND
+    without the figure it explains, for a holder that did not declare WORKER_CAPABILITY_LOOK_V23: a bare "$2.94" beside
+    "How Costco makes money" would read as something else. Such a worker then draws the kicker, the logo, the chip and
+    the headline, a subset of the stored card's strings (the server's allow-list), so the video still registers. A
+    copy; anything else as it is."""
+    if not isinstance(card, dict) or "figure_label" not in card:
+        return card
+    logger.warning("marketing script run_id=%s: the run's holder did not declare %s — its opening card is sent without "
+                   "the figure and the label its walker would refuse (the headline, the logo and the chip)", run_id,
+                   WORKER_CAPABILITY_LOOK_V23)
+    return {k: v for k, v in card.items() if k not in ("figure_label", "figure")}
+
+
+#: news-v23 phase 3: the grid keys a worker without WORKER_CAPABILITY_THEME_ANGLES refuses (its closed walker): a tile's
+#: ticker `chip`, the spec's `icon` and its `sub_break` — none of them a string it would otherwise draw.
+_THEME_GRID_DROPS = frozenset({"icon", "sub_break"})
+_THEME_TILE_DROPS = frozenset({"chip"})
+
+
+def _without_theme_angles(spec: Any, card: Any, series: Any, run_id: Optional[str]) -> Tuple[Any, Any]:
+    """The read-back's picture spec and opening card for a holder that did not declare WORKER_CAPABILITY_THEME_ANGLES
+    (news-v23 phase 3): a theme `grid` without its tiles' chips, its icon and its sub-line break, and a THEME post's
+    opening card without its list cover (today's opening card: the kicker, the logo, the count, the title) — each a
+    subset of the stored strings (the server's allow-list), so it still registers. A `ranked` / `figures` / `ledger` /
+    `tally` picture never reaches such a holder at BUILD time: the adapter is told which angles it can draw, and one
+    built while such a holder holds the run is frozen as TEXT at write time (`_frozen_output`, `layout_capabilities`).
+    One built and frozen by a newer worker and then re-claimed by an older one (a worker rollback mid-run — final
+    review of 2026-11-26) is sent UNCHANGED: that worker's walker refuses the layout and its render fails loudly
+    (retried, then closed failed at the attempts cap) — never a guessed picture. Copies; anything else as it is."""
+    out_spec, out_card = spec, card
+    if isinstance(spec, dict) and spec.get("layout") == "grid" and isinstance(spec.get("tiles"), list):
+        out_spec = {k: v for k, v in spec.items() if k not in _THEME_GRID_DROPS}
+        out_spec["tiles"] = [{k: v for k, v in t.items() if k not in _THEME_TILE_DROPS} if isinstance(t, dict) else t
+                             for t in spec["tiles"]]
+    if series == THEME_CONTEXT_SERIES and isinstance(card, dict) and "list" in card:
+        out_card = {k: v for k, v in card.items() if k != "list"}
+    if out_spec != spec or out_card != card:
+        logger.warning("marketing script run_id=%s: the run's holder did not declare %s — its theme picture is sent "
+                       "without the tiles' chips, icon and sub-line break, and its video without the list cover",
+                       run_id, WORKER_CAPABILITY_THEME_ANGLES)
+    return out_spec, out_card
 
 
 def end_card_cta(output: Any) -> str:
@@ -646,7 +900,56 @@ def _worker_template_fields(output: Dict[str, Any]) -> Dict[str, Any]:
         "opening_card": copy.deepcopy(opening) if opening is not None else None,
         "image_spec": copy.deepcopy(spec) if spec is not None else None,
         "logos": logos,
+        "art": _worker_art(output),
     }
+
+
+def _worker_art(output: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The read-back's `art` (workstream C, decision 11): `post_art.worker_art` — {url, sha256, bytes, width, height}
+    of the accepted output's checked art, ONLY while MARKETING_ART_ENABLED is on, read at CALL time (a real kill
+    switch: turned off, the next render draws none; the server accepts a missing declaration — art is never
+    required), else None (a lesson, no art, a failed record). Never the models, the subject or the usage. A raise
+    (a bug) is logged at ERROR and sent as None — the read-back never fails for art."""
+    try:
+        return post_art.worker_art(output)
+    except Exception as e:  # noqa: BLE001 — art is optional: no art, never a failed read-back
+        logger.error("marketing script: the accepted output's art could not be read for the worker (%s: %s) — sent "
+                     "as None", type(e).__name__, e, exc_info=True)
+        return None
+
+
+def _art_cap_micros() -> Optional[int]:
+    """MARKETING_ART_MONTHLY_BUDGET_USD in micro-USD, read now (0 = no art); None — no art, ERROR — for a value that
+    is not a finite non-negative number (the Settings field refuses one at deploy; this is defence in depth)."""
+    raw = settings.MARKETING_ART_MONTHLY_BUDGET_USD
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw < 0:
+        logger.error("marketing art: MARKETING_ART_MONTHLY_BUDGET_USD=%r is not a finite number of dollars — no art",
+                     raw)
+        return None
+    return int(round(float(raw) * 1_000_000))
+
+
+#: The primary formats a post takes WITHOUT frozen `post_formats` (a failed freeze): the video platforms post the
+#: video, every other platform text (`run_service.frozen_post_formats` → None, the worker's own POST_FORMAT).
+_UNFROZEN_VIDEO_PLATFORMS = frozenset(p for p, fmts in POST_FORMATS_BY_PLATFORM.items() if fmts == ("video",))
+
+
+def _art_day_surfaces(output: Dict[str, Any], subject: "post_art.ArtSubject") -> Tuple[str, ...]:
+    """The surfaces of `subject` (decision 4) the DAY can show (decision 11: "a picture or video format on the day"):
+    the spotlight picture only when some post was frozen `image`, the cover only when some post is a `video` (frozen,
+    or — formats unfrozen — a video platform the output carries copy for). () = a text-only day: no art. Pure."""
+    try:
+        formats = frozen_post_formats(output)
+    except ValueError as e:     # create_posts refuses such a run anyway; no surface is promised for it
+        logger.warning("marketing art: the output's post_formats do not read back (%s) — no art surface", e)
+        return ()
+    if formats is not None:
+        taken = set(formats.values())
+    else:
+        posts = output.get("posts") if isinstance(output.get("posts"), dict) else {}
+        taken = {"video"} if any(p in _UNFROZEN_VIDEO_PLATFORMS for p in posts) else set()
+    need = {post_art.SURFACE_PICTURE: "image", post_art.SURFACE_COVER: "video"}
+    return tuple(s for s in subject.surfaces if need.get(s) in taken)
 
 
 #: A Threads IMAGE post is frozen only while its composed caption fits this many UTF-8 BYTES. Upload-Post
@@ -701,6 +1004,17 @@ def _picture_platforms(output: Any, listed: FrozenSet[str], x_images: bool) -> L
                   and (bool(x_images) if p == "x" else p in listed))
 
 
+def template_picture_outlets(image_posts: bool, x_images: bool, image_platforms: Iterable[str]) -> List[str]:
+    """Review 2026-11-20: the platforms whose post will carry a TEMPLATE day's picture, from the switches as a build
+    read them — none while image posts are off; else X while `x_images`, and every other picture platform listed in
+    `image_platforms` (MARKETING_IMAGE_PLATFORMS). Sorted; `news_templates.compose`'s `picture_outlets`, the very
+    predicate `_picture_platforms` applies at the freeze. Pure."""
+    if not image_posts:
+        return []
+    listed = frozenset(p for p in image_platforms if isinstance(p, str) and p in IMAGE_PLATFORMS)
+    return sorted(p for p in news_templates.PICTURE_OUTLETS if (bool(x_images) if p == "x" else p in listed))
+
+
 def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: bool, x_images: bool,
                         run_id: Optional[str] = None, image_platforms: Optional[Iterable[str]] = None,
                         image_blocked: Optional[str] = None) -> Dict[str, Any]:
@@ -739,8 +1053,13 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
       "platforms": [...]}`, one reason, the first that applies — `image_blocked`; `image_dropped` (no
       usable `image_post`: the writer dropped it — its `dropped_image` says why — or it does not read);
       `image_spec_invalid` (a template whose `image_spec` does not validate); else
-      `threads_caption_long` (the one per-platform rule: Threads alone). Never carried over from the
-      input. With image posts off, or with every listed platform posting the picture, there is none."""
+      `threads_caption_long` (Threads alone), then `caption_list_long` (review 2026-11-20: a template's
+      `text_outlets` — a list post's X / Bluesky caption that could not keep the picture's "+N more"
+      promise, written as a text post). Never carried over from the input. With image posts off, or with
+      every listed platform posting the picture, there is none.
+    * Review 2026-11-20: a TEMPLATE output's `picture_outlets` (the platforms its captions were written to
+      ride the picture, as the build read the switches) bounds the picture platforms — one outside it is
+      TEXT as if left off (no fallback: its caption is a text post's)."""
     if image_platforms is None:
         listed = frozenset(IMAGE_PLATFORMS)
     elif isinstance(image_platforms, (str, bytes)):
@@ -784,10 +1103,20 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
         elif not spec_ok:
             blocked = "image_spec_invalid"
     pictured = frozenset(_picture_platforms(output, listed, x_images)) if image_posts else frozenset()
+    # Review 2026-11-20 — a TEMPLATE output says which platforms its captions were written to ride the picture
+    # (`picture_outlets`, as the build read the switches) and which of those could not keep the picture's "+N more"
+    # promise (`text_outlets`, written as text posts): a platform outside the first never posts the picture (its
+    # caption owes it nothing — as if left off), and one in the second freezes as TEXT (``caption_list_long``)
+    frozen_pictured = output.get("picture_outlets") if template else None
+    if isinstance(frozen_pictured, list):
+        pictured = pictured & frozenset(p for p in frozen_pictured if isinstance(p, str))
+    texted = output.get("text_outlets") if template else None
+    list_text = frozenset(p for p in texted if isinstance(p, str)) if isinstance(texted, list) else frozenset()
     posts = output.get("posts") if isinstance(output.get("posts"), dict) else {}
     formats: Dict[str, str] = {}
     fallen: List[str] = []
     threads_long = False
+    list_long = False
     for platform in sorted(posts):
         allowed = POST_FORMATS_BY_PLATFORM.get(platform, ())
         if "video" in allowed:
@@ -802,6 +1131,11 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
                             size, THREADS_IMAGE_CAPTION_MAX_BYTES, run_id)
                 formats[platform] = "text"
                 threads_long = True
+            elif platform in list_text:
+                logger.info("marketing script: the %s caption could not list the rows its picture leaves out run_id=%s "
+                            "— it was written as a text post and is frozen as TEXT", platform, run_id)
+                formats[platform] = "text"
+                list_long = True
             else:
                 formats[platform] = "image"
         elif "text" in allowed:
@@ -814,7 +1148,8 @@ def freeze_post_formats(output: Dict[str, Any], run_date: date, *, image_posts: 
             fallen.append(platform)
     out["post_formats"] = formats
     if fallen:
-        reason = blocked if blocked is not None else "threads_caption_long" if threads_long else None
+        reason = (blocked if blocked is not None else "threads_caption_long" if threads_long else
+                  "caption_list_long" if list_long else None)
         if reason is None:   # unreachable: a pictured platform is text only for a reason above
             logger.error("marketing script: %s froze as TEXT for no known reason run_id=%s — recorded as "
                          "freeze_failed", fallen, run_id)
@@ -1053,15 +1388,261 @@ def _trail_steps(row: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
 def _selection_mirror(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The server-owned run metadata a selection mirrors (drop 2): `series` — the series the day took
     (the trail's "chosen" step; the template id when the trail does not say) — and `series_trail`, the
-    first SERIES_TRAIL_MAX steps. None when the script recorded no selection block."""
+    first SERIES_TRAIL_MAX steps. None when the script recorded no selection block.
+
+    A trail that reached the SKIP terminal (a spotlight day where nothing qualified: its `nothing_qualified`
+    row) mirrors `selection.SKIP` — never the lesson, which that day did not post. So does a
+    `nothing_qualified` row whose trail lost its SKIP step."""
     steps = _trail_steps(row)
     if steps is None:
         return None
     chosen = next((s["series"] for s in reversed(steps) if s.get("outcome") == "chosen"), None)
     if chosen is None:
-        tid = row.get("template_id")
-        chosen = tid if isinstance(tid, str) and tid in selection.SERIES_BY_ID else selection.LESSON
+        if (any(s.get("series") == selection.SKIP for s in steps)
+                or row.get("reject_reason") == REASON_NOTHING_QUALIFIED):
+            chosen = selection.SKIP
+        else:
+            tid = row.get("template_id")
+            chosen = tid if isinstance(tid, str) and tid in selection.SERIES_BY_ID else selection.LESSON
     return {"series": chosen, "series_trail": steps[:SERIES_TRAIL_MAX]}
+
+
+def _symbol(value: Any) -> Optional[str]:
+    """A logo key as a comparable company symbol (stripped, upper-cased), or None for anything that is not a
+    non-empty string. Bounded: a stored value is never trusted to be short."""
+    if not isinstance(value, str):
+        return None
+    sym = value.strip().upper()[:24]
+    return sym or None
+
+
+def lead_company(output: Any) -> Optional[str]:
+    """The LEAD company a template output draws — the company the post is about — as a symbol, or None (a lesson,
+    an output with no logo). Rule (b) of the cross-lane exclusion compares leads only, never every drawn row: a
+    roundup lists up to a dozen companies, and blocking on any of them would drop a whole one-record series (the
+    lane review of 2026-11-15).
+
+    The header logo of the post image when it has one (the `spotlight` / `bars` layouts, a `rows` roundup with a
+    header — and any future layout that keeps its company in a `header`: since news-v23 the company_stakes list's
+    investor plate); the LEFT company of a `pair` (the investor whose stake a pre-news-v23 post reports); else the first of `logo_refs` (the image's logos in draw order, then
+    the opening card's). news-v23 (the ONE 13F list): a 13F post leads with its FIRST row — the largest holding change,
+    as before the restyle — never the listed filer's plate in its header (`_first_row_logo`). Pure, never raises: a
+    stored row that does not read back has no lead."""
+    if not isinstance(output, Mapping):
+        return None
+    spec = output.get("image_spec")
+    if isinstance(spec, Mapping):
+        if output.get("series") in _F13_LIST_SERIES and _first_row_logo(spec):
+            return _first_row_logo(spec)
+        header = spec.get("header")
+        if isinstance(header, Mapping) and _symbol(header.get("logo")):
+            return _symbol(header.get("logo"))
+        left = spec.get("left")
+        if spec.get("layout") == "pair" and isinstance(left, Mapping) and _symbol(left.get("logo")):
+            return _symbol(left.get("logo"))
+    refs = output.get("logo_refs")
+    for ref in refs if isinstance(refs, list) else ():
+        if isinstance(ref, Mapping) and _symbol(ref.get("key")):
+            return _symbol(ref.get("key"))
+    return None
+
+
+#: The series whose picture is the news-v23 13F list (`news_templates._f13_list_parts`).
+_F13_LIST_SERIES = frozenset({"thirteen_f", "thirteen_f_spotlight"})
+
+
+def _first_row_logo(spec: Mapping[str, Any]) -> Optional[str]:
+    """The logo symbol of a `rows` picture's first row, or None. Pure, never raises."""
+    sections = spec.get("sections")
+    if not isinstance(sections, list) or not sections or not isinstance(sections[0], Mapping):
+        return None
+    rows = sections[0].get("rows")
+    if not isinstance(rows, list) or not rows or not isinstance(rows[0], Mapping):
+        return None
+    return _symbol(rows[0].get("logo"))
+
+
+def _logo_ref_names(output: Any) -> Dict[str, str]:
+    """{symbol: display name} of every logo ref a template output names (`logo_refs[].key` / `.name`, whitespace
+    collapsed, at most 80 characters) — the insider list's cooldown names each of its companies by it. Pure, never
+    raises: a stored row that does not read back names nothing."""
+    out: Dict[str, str] = {}
+    refs = output.get("logo_refs") if isinstance(output, Mapping) else None
+    for ref in refs if isinstance(refs, list) else ():
+        if not isinstance(ref, Mapping):
+            continue
+        key, name = _symbol(ref.get("key")), ref.get("name")
+        if key and isinstance(name, str) and name.strip() and key not in out:
+            out[key] = " ".join(name.split())[:80]
+    return out
+
+
+def lead_company_name(output: Any) -> Optional[str]:
+    """The display NAME of the lead company a template output draws (`lead_company`), as its logo ref names it
+    (`logo_refs[].name`, the template's wordmark), or None (a lesson, a lead with no named ref). Pure, never raises.
+    The insider spotlight's cooldown matches a recent spotlight's company by it (`_spotlight_source_kw`)."""
+    lead = lead_company(output)
+    refs = output.get("logo_refs") if lead is not None and isinstance(output, Mapping) else None
+    for ref in refs if isinstance(refs, list) else ():
+        if isinstance(ref, Mapping) and _symbol(ref.get("key")) == lead:
+            name = ref.get("name")
+            if isinstance(name, str) and name.strip():
+                return " ".join(name.split())[:80]
+    return None
+
+
+#: The prefixes of a `lead_keys` entry: the lead's issuer root symbol and its casefolded display name.
+LEAD_KEY_ROOT = "root:"
+LEAD_KEY_NAME = "name:"
+
+
+def lead_keys(output: Any) -> FrozenSet[str]:
+    """The keys rule (b) of the cross-lane exclusion compares for a template output's LEAD company (`lead_company`) — so
+    one company drawn under two listings counts as ONE lead (the second review, 2026-11-16: Alphabet's Money Map leads
+    with GOOGL, its earnings post with GOOG, and a raw-symbol compare let both out within 48 h):
+
+    * ``root:<issuer root>`` — the lead symbol folded through the issuer family rule (`company_news_rules.issuer_root`:
+      "GOOGL" → "GOOG", "BRK-B" → "BRK");
+    * ``name:<display name>`` — the lead's logo-ref name (`lead_company_name`), casefolded and whitespace-collapsed.
+
+    Two outputs share a lead when their key sets meet. Empty for a lesson or an output with no lead. Pure, never
+    raises: a stored row that does not read back has no keys."""
+    keys: Set[str] = set()
+    root = news_rules.issuer_root(lead_company(output))
+    if root:
+        keys.add(LEAD_KEY_ROOT + root)
+    name = lead_company_name(output)
+    if name:
+        keys.add(LEAD_KEY_NAME + name.casefold())
+    return frozenset(keys)
+
+
+def _record_lead_keys(company: Any) -> FrozenSet[str]:
+    """`lead_keys` of a record's company row (its issuer root, its casefolded display name) — the keys the output's
+    lead will carry when that company leads it. Pure, never raises."""
+    keys: Set[str] = set()
+    root = news_rules.issuer_root(getattr(company, "symbol", None))
+    if root:
+        keys.add(LEAD_KEY_ROOT + root)
+    name = getattr(company, "name", None)
+    if isinstance(name, str) and name.strip():
+        keys.add(LEAD_KEY_NAME + " ".join(name.split())[:80].casefold())
+    return frozenset(keys)
+
+
+#: The several-company records whose LEAD (their first row) may be dropped for rule (b) of the cross-lane exclusion
+#: (review 2026-11-20): the record type → (its rows' field, its fewest rows).
+_LEAD_NARROWABLE: Dict[type, Tuple[str, int]] = {
+    news_rules.EarningsDay: ("reports", news_rules.EARNINGS_DAY_COMPANIES[0]),
+    news_rules.CongressMonth: ("counts", news_rules.CONGRESS_MONTH_COMPANIES[0]),
+    # owner decisions 2026-11-20 ("3 - 5 companies at once"): both Form 4 lists — a weekly roundup's lead row and the
+    # insider list's lead company drop as the earnings lead does; fewer than INSIDER_MIN_ROWS left is the exclusion
+    news_rules.InsiderBuysWeek: ("rows", news_rules.INSIDER_MIN_ROWS),
+    news_rules.InsiderSpotlight: ("companies", news_rules.INSIDER_MIN_ROWS),
+}
+
+
+def narrow_other_lane_lead(record: Any, avoid_leads: FrozenSet[str]) -> Tuple[Optional[Any], List[str]]:
+    """Rule (b) for a SEVERAL-company post (review 2026-11-20, confirmed): an earnings day, a Congress month or — owner
+    decisions 2026-11-20 — a Form 4 list (a weekly roundup, the insider list) is ONE record per call, its lead the first
+    (largest) company — so excluding the whole record because the other lane drew
+    its lead within CROSS_LANE_COMPANY_DAYS dropped every other company's results (or the month's Congress post) with
+    it. Here only the lead is DROPPED, then the next (the new lead) is checked the same way, until the lead is clear:
+    (the narrowed record, the symbols dropped). (None, dropped) when fewer than the post's minimum would be left — an
+    EXCLUSION, never a template refusal. Every other record: (record, []) — its lead is its subject (a stakes post's
+    investor plate, a 13F's largest row of ONE filer): the output check excludes it whole. Pure; the record is rebuilt
+    with `dataclasses.replace` (its own validation re-runs)."""
+    shape = _LEAD_NARROWABLE.get(type(record))
+    if shape is None or not avoid_leads:
+        return record, []
+    field_, least = shape
+    rows = list(getattr(record, field_))
+    dropped: List[str] = []
+    while rows and _record_lead_keys(rows[0].company) & avoid_leads:
+        dropped.append(rows.pop(0).company.symbol)
+    if not dropped:
+        return record, []
+    if len(rows) < least:
+        return None, dropped
+    return dataclasses.replace(record, **{field_: tuple(rows)}), dropped
+
+
+def _without_feature_series(chain: Tuple[str, ...], run: Dict[str, Any], *, lane: str) -> Tuple[str, ...]:
+    """`chain` without the series whose post image is the `feature` layout (FEATURE_LAYOUT_SERIES) when the worker
+    holding `run` did not declare WORKER_CAPABILITY_LAYOUT_FEATURE on its claim — the LAYOUTS_2B rule, for the
+    2026-11-15 layout: an image older than it refuses a feature picture loudly (a failed day), so those series
+    leave the chain and it falls through to its next series exactly as a refused one does (a spotlight chain to
+    its SKIP, never the lesson). One WARNING naming the worker, the capability and the series dropped; nothing
+    logged, and `chain` returned as it is, when the chain holds no such series or the holder declared it. Pure
+    but for logging."""
+    cannot_draw = [s for s in chain if s in FEATURE_LAYOUT_SERIES]
+    caps = run_worker_capabilities(run)
+    if not cannot_draw or WORKER_CAPABILITY_LAYOUT_FEATURE in caps:
+        return chain
+    logger.warning(
+        "marketing script%s: the day's chain %s has %s, whose post image is the %s layout, but the worker holding "
+        "run_id=%s (worker_version=%r, attempt %s, declared %s) did not declare %r on its claim — %s dropped from "
+        "the chain (deploy the feature-layout marketing worker)", " (spotlight)" if lane == RUN_LANE_SPOTLIGHT else "",
+        list(chain), cannot_draw, "/".join(WORKER_LAYOUTS_FEATURE), run.get("id"),
+        str(run.get("worker_version") or "")[:64], run.get("attempts"), sorted(caps) or "nothing",
+        WORKER_CAPABILITY_LAYOUT_FEATURE, "it is" if len(cannot_draw) == 1 else "they are")
+    return tuple(s for s in chain if s not in FEATURE_LAYOUT_SERIES)
+
+
+#: news-v23 (the restyle, owner 2026-11-19): the series whose picture only a WORKER_CAPABILITY_LOOK_V23 worker can
+#: draw at all — earnings, whose post is a TABLE of 2-4 companies (a `rows` section's `columns` and each row's `table`):
+#: an older worker's closed walker refuses those keys, and without them the picture would be the companies' names
+#: with no figure; and company stakes, whose list draws each stake's basis word as its row's `label` (an older walker
+#: refuses the key, and without it an amount would stand without its basis). `_without_look_series` drops them from
+#: the chain of any other holder.
+#: Owner decisions 2026-11-20: the insider LIST too — each row's grey detail line (`detail`) and its "Total purchases"
+#: column are news-v23 keys an older walker refuses, and without them the list would be names and totals with no shares
+#: or filed cost.
+LOOK_V23_SERIES: FrozenSet[str] = frozenset({"earnings", "company_stakes", "insider_spotlight"})
+
+
+def _without_look_series(chain: Tuple[str, ...], run: Dict[str, Any], *, lane: str) -> Tuple[str, ...]:
+    """`chain` without LOOK_V23_SERIES when the worker holding `run` did not declare WORKER_CAPABILITY_LOOK_V23 on its
+    claim — `_without_feature_series`' rule for the news-v23 earnings table: the chain falls through to its next
+    series exactly as a refused one does. One WARNING naming the worker, the capability and the series dropped;
+    `chain` as it is when it holds none or the holder declared it. Pure but for logging."""
+    cannot_draw = [s for s in chain if s in LOOK_V23_SERIES]
+    caps = run_worker_capabilities(run)
+    if not cannot_draw or WORKER_CAPABILITY_LOOK_V23 in caps:
+        return chain
+    logger.warning(
+        "marketing script%s: the day's chain %s has %s, whose picture needs the news-v23 rows (the earnings table, a "
+        "stake's basis label), but the worker holding "
+        "run_id=%s (worker_version=%r, attempt %s, declared %s) did not declare %r on its claim — dropped from the "
+        "chain (deploy the news-v23 marketing worker)", " (spotlight)" if lane == RUN_LANE_SPOTLIGHT else "",
+        list(chain), cannot_draw, run.get("id"), str(run.get("worker_version") or "")[:64], run.get("attempts"),
+        sorted(caps) or "nothing", WORKER_CAPABILITY_LOOK_V23)
+    return tuple(s for s in chain if s not in LOOK_V23_SERIES)
+
+
+#: Review of 2026-11-26: the composer refusals that leave the insider spotlight's window UNCHECKED (the trail entry
+#: carries no `TRAIL_WINDOW_KEY`): a list the per-company gates cut below `INSIDER_MIN_ROWS` companies. Like the
+#: adapter's own `insider_spotlight_too_few_companies` (which returns no checked window), its one or two companies
+#: stay in reach, so the next spotlight's window reaches back over those days (`company_news_rules.spotlight_window`,
+#: from the last RECORDED window, at most SPOTLIGHT_MAX_WINDOW_DAYS) and can make them a list of three. Nothing was
+#: posted, so the ledger and the 14-day cooldown are untouched. Every other refusal still records its window.
+SPOTLIGHT_UNCHECKED_REFUSALS: FrozenSet[str] = frozenset({"too_few_rows"})
+
+
+def _checked_window_entry(got: Any) -> Dict[str, Any]:
+    """The trail-entry part recording the Form 4 window a series' collector CHECKED (C0, 2026-11-16):
+    ``{TRAIL_WINDOW_KEY: {"start", "end"}}`` from `Candidates.checked_window`, or {} when the answer carries none (any
+    series but the insider spotlight, a source without the field, a malformed pair — logged). Pure but for logging."""
+    window = getattr(got, "checked_window", None)
+    if window is None:
+        return {}
+    if (isinstance(window, tuple) and len(window) == 2
+            and all(isinstance(d, date) and not isinstance(d, datetime) for d in window) and window[0] <= window[1]):
+        return {TRAIL_WINDOW_KEY: {"start": window[0].isoformat(), "end": window[1].isoformat()}}
+    logger.error("marketing template day: the source answered a checked window that is not a (start, end) pair of "
+                 "dates (%r) — not recorded; the next spotlight's window starts from the last recorded one",
+                 str(window)[:80])
+    return {}
 
 
 def _trail_text(trail: List[Dict[str, str]]) -> str:
@@ -1077,7 +1658,8 @@ def _extras_text(output: Any) -> str:
 
 
 class MarketingScriptService:
-    def __init__(self, runs: Optional[MarketingRunService] = None, *, writer=None, news=None) -> None:
+    def __init__(self, runs: Optional[MarketingRunService] = None, *, writer=None, news=None,
+                 art_gemini: Any = None, art_claude: Any = None) -> None:
         self._runs = runs
         # Injected in tests; the real one is imported lazily because it loads the agents
         # package (and, through it, the FMP client) — keep that out of module import.
@@ -1100,6 +1682,12 @@ class MarketingScriptService:
         # only as long as the task.
         self._terminal: Dict[str, _TerminalWrite] = {}
         self._wedge_reported: Set[str] = set()
+        # Per-post art (workstream C): (run_id, ref) → the art record a build of this process made (failures too),
+        # so a rebuild never pays twice (`_attach_art`; ART_MEMO_MAX, oldest dropped first). `art_gemini` /
+        # `art_claude`: the image client and the Claude CLIENT post_art uses — None = the shared ones (tests inject).
+        self._art_memo: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
+        self._art_gemini = art_gemini
+        self._art_claude = art_claude
 
     @property
     def runs(self) -> MarketingRunService:
@@ -1172,9 +1760,12 @@ class MarketingScriptService:
         unknown id mirrors no class, WARNING) and, when the selection recorded a fallback trail
         (`fact_sheet.selection`), the server-owned run metadata `series` + `series_trail` (≤ 8). It is
         written only when something differs, as ONE fenced write (`update_run(cas=True)`: the metadata
-        merge must not revert a claim or a worker PATCH that lands between its read and its write)."""
+        merge must not revert a claim or a worker PATCH that lands between its read and its write).
+
+        A row with no pick mirrors nothing — except a SPOTLIGHT day where nothing qualified (`_heal_skip_mirror`)."""
         ref = row.get("source_ref")
         if not ref:
+            await self._heal_skip_mirror(run, row)
             return
         template_id = row.get("template_id")
         klass = selection.content_class_of(template_id)
@@ -1211,6 +1802,38 @@ class MarketingScriptService:
             return
         run["source_ref"] = ref
 
+    async def _heal_skip_mirror(self, run: Dict[str, Any], row: Dict[str, Any]) -> None:
+        """The selection mirror of a row with NO pick. Only a trail that reached the SKIP terminal is mirrored — a
+        spotlight `nothing_qualified` row (migration 210): `series` = `selection.SKIP` and its `series_trail`, never a
+        source_ref, template or class (it has none). That trail is what lets the run-health texts and the digest
+        tell a quiet day from a data source that timed out (`digest_service._series_note` and its skip texts read
+        the RUN, never the script — OBS-1: a machinery failure must not hide behind "nothing qualified"). Every
+        other row without a pick (a rest day, a lesson day's empty pool) mirrors nothing, exactly as before: a main
+        run never reaches SKIP. The same rules as `_heal_mirror`: only on a HELD run, one fenced merge
+        (`cas=True`), written only when something differs, a lost write logged and retried by the next kick."""
+        meta_want = _selection_mirror(row)
+        if meta_want is None or meta_want.get("series") != selection.SKIP:
+            return
+        run_meta = run.get("metadata") if isinstance(run.get("metadata"), dict) else {}
+        if all(run_meta.get(k) == v for k, v in meta_want.items()):
+            return
+        if self._held_problem(run) is not None:
+            logger.info("marketing script: the skip trail was not mirrored onto run %s (not held); the script row is "
+                        "the record", run.get("id"))
+            return
+        try:
+            written = await self.runs.update_run(run["id"], metadata=meta_want, cas=True)
+        except Exception as e:
+            logger.warning("marketing script: could not mirror the skip trail onto run %s lane=%s (%s: %s) — the "
+                           "next kick retries; until then its run-health check reads the skip as unexplained",
+                           run.get("id"), run.get("lane") or RUN_LANE_MAIN, type(e).__name__, e)
+            return
+        if written is None:
+            logger.info("marketing script: run %s changed under the skip-trail mirror — nothing written; the next "
+                        "kick retries", run.get("id"))
+            return
+        run["metadata"] = {**run_meta, **meta_want}
+
     async def _select(self, run: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """The day's first selection (drop 2, contract D11). A rest day → the rest_day INSERT. Otherwise
         the series calendar (`selection.plan_for`), narrowed to the enabled classes and the shipped series
@@ -1225,13 +1848,20 @@ class MarketingScriptService:
         draw the template as a lesson — the person's name on the video's first frame, the alt text on the
         image — so its day is the LESSON (WARNING naming the worker), never a failed day. A holder that
         declared `news_templates` but not WORKER_CAPABILITY_LAYOUTS_2B (a drop-2a image) loses only the
-        series whose image is a drop-2b layout (LAYOUTS_2B_SERIES, WARNING): the rest of the chain runs."""
+        series whose image is a drop-2b layout (LAYOUTS_2B_SERIES, WARNING): the rest of the chain runs. One
+        without WORKER_CAPABILITY_LAYOUT_FEATURE loses the `feature`-layout series (FEATURE_LAYOUT_SERIES) the
+        same way (`_without_feature_series`).
+
+        A SPOTLIGHT run (migration 210) is selected by `_select_spotlight` — its own calendar, ending in a skip,
+        never the lesson. Everything below is the MAIN lane's, unchanged."""
         run_id = run["id"]
         run_date = date.fromisoformat(str(run["run_date"])[:10])
+        if self._lane(run) == RUN_LANE_SPOTLIGHT:
+            return await self._select_spotlight(run, run_date)
         plan = selection.plan_for(run_date)
         if plan.rest_day:
             row, ours = await self.runs.insert_script(
-                {"run_id": run_id, "run_date": run_date.isoformat(), "status": REST_DAY})
+                {"run_id": run_id, "run_date": run_date.isoformat(), "status": REST_DAY}, run=run)
             logger.info("marketing script %s run_id=%s run_date=%s status=%s (rest day)",
                         "SELECTED" if ours else "selection ADOPTED (a concurrent kick won)", run_id, run_date,
                         row.get("status"))
@@ -1268,10 +1898,120 @@ class MarketingScriptService:
                 run.get("attempts"), sorted(run_worker_capabilities(run)) or "nothing",
                 WORKER_CAPABILITY_LAYOUTS_2B, "it is" if len(cannot_draw) == 1 else "they are")
             chain = tuple(s for s in chain if s not in LAYOUTS_2B_SERIES)
+        chain = _without_feature_series(chain, run, lane=RUN_LANE_MAIN)
+        chain = _without_look_series(chain, run, lane=RUN_LANE_MAIN)
         if chain == (selection.LESSON,) or not chain:
+            # The lesson rotation keeps only lesson refs (`selection.lesson_refs`) and a spotlight run never picks a
+            # lesson, so the other lane's same-day pick could never matter here: this read stays exactly today's.
             recent = await self.runs.recent_source_refs(run_date, selection.news_recent_limit())
             return await self._select_lesson(run, run_date, recent, classes=classes, selection_block=None)
         return await self._await_template_build(run, run_date, plan, chain, classes)
+
+    @staticmethod
+    def _lane(run: Dict[str, Any]) -> str:
+        """The run's lane (`run_service.run_lane`: no lane is the main lane, the column default). A lane the code
+        does not know is never guessed — keys, paths and the calendar all depend on it: MarketingRequestInvalid
+        (a 422, deterministic for the run), logged at ERROR with the run id, before any selection or write."""
+        try:
+            return run_lane(run)
+        except ValueError as e:
+            logger.error("marketing script REFUSED run_id=%s run_date=%s: %s — no selection, nothing written",
+                         run.get("id"), run.get("run_date"), e)
+            raise MarketingRequestInvalid(f"run {run.get('id')}: {e}") from e
+
+    async def _select_spotlight(self, run: Dict[str, Any], run_date: date) -> Optional[Dict[str, Any]]:
+        """The SPOTLIGHT day's first selection (migration 210, owner decision 2026-11-15). The lane is news-only and
+        never ends in the lesson (the main lane posts the week's):
+
+        * the lane no longer runs on `run_date` (`selection.spotlight_day_problem`, the claim gate's own predicate: its
+          switch, its weekdays, its hours, the news classes or the per-series switch changed after the claim, or no
+          spotlight series is left once the main lane's are dropped) or the calendar rests that weekday → the
+          rest_day INSERT;
+        * the chain = `selection.spotlight_chain(run_date)`: `spotlight_plan_for` narrowed by `enabled_chain` to the
+          classes and the SAME per-series switch as the main lane (MARKETING_NEWS_SERIES ∩ the shipped series, read
+          now), WITHOUT every series the main lane's chain holds that day (C0, 2026-11-16: the spotlight never takes
+          the main lane's Money Map, which sent the main day to a second weekly lesson) — it ends in `selection.SKIP`;
+        * a holder that did not declare WORKER_CAPABILITY_NEWS_TEMPLATES cannot draw a template, and the lesson is no
+          fallback here: the day skips `nothing_qualified` (WARNING naming the worker). A holder without
+          WORKER_CAPABILITY_LAYOUTS_2B loses the drop-2b layout series, and one without
+          WORKER_CAPABILITY_LAYOUT_FEATURE the `feature`-layout series (the spotlight series' picture), as on the
+          main lane;
+        * a chain with no series left → `nothing_qualified` now; any other chain → the background template build
+          (`_await_template_build`), whose SKIP terminal writes the same `nothing_qualified` row."""
+        run_id = run["id"]
+        plan = selection.spotlight_plan_for(run_date)
+        problem = selection.spotlight_day_problem(run_date) if not plan.rest_day else "rest_day"
+        if problem is not None:
+            row, ours = await self.runs.insert_script(
+                {"run_id": run_id, "run_date": run_date.isoformat(), "status": REST_DAY}, run=run)
+            logger.warning("marketing script %s run_id=%s run_date=%s lane=spotlight status=%s (the spotlight lane "
+                           "does not run that day NOW — %s: MARKETING_SPOTLIGHT_ENABLED, MARKETING_SPOTLIGHT_WEEKDAYS, "
+                           "the hours, the news classes or MARKETING_NEWS_SERIES changed after the claim, or no "
+                           "spotlight series is left once the main lane's are dropped)",
+                           "SELECTED" if ours else "selection ADOPTED (a concurrent kick won)", run_id, run_date,
+                           row.get("status"), problem)
+            return row
+        classes = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
+        news_series = (selection.parse_news_series(settings.MARKETING_NEWS_SERIES)
+                       if classes != frozenset({"A"}) else frozenset())
+        # C0 (2026-11-16): the chain is the calendar's narrowed by the switches AND without every series the main
+        # lane's chain holds that day (`selection.spotlight_chain`) — the spotlight never takes the main lane's series.
+        narrowed = selection.spotlight_chain(run_date, classes=classes, news_series=news_series)
+        chain = narrowed.chain
+        logger.info("marketing script (spotlight): content classes %s news_series=%s run_id=%s run_date=%s plan=%s "
+                    "chain=%s main lane's series left out=%s", ",".join(sorted(classes)),
+                    ",".join(sorted(news_series)) or "none", run_id, run_date, plan.reason, list(chain),
+                    list(narrowed.main_lane) or "none")
+        caps = run_worker_capabilities(run)
+        series = [s for s in chain if s not in selection.CHAIN_TERMINALS]
+        if series and WORKER_CAPABILITY_NEWS_TEMPLATES not in caps:
+            logger.warning(
+                "marketing script (spotlight): the day's chain %s has news series, but the worker holding run_id=%s "
+                "(worker_version=%r, attempt %s, declared %s) did not declare %r on its claim — an older worker image "
+                "cannot draw a template, and a spotlight day never falls to the lesson: the day SKIPS "
+                "(nothing_qualified) — deploy the drop-2 marketing worker", list(chain), run_id,
+                str(run.get("worker_version") or "")[:64], run.get("attempts"), sorted(caps) or "nothing",
+                WORKER_CAPABILITY_NEWS_TEMPLATES)
+            return await self._skip_nothing_qualified(run, run_date, {
+                "plan": plan.reason, "chain": list(chain),
+                "trail": [{"series": selection.SKIP, "outcome": "no_candidates",
+                           "reason": "worker_without_news_templates"}]})
+        cannot_draw = [s for s in series if s in LAYOUTS_2B_SERIES]
+        if cannot_draw and WORKER_CAPABILITY_LAYOUTS_2B not in caps:
+            logger.warning(
+                "marketing script (spotlight): the day's chain %s has %s, whose post image is a drop-2b layout (%s), "
+                "but the worker holding run_id=%s (worker_version=%r, attempt %s, declared %s) did not declare %r on "
+                "its claim — dropped from the chain (deploy the drop-2b marketing worker)", list(chain), cannot_draw,
+                "/".join(WORKER_LAYOUTS_2B), run_id, str(run.get("worker_version") or "")[:64], run.get("attempts"),
+                sorted(caps) or "nothing", WORKER_CAPABILITY_LAYOUTS_2B)
+            chain = tuple(s for s in chain if s not in LAYOUTS_2B_SERIES)
+        chain = _without_feature_series(chain, run, lane=RUN_LANE_SPOTLIGHT)
+        chain = _without_look_series(chain, run, lane=RUN_LANE_SPOTLIGHT)
+        if not any(s not in selection.CHAIN_TERMINALS for s in chain):
+            return await self._skip_nothing_qualified(run, run_date, {
+                "plan": plan.reason, "chain": list(chain),
+                "trail": [{"series": selection.SKIP, "outcome": "no_candidates"}]})
+        return await self._await_template_build(run, run_date, plan, chain, classes)
+
+    async def _skip_nothing_qualified(self, run: Dict[str, Any], run_date: date,
+                                      selection_block: Dict[str, Any]) -> Dict[str, Any]:
+        """A SPOTLIGHT day where nothing qualified: ONE first-write-wins INSERT of a `rejected` script, reject_reason
+        `nothing_qualified` (migration 210's CHECK), carrying the selection trail in its fact sheet — so the day is
+        VISIBLE (the run closes `skipped`, the trail says why), never a rest day and never the lesson. A concurrent
+        writer's row is adopted. The lane comes from the run (`insert_script`)."""
+        run_id = run["id"]
+        row, ours = await self.runs.insert_script({
+            "run_id": run_id, "run_date": run_date.isoformat(), "status": REJECTED,
+            "reject_reason": REASON_NOTHING_QUALIFIED, "last_error": "spotlight: nothing qualified",
+            "fact_sheet": {"selection": selection_block},
+        }, run=run)
+        trail = selection_block.get("trail") if isinstance(selection_block.get("trail"), list) else []
+        logger.warning("marketing script %s run_id=%s run_date=%s lane=%s status=%s reason=%s plan=%s trail=%s — the "
+                       "day skips, never the lesson",
+                       "NOTHING QUALIFIED" if ours else "selection ADOPTED (a concurrent kick won)", run_id, run_date,
+                       run.get("lane") or RUN_LANE_MAIN, row.get("status"), row.get("reject_reason"),
+                       selection_block.get("plan"), _trail_text(trail))
+        return row
 
     async def _select_lesson(self, run: Dict[str, Any], run_date: date, recent: List[str], *,
                              classes: FrozenSet[str], selection_block: Optional[Dict[str, Any]]
@@ -1308,7 +2048,7 @@ class MarketingScriptService:
                 "template_id": sel.template_id,
                 "fact_sheet": sheet,
             }
-        row, ours = await self.runs.insert_script(new)
+        row, ours = await self.runs.insert_script(new, run=run)
         logger.info(
             "marketing script %s run_id=%s run_date=%s status=%s source_ref=%s template=%s "
             "pool=%d recent=%d", "SELECTED" if ours else "selection ADOPTED (a concurrent kick won)",
@@ -1368,7 +2108,8 @@ class MarketingScriptService:
     async def _build_template_day(self, run: Dict[str, Any], run_date: date, plan: "selection.DayPlan",
                                   chain: Tuple[str, ...], classes: FrozenSet[str]) -> Dict[str, Any]:
         """Walk the day's chain until a series yields a record its template composes and re-checks, and
-        store it as the day's ACCEPTED script — or fall to the lesson at the chain's end. Always ends in
+        store it as the day's ACCEPTED script — or, at the chain's end, fall to the lesson (main) or skip
+        `nothing_qualified` (spotlight). Always ends in
         exactly ONE `insert_script` (first write wins: a concurrent builder's row is adopted). No model,
         no lease, 0 tokens. Every fallback lands in the trail (`fact_sheet.selection`), logged.
 
@@ -1382,8 +2123,17 @@ class MarketingScriptService:
         finished (its INSERT committed, its done-callback ran) starts a new build — which ADOPTS that row
         here instead of walking the adapter again (a series that timed out in the first build would
         otherwise hit FMP a second time, only to lose its INSERT with 23505). A new build is created only
-        after the previous one's done-callback ran, so its INSERT is already visible to this read."""
+        after the previous one's done-callback ran, so its INSERT is already visible to this read.
+
+        The two lanes (migration 210): a MAIN chain ends in the lesson, a SPOTLIGHT chain in `selection.SKIP` — the
+        `nothing_qualified` row (`_skip_nothing_qualified`), never the lesson. Either lane keeps away from the other
+        lane's day (`_cross_lane`): the other lane's same-day ledger refs join the exclude set (`recent_source_refs`
+        with the lane, which reads them first); a series the other lane used that day falls back `other_lane`
+        before the source is asked; a candidate whose LEAD company (`lead_company`) the other lane drew within
+        CROSS_LANE_COMPANY_DAYS is EXCLUDED — collected apart from the refusals, so it never reaches the source's
+        refusal memo (a Money Map or a stake held back for weeks because of the other lane's post)."""
         run_id = str(run["id"])
+        lane = self._lane(run)
         existing = await self.runs.get_script(run_id)
         if existing is not None:
             logger.info("marketing template day: run_id=%s already has its row (status=%s source=%s) — a "
@@ -1392,25 +2142,58 @@ class MarketingScriptService:
             return existing
         started = _mono()
         deadline = started + TEMPLATE_BUILD_BUDGET_SECONDS
-        recent = await self.runs.recent_source_refs(run_date, selection.news_recent_limit())
-        exclude = frozenset(r for r in recent if isinstance(r, str))
+        recent = await self.runs.recent_source_refs(run_date, selection.news_recent_limit(), lane=lane)
+        same_day_refs, taken_today, avoid_leads = await self._cross_lane(run, run_date, lane)
+        exclude = frozenset(r for r in recent if isinstance(r, str)) | same_day_refs
+        # The insider spotlight's ledger inputs (B decisions 5-6) — read only when the day's chain holds it, so every
+        # other build reads exactly what it always did. A failed read raises like the two reads above.
+        spotlight_kw = (await self._spotlight_source_kw(run, run_date)
+                        if SPOTLIGHT_CONTEXT_SERIES in chain else {})
+        # news-v23 phase 3 (the weekly theme post): its rotation's own ledger read and the holder's drawable angles —
+        # read only when the day's chain holds the theme series (Wednesdays), so every other build is unchanged
+        theme_kw = (await self._theme_source_kw(run, run_date)
+                    if THEME_CONTEXT_SERIES in chain else {})
+        spotlight = lane == RUN_LANE_SPOTLIGHT
+        end_of_chain = "the skip (nothing_qualified)" if spotlight else "the lesson"
         try:
             news = self._news_source_fn()
         except Exception as e:  # noqa: BLE001 — a broken adapter import must not cost the day its lesson
             logger.exception("marketing template day: the company-news source could not be loaded run_id=%s "
-                             "(%s: %s) — every series falls through to the lesson", run_id, type(e).__name__, e)
+                             "(%s: %s) — every series falls through to %s", run_id, type(e).__name__, e,
+                             end_of_chain)
             news = None
         unavailable_cls = getattr(news, "MarketingNewsUnavailable", None)
         store_state = smart_link.store_state()
         allow_x_url = bool(settings.MARKETING_X_ALLOW_URLS)
+        # news-v22: the closed first-line prefixes, read ONCE for this build like allow_x_url and frozen into the
+        # accepted output (`first_line_prefix_on`): create_posts re-composes from the frozen value, never today's switch
+        first_line_prefix = settings.MARKETING_FIRST_LINE_PREFIX is True
         image_posts = bool(settings.MARKETING_IMAGE_POSTS)   # read ONCE for this build, like a generation
+        # review 2026-11-20: the platforms whose post will carry the picture, read ONCE for this build with the switches
+        # the freeze reads (MARKETING_X_IMAGES, MARKETING_IMAGE_PLATFORMS) — `compose` writes a list series' X /
+        # Bluesky caption for its format and freezes them into the output (`picture_outlets`), which then BOUNDS the
+        # freeze's own read (`freeze_post_formats`: a platform the composition did not picture never posts it)
+        picture_outlets = template_picture_outlets(image_posts, bool(settings.MARKETING_X_IMAGES),
+                                                   image_platforms_setting())
+        # Per-post art (workstream C): read at the build's start so each candidate's ONE holder read also serves the
+        # art gate (`art_holder`); `_attach_art` reads the switch again, at its own call (off then: no art, no key).
+        art_on = settings.MARKETING_ART_ENABLED is True
         trail: List[Dict[str, str]] = []
 
         def block(extra: Dict[str, str]) -> Dict[str, Any]:
             return {"plan": plan.reason, "chain": list(chain), "trail": [*trail, extra]}
 
         for i, series in enumerate(chain):
-            if series == selection.LESSON:
+            if series in selection.CHAIN_TERMINALS:
+                if spotlight:
+                    if series != selection.SKIP:   # unreachable: `spotlight_plan_for` never names the lesson
+                        logger.error("marketing template day: the spotlight chain %s reached %r run_id=%s — a "
+                                     "spotlight day never posts the lesson: it skips", list(chain), series, run_id)
+                    return await self._skip_nothing_qualified(
+                        run, run_date, block({"series": selection.SKIP, "outcome": "no_candidates"}))
+                if series != selection.LESSON:     # unreachable: `plan_for` never names the skip
+                    logger.error("marketing template day: the main chain %s reached %r run_id=%s — the main lane "
+                                 "always ends in the lesson: selecting it", list(chain), series, run_id)
                 row = await self._select_lesson(run, run_date, recent, classes=classes,
                                                 selection_block=block({"series": selection.LESSON,
                                                                        "outcome": "chosen"}))
@@ -1418,6 +2201,10 @@ class MarketingScriptService:
                             _trail_text(trail), _mono() - started)
                 return row
             nxt = chain[i + 1] if i + 1 < len(chain) else None
+            if series in taken_today:
+                # Rule (c): the other lane already used this series today — never asked, never a refusal.
+                self._fell_back(run_id, trail, series, OTHER_LANE, OTHER_LANE_SERIES, nxt)
+                continue
             if news is None:
                 self._fell_back(run_id, trail, series, "error", "news_source_unavailable", nxt)
                 continue
@@ -1429,7 +2216,9 @@ class MarketingScriptService:
             try:
                 got = await asyncio.wait_for(
                     news.candidates(series, run_date=run_date, exclude=exclude, limit=MAX_CANDIDATES_PER_SERIES,
-                                    deadline=_mono() + cap),
+                                    deadline=_mono() + cap,
+                                    **(spotlight_kw if series == SPOTLIGHT_CONTEXT_SERIES else {}),
+                                    **(theme_kw if series == THEME_CONTEXT_SERIES else {})),
                     cap + SERIES_WAIT_SLACK_SECONDS)
             except asyncio.CancelledError:
                 raise
@@ -1448,24 +2237,41 @@ class MarketingScriptService:
             records = tuple(getattr(got, "records", ()) or ())
             rejections = getattr(got, "rejections", None)
             rejections = dict(rejections) if isinstance(rejections, Mapping) else {}
+            # C0: the Form 4 window the insider spotlight CHECKED rides on its trail entry, whatever became of it
+            checked = _checked_window_entry(got) if series == SPOTLIGHT_CONTEXT_SERIES else {}
             refused: List[str] = []
+            excluded: List[str] = []
             for rec in records:
-                seen = len(refused)
+                seen, kept_out = len(refused), len(excluded)
+                art_holder: Optional[Dict[str, Any]] = {} if art_on else None
                 built = await self._compose_candidate(
-                    run, run_date, series, rec, rejections, block({"series": series, "outcome": "chosen"}),
+                    run, run_date, series, rec, rejections, block({"series": series, "outcome": "chosen", **checked}),
                     store_state=store_state, allow_x_url=allow_x_url, image_posts=image_posts,
-                    deadline=deadline, news=news, refused=refused)
+                    deadline=deadline, news=news, refused=refused, excluded=excluded, avoid_leads=avoid_leads,
+                    first_line_prefix=first_line_prefix, art_holder=art_holder, picture_outlets=picture_outlets)
                 if built is None:
-                    self._report_template_refusal(news, series, rec, refused[seen:], run_date=run_date,
-                                                  run_id=run_id)
+                    # Only a TEMPLATE refusal reaches the source's refusal memo; a cross-lane exclusion never does
+                    # (the memo would hold back a Money Map for 28 days, a stake for its fingerprint's life).
+                    if len(refused) > seen:
+                        self._report_template_refusal(news, series, rec, refused[seen:], run_date=run_date,
+                                                      run_id=run_id)
+                    elif len(excluded) == kept_out:   # unreachable: every None names a refusal or an exclusion
+                        logger.error("marketing series %s: a candidate was dropped with no refusal code and no "
+                                     "exclusion run_id=%s — not reported to the source", series, run_id)
                     continue
                 output, sheet, ref = built
+                if art_on:
+                    # The record is chosen, composed, re-checked as stored and frozen: the art step (its own budget,
+                    # never a refusal — any failure is an art record saying why, and the day goes on) runs here,
+                    # BEFORE the one INSERT, so its spend lands on the row it belongs to.
+                    output = await self._attach_art(run, run_date, series, output, sheet, ref, rec=rec, news=news,
+                                                    holder=art_holder, started=started)
                 row, ours = await self.runs.insert_script({
                     "run_id": run_id, "run_date": run_date.isoformat(), "status": ACCEPTED,
                     "source_ref": ref, "template_id": series, "output": output, "violations": [],
                     "fact_sheet": sheet, "generation_id": str(uuid.uuid4()), "generations": 0,
                     "model": None, "prompt_version": news_templates.TEMPLATE_VERSION, "tokens_used": 0,
-                })
+                }, run=run)
                 if ours:
                     logger.info("marketing template ACCEPTED run_id=%s series=%s class=%s source=%s trail=%s "
                                 "formats=%s video_features=%s extras=%s logos=%d/%d in %.1fs", run_id, series,
@@ -1476,23 +2282,190 @@ class MarketingScriptService:
                 else:
                     logger.info("marketing template day ADOPTED a concurrent writer's row run_id=%s status=%s "
                                 "source=%s (ours was %s)", run_id, row.get("status"), row.get("source_ref"), ref)
+                    self._report_lost_art(run_id, output)
                 return row
             if refused:
-                logger.error("marketing series %s refused every candidate run_id=%s codes=%s", series, run_id,
-                             sorted(set(refused)))
-                self._fell_back(run_id, trail, series, "all_refused", sorted(set(refused))[0], nxt)
-            elif records:   # unreachable: a record either composes or is refused
-                self._fell_back(run_id, trail, series, "all_refused", "unknown", nxt)
+                logger.error("marketing series %s refused every candidate%s run_id=%s codes=%s", series,
+                             (f" it did not exclude ({len(excluded)} excluded: the other lane drew their lead "
+                              "company)") if excluded else "", run_id, sorted(set(refused)))
+                # review of 2026-11-26: a list the composer cut below three companies (`too_few_rows`) or whose lead the
+                # other lane drew leaves its window UNCHECKED — its companies stay in reach of the next spotlight
+                # (`SPOTLIGHT_UNCHECKED_REFUSALS`); any other refusal is a checked window, as before
+                unchecked = set(refused) <= SPOTLIGHT_UNCHECKED_REFUSALS
+                self._fell_back(run_id, trail, series, "all_refused", sorted(set(refused))[0], nxt,
+                                extra=None if unchecked else checked)
+            elif excluded:
+                # Rule (b): every candidate's lead company was drawn by the other lane within CROSS_LANE_COMPANY_DAYS.
+                # Review of 2026-11-26: no post was made, so the window stays unchecked (the lead's 2-day hold ends and
+                # the next spotlight's window reaches back over these days)
+                self._fell_back(run_id, trail, series, OTHER_LANE, OTHER_LANE_COMPANY, nxt)
+            elif records:   # unreachable: a record either composes, is refused or is excluded
+                self._fell_back(run_id, trail, series, "all_refused", "unknown", nxt, extra=checked)
             elif rejections and set(k for k, n in rejections.items() if n) == {"already_posted"}:
-                self._fell_back(run_id, trail, series, "all_recent", str(getattr(got, "skip_reason", "") or ""), nxt)
+                self._fell_back(run_id, trail, series, "all_recent", str(getattr(got, "skip_reason", "") or ""), nxt,
+                                extra=checked)
             else:
                 self._fell_back(run_id, trail, series, "no_candidates",
-                                str(getattr(got, "skip_reason", "") or ""), nxt)
-        # Unreachable while every chain ends in the lesson (`selection.enabled_chain`); never a silent day.
+                                str(getattr(got, "skip_reason", "") or ""), nxt, extra=checked)
+        # Unreachable while every chain ends in a terminal (`selection.enabled_chain`); never a silent day.
+        if spotlight:
+            logger.error("marketing template day: the spotlight chain %s ended without its skip run_id=%s — the day "
+                         "skips (nothing_qualified)", list(chain), run_id)
+            return await self._skip_nothing_qualified(
+                run, run_date, block({"series": selection.SKIP, "outcome": "no_candidates"}))
         logger.error("marketing template day: the chain %s ended without the lesson run_id=%s — selecting the "
                      "lesson", list(chain), run_id)
         return await self._select_lesson(run, run_date, recent, classes=classes,
                                          selection_block=block({"series": selection.LESSON, "outcome": "chosen"}))
+
+    async def _cross_lane(self, run: Dict[str, Any], run_date: date, lane: str
+                          ) -> Tuple[FrozenSet[str], FrozenSet[str], FrozenSet[str]]:
+        """What the OTHER lane took (the spotlight lane, migration 210), from the ACCEPTED scripts of every lane dated
+        [run_date − CROSS_LANE_COMPANY_DAYS, run_date] — through run_date + 1 for a MAIN run (below) —
+        (`runs.lane_scripts_between`, one bounded read), this run's own row left out:
+
+        * (a) the other lane's ledger refs dated `run_date` (the `recent` read stops BEFORE the run date) — and, for a
+          MAIN run, dated run_date + 1;
+        * (c) the series (template ids) the other lane used on `run_date` (that day only: C0 keeps the spotlight off
+          the main lane's series, and this stays the guard for anything the calendars cannot see);
+        * (b) the LEAD companies to avoid, as `lead_keys` (the issuer root and the display name — GOOGL and GOOG are
+          one lead): every lane's rows for a SPOTLIGHT run (its own earlier days included), only SPOTLIGHT rows for a
+          MAIN run — so with no spotlight row the main lane's day is byte for byte what it was.
+
+        The MAIN run's forward day (C0, 2026-11-16): a main run of D − 1 resumed on day D (its resume window runs until
+        the main hour, after the spotlight's) may be built AFTER D's spotlight was accepted; the `recent` read stops
+        before D − 1, so without it neither read sees D's pick and the two lanes could post one ledger key. The claim
+        window holds only today and yesterday, so run_date + 1 is as far as a row can be newer.
+
+        A row whose lane does not read back counts as the other lane's (keeping away from more is the safe side).
+        A failed or over-bound read RAISES, like the `recent` read beside it: the build crashes into the kick, the
+        worker retries, and nothing is posted on a guess about the other lane."""
+        through = run_date + timedelta(days=1) if lane == RUN_LANE_MAIN else run_date
+        rows = await self.runs.lane_scripts_between(run_date - timedelta(days=CROSS_LANE_COMPANY_DAYS), through)
+        run_id, today, last = str(run["id"]), run_date.isoformat(), through.isoformat()
+        refs: Set[str] = set()
+        taken: Set[str] = set()
+        leads: Set[str] = set()
+        for r in rows:
+            if not isinstance(r, dict) or str(r.get("run_id")) == run_id:
+                continue
+            row_lane = r.get("lane") or RUN_LANE_MAIN
+            row_day = str(r.get("run_date") or "")[:10]
+            if today <= row_day <= last and row_lane != lane:
+                if isinstance(r.get("source_ref"), str) and r["source_ref"]:
+                    refs.add(r["source_ref"])
+                if row_day == today and isinstance(r.get("template_id"), str) and r["template_id"]:
+                    taken.add(r["template_id"])
+            if lane == RUN_LANE_SPOTLIGHT or row_lane != RUN_LANE_MAIN:
+                leads.update(lead_keys(r.get("output")))
+        if refs or taken or leads:
+            logger.info("marketing template day: cross-lane run_id=%s lane=%s run_date=%s other lane's refs %s..%s=%s "
+                        "series today=%s lead companies to avoid (last %d ET days)=%s", run_id, lane, run_date, today,
+                        last, sorted(refs)[:10], sorted(taken)[:10], CROSS_LANE_COMPANY_DAYS, sorted(leads)[:20])
+        return frozenset(refs), frozenset(taken), frozenset(leads)
+
+    async def _theme_source_kw(self, run: Dict[str, Any], run_date: date) -> Dict[str, Any]:
+        """The weekly theme post's two inputs, for its `candidates()` call only (news-v23 phase 3):
+
+        * ``theme_history`` — the `source_ref` of every theme script dated [run_date − THEME_HISTORY_DAYS, run_date]
+          (`runs.theme_refs_between`: its OWN bounded read, so the rotation sees twelve weeks of theme keys whatever
+          the other series posted — the general `recent` read is sized by row count, not by days);
+        * ``theme_angles`` — the angles the worker holding the run can draw: every angle with
+          WORKER_CAPABILITY_THEME_ANGLES, else "how they make money" only (THEME_ANGLES_WITHOUT_CAPABILITY: the `grid`
+          it already draws). The adapter skips the others (``theme_angle_unsupported``), never a picture the worker
+          would refuse;
+        * ``theme_classes`` (2026-11-20) — the content classes switched on NOW (MARKETING_CONTENT_CLASSES): an angle of
+          filings (`news_rules.THEME_ANGLE_CLASSES`: the insider scorecard and Congress, class C) is skipped with no read
+          while class C is off (``theme_angle_class_off``); create_posts re-checks it (`record_content_classes`).
+
+        A failed or over-bound read RAISES (logged at ERROR with the run id), like the build's other ledger reads: the
+        build crashes into the kick, the worker retries, and no theme is chosen on a guess about its last post."""
+        run_id = str(run["id"])
+        try:
+            refs = await self.runs.theme_refs_between(run_date - timedelta(days=news_rules.THEME_HISTORY_DAYS),
+                                                      run_date)
+        except Exception as e:
+            logger.error("marketing template day: the theme rotation's ledger read failed run_id=%s run_date=%s "
+                         "(%s: %s) — the build stops; the next kick builds the day afresh", run_id, run_date,
+                         type(e).__name__, e)
+            raise
+        caps = run_worker_capabilities(run)
+        angles = (news_rules.THEME_ANGLES if WORKER_CAPABILITY_THEME_ANGLES in caps
+                  else THEME_ANGLES_WITHOUT_CAPABILITY)
+        if WORKER_CAPABILITY_THEME_ANGLES not in caps:
+            logger.warning("marketing template day: the worker holding run_id=%s did not declare %r — the theme post "
+                           "may take only the angle(s) %s (deploy the theme-angles marketing worker)", run_id,
+                           WORKER_CAPABILITY_THEME_ANGLES, list(angles))
+        classes = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
+        off = sorted(a for a, k in news_rules.THEME_ANGLE_CLASSES.items() if k not in classes)
+        if off:
+            logger.info("marketing template day run_id=%s: class(es) %s off (MARKETING_CONTENT_CLASSES) — the theme "
+                        "post skips the angle(s) %s", run_id,
+                        sorted({news_rules.THEME_ANGLE_CLASSES[a] for a in off}), off)
+        return {"theme_history": tuple(refs[-256:]), "theme_angles": tuple(angles),
+                "theme_classes": tuple(sorted(classes))}
+
+    async def _spotlight_source_kw(self, run: Dict[str, Any], run_date: date) -> Dict[str, Any]:
+        """The insider spotlight's two ledger inputs, for its `candidates()` call only (the spotlight lane, B decisions 5
+        and 6, 2026-11-15), from two bounded reads:
+
+        * ``spotlight_checked_through`` — the END of the Form 4 window the newest SPOTLIGHT script dated in
+          [run_date − `SPOTLIGHT_ISSUER_COOLDOWN_DAYS`, run_date) recorded as checked (`runs.last_checked_window`, C0,
+          2026-11-16: from that script's trail entry, `TRAIL_WINDOW_KEY`), or None: the window starts the day after it
+          (`company_news_rules.spotlight_window`, never earlier than a week back) — so a 13F-led day, which checks no
+          Form 4 window, loses no filing, and a mid-week change of the spotlight days leaves no gap;
+        * ``spotlight_recent`` — ``(symbol, display name)`` of EVERY company of every ACCEPTED insider list dated
+          [run_date − `SPOTLIGHT_ISSUER_COOLDOWN_DAYS`, run_date] (`runs.lane_scripts_between`), this run's own row left
+          out: the 14-day issuer cooldown, exact on the RUN date (a ledger key carries only its window's start). The
+          symbols are the key's (`insider_spotlight_key_parts`: owner decisions 2026-11-20, each company of a list
+          once), else the output's lead (`lead_company`); each name its logo ref's (`_logo_ref_names`). A row that
+          names none is skipped with a WARNING — the adapter's own ledger rule still covers it.
+
+        A failed or over-bound read RAISES (logged at ERROR with the run id), like the build's other reads: the build
+        crashes into the kick, the worker retries, and no spotlight is chosen on a guess about its window or its
+        cooldown."""
+        run_id = str(run["id"])
+        try:
+            checked = await self.runs.last_checked_window(
+                RUN_LANE_SPOTLIGHT, SPOTLIGHT_CONTEXT_SERIES, before=run_date,
+                within_days=news_rules.SPOTLIGHT_ISSUER_COOLDOWN_DAYS)
+            rows = await self.runs.lane_scripts_between(
+                run_date - timedelta(days=news_rules.SPOTLIGHT_ISSUER_COOLDOWN_DAYS), run_date)
+        except Exception as e:
+            logger.error("marketing template day: the insider spotlight's ledger reads failed run_id=%s run_date=%s "
+                         "(%s: %s) — the build stops; the next kick builds the day afresh", run_id, run_date,
+                         type(e).__name__, e)
+            raise
+        recent: List[Tuple[str, str]] = []
+        for r in rows:
+            if (not isinstance(r, dict) or r.get("template_id") != SPOTLIGHT_CONTEXT_SERIES
+                    or str(r.get("run_id")) == run_id):
+                continue
+            # owner decisions 2026-11-20 (the insider LIST): EVERY company of the list is on cooldown — each symbol of
+            # its key, with the display name its logo ref carries; a key that does not read back: the output's lead
+            parts = news_rules.insider_spotlight_key_parts(r.get("source_ref"))
+            syms = list(parts[0]) if parts is not None else [lead_company(r.get("output"))]
+            names = _logo_ref_names(r.get("output"))
+            pairs: List[Tuple[str, str]] = []
+            for sym in syms:
+                ok = sym if sym is not None and news_rules.canonical_symbol(sym) == sym else ""
+                name = names.get(ok, "") if ok else (lead_company_name(r.get("output")) or "")
+                if ok or name:
+                    pairs.append((ok, name))
+            if not pairs:
+                logger.warning("marketing template day: an accepted insider spotlight (run_date=%s source=%s) names no "
+                               "company — the cooldown reads its ledger key alone run_id=%s",
+                               str(r.get("run_date"))[:10], str(r.get("source_ref"))[:80], run_id)
+                continue
+            for pair in pairs:
+                if pair not in recent:
+                    recent.append(pair)
+        through = checked[1] if checked is not None else None
+        logger.info("marketing template day: insider spotlight inputs run_id=%s run_date=%s last checked window=%s "
+                    "cooldown companies (last %d days)=%s", run_id, run_date,
+                    f"{checked[0]}..{checked[1]}" if checked is not None else "none",
+                    news_rules.SPOTLIGHT_ISSUER_COOLDOWN_DAYS, [s or n for s, n in recent][:20])
+        return {"spotlight_checked_through": through, "spotlight_recent": tuple(recent)}
 
     @staticmethod
     def _report_template_refusal(news: Any, series: str, rec: Any, codes: List[str], *, run_date: date,
@@ -1514,8 +2487,11 @@ class MarketingScriptService:
         try:
             remember(rec, tuple(codes), run_date=run_date)
         except Exception as e:  # noqa: BLE001 — a memo write must never cost the day its next candidate
-            # the record's company symbol (a Money Map) or its stake id (a stake) — never a person's name
+            # the record's company symbol (a Money Map), its stake id (a stake) or — news-v23 — the investor and the
+            # stake ids of a several-stake post — never a person's name
+            stakes = getattr(rec, "stakes", None) if isinstance(rec, news_rules.CompanyStakes) else None
             which = (getattr(getattr(rec, "company", None), "symbol", None) or getattr(rec, "stake_id", None)
+                     or (f"{rec.investor.symbol}'s stakes " + ",".join(s.stake_id for s in stakes) if stakes else None)
                      or "a record")
             logger.warning("marketing series %s: the template refusal of %s (%s) could not be reported to the "
                            "company-news source run_id=%s (%s: %s) — the record may be offered first again",
@@ -1523,24 +2499,49 @@ class MarketingScriptService:
                            type(e).__name__, e, exc_info=True)
 
     @staticmethod
-    def _fell_back(run_id: str, trail: List[Dict[str, str]], series: str, outcome: str, reason: str,
-                   nxt: Optional[str]) -> None:
-        entry = {"series": series, "outcome": outcome}
+    def _fell_back(run_id: str, trail: List[Dict[str, Any]], series: str, outcome: str, reason: str,
+                   nxt: Optional[str], *, extra: Optional[Mapping[str, Any]] = None) -> None:
+        """One fallback step on the trail: `{series, outcome, reason?}` plus `extra` (the insider spotlight's checked
+        window, C0 — `_checked_window_entry`), logged at WARNING."""
+        entry: Dict[str, Any] = {"series": series, "outcome": outcome}
         reason = str(reason or "")[:60]
         if reason:
             entry["reason"] = reason
+        if extra:
+            entry.update(extra)
         trail.append(entry)
-        logger.warning("marketing series FELL BACK run_id=%s from=%s outcome=%s reason=%s next=%s", run_id, series,
-                       outcome, reason or "-", nxt)
+        logger.warning("marketing series FELL BACK run_id=%s from=%s outcome=%s reason=%s next=%s%s", run_id, series,
+                       outcome, reason or "-", nxt,
+                       f" checked={entry[TRAIL_WINDOW_KEY]['start']}..{entry[TRAIL_WINDOW_KEY]['end']}"
+                       if TRAIL_WINDOW_KEY in entry else "")
 
     async def _compose_candidate(
         self, run: Dict[str, Any], run_date: date, series: str, rec: Any, rejections: Dict[str, Any],
         selection_block: Dict[str, Any], *, store_state: str, allow_x_url: bool, image_posts: bool,
-        deadline: float, news: Any, refused: List[str],
+        deadline: float, news: Any, refused: List[str], excluded: List[str], avoid_leads: FrozenSet[str],
+        first_line_prefix: bool = False, art_holder: Optional[Dict[str, Any]] = None,
+        picture_outlets: Optional[Sequence[str]] = None,
     ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], str]]:
         """(output, fact sheet, ledger key) of ONE candidate record, as stored — or None, its refusal code
         appended to `refused` (logged). Never raises but for a cancellation: a candidate the template
-        cannot write is the next candidate's turn."""
+        cannot write is the next candidate's turn.
+
+        A candidate that composes and passes its first re-check but whose LEAD company (`lead_keys`: its issuer root or
+        its display name) is in `avoid_leads` (the other lane drew it within CROSS_LANE_COMPANY_DAYS, `_cross_lane`) is
+        EXCLUDED: None, with
+        OTHER_LANE_COMPANY appended to `excluded` — NOT to `refused`, so the caller never reports it to the source's
+        refusal memo. Checked before any logo fetch (no network for a candidate that cannot post). A real refusal
+        always wins: a candidate the template refuses is refused (and reported) whatever its company.
+
+        `first_line_prefix` (news-v22): MARKETING_FIRST_LINE_PREFIX as THIS build read it, once — `compose` freezes it
+        into the output (`first_line_prefix_on`), and both re-checks here and create_posts' re-compose from that.
+
+        `art_holder` (workstream C): handed to `_frozen_output`, which records its one holder read there for the art
+        step (`_attach_art`); None while the art switch is off.
+
+        `picture_outlets` (review 2026-11-20): the platforms whose post will carry the picture, as THIS build read the
+        switches once (`template_picture_outlets`) — `compose` freezes it into the output; None (a caller that does
+        not say): every picture platform, `compose`'s default."""
         run_id = str(run["id"])
         try:
             if getattr(rec, "series", None) != series:
@@ -1549,10 +2550,40 @@ class MarketingScriptService:
             # Compose from the JSON round trip of the record — exactly what the fact sheet stores and
             # create_posts' re-check reads back: no float / date / key-order drift between the two.
             rec = news_rules.record_from_dict(json.loads(json.dumps(news_rules.record_to_dict(rec), allow_nan=False)))
+            # news-v23: a several-company post (earnings, Congress Count, company stakes) DROPS the companies its
+            # template refuses one by one — before the fact sheet and the ledger key, so both name exactly the companies
+            # the post draws (too few left: refused like any record)
+            narrowed = news_templates.drop_refused_rows(rec, run_date)
+            if isinstance(rec, news_rules.CompanyStakes) and narrowed is not rec:
+                # RR3-STAKES-TEMPLATE-WALL, news-v23: each stake the template dropped from the post is reported to the
+                # source's refusal memo like a refused record — it never wins its investor the head of the walk again
+                kept_ids = {st.stake_id for st in narrowed.stakes}
+                for st in rec.stakes:
+                    if st.stake_id not in kept_ids:
+                        self._report_template_refusal(news, series, st, ["template_row_refused"], run_date=run_date,
+                                                      run_id=run_id)
+            rec = narrowed
+            # Rule (b), review 2026-11-20: a several-company post whose LEAD the other lane drew within
+            # CROSS_LANE_COMPANY_DAYS drops that company (and a next lead it drew too) — before the fact sheet and the
+            # ledger key, so both name only the companies the post draws — never the whole day's results
+            lead_free, lead_dropped = narrow_other_lane_lead(rec, avoid_leads)
+            if lead_dropped:
+                if lead_free is None:
+                    logger.info("marketing series %s candidate EXCLUDED run_id=%s: its lead(s) %s were drawn by the other "
+                                "lane within %d ET days and too few companies are left (not a template refusal, not "
+                                "reported to the source)", series, run_id, ",".join(lead_dropped),
+                                CROSS_LANE_COMPANY_DAYS)
+                    excluded.append(OTHER_LANE_COMPANY)
+                    return None
+                logger.info("marketing series %s run_id=%s: %s DROPPED from the post — drawn by the other lane within %d "
+                            "ET days (rule b); the other companies stay", series, run_id, ",".join(lead_dropped),
+                            CROSS_LANE_COMPANY_DAYS)
+                rec = lead_free
             sheet = news_rules.fact_sheet(rec, rejections=rejections, selection=selection_block)
             sheet = json.loads(json.dumps(sheet, allow_nan=False))
             ref = news_rules.ledger_key(rec)
-            out = news_templates.compose(rec, run_date=run_date, store_state=store_state, allow_x_url=allow_x_url)
+            out = news_templates.compose(rec, run_date=run_date, store_state=store_state, allow_x_url=allow_x_url,
+                                         first_line_prefix=first_line_prefix, picture_outlets=picture_outlets)
         except asyncio.CancelledError:
             raise
         except news_templates.NewsTemplateRefused as e:
@@ -1572,9 +2603,17 @@ class MarketingScriptService:
                          ref, run_id, codes)
             refused.extend(codes)
             return None
+        if avoid_leads:
+            hit = lead_keys(out) & avoid_leads
+            if hit:
+                logger.info("marketing series %s candidate %s EXCLUDED run_id=%s: its lead company %s (%s) was drawn by "
+                            "the other lane within %d ET days (not a template refusal, not reported to the source)",
+                            series, ref, run_id, lead_company(out), ",".join(sorted(hit)), CROSS_LANE_COMPANY_DAYS)
+                excluded.append(OTHER_LANE_COMPANY)
+                return None
         out["logos"] = await self._attach_logos(out, deadline=deadline, news=news, run_id=run_id)
         out = await self._frozen_output(out, run_date, run_id=run_id, gen_id=f"template:{series}",
-                                        image_posts=image_posts, fact_sheet=sheet)
+                                        image_posts=image_posts, fact_sheet=sheet, art_holder=art_holder)
         try:
             stored = json.loads(json.dumps(out, allow_nan=False))   # what JSONB will hold
         except (TypeError, ValueError) as e:
@@ -1605,6 +2644,11 @@ class MarketingScriptService:
             key, name = ref.get("key"), ref.get("name")
             entry: Dict[str, Any] = {"key": key, "name": name, "url": None, "sha256": None, "bytes": None,
                                      "width": None, "height": None}
+            if news_rules.canonical_symbol(key) != key:
+                # a key that is no ticker (the 13F spotlight list's filer plate, `news_templates.F13S_FILER_LOGO_KEY`:
+                # a fund with no listing of its own) is a wordmark by design — never fetched, never a warning
+                logger.info("marketing logo: %s names no listing run_id=%s — its wordmark by design", key, run_id)
+                return entry
             async with sem:
                 left = deadline - _mono()
                 if left < 1.0:
@@ -1637,6 +2681,222 @@ class MarketingScriptService:
 
         return list(await asyncio.gather(*(one(r) for r in refs)))
 
+    # ── per-post art (workstream C, owner decisions 2026-11-15) ──────────────
+
+    async def _attach_art(self, run: Dict[str, Any], run_date: date, series: str, output: Dict[str, Any],
+                          sheet: Any, ref: str, *, rec: Any, news: Any, holder: Optional[Dict[str, Any]],
+                          started: float) -> Dict[str, Any]:
+        """The accepted template output with its ART record (`output["art"]`), or the output UNCHANGED — the art step
+        of a template day ("Google draws, Claude checks"), run by `_build_template_day` after the record is chosen,
+        composed, re-checked as stored and frozen, and BEFORE its one INSERT. Never raises but for a cancellation, and
+        never refuses, skips or fails the day: every way to no art is a record saying why (post_art.ART_REASONS), and
+        the worker draws today's picture.
+
+        No `art` key at all (the stored output byte for byte today's): MARKETING_ART_ENABLED off — read NOW —, a
+        monthly budget of 0 (or unreadable), or a script row that already exists (a concurrent build's, in a deploy
+        overlap: nothing is spent, the INSERT adopts that row). Otherwise, in this order, each before any spend:
+        the post must picture ONE company (`post_art.art_subject_for`, decision 4 — `not_a_company_series`); the day
+        must carry a surface for it (`_art_day_surfaces`: an image post for a spotlight picture, a video for the
+        cover — `text_only_day`); the worker holding the run must have declared WORKER_CAPABILITY_POST_ART, read from
+        the ONE holder read the freeze made (`holder["holder"]` — `no_capability`, WARNING naming the worker;
+        `ledger_unreadable` when that read failed); a record this process already made for (run_id, ref) is reused
+        (the memo, failures included); at least ART_MIN_START_SECONDS must be left of TEMPLATE_DAY_BUDGET_SECONDS
+        (`timeout`); then the script row is read again (adopt-first), the Claude model must have a price
+        (`claude_unpriced`, ONE ERROR per value — `post_art.claude_model_problem`), and the run's ET month's art spend
+        (`runs.art_spend_between`, two runs a day included) plus this run's worst case (`post_art.run_worst_micros`)
+        must fit the cap (`budget_cap`; an unreadable month is `budget_unreadable`). Both reads are cut at the art's
+        start window (TEMPLATE_DAY_BUDGET_SECONDS − ART_MIN_START_SECONDS from the build's start — `timeout`), and the
+        time left is measured AGAIN after them (`timeout` under ART_MIN_START_SECONDS), so a slow ledger never pushes
+        the art past the template day's ceiling. Only then `post_art.make_post_art` (its budget:
+        min(MARKETING_ART_BUDGET_SECONDS, what is left of TEMPLATE_DAY_BUDGET_SECONDS NOW)), the company's sector /
+        industry fetched inside it through the news source's `company_facts` (best effort, ≤ 8 s); the record is
+        memoised (ok or failed). Every record returned once the day's surfaces are known — made, reused or a gate's —
+        records only those surfaces (`_on_the_day`); the memo keeps the subject's own.
+
+        Template rows keep tokens_used 0 and claude_usage NULL: the art's spend lives only in `output.art.usage`."""
+        run_id = str(run["id"])
+        if settings.MARKETING_ART_ENABLED is not True:
+            logger.info("marketing art: MARKETING_ART_ENABLED was turned off during the build run_id=%s — no art", run_id)
+            return output
+        cap = _art_cap_micros()
+        if cap is None or cap <= 0:
+            logger.info("marketing art: the monthly art budget is %s run_id=%s — no art",
+                        "unreadable" if cap is None else "0", run_id)
+            return output
+        try:
+            record_in = news_rules.record_from_fact_sheet(sheet)
+        except Exception as e:  # noqa: BLE001 — the stored record is the preferred input; the offered one is equal
+            logger.warning("marketing art: the stored record of %s does not read back run_id=%s (%s: %s) — the art "
+                           "reads the offered one", ref, run_id, type(e).__name__, e)
+            record_in = rec
+        subject = post_art.art_subject_for(series, output, record_in)
+        # The surfaces the DAY can show (None until known): every record returned once they are known is narrowed to
+        # them (`_on_the_day`) — never the memo, which keeps the subject's own (a rebuild may freeze other formats).
+        surfaces: Optional[Tuple[str, ...]] = None
+
+        def no_art(reason: str, detail: str) -> Dict[str, Any]:
+            record = post_art.gate_record(reason, run_id=run_id, ref=ref, series=series, subject=subject,
+                                          detail=detail)
+            return self._with_art(output, record if surfaces is None else self._on_the_day(record, surfaces),
+                                  run_id)
+
+        if subject is None:
+            return no_art("not_a_company_series", "the post does not picture exactly one company (decision 4)")
+        if post_art.cover_is_costs_card(output):
+            # owner decision 2026-11-20: a Money Map loss year's cover is its costs card — no art is drawn on it
+            return no_art("costs_cover", "a Money Map loss year's video cover is its costs card")
+        surfaces = _art_day_surfaces(output, subject)
+        if not surfaces:
+            return no_art("text_only_day", "the day freezes no picture or video post that may carry this art")
+        found = holder.get("holder") if isinstance(holder, dict) else None
+        holder_run, error = found if isinstance(found, tuple) and len(found) == 2 else (None, None)
+        if error is not None or holder_run is None:
+            logger.warning("marketing art: the run's holder could not be read run_id=%s (%s) — no art", run_id,
+                           f"{type(error).__name__}: {error}" if error is not None else
+                           ("no holder read was made" if found is None else "the run was not found"))
+            return no_art("ledger_unreadable", "the holder read failed")
+        declared = run_worker_capabilities(holder_run)
+        if WORKER_CAPABILITY_POST_ART not in declared:
+            logger.warning("marketing art: MARKETING_ART_ENABLED is on, but the worker holding run_id=%s "
+                           "(worker_version=%r, attempt %s, declared %s) did not declare %r on its claim — no art this "
+                           "run (deploy the per-post art marketing worker)", run_id,
+                           str(holder_run.get("worker_version") or "")[:64], holder_run.get("attempts"),
+                           sorted(declared) or "nothing", WORKER_CAPABILITY_POST_ART)
+            return no_art("no_capability", "the holder did not declare post_art")
+        key = (run_id, str(ref))
+        memo = self._art_memo.get(key)
+        if memo is not None:
+            logger.info("marketing art: run_id=%s ref=%s already has this process's art record (status=%s) — reused, "
+                        "nothing spent", run_id, ref, memo.get("status"))
+            return self._with_art(output, self._on_the_day(copy.deepcopy(memo), surfaces), run_id)
+        def art_budget() -> Tuple[float, float]:
+            """(what is left of TEMPLATE_DAY_BUDGET_SECONDS, the art's budget = min(the setting, that)), read NOW."""
+            left_now = started + TEMPLATE_DAY_BUDGET_SECONDS - _mono()
+            return left_now, min(float(settings.MARKETING_ART_BUDGET_SECONDS), left_now)
+
+        def too_late(left_now: float, when: str) -> Dict[str, Any]:
+            return no_art("timeout", f"{max(left_now, 0.0):.0f}s left of the template day's "
+                                     f"{TEMPLATE_DAY_BUDGET_SECONDS:.0f}s {when} (the art needs "
+                                     f"{ART_MIN_START_SECONDS:.0f}s)")
+
+        left, budget = art_budget()
+        if budget < ART_MIN_START_SECONDS:
+            return too_late(left, "at the art step")
+        # C-fix (review, 2026-11-16): the two ledger reads below sit INSIDE the template day's ceiling. Each is cut at
+        # the art's start window (the latest instant the art could still start with ART_MIN_START_SECONDS), and the
+        # budget is measured again after them — a slow Supabase must never push the art past started +
+        # TEMPLATE_DAY_BUDGET_SECONDS, which the worker's render pin (280 + 40 + 630 ≤ 960) relies on.
+        start_by = started + TEMPLATE_DAY_BUDGET_SECONDS - ART_MIN_START_SECONDS
+
+        def read_window() -> float:
+            return max(start_by - _mono(), 0.0)
+
+        try:
+            existing = await asyncio.wait_for(self.runs.get_script(run_id), timeout=read_window())
+        except asyncio.TimeoutError:
+            logger.warning("marketing art: the adopt-first read of run_id=%s outlasted the art's start window — no "
+                           "art (the build's INSERT still adopts any concurrent row)", run_id)
+            return too_late(art_budget()[0], "after the adopt-first read")
+        except Exception as e:  # noqa: BLE001 — no spend on a guess about a concurrent row
+            logger.warning("marketing art: the script row of run_id=%s could not be read before spending (%s: %s) — "
+                           "no art", run_id, type(e).__name__, e)
+            return no_art("ledger_unreadable", "the adopt-first read failed")
+        if existing is not None:
+            logger.info("marketing art: run_id=%s already has its script row (status=%s source=%s) — no art spent; "
+                        "the build adopts that row", run_id, existing.get("status"), existing.get("source_ref"))
+            return output
+        # Decision 9: a blank or unpriced Claude model is no art and ONE ERROR per value (post_art's once-key, shared
+        # with preflight_problem) — never an ERROR (a Sentry event) on every eligible build of both lanes. Checked
+        # before the month's read: nothing to reserve, nothing to read.
+        if post_art.claude_model_problem() is not None:
+            return no_art("claude_unpriced", "no price for the Claude model")
+        month_start = run_date.replace(day=1)
+        month_end = (month_start + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        try:
+            spent = await asyncio.wait_for(self.runs.art_spend_between(month_start, month_end), timeout=read_window())
+        except asyncio.TimeoutError:
+            logger.warning("marketing art: this month's art spend read of run_id=%s outlasted the art's start window "
+                           "— no art", run_id)
+            return too_late(art_budget()[0], "after the month's spend read")
+        except Exception as e:  # noqa: BLE001 — a cap never sums a guess
+            logger.warning("marketing art: this month's art spend could not be read run_id=%s (%s: %s) — no art",
+                           run_id, type(e).__name__, e)
+            return no_art("budget_unreadable", f"{type(e).__name__}")
+        reserve = post_art.run_worst_micros()
+        if reserve is None:   # the setting changed between the check above and this read: still no reserve
+            logger.warning("marketing art: MARKETING_ART_CLAUDE_MODEL has no price — the cap cannot reserve this run "
+                           "run_id=%s; no art", run_id)
+            return no_art("claude_unpriced", "no reserve")
+        if spent["micros"] + reserve > cap:
+            logger.warning("marketing art: this month's art budget is used up run_id=%s (spent ≈ $%.2f over %d runs, "
+                           "this run reserves ≈ $%.2f, cap $%.2f) — no art", run_id, spent["micros"] / 1e6,
+                           spent["runs"], reserve / 1e6, cap / 1e6)
+            return no_art("budget_cap", f"spent {spent['micros']} + reserve {reserve} > cap {cap}")
+        left, budget = art_budget()     # measured again: the reads above took their time out of the same ceiling
+        if budget < ART_MIN_START_SECONDS:
+            logger.warning("marketing art: the art step's ledger reads left %.0fs of the template day run_id=%s — no "
+                           "art", max(left, 0.0), run_id)
+            return too_late(left, "after the ledger reads")
+        facts = getattr(news, "company_facts", None)
+        facts_fn = (functools.partial(facts, timeout=post_art.STEP_SECONDS["facts"][1]) if callable(facts) else None)
+        try:
+            record = await post_art.make_post_art(
+                run_id=run_id, ref=ref, series=series, output=output, store=self.runs.store_art, facts_fn=facts_fn,
+                record=record_in, gemini=self._art_gemini, claude=self._art_claude, budget_seconds=budget)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a contract breach (it never raises): spend unknown, fail closed
+            logger.exception("marketing art: make_post_art RAISED run_id=%s (%s: %s) — recorded with an unknown "
+                             "spend, so this month's art cap reads unreadable", run_id, type(e).__name__, e)
+            record = {"version": post_art.ART_VERSION, "status": post_art.STATUS_FAILED, "reason": "internal_error",
+                      "usage": {"images": 0, "images_uncertain": 0, "estimated_micros": None}}
+        self._art_memo[key] = copy.deepcopy(record)
+        while len(self._art_memo) > ART_MEMO_MAX:
+            self._art_memo.popitem(last=False)
+        return self._with_art(output, self._on_the_day(record, surfaces), run_id)
+
+    @staticmethod
+    def _on_the_day(record: Any, surfaces: Tuple[str, ...]) -> Any:
+        """`record` with its `surfaces` narrowed to the ones the DAY can show (`_art_day_surfaces`) — a new dict, in
+        post_art.SURFACES order; anything that is not a record with a surfaces list comes back unchanged. Final review
+        (2026-11-19): `make_post_art` / `gate_record` record the subject's decision-4 surfaces (("picture", "cover")
+        for every spotlight series), so a spotlight day frozen with NO image post (image posts off, no picture
+        platform, a picture that fell back to text) noted the picture as allowed-but-not-drawn, and the review line
+        read "(not on the picture)" — the wording of a worker that skipped the art. Narrowed, `art_surfaces` also
+        refuses a picture declaration on a day that renders no picture (none ever is). Pure."""
+        if not isinstance(record, dict) or not isinstance(record.get("surfaces"), list):
+            return record
+        return {**record, "surfaces": [s for s in post_art.SURFACES if s in record["surfaces"] and s in surfaces]}
+
+    @staticmethod
+    def _with_art(output: Dict[str, Any], record: Any, run_id: str) -> Dict[str, Any]:
+        """`output` + `art: record`, as JSONB will hold it. A record that is not JSON-safe (never, by construction) is
+        replaced by a minimal failed one with an UNKNOWN spend (ERROR): the spend must not vanish from the ledger, so
+        the month's cap then reads unreadable — fail closed. `art` sits outside `news_templates.COMPARED_FIELDS`,
+        so the stored output still re-checks as it did."""
+        try:
+            return json.loads(json.dumps({**output, "art": record}, allow_nan=False))
+        except (TypeError, ValueError) as e:
+            logger.error("marketing art: the art record of run_id=%s is not JSON-safe (%s: %s) — stored as a failed "
+                         "record with an unknown spend (this month's art cap now reads unreadable)", run_id,
+                         type(e).__name__, e)
+            minimal = {"version": post_art.ART_VERSION, "status": post_art.STATUS_FAILED, "reason": "internal_error",
+                       "usage": {"images": 0, "images_uncertain": 0, "estimated_micros": None}}
+            return {**output, "art": minimal}
+
+    @staticmethod
+    def _report_lost_art(run_id: str, output: Dict[str, Any]) -> None:
+        """A build whose INSERT lost to a concurrent writer's row (a deploy overlap) after making art: that art's spend
+        is in no ledger row, so the monthly cap under-counts it — said once, at WARNING, with the amount."""
+        art = output.get("art") if isinstance(output, dict) else None
+        usage = art.get("usage") if isinstance(art, dict) else None
+        spent = usage.get("estimated_micros") if isinstance(usage, dict) else None
+        if art is None or spent == 0:
+            return
+        logger.warning("marketing art: run_id=%s — this build's art (status=%s, ≈ %s micros) lost the INSERT to a "
+                       "concurrent row; its spend is in no ledger row and the monthly cap does not count it", run_id,
+                       art.get("status") if isinstance(art, dict) else "?", spent if spent is not None else "unknown")
+
     def _rejected_body(self, row: Dict[str, Any]) -> Dict[str, Any]:
         reason = row.get("reject_reason")
         if reason not in SCRIPT_REJECT_REASONS:
@@ -1658,7 +2918,8 @@ class MarketingScriptService:
         if status == REST_DAY:
             return {"status": REST_DAY, **base}
         if status == ACCEPTED and isinstance(row.get("output"), dict):
-            return {"status": ACCEPTED, **base, "script": worker_script(row["output"], run_id=run_id)}
+            return {"status": ACCEPTED, **base, "script": worker_script(row["output"], run_id=run_id,
+                                                                        capabilities=run_worker_capabilities(run))}
         if status == REJECTED:
             return self._rejected_body(row)
 
@@ -2375,7 +3636,8 @@ class MarketingScriptService:
                          "generation=%s (%s) codes=%s", run_id, gen_id, outcome, _codes(result.violations))
 
     async def _frozen_output(self, package: Dict[str, Any], run_date: date, *, run_id: str,
-                             gen_id: str, image_posts: bool, fact_sheet: Any = None) -> Dict[str, Any]:
+                             gen_id: str, image_posts: bool, fact_sheet: Any = None,
+                             art_holder: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """`freeze_post_formats` at write time, once. `image_posts` is MARKETING_IMAGE_POSTS as the
         caller read it ONCE when the generation started — the very value the writer was given
         (drop-1 review, server:F4), so it is never read again here; MARKETING_X_IMAGES and the
@@ -2414,14 +3676,23 @@ class MarketingScriptService:
         template's re-check). With the switch empty (the default) nothing is frozen or added: the stored output
         is byte for byte what it was. Neither key in the package is ever carried over; no run read (the video
         they carry is one the worker renders anyway); a freeze that raises is logged at ERROR and costs the
-        extras only, never the paid package."""
+        extras only, never the paid package.
+
+        Per-post art (workstream C, decision 11): `art_holder` — a dict, passed by a TEMPLATE build whose art switch
+        was on — receives this freeze's ONE holder read as `art_holder["holder"]` (`_read_holder`'s (run, error)),
+        so `_attach_art` gates on the very capabilities the formats were frozen against, with no extra statement;
+        the read is made for it too while image posts and video features are both off. None (every lesson, every
+        build with the switch off): no change at all."""
         image_posts = bool(image_posts)
         x_images = bool(settings.MARKETING_X_IMAGES)
         platforms = image_platforms_setting()
         template = package.get("authorship") == TEMPLATE_AUTHORSHIP
         video_wanted = tuple(f for f in video_features_setting()
                              if f in (TEMPLATE_VIDEO_FEATURES if template else LESSON_VIDEO_FEATURES))
-        holder = await self._read_holder(run_id) if (image_posts or video_wanted) else None
+        art_wanted = template and isinstance(art_holder, dict)
+        holder = await self._read_holder(run_id) if (image_posts or video_wanted or art_wanted) else None
+        if art_wanted:
+            art_holder["holder"] = holder
         spec = package.get("image_spec") if template else None
         image_layout = spec.get("layout") if isinstance(spec, Mapping) else None
         blocked: Optional[str] = None
@@ -2492,8 +3763,10 @@ class MarketingScriptService:
         server-owned `metadata.worker_capabilities`, replaced by every claim that takes the run), read at
         write time from `holder` (`_read_holder`): every one needs WORKER_CAPABILITY_VIDEO_V2, and a
         `data_card` — the template's post image drawn into the video — also what drawing that picture needs
-        (WORKER_CAPABILITY_NEWS_TEMPLATES, plus WORKER_CAPABILITY_LAYOUTS_2B for a drop-2b `image_layout`), as
-        the post image itself does (`_holder_image_block`). () — no video feature this run: the video stays
+        (WORKER_CAPABILITY_NEWS_TEMPLATES, plus `layout_capabilities(image_layout)`: WORKER_CAPABILITY_LAYOUTS_2B
+        for a drop-2b layout, WORKER_CAPABILITY_LAYOUT_FEATURE for `feature` — which is never a data card anyway,
+        `run_service.data_card_strings`), as the post image itself does (`_holder_image_block`). () — no video
+        feature this run: the video stays
         today's, which every worker renders — when the holder lacks video_v2 or the run cannot be read; each
         loss logged WARNING naming the worker, or the read that failed (a ledger blip is never blamed on the
         worker)."""
@@ -2518,8 +3791,7 @@ class MarketingScriptService:
             return ()
         can = tuple(wanted)
         if VIDEO_FEATURE_DATA_CARD in can:
-            needed = [WORKER_CAPABILITY_NEWS_TEMPLATES] + (
-                [WORKER_CAPABILITY_LAYOUTS_2B] if image_layout in WORKER_LAYOUTS_2B else [])
+            needed = [WORKER_CAPABILITY_NEWS_TEMPLATES, *layout_capabilities(image_layout)]
             missing = [c for c in needed if c not in declared]
             if missing:
                 logger.warning("marketing script: the worker holding run_id=%s (worker_version=%r) declared %r but "
@@ -2536,8 +3808,10 @@ class MarketingScriptService:
         for a `template` output, WORKER_CAPABILITY_NEWS_TEMPLATES too (only that worker draws an
         `image_spec`; an older one would draw the alt text, which the server refuses), plus
         WORKER_CAPABILITY_LAYOUTS_2B when its `image_layout` is a drop-2b layout (WORKER_LAYOUTS_2B: a
-        drop-2a image refuses a `pair` / `grid` loudly, failing the day). Read at write time, so a
-        re-claim by another worker during a slow generation is honoured.
+        drop-2a image refuses a `pair` / `grid` loudly, failing the day), or WORKER_CAPABILITY_LAYOUT_FEATURE
+        when it is the `feature` layout (2026-11-15: an older image refuses it the same way) —
+        `layout_capabilities`. Read at write time, so a re-claim by another worker during a slow generation
+        is honoured.
 
         Otherwise the IMAGE_FALLBACK_REASONS code that freezes the run's posts as TEXT — the posts every
         worker makes — and that the freeze records (`image_fallback`), both logged WARNING:
@@ -2557,13 +3831,16 @@ class MarketingScriptService:
                            "this run's posts are frozen as text", run_id, gen_id)
             return "freeze_failed"
         declared = run_worker_capabilities(run)
-        layouts_2b = template and image_layout in WORKER_LAYOUTS_2B
         needed = ([WORKER_CAPABILITY_POST_IMAGE] + ([WORKER_CAPABILITY_NEWS_TEMPLATES] if template else [])
-                  + ([WORKER_CAPABILITY_LAYOUTS_2B] if layouts_2b else []))
+                  + (list(layout_capabilities(image_layout)) if template else []))
         missing = [c for c in needed if c not in declared]
         if not missing:
             return None
-        drop = ("drop-2b" if WORKER_CAPABILITY_LAYOUTS_2B in missing else "drop-2" if template else "drop-1")
+        drop = ("drop-2b" if WORKER_CAPABILITY_LAYOUTS_2B in missing
+                else "feature-layout" if WORKER_CAPABILITY_LAYOUT_FEATURE in missing
+                # news-v23 phase 3: a theme's `ranked` picture (the market-value angle) built before a re-claim
+                else "theme-angles" if WORKER_CAPABILITY_THEME_ANGLES in missing
+                else "drop-2" if template else "drop-1")
         logger.warning("marketing script: MARKETING_IMAGE_POSTS is on, but the worker holding run_id=%s "
                        "(worker_version=%r, attempt %s) did not declare %s on its claim — an older worker "
                        "image; this run's posts are frozen as TEXT (deploy the %s marketing worker)",

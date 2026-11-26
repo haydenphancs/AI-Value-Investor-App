@@ -37,7 +37,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import fields
+from dataclasses import fields, replace
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List
 
@@ -52,28 +52,64 @@ from app.services.marketing import selection
 
 EXPECTED_FIELDS = {
     R.CompanyRef: ("symbol", "name"),
+    # `cost_per_share_min_usd` / `cost_per_share_max_usd` (owner decision 2026-11-15, "Captions + picture"): the
+    # lowest and highest per-share cost the person's Form 4 LINES report, as filed — the filing's own figure, never
+    # the profile's price. The only per-share dollar figures a filing record carries: `FILED_FIGURE_FIELDS` below.
     R.InsiderPurchase: ("company", "role", "person_name", "amount_usd", "shares", "purchases",
-                        "earliest_trade_date", "latest_trade_date", "filing_dates", "holding", "amended"),
+                        "earliest_trade_date", "latest_trade_date", "filing_dates", "holding", "amended",
+                        "cost_per_share_min_usd", "cost_per_share_max_usd"),
     R.InsiderBuysWeek: ("series", "window_start", "window_end", "rows"),
+    # The spotlight lane: owner decisions 2026-11-20 ("3 - 5 companies at once") — a LIST of 3..8 issuers, each one
+    # issuer's lead insider and up to 4 more of the same issuer (the one-issuer record and its revenue line, of
+    # 2026-11-15, are retired); ONE 13F filer's holdings — up to five since the owner's feedback of 2026-11-19 (the filer fields of
+    # `ThirteenFFiling`, no total; two integers: how many holdings passed the gates, and the filing's own count of
+    # every change, which decides whether the list may state its counts as the filing's).
+    R.InsiderSpotlight: ("series", "window_start", "window_end", "companies"),
+    R.InsiderSpotlightCompany: ("lead", "others"),
+    R.ThirteenFSpotlight: ("series", "filer_name", "filer_cik", "filer_symbol", "period", "period_end", "filed_on",
+                           "amended_on", "moves", "eligible_moves", "filing_moves"),
     # `prev_value_usd` (review round 8, the shared adapter/templates contract): an exit's value on
     # the previous quarter's 13F book — a filed figure, never drawn, used to rank the exit.
     R.ThirteenFMove: ("company", "move", "shares", "prev_shares", "value_usd", "listed_on", "prev_value_usd"),
     R.ThirteenFFiling: ("series", "filer_name", "filer_cik", "filer_symbol", "period", "period_end",
                         "filed_on", "amended_on", "total_value_usd", "position_count", "moves", "counts"),
     R.CongressCount: ("series", "company", "month", "members", "fetched_on"),
+    # news-v23 (owner 2026-11-19): ONE post of 2-3 companies — the month, its read and the counts (no identity field)
+    R.CongressMonth: ("series", "month", "fetched_on", "counts"),
     R.CompanyStake: ("series", "stake_id", "investor", "investee_name", "investee", "kind", "value_usd",
                      "value_basis", "ownership_pct", "as_of", "verified_on", "source_title", "background",
                      "listed_since", "local_listing", "is_new"),
+    # news-v23 (owner 2026-11-19, "public only"): ONE investor's stakes in public companies — the investor and its rows
+    R.CompanyStakes: ("series", "investor", "stakes"),
     R.EarningsReport: ("series", "company", "report_date", "period_end", "eps_actual", "eps_estimate",
                        "revenue_actual", "revenue_estimate"),
+    # news-v23 (owner 2026-11-19): ONE post of 2-4 companies — their reports, nothing else
+    R.EarningsDay: ("series", "reports"),
     R.Segment: ("name", "value_usd"),
     R.MoneyMap: ("series", "company", "fiscal_year", "period_end", "segments", "other_usd",
                  "eliminations_usd", "revenue_usd", "gross_profit_usd", "operating_profit_usd",
                  "net_income_usd"),
-    R.ThemeMember: ("company", "top_segment", "top_segment_share", "fiscal_year"),
+    # news-v23 phase 3 (the weekly theme post's "biggest" angle): a member's MARKET VALUE, from the market-capitalization
+    # batch read (owner 2026-09-28: market cap may be shown publicly) — never the profile's cap, never a price
+    R.ThemeMember: ("company", "top_segment", "top_segment_share", "fiscal_year", "market_value_usd",
+                    # news-v23 phase 3, the last three angles (2026-11-20): two years' revenue and the net income (the
+                    # statements: growth and profit per $100 only reach the post), the Form 4 purchase and sale totals
+                    # (company totals — no person, role or name), the distinct members' COUNT (no identity)
+                    "revenue_usd", "prior_revenue_usd", "net_income_usd", "purchases_usd", "sales_usd",
+                    "congress_members",
+                    # phase 4 (2026-11-20): the company's newest fiscal year when its segment fact walked back past a
+                    # gross one (a year, no figure — it only makes the template tag the fact)
+                    "latest_fiscal_year"),
     # `theme_size` (the shared adapter/templates contract, 2026-10-10): the theme's ticker count
     # as the app card shows it, before any gate — a count, no identity, no price.
-    R.ThemeExplainer: ("series", "slug", "title", "members", "tickers_as_of", "theme_size"),
+    R.ThemeExplainer: ("series", "slug", "title", "members", "tickers_as_of", "theme_size",
+                       # news-v23 phase 3: the post's angle, its run date (the ledger key) and the market values' date
+                       "angle", "posted_on", "values_as_of",
+                       # 2026-11-20: the insider scorecard's filing window and its checked count, the Congress month
+                       "window_start", "window_end", "companies_checked", "month",
+                       # the fix round (2026-11-20): whether the list's date is the row's last write (a bool, no
+                       # identity, never printed)
+                       "tickers_as_of_from_row"),
 }
 
 BANNED_TOKENS = frozenset({
@@ -114,6 +150,39 @@ def test_the_token_ban_is_not_vacuous():
     """Mutation stand-in: a record shaped like the ones the plan forbids is caught."""
     for bad in ("last_price", "market_cap", "image_url", "ceo_name", "member_district", "first_name"):
         assert set(bad.split("_")) & BANNED_TOKENS, bad
+
+
+#: The ONLY per-share dollar figures a filing record may carry (owner decision 2026-11-15, "Captions + picture"):
+#: the Form 4 lines' OWN cost per share. marketing.md §1 allows "insider (Form 4) … as filed (the filing's own
+#: amounts and prices)" and bars "a market price (current, delayed, end-of-day or intraday), % price moves,
+#: price charts" — a filed cost is the first, never the second. It may be shown only in a caption or on the post
+#: picture's facts, labelled "as filed", never the word "price", never narrated or drawn on a video (the
+#: templates' rule). A new per-share field anywhere must be decided HERE.
+FILED_FIGURE_FIELDS = frozenset({"cost_per_share_min_usd", "cost_per_share_max_usd"})
+#: Earnings per share is per-share by definition and a reported RESULT (marketing.md §1: "earnings dates and
+#: results against estimates"), never a price — pinned apart, on `EarningsReport` only.
+EPS_FIELDS = frozenset({("EarningsReport", "eps_actual"), ("EarningsReport", "eps_estimate")})
+
+
+def _per_share_shaped(name: str) -> bool:
+    tokens = set(name.split("_"))
+    return bool({"per", "cost", "eps", "pershare", "unit"} & tokens) or {"share", "usd"} <= tokens
+
+
+def test_the_filed_figure_exemption_is_exact():
+    """Across EVERY record type, nested included: the per-share-shaped fields are exactly the filed cost pair
+    (on `InsiderPurchase`) and the EPS pair (on `EarningsReport`) — no other record carries a per-share figure."""
+    shaped = {(cls.__name__, f.name) for cls in R.ALL_RECORD_TYPES for f in fields(cls) if _per_share_shaped(f.name)}
+    assert shaped == {("InsiderPurchase", n) for n in FILED_FIGURE_FIELDS} | EPS_FIELDS
+    assert {f.name for f in fields(R.InsiderPurchase)} >= FILED_FIGURE_FIELDS
+    # never a price token: the exemption is a cost AS FILED, and the token ban still holds over it
+    for name in FILED_FIGURE_FIELDS:
+        assert not set(name.split("_")) & BANNED_TOKENS and name not in TOKEN_EXEMPT_FIELDS
+    # the shape check is not vacuous: what a price-like field would be called is caught
+    for bad in ("share_value_usd", "cost_basis", "per_share_usd", "unit_usd", "eps_ttm", "cost_per_unit"):
+        assert _per_share_shaped(bad), bad
+    for fine in ("amount_usd", "shares", "prev_shares", "value_usd", "top_segment_share", "revenue_usd"):
+        assert not _per_share_shaped(fine), fine
 
 
 # ── 3. canaries ───────────────────────────────────────────────────────────────
@@ -230,7 +299,8 @@ def _names_outside_the_members_elect_window(monkeypatch):
 #: Each company's issuer CIK — a canary: it keys the line check and the per-issuer Form 4/A read
 #: (review round 9, ``companyCik``), and must never travel. A row's ``companyCik`` is its
 #: profile's (FMP's issuer index files every row under it), except the dropped member's.
-_INSIDER_CIKS = {"GME": "0004242424", "FOX": "0004242425", "HD": "0004242426"}
+_INSIDER_CIKS = {"GME": "0004242424", "FOX": "0004242425", "HD": "0004242426", "LOW": "0004242427",
+                 "NKE": "0004242428"}
 
 
 def _insider_rows() -> List[Dict[str, Any]]:
@@ -251,6 +321,16 @@ def _insider_rows() -> List[Dict[str, Any]]:
                shares=20_000, price=30.0, companyCik=_INSIDER_CIKS["FOX"], **canary),
         T.irow(sym="FOX", name="TAYLOR EMMA", cik="0000000556", title="officer: Chief Financial Officer",
                shares=10_000, price=30.0, companyCik=_INSIDER_CIKS["FOX"], **canary),
+        # owner decisions 2026-11-20 ("3 - 5 companies at once"): two more issuers, so each week holds three — LOW's and
+        # NKE's CEOs (unrenderable reporting names: they must never travel) and LOW's director, NKE's CFO.
+        T.irow(sym="LOW", name="ZQXREPORTER ZQXLOWCEO", cik="0000000601", shares=30_000, price=30.0,
+               companyCik=_INSIDER_CIKS["LOW"], **canary),
+        T.irow(sym="NKE", name="ZQXREPORTER ZQXNKECEO", cik="0000000602", shares=20_000, price=30.0,
+               companyCik=_INSIDER_CIKS["NKE"], **canary),
+        T.irow(sym="LOW", name="ZQXREPORTER ZQXLOWDIR", cik="0000000603", title="director, other: ZQXOTHER",
+               shares=15_000, price=30.0, companyCik=_INSIDER_CIKS["LOW"], **canary),
+        T.irow(sym="NKE", name="ZQXREPORTER ZQXNKECFO", cik="0000000604", title="officer: Chief Financial Officer",
+               shares=12_000, price=30.0, companyCik=_INSIDER_CIKS["NKE"], **canary),
     ]
 
 
@@ -261,6 +341,8 @@ def _insider_profiles() -> Dict[str, Any]:
         "FOX": _canary_profile("FOX", "Fox Corporation", price=29.5, cap=8080808080.0, exchange="NASDAQ",
                                ceo="ZQXCEOSUFFIX"),
         "HD": _canary_profile("HD", "The Home Depot, Inc.", price=300.0, cap=300e9),
+        "LOW": _canary_profile("LOW", "Lowe's Companies, Inc.", price=30.0, cap=8080808080.0, ceo="ZQXCEOSUFFIX"),
+        "NKE": _canary_profile("NKE", "NIKE, Inc.", price=30.0, cap=8080808080.0, ceo="ZQXCEOSUFFIX"),
     }
     for sym, cik in _INSIDER_CIKS.items():
         profiles[sym]["cik"] = cik
@@ -277,10 +359,10 @@ async def test_insider_series_leak_nothing_but_their_fields(series, caplog):
         _assert_clean(sheet)
     rows = got.records[0].rows
     if series == "ceo_buys":
-        assert [r.person_name for r in rows] == ["Ryan Cohen", None]     # anti-vacuity
+        assert [r.person_name for r in rows] == ["Ryan Cohen", None, None, None]     # anti-vacuity
         assert got.rejections["congress_name"] == 1
     else:
-        assert {r.role for r in rows} == {"director"}
+        assert [(r.company.symbol, r.role) for r in rows] == [("FOX", "director"), ("LOW", "director"), ("NKE", "cfo")]
     assert fmp.issuer_calls, "anti-vacuity: the per-issuer read ran on the canary rows"
     log = caplog.text.lower()
     assert "pelosi" not in log and "nancy" not in log and "zqxreporter" not in log
@@ -294,12 +376,118 @@ async def test_inside_the_members_elect_window_no_person_travels(monkeypatch):
     monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
     fmp = T.FakeFMP(insider=_insider_rows(), profiles=_insider_profiles())
     got = await _run("ceo_buys", fmp)
-    assert [r.company.symbol for r in got.records[0].rows] == ["GME", "FOX"]          # anti-vacuity: the rows
+    assert [r.company.symbol for r in got.records[0].rows] == ["GME", "FOX", "LOW", "NKE"]   # anti-vacuity: the rows
     assert all(r.person_name is None for r in got.records[0].rows)
     for sheet in _sheets(got):
         _assert_clean(sheet)
         low = json.dumps(sheet).lower()
         assert "cohen" not in low and "ryan" not in low
+
+
+# ── the spotlight lane (2026-11-15): the insider spotlight and the filing's own cost per share ───────────────
+
+def _spotlight_rows() -> List[Dict[str, Any]]:
+    """One issuer (GME) with a cluster, filed Nov 17-18 (the window of Thursday Nov 19's spotlight, the previous run
+    Tuesday): the CEO (renders and corroborates — the one person value allowed to travel), a director whose reporting
+    name cannot be rendered (it must never travel), the CFO, a member of Congress (dropped, never logged), and a
+    run-day filing of another company (the feed's proof). Every line's own price is 25.0 / 25.5 / 26.0; the PROFILE
+    price is the canary 25.123456."""
+    canary = dict(securityName="Common Stock ZQXSECNAME", url="https://www.sec.gov/ZQXURL/x.htm",
+                  securitiesOwned=7_777_777, companyCik=_INSIDER_CIKS["GME"])
+    return [
+        T.irow(title="director, officer: Chief Executive Officer, other: ZQXOTHER", reportingCik="0009191919",
+               filed="2026-11-18", traded="2026-11-17", **canary),
+        T.irow(price=25.5, title="officer: Chief Executive Officer", reportingCik="0009191919", filed="2026-11-18",
+               traded="2026-11-16", **canary),
+        T.irow(name="ZQXREPORTER ZQXREPORTER", cik="0000000555", title="director, other: ZQXOTHER", shares=20_000,
+               price=26.0, filed="2026-11-17", traded="2026-11-16", **canary),
+        T.irow(name="TAYLOR EMMA", cik="0000000556", title="officer: Chief Financial Officer", shares=10_000,
+               filed="2026-11-18", traded="2026-11-17", **canary),
+        T.irow(name="PELOSI NANCY", cik="0000000444", title="director", shares=30_000, filed="2026-11-18",
+               traded="2026-11-17", **canary),
+        T.irow(sym="FOX", name="SMITH JOHN", cik="0000000111", filed="2026-11-19", traded="2026-11-18",
+               companyCik=_INSIDER_CIKS["FOX"]),
+        # owner decisions 2026-11-20 ("3 - 5 companies at once"): two more issuers inside the window, so the list holds
+        # three — LOW's CEO and NKE's director (unrenderable reporting names: they must never travel)
+        T.irow(sym="LOW", name="ZQXREPORTER ZQXLOWCEO", cik="0000000601", shares=20_000, price=30.0, filed="2026-11-17",
+               traded="2026-11-16", **dict(canary, companyCik=_INSIDER_CIKS["LOW"])),
+        T.irow(sym="NKE", name="ZQXREPORTER ZQXNKEDIR", cik="0000000603", title="director, other: ZQXOTHER",
+               shares=10_000, price=30.0, filed="2026-11-18", traded="2026-11-17",
+               **dict(canary, companyCik=_INSIDER_CIKS["NKE"])),
+    ]
+
+
+async def _run_spotlight(fmp, **kw):
+    return await A.candidates("insider_spotlight", run_date=T.SPOT_RUN, exclude=frozenset(), limit=5,
+                              deadline=time.monotonic() + 60.0, deps=A.NewsDeps(fmp=fmp, actions=T.SplitActions()),
+                              spotlight_checked_through=T.SPOT_CHECKED, **kw)
+
+
+@pytest.mark.asyncio
+async def test_insider_spotlight_leaks_nothing_but_its_fields(caplog):
+    caplog.set_level(logging.DEBUG)
+    fmp = T.FakeFMP(insider=_spotlight_rows(), profiles=_insider_profiles())
+    got = await _run_spotlight(fmp)
+    for sheet in _sheets(got):
+        _assert_clean(sheet)
+    (rec,) = got.records
+    assert [c.company.symbol for c in rec.companies] == ["GME", "LOW", "NKE"]                   # anti-vacuity
+    people = rec.companies[0].people
+    assert [(p.role, p.person_name) for p in people] == [("ceo", "Ryan Cohen"), ("director", None),
+                                                         ("cfo", "Emma Taylor")]                # anti-vacuity
+    assert [p.person_name for c in rec.companies[1:] for p in c.people] == [None, None]
+    assert got.rejections["congress_name"] == 1 and fmp.issuer_calls
+    log = caplog.text.lower()
+    assert "pelosi" not in log and "nancy" not in log and "zqxreporter" not in log
+    assert "zqxurl" not in log and "https://" not in log
+
+
+@pytest.mark.asyncio
+async def test_filed_cost_is_the_form4_lines_own_price(monkeypatch):
+    """B decision 1 (owner, "Captions + picture"): the cost per share that travels is the Form 4 LINES' own price —
+    25.0 and 25.5 for GameStop's CEO, 26.0 for the director — never the profile's 25.123456 (a canary). Mutation
+    stand-in: an `_insider_row` that lets the profile price into the pair (still a valid record: the average stays
+    inside it) is caught by the canary check."""
+    fmp = T.FakeFMP(insider=_spotlight_rows(), profiles=_insider_profiles())
+    got = await _run_spotlight(fmp)
+    (rec,) = got.records
+    assert [(p.cost_per_share_min_usd, p.cost_per_share_max_usd) for p in rec.companies[0].people] == [
+        (25.0, 25.5), (26.0, 26.0), (25.0, 25.0)]
+    assert [(p.cost_per_share_min_usd, p.cost_per_share_max_usd) for c in rec.companies[1:] for p in c.people] == [
+        (30.0, 30.0), (30.0, 30.0)]
+    assert _insider_profiles()["GME"]["price"] == 25.123456
+    real = A._insider_row
+
+    def leaky(ctx, company, profile, lines):
+        row = real(ctx, company, profile, lines)
+        if isinstance(row, str):
+            return row
+        return replace(row, cost_per_share_max_usd=max(row.cost_per_share_max_usd, float(profile["price"])))
+
+    monkeypatch.setattr(A, "_insider_row", leaky)
+    A.clear_memo()
+    got = await _run_spotlight(T.FakeFMP(insider=_spotlight_rows(), profiles=_insider_profiles()))
+    assert got.records[0].lead.cost_per_share_max_usd == 25.5                      # GME's lead: 25.5 > 25.123456
+    with pytest.raises(AssertionError):
+        for sheet in _sheets(got):
+            _assert_clean(sheet)
+
+
+@pytest.mark.asyncio
+async def test_a_13f_spotlight_leaks_nothing_but_its_fields():
+    whales = [T.whale(T.SOROS, "Soros Fund Management", name="George ZQXWHALEPERSON",
+                      avatar_url="https://zqx.example/ZQXAVATAR.png", description="ZQXWHALEDESC",
+                      portfolio_value=9191919191919.0)]
+    fmp = T.FakeFMP(profiles=_thirteen_f_profiles(), extracts=_canary_book(T.SOROS), dates={T.SOROS: T.DATES_Q3_Q2})
+    got = await A.candidates("thirteen_f_spotlight", run_date=T.RUN, exclude=frozenset(), limit=5,
+                             deadline=time.monotonic() + 60.0,
+                             deps=A.NewsDeps(fmp=fmp, sb=T.FakeSB({"whales": whales}), actions=T.SplitActions()))
+    for sheet in _sheets(got):
+        _assert_clean(sheet)
+    (rec,) = got.records
+    # the list (owner feedback 2026-11-19): every holding's fields are the record's own — the lead and the rest
+    assert (rec.filer_cik, rec.moves[0].company.symbol, rec.moves[0].move) == (T.SOROS, "OXY", "no_longer_reported")
+    assert len(rec.moves) >= 2 and "ZQX" not in json.dumps(R.record_to_dict(rec))
 
 
 def _canary_book(cik: str) -> Dict[Any, Any]:
@@ -421,12 +609,13 @@ async def test_congress_count_leaks_no_member_anywhere(caplog):
     fmp = T.FakeFMP2b(senate=senate, house=house, profiles=profiles)
     got = await A.candidates("congress_count", run_date=T.CONGRESS_RUN, exclude=frozenset(), limit=5,
                              deadline=time.monotonic() + 60.0, deps=A.NewsDeps(fmp=fmp))
-    assert [(r.company.symbol, r.members) for r in got.records] == [("AAPL", 2), ("MSFT", 2)]   # anti-vacuity
+    # news-v23: ONE record of the month's companies
+    assert [(r.company.symbol, r.members) for r in got.records[0].counts] == [("AAPL", 2), ("MSFT", 2)]
     for sheet in _sheets(got):
         _assert_clean(sheet)                       # also: no 64-hex string (a hashed identity)
         _assert_no_member(json.dumps(sheet))
-    # Walk the records: no field of a CongressCount (nested included) names an identity key.
-    for rec in got.records:
+    # Walk the records: no field of a CongressMonth or its CongressCounts (nested included) names an identity key.
+    for rec in [got.records[0], *got.records[0].counts]:
         for f in fields(rec):
             assert f.name not in A.CONGRESS_IDENTITY_FIELDS
             assert not set(f.name.lower().split("_")) & {"first", "last", "office", "district", "owner",
@@ -462,12 +651,15 @@ async def test_company_stakes_leak_nothing_but_their_fields(monkeypatch):
         card.market_cap, card.logo_symbol, card.notice = 9191919191919.0, "ZQXLOGOSYM", "ZQXNOTICE"
     profiles = {"NVDA": _canary_profile("NVDA", "NVIDIA Corporation", exchange="NASDAQ", price=25.123456,
                                         cap=8080808080.0),
-                "INTC": _canary_profile("INTC", "Intel Corporation", exchange="NASDAQ", cap=8080808080.0)}
+                "INTC": _canary_profile("INTC", "Intel Corporation", exchange="NASDAQ", cap=8080808080.0),
+                # news-v23: a public stake's investee is profiled too (its listing verified) — canaries and all
+                T._sym_of("Nscale"): _canary_profile(T._sym_of("Nscale"), "Nscale", exchange="NASDAQ",
+                                                     cap=8080808080.0)}
     got = await A.candidates("company_stakes", run_date=T.STAKES_RUN, exclude=frozenset(), limit=5,
                              deadline=time.monotonic() + 60.0,
                              deps=A.NewsDeps(fmp=T.FakeFMP(profiles=profiles), club=club, sb=sb))
-    assert [r.investee_name for r in got.records] == ["Nscale", "Intel"]                 # anti-vacuity
-    assert got.records[0].ownership_pct is None                                         # a qualified pct
+    assert T._stake_names(got) == ["Intel", "Nscale"]                                   # anti-vacuity
+    assert T._stake_rows(got)[1].ownership_pct is None                                  # a qualified pct
     for sheet in _sheets(got):
         _assert_clean(sheet)
         low = json.dumps(sheet).lower()
@@ -527,10 +719,12 @@ async def test_the_stake_finders_columns_and_left_out_rows_leak_nothing(monkeypa
     sb.honour_or = honour_or
     profiles = {"NVDA": _canary_profile("NVDA", "NVIDIA Corporation", exchange="NASDAQ", price=25.123456,
                                         cap=8080808080.0)}
+    for name in ("Ayar Labs", "Lambda", "Zqxautoname Robotics", "Zqxoriginname Labs"):
+        profiles[T._sym_of(name)] = _canary_profile(T._sym_of(name), name, exchange="NASDAQ", cap=8080808080.0)
     got = await A.candidates("company_stakes", run_date=T.STAKES_RUN, exclude=frozenset(), limit=5,
                              deadline=time.monotonic() + 60.0,
                              deps=A.NewsDeps(fmp=T.FakeFMP(profiles=profiles), club=club, sb=sb))
-    assert [r.investee_name for r in got.records] == ["Ayar Labs", "Lambda"]               # anti-vacuity
+    assert T._stake_names(got) == ["Lambda", "Ayar Labs"]               # anti-vacuity (news-v23: the larger figure first)
     assert got.rejections == {}
     for sheet in _sheets(got):
         _assert_clean(sheet)
@@ -571,8 +765,9 @@ async def test_earnings_leak_nothing_but_their_fields():
     fmp = T.FakeFMP2b(calendar=cal, profiles=profiles, currency=quarters)
     got = await A.candidates("earnings", run_date=T.EARN_RUN, exclude=frozenset(), limit=5,
                              deadline=time.monotonic() + 60.0, deps=A.NewsDeps(fmp=fmp))
-    assert [r.company.symbol for r in got.records] == ["AAA", "BBB"]                     # anti-vacuity
-    assert all(r.period_end.isoformat() == "2026-12-31" for r in got.records)          # the read was used
+    # news-v23: ONE record of the day's companies (anti-vacuity)
+    assert [r.company.symbol for r in got.records[0].reports] == ["AAA", "BBB"]
+    assert all(r.period_end.isoformat() == "2026-12-31" for r in got.records[0].reports)   # the read was used
     assert sorted(sym for sym, _limit in fmp.statement_calls) == ["AAA", "BBB"]
     for sheet in _sheets(got):
         _assert_clean(sheet)
@@ -603,11 +798,66 @@ async def test_a_theme_explainer_leaks_nothing_but_its_fields():
             assert canary not in low
 
 
+@pytest.mark.asyncio
+async def test_a_theme_market_value_post_leaks_nothing_but_its_fields():
+    """news-v23 phase 3, the "biggest" angle: the market-capitalization batch's rows carry canaries beside the three keys
+    the adapter reads (`symbol`, `date`, `marketCap`) — a price, a % change, a volume, a name — and the profiles their own
+    canary cap and price: none of them reaches a fact sheet, and the only market values in it are the batch's."""
+    world = T.theme_world()
+    caps = {"NVDA": 4.4e12, "AMD": 3.1e11, "AVGO": 1.6e12, "QCOM": 1.8e11, "MRVL": 7.7e10, "INTC": 1.2e11}
+    world["fmp"] = T.FakeFMP(
+        profiles={s: {**_canary_profile(s, p["companyName"], exchange="NASDAQ", price=25.123456, cap=8080808080.0,
+                                        isEtf=p["isEtf"]), "cik": str(4242400 + i).zfill(10)}
+                  for i, (s, p) in enumerate(T.theme_profiles().items())},
+        market_caps=[{"symbol": s, "date": "2026-11-18", "marketCap": v, "price": 25.123456,
+                      "changesPercentage": 12.3456, "volume": 7777777, "name": "ZQXCAPNAME"} for s, v in caps.items()])
+    hist = frozenset({"news:theme_explainer:ai-chips:make_money:2026-10-01"})
+    got = await T.trun(world, theme_history=hist)
+    (rec,) = got.records
+    assert rec.angle == "biggest" and len(rec.members) == 6                               # anti-vacuity
+    for sheet in _sheets(got):
+        _assert_clean(sheet)
+        low = json.dumps(sheet).lower()
+        for canary in ("zqxcapname", "12.3456", "7777777"):
+            assert canary not in low
+        nums = [m["market_value_usd"] for m in sheet["record"]["members"]]
+        assert sorted(nums, reverse=True) == nums and set(nums) == set(caps.values())
+
+
+@pytest.mark.asyncio
+async def test_a_theme_make_money_post_never_carries_the_market_values_that_order_it():
+    """Phase 4 (2026-11-20): "how they make money" reads the market-capitalization batch for its TILE ORDER only — the
+    batch's rows carry canaries beside the three keys read and the profiles a canary cap: no market value, price or
+    canary reaches the fact sheet (the record refuses a market value off a market-value post), while the members' order
+    shows the values were read (anti-vacuity)."""
+    world = T.theme_world()
+    caps = {"NVDA": 4.4e12, "AMD": 3.1e11, "AVGO": 1.6e12, "QCOM": 1.8e11, "MRVL": 7.7e10, "INTC": 1.2e11}
+    world["fmp"] = T.FakeFMP(
+        profiles={s: {**_canary_profile(s, p["companyName"], exchange="NASDAQ", price=25.123456, cap=8080808080.0,
+                                        isEtf=p["isEtf"]), "cik": str(4242400 + i).zfill(10)}
+                  for i, (s, p) in enumerate(T.theme_profiles().items())},
+        market_caps=[{"symbol": s, "date": "2026-11-18", "marketCap": v, "price": 25.123456,
+                      "changesPercentage": 12.3456, "volume": 7777777, "name": "ZQXCAPNAME"} for s, v in caps.items()])
+    got = await T.trun(world)
+    (rec,) = got.records
+    assert rec.angle == "make_money" and world["fmp"].calls["market_caps"] == 1                # anti-vacuity
+    assert [m.company.symbol for m in rec.members][:4] == ["NVDA", "AVGO", "AMD", "QCOM"]       # ordered by them
+    for sheet in _sheets(got):
+        _assert_clean(sheet)
+        low = json.dumps(sheet).lower()
+        for canary in ("zqxcapname", "12.3456", "7777777", "8080808080", *(repr(v) for v in caps.values()),
+                       *(str(int(v)) for v in caps.values())):
+            assert canary.lower() not in low, canary
+        assert all(m["market_value_usd"] is None for m in sheet["record"]["members"])
+
+
 def test_every_shipped_series_has_a_canary_test_here():
     """A series added to SHIPPED_SERIES must get its canary run in this file — every series whose
-    collector exists has one (the 2a four above, the 2b four just above)."""
+    collector exists has one (the 2a four above, the 2b four just above, and the spotlight pair of
+    2026-11-15, whose collectors exist ahead of their shipping)."""
     covered = {"ceo_buys", "insider_buys", "thirteen_f", "money_map",
-               "congress_count", "company_stakes", "earnings", "theme_explainer"}
+               "congress_count", "company_stakes", "earnings", "theme_explainer",
+               "insider_spotlight", "thirteen_f_spotlight"}
     assert set(selection.SHIPPED_SERIES) <= covered
     assert set(A.COLLECTORS) == covered
 

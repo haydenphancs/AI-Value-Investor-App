@@ -83,7 +83,7 @@ import pytest
 from app.config import settings
 from app.integrations import anthropic_client as ac
 from app.integrations import bluesky, telegram, upload_post, x_api
-from app.schemas.marketing import IMAGE_FALLBACK_REASONS
+from app.schemas.marketing import IMAGE_FALLBACK_REASONS, RUN_LANES
 from app.services import notification_jobs
 from app.services.marketing import digest_service as ds
 from app.services.marketing import metrics_service as ms
@@ -3397,23 +3397,27 @@ async def test_a_capped_measure_read_is_named_in_the_jobs_note(env, monkeypatch)
 
 
 def test_the_paged_reads_hold_every_post_the_schema_allows():
-    """MD-7 — the record of why the paged reads cannot drop the NEWEST posts. One run a day
-    (`marketing_runs.run_date` UNIQUE) records at most one post per (platform, format) (`marketing_posts`
-    UNIQUE (run_id, platform, format) over POST_FORMATS_BY_PLATFORM plus, since Batch 3, the extra videos of
-    EXTRA_POST_FORMATS_BY_PLATFORM: 13 + 3 = 16 pairs); a post goes out on its run day or the next (a week of
-    slack covers a late reconcile). So a window of D days holds at most (D + 7) × pairs published posts — inside
-    pages × page size for both reads, with room kept for one more pair (17). Widen the maps past it and this
-    fails: raise the page count with it."""
-    from app.schemas.marketing import EXTRA_POST_FORMATS_BY_PLATFORM, POST_FORMATS_BY_PLATFORM
+    """MD-7 — the record of why the paged reads cannot drop the NEWEST posts. One run per (day, lane)
+    (`marketing_runs` UNIQUE (run_date, lane) since migration 210 — the main lane and the spotlight lane: RUN_LANES)
+    records at most one post per (platform, format) (`marketing_posts` UNIQUE (run_id, platform, format) over
+    POST_FORMATS_BY_PLATFORM plus, since Batch 3, the extra videos of EXTRA_POST_FORMATS_BY_PLATFORM: 13 + 3 = 16
+    pairs); a post goes out on its run day or the next (a week of slack covers a late reconcile). So a window of D
+    days holds at most (D + 7) × pairs × lanes published posts — inside pages × page size for both reads, with room
+    kept for one more pair (17): 37 × 17 × 2 = 1,258 and 42 × 17 × 2 = 1,428, each ≤ 5 × 300. Widen the maps or the
+    lanes past it and this fails: raise the page count with it."""
+    from app.schemas.marketing import EXTRA_POST_FORMATS_BY_PLATFORM, POST_FORMATS_BY_PLATFORM, RUN_LANES
 
     pairs = len({(platform, fmt) for formats_by in (POST_FORMATS_BY_PLATFORM, EXTRA_POST_FORMATS_BY_PLATFORM)
                  for platform, formats in formats_by.items() for fmt in formats})
     assert pairs >= 16                       # the extras are counted (a later pair only tightens the bound below)
+    assert len(RUN_LANES) >= 2               # the spotlight lane is counted (migration 210)
     for days, page, pages in ((ms.MEASURE_MAX_AGE.days, ms.MEASURE_SCAN_LIMIT, ms.MEASURE_SCAN_PAGES),
                               (ds.FOLLOWER_LOOKBACK.days, ds.MEASURED_POST_LIMIT, ds.MEASURED_POST_PAGES)):
-        assert (days + 7) * max(pairs, 17) <= page * pages, (days, pairs, page, pages)
+        assert (days + 7) * max(pairs, 17) * len(RUN_LANES) <= page * pages, (days, pairs, page, pages)
         assert 0 < page < 1_000                  # under PostgREST's max-rows: a page it cut would pass for the last
     assert ds.MEASURED_POST_MAX == ds.MEASURED_POST_LIMIT * ds.MEASURED_POST_PAGES
+    # the pins: 5 pages of 300 for both reads (4 → 5 with the spotlight lane)
+    assert (ms.MEASURE_SCAN_LIMIT, ms.MEASURE_SCAN_PAGES) == (ds.MEASURED_POST_LIMIT, ds.MEASURED_POST_PAGES) == (300, 5)
 
 
 @pytest.mark.asyncio
@@ -3692,10 +3696,13 @@ def _post(platform: str = "x", status: str = "published", *, run_date: str = "20
 
 
 def _run(status: str, *, run_date: str = "2026-10-03", **kw: Any) -> Dict[str, Any]:
+    """A run row as the ledger holds it: since migration 210 every row carries its `lane` (NOT NULL DEFAULT 'main');
+    `lane=None` leaves the key out — a row read before 210, which every reader takes as the main lane's."""
+    lane = kw.pop("lane", "main")
     return {"id": str(uuid.uuid4()), "run_date": run_date, "status": status,
             "stage": kw.pop("stage", "assets_ready"), "attempts": kw.pop("attempts", 1),
             "metadata": kw.pop("metadata", {}), "timings": kw.pop("timings", {}),
-            "last_error": kw.pop("last_error", None), **kw}
+            "last_error": kw.pop("last_error", None), **({} if lane is None else {"lane": lane}), **kw}
 
 
 #: The 22:00 ET check of SAT, and the production knobs it is judged with.
@@ -3715,9 +3722,14 @@ def _declared_run_health_hours(monkeypatch):
     """The run-health hours are read from settings at call time (MARKETING_RUN_HOUR_ET, the worker's run
     hour mirrored on the web, and MARKETING_MAX_RUN_ATTEMPTS): pin both to their DECLARED defaults, so a
     developer's .env can never move every expected 22:00 / 16:00. A test that wants another hour sets its
-    own (`_hours`). Neutral for the measure step, which reads neither."""
+    own (`_hours`). Neutral for the measure step, which reads neither.
+
+    The spotlight lane (migration 210) is read by the same jobs: its switch (off), weekdays and hour are pinned to
+    their declared defaults too, so every test above judges the main lane alone unless it opens the lane itself
+    (`_spot_lane`)."""
     fields = type(settings).model_fields
-    for name in ("MARKETING_RUN_HOUR_ET", "MARKETING_MAX_RUN_ATTEMPTS"):
+    for name in ("MARKETING_RUN_HOUR_ET", "MARKETING_MAX_RUN_ATTEMPTS", "MARKETING_SPOTLIGHT_ENABLED",
+                 "MARKETING_SPOTLIGHT_WEEKDAYS", "MARKETING_SPOTLIGHT_HOUR_ET"):
         monkeypatch.setattr(settings, name, fields[name].default)
 
 
@@ -3999,6 +4011,7 @@ def test_a_hostile_last_error_is_scrubbed_folded_onto_one_line_and_capped():
     ("narration_too_long", "voice stage"),
     ("unrenderable_text", "render stage"),
     ("image_too_large", "post image"),
+    ("nothing_qualified", "selection trail"),     # a spotlight day with no record (migration 210, 2026-11-15)
 ])
 def test_each_known_skip_reason_says_where_to_look(reason, needle):
     msg = _health(_run("skipped", stage="selected", metadata={"skip_reason": reason}))
@@ -4937,20 +4950,27 @@ def _env_get_default(call: Any, name: str) -> Optional[str]:
     return args[1].value
 
 
-def _worker_run_hour_defaults(source: str) -> List[str]:
-    """Every default the worker gives MARKETING_RUN_HOUR_ET, from its AST (so a comment or a docstring can
-    never satisfy it). Every use of the name must be one `os.environ.get(name, "<n>")` — any other way
-    to read it (os.environ[...], os.getenv, a variable name) is reported as None, never skipped."""
+def _worker_run_hour_defaults(source: str, name: str = "MARKETING_RUN_HOUR_ET") -> List[str]:
+    """Every default the worker gives the environment variable `name` (MARKETING_RUN_HOUR_ET, and since migration
+    210 MARKETING_SPOTLIGHT_HOUR_ET), from its AST (so a comment or a docstring can never satisfy it). Every use of
+    the name must be one `os.environ.get(name, "<n>")` — any other way to read it (os.environ[...], os.getenv, a
+    variable name) is reported as None, never skipped."""
     import ast
 
     tree = ast.parse(source)
     calls = {id(n.args[0]): n for n in ast.walk(tree) if isinstance(n, ast.Call) and n.args}
     found: List[Any] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Constant) and node.value == "MARKETING_RUN_HOUR_ET":
+        if isinstance(node, ast.Constant) and node.value == name:
             call = calls.get(id(node))
-            found.append(_env_get_default(call, "MARKETING_RUN_HOUR_ET") if call is not None else None)
+            found.append(_env_get_default(call, name) if call is not None else None)
     return found
+
+
+def _worker_source() -> str:
+    from pathlib import Path
+
+    return (Path(__file__).resolve().parents[1] / "marketing" / "main.py").read_text(encoding="utf-8")
 
 
 def test_the_webs_run_hour_default_mirrors_the_workers():
@@ -4968,6 +4988,43 @@ def test_the_webs_run_hour_default_mirrors_the_workers():
     assert None not in defaults, f"the worker reads MARKETING_RUN_HOUR_ET some other way: {defaults}"
     web_default = Settings.model_fields["MARKETING_RUN_HOUR_ET"].default
     assert {int(d) for d in defaults} == {web_default}, (defaults, web_default)
+
+
+def test_the_webs_spotlight_hour_default_mirrors_the_workers():
+    """Migration 210: MARKETING_SPOTLIGHT_HOUR_ET is the same kind of mirror — the worker's variable decides when the
+    spotlight lane is claimed, the web's decides whether its claim gate's hour rule holds (spotlight hour +
+    MARKETING_MAX_RUN_ATTEMPTS <= MARKETING_RUN_HOUR_ET). An owner who sets neither must get one hour on both sides,
+    and the two defaults must satisfy that rule together. Read from the worker's source by AST, read ONCE."""
+    from app.config import Settings
+    from app.services.marketing import selection
+
+    defaults = _worker_run_hour_defaults(_worker_source(), "MARKETING_SPOTLIGHT_HOUR_ET")
+    assert defaults, "the worker no longer reads MARKETING_SPOTLIGHT_HOUR_ET with os.environ.get — update this guard"
+    assert None not in defaults, f"the worker reads MARKETING_SPOTLIGHT_HOUR_ET some other way: {defaults}"
+    assert len(defaults) == 1, defaults
+    fields = Settings.model_fields
+    web_default = fields["MARKETING_SPOTLIGHT_HOUR_ET"].default
+    assert {int(d) for d in defaults} == {web_default} == {10}, (defaults, web_default)
+    assert selection.spotlight_hours_problem(web_default, fields["MARKETING_MAX_RUN_ATTEMPTS"].default,
+                                             fields["MARKETING_RUN_HOUR_ET"].default) is None
+    # the worker's own default run hour too: its spotlight default comes before it
+    (run_default,) = _worker_run_hour_defaults(_worker_source())
+    assert int(defaults[0]) < int(run_default)
+
+
+@pytest.mark.parametrize("source, expected", [
+    ('import os\nh = os.environ.get("MARKETING_SPOTLIGHT_HOUR_ET", "10")\n', ["10"]),
+    ('import os\nh = f(os.environ.get("MARKETING_SPOTLIGHT_HOUR_ET", "9"), run_hour=16)\n', ["9"]),
+    ('import os\nh = os.environ.get("MARKETING_SPOTLIGHT_HOUR_ET", 10)\n', [None]),
+    ('import os\nh = os.getenv("MARKETING_SPOTLIGHT_HOUR_ET", "10")\n', [None]),
+    # a log line naming the variable inside a longer text is not a read, and not a Constant equal to the name
+    ('import os\nlog("MARKETING_SPOTLIGHT_HOUR_ET=%r is bad", x)\nh = os.environ.get("MARKETING_SPOTLIGHT_HOUR_ET", "10")\n',
+     ["10"]),
+    # the run-hour scan never counts the spotlight variable, nor the reverse
+    ('import os\nh = os.environ.get("MARKETING_RUN_HOUR_ET", "16")\n', []),
+])
+def test_the_spotlight_hour_parity_scan_sees_every_read_and_no_comment(source, expected):
+    assert _worker_run_hour_defaults(source, "MARKETING_SPOTLIGHT_HOUR_ET") == expected
 
 
 @pytest.mark.parametrize("source, expected", [
@@ -5548,8 +5605,9 @@ def test_an_unreadable_or_capped_read_says_so_never_an_empty_scorecard():
         s["scorecard"]["read"] = junk
         assert ("  (the published-posts read stopped after ? posts — the newest may be missing)"
                 in ds.compose_digest(s).splitlines()), junk
-    # paged (MD-7): 4 pages of 300, never one capped read of 300 that lost the newest week
-    assert (ds.MEASURED_POST_LIMIT, ds.MEASURED_POST_PAGES, ds.MEASURED_POST_MAX) == (300, 4, 1_200)
+    # paged (MD-7): 5 pages of 300 (4 → 5 with the spotlight lane, migration 210: two runs a day), never one capped
+    # read of 300 that lost the newest week
+    assert (ds.MEASURED_POST_LIMIT, ds.MEASURED_POST_PAGES, ds.MEASURED_POST_MAX) == (300, 5, 1_500)
     assert ds.FOLLOWER_LOOKBACK == timedelta(days=35)
 
 
@@ -8032,10 +8090,10 @@ async def test_a_final_job_that_raises_never_stops_the_nightly_alert(bot, digest
                                                                      caplog):
     real = digest_ledger.get_run_for_date
 
-    async def flaky(run_date: Any) -> Any:
+    async def flaky(run_date: Any, **kw: Any) -> Any:     # both lanes' reads (migration 210)
         if run_date == date(2026, 10, 5):
             raise mrs.MarketingRunError("runs 503")
-        return await real(run_date)
+        return await real(run_date, **kw)
 
     monkeypatch.setattr(digest_ledger, "get_run_for_date", flaky)
     caplog.set_level(logging.ERROR)
@@ -8312,12 +8370,12 @@ async def test_an_unreadable_nightly_state_fails_the_final_word_closed_and_a_lat
     assert (await _health_at(digest_jobs, _et(2026, 10, 5, 22, 0)))["sent"] == 1      # Monday's check: all used
     real_table = digest_ledger.fake.tables[ds._JOB_STATE_TABLE]
     digest_ledger.fake.tables[ds._JOB_STATE_TABLE] = table
-    read: List[date] = []
+    read: List[Any] = []
     real_get = digest_ledger.get_run_for_date
 
-    async def recording(run_date: Any) -> Any:
-        read.append(run_date)
-        return await real_get(run_date)
+    async def recording(run_date: Any, **kw: Any) -> Any:
+        read.append((run_date, kw.get("lane", "main")))
+        return await real_get(run_date, **kw)
 
     monkeypatch.setattr(digest_ledger, "get_run_for_date", recording)
     assert await _health_at(digest_jobs, _et(2026, 10, 6, 16, 0)) == {"checked": 0, "sent": 0, "failed": 1,
@@ -8329,7 +8387,8 @@ async def test_an_unreadable_nightly_state_fails_the_final_word_closed_and_a_lat
     digest_ledger.fake.tables[ds._JOB_STATE_TABLE] = real_table
     assert await _health_at(digest_jobs, _et(2026, 10, 6, 16, 10)) == {"checked": 1, "sent": 0, "failed": 0,
                                                                    "rate_limited": 0}
-    assert read == [date(2026, 10, 5)] and len(_sends(bot)) == 1
+    # the run of each lane is read once the state is readable (migration 210: the final word judges both lanes)
+    assert read == [(date(2026, 10, 5), "main"), (date(2026, 10, 5), "spotlight")] and len(_sends(bot)) == 1
     assert digest_jobs.rows[ds.JOB_HEALTH_FINAL]["run_day"] == date(2026, 10, 6)
 
 
@@ -8570,11 +8629,12 @@ def test_the_digest_names_the_days_whose_picture_was_not_used_in_the_owners_word
     ]
     s = _summary(posts)
     unknown = "a reason this digest does not know"
+    # (run day, lane, reasons) — keyed by (day, lane) since migration 210; every post here is a main-lane post
     assert s["image_fallback"] == [
-        (date(2026, 9, 28), [("the worker that ran the day cannot draw this picture", 1)]),
-        (date(2026, 10, 1), [("the picture text did not pass the checks", 2),
-                             ("the Threads caption is too long for a picture post", 1)]),
-        (date(2026, 10, 3), [(unknown, 2)]),
+        (date(2026, 9, 28), "main", [("the worker that ran the day cannot draw this picture", 1)]),
+        (date(2026, 10, 1), "main", [("the picture text did not pass the checks", 2),
+                                     ("the Threads caption is too long for a picture post", 1)]),
+        (date(2026, 10, 3), "main", [(unknown, 2)]),
     ]
     text = ds.compose_digest(s)
     lines = text.splitlines()
@@ -8640,15 +8700,41 @@ def _template_refused_switches() -> List[str]:
     return sorted(set(names))
 
 
+#: The main lane's `template_refused` hint, byte for byte what it was before the spotlight lane (plan step 8: the main
+#: lane's Telegram texts never change).
+_MAIN_TEMPLATE_REFUSED_HINT = ("the day's company post failed the template re-check, or MARKETING_CONTENT_CLASSES / "
+                               "MARKETING_NEWS_SERIES no longer lists its class or series (or this deploy no longer "
+                               "ships the series) — read the web log 'create_posts TEMPLATE REFUSED' for this run")
+
+
 def test_the_template_refusal_hint_names_every_switch_create_posts_refuses_on():
     """Review R9 (low): the per-series switch (drop 2b) also answers `template_refused`; the owner's alert
-    must name MARKETING_NEWS_SERIES too, not only the class switch — or it points at the wrong setting."""
+    must name MARKETING_NEWS_SERIES too, not only the class switch — or it points at the wrong setting.
+
+    The spotlight lane (migration 210) adds a switch create_posts refuses only a SPOTLIGHT run on
+    (MARKETING_SPOTLIGHT_ENABLED): the spotlight lane's text names every switch, the main lane's every switch but that
+    lane's own — its hint byte for byte what it was (lane review, 2026-11-15), and the union covers them all."""
     switches = _template_refused_switches()
-    assert {"MARKETING_CONTENT_CLASSES", "MARKETING_NEWS_SERIES"} <= set(switches), switches
+    assert {"MARKETING_CONTENT_CLASSES", "MARKETING_NEWS_SERIES", "MARKETING_SPOTLIGHT_ENABLED"} <= set(switches), \
+        switches
+    lane_only = {s for s in switches if "SPOTLIGHT" in s}
     msg = _health(_run("skipped", stage="assets_ready", metadata={"skip_reason": "template_refused"}))
     assert msg is not None
-    missing = [s for s in switches if s not in msg]
+    missing = [s for s in switches if s not in msg and s not in lane_only]
     assert not missing, (missing, msg)
+    assert not [s for s in lane_only if s in msg], msg                  # the main lane's text never names them
+    assert ds._SKIP_HINTS["template_refused"] == _MAIN_TEMPLATE_REFUSED_HINT
+    assert msg == f"⚠️ Marketing run Sat 2026-10-03 was SKIPPED (template_refused): {_MAIN_TEMPLATE_REFUSED_HINT}."
+    spot = _spot_health(_spot("skipped", run_date="2026-11-17", stage="assets_ready",
+                              metadata={"skip_reason": "template_refused"}))
+    assert spot.startswith("⚠️ Marketing run Tue 2026-11-17 · spotlight was SKIPPED (template_refused): "), spot
+    assert not [s for s in switches if s not in spot], spot
+    # a lane's own wording only ever re-words a hint `_SKIP_HINTS` has (`_skip_text` checks that set)
+    assert set(ds._LANE_SKIP_HINTS) <= set(RUN_LANES)
+    for words in ds._LANE_SKIP_HINTS.values():
+        assert set(words) <= set(ds._SKIP_HINTS)
+    assert ds._skip_hint("template_refused", "main") == _MAIN_TEMPLATE_REFUSED_HINT
+    assert ds._skip_hint("empty_pool", "spotlight") == ds._SKIP_HINTS["empty_pool"]
 
 
 def _worker_rejection_skip_reasons() -> Dict[str, str]:
@@ -8966,7 +9052,8 @@ async def test_b3pd2_an_unchanged_calendar_looks_once_claims_nothing_and_sends_n
                                                                                        monkeypatch):
     """At the default calendar the day after a rest day (Thursday 2026-10-08, after Wednesday's `rest_day` skip) is
     exactly as before — no claim, no message, `checked` 0 — and the look at its records costs ONE job-state read and
-    ONE run read per process per day: none before 16:00 ET, none on a later tick that day."""
+    ONE run read per lane per process per day (migration 210: the main run, then the spotlight run, since the main
+    one did not decide): none before 16:00 ET, none on a later tick that day."""
     _seed_health_run(digest_ledger, _run("skipped", run_date="2026-10-07", stage="planned", metadata=_REST))
     state_reads: List[str] = []
     run_reads: List[Any] = []
@@ -8976,9 +9063,9 @@ async def test_b3pd2_an_unchanged_calendar_looks_once_claims_nothing_and_sends_n
         state_reads.append(job)
         return await real_state(svc, job)
 
-    async def run_spy(run_date: Any) -> Any:
-        run_reads.append(run_date)
-        return await real_run(run_date)
+    async def run_spy(run_date: Any, **kw: Any) -> Any:
+        run_reads.append((run_date, kw.get("lane", "main")))
+        return await real_run(run_date, **kw)
 
     monkeypatch.setattr(ds, "_job_state", state_spy)
     monkeypatch.setattr(digest_ledger, "get_run_for_date", run_spy)
@@ -8986,7 +9073,9 @@ async def test_b3pd2_an_unchanged_calendar_looks_once_claims_nothing_and_sends_n
     assert state_reads == [] and run_reads == []
     for at in (_et(2026, 10, 8, 16, 0), _et(2026, 10, 8, 16, 10), _et(2026, 10, 8, 21, 59)):
         assert await _health_at(digest_jobs, at) == {"checked": 0, "sent": 0, "failed": 0, "rate_limited": 0}
-    assert state_reads == [ds.JOB_HEALTH] and run_reads == [date(2026, 10, 7)]
+    assert state_reads == [ds.JOB_HEALTH]
+    assert run_reads == [(date(2026, 10, 7), "main"), (date(2026, 10, 7), "spotlight")]
+    assert ds._FINAL_OWED == {"day": date(2026, 10, 8), "owed": False}    # decided — never a failed look
     assert digest_jobs.claims == [] and digest_jobs.state_reads == 0 and _sends(bot) == []
 
 
@@ -9018,10 +9107,10 @@ async def test_b3pd2_a_failed_look_is_logged_and_retried_never_a_guess(bot, dige
     real_run = digest_ledger.get_run_for_date
     fail = {"on": True}
 
-    async def flaky(run_date: Any) -> Any:
+    async def flaky(run_date: Any, **kw: Any) -> Any:     # both lanes' reads (migration 210)
         if fail["on"]:
             raise mrs.MarketingRunError("runs 503")
-        return await real_run(run_date)
+        return await real_run(run_date, **kw)
 
     monkeypatch.setattr(digest_ledger, "get_run_for_date", flaky)
     caplog.set_level(logging.WARNING, logger=ds.__name__)
@@ -9155,3 +9244,993 @@ async def test_batch3_at_seven_days_the_runway_sees_every_lesson_of_a_long_news_
     seen_by_240 = selection.lesson_refs([ref for _d, ref in sorted(((r["run_date"], r["source_ref"]) for r in rows),
                                                                    reverse=True)][:240])
     assert 45 - len(set(seen_by_240)) == 10
+
+
+# ══ The spotlight lane (migration 210, 2026-11-15): run health, final word and digest per lane ═════════════════
+
+SPOT_MON, SPOT_TUE, SPOT_WED, SPOT_THU = date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 18), date(2026, 11, 19)
+_SPOT_NIGHT = _et(2026, 11, 17, 22, 0)        # Tue's nightly check
+_SPOT_FINAL = _et(2026, 11, 18, 16, 0)        # Wed: Tue's final word
+_NO_RETRY_SPOT = "no retry is left (the worker resumes a day only until 10:00 ET the next day)"
+_HINT_SPOT = "Check the marketing-worker cron on Railway (hourly from 10:15 ET) and its last logs"
+
+
+_SPOT_LANE_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"
+
+
+def _spot_lane(monkeypatch, weekdays: str = "tue,thu,sat") -> None:
+    """Open the spotlight lane: its switch on, its weekdays, a news class (the lesson alone keeps it closed) and the
+    declared hours (10 + 6 <= 16, pinned by `_declared_run_health_hours`). The weekday-parse and closed-lane log
+    memos are cleared so no test inherits another's."""
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_ENABLED", True)
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_WEEKDAYS", weekdays)
+    monkeypatch.setattr(settings, "MARKETING_CONTENT_CLASSES", "A,C,F")
+    # C0 (2026-11-16): a spotlight day needs a series the main lane's chain does not hold that day — the insider
+    # spotlight listed (the switch-on order's value), so every listed weekday is one
+    monkeypatch.setattr(settings, "MARKETING_NEWS_SERIES", _SPOT_LANE_SERIES)
+    selection._parse_spotlight_weekdays_text.cache_clear()
+    selection._log_lane_closed.cache_clear()
+    selection._news_series_once.cache_clear()
+    assert selection.spotlight_lane_open()
+
+
+def _spot(status: str, *, run_date: str, **kw: Any) -> Dict[str, Any]:
+    """A SPOTLIGHT run row (`lane` = "spotlight"); `_run` rows carry no lane — the main lane, the column default."""
+    return _run(status, run_date=run_date, lane="spotlight", **kw)
+
+
+def _spot_health(run, **kw: Any) -> Optional[str]:
+    base: Dict[str, Any] = dict(run_date=SPOT_TUE, posting_day=True, now=_SPOT_NIGHT, max_attempts=6,
+                                stale_seconds=HEALTH_STALE_SECONDS, lane="spotlight")
+    base.update(kw)
+    return ds.evaluate_run_health(run, **base)
+
+
+def _spot_final(run, **kw: Any) -> Optional[str]:
+    base: Dict[str, Any] = dict(run_date=SPOT_TUE, posting_day=True, now=_SPOT_FINAL, max_attempts=6,
+                                stale_seconds=HEALTH_STALE_SECONDS, checked_at=_SPOT_NIGHT, lane="spotlight")
+    base.update(kw)
+    return ds.evaluate_run_final(run, **base)
+
+
+#: The SKIP terminal's own trail step (script_service `_skip_nothing_qualified`).
+_SKIP_STEP = {"series": "skip", "outcome": "no_candidates"}
+#: A spotlight run's metadata on a QUIET day where nothing qualified: its skip reason and the selection mirror the
+#: script kick writes (script_service `_heal_skip_mirror`) — every series fell through on the week's content.
+_QUIET_SKIP = {"skip_reason": "nothing_qualified", "series": "skip", "series_trail": [
+    {"series": "insider_spotlight", "outcome": "no_candidates"}, {"series": "money_map", "outcome": "all_recent"},
+    dict(_SKIP_STEP)]}
+_NQ_HINT = ("no spotlight series had a record to post that day — read the selection trail in "
+            "marketing_scripts.fact_sheet for this run, and check MARKETING_NEWS_SERIES lists the spotlight series")
+
+
+def _nq(trail: Any = None, **meta: Any) -> Dict[str, Any]:
+    """A spotlight run skipped `nothing_qualified` on Tue 2026-11-17, its mirror carrying `trail` (no mirror when
+    None and no `series` is given)."""
+    md: Dict[str, Any] = {"skip_reason": "nothing_qualified", **meta}
+    if trail is not None:
+        md.setdefault("series", "skip")
+        md["series_trail"] = trail
+    return _spot("skipped", run_date="2026-11-17", stage="planned", metadata=md)
+
+
+# ── the hours: the latest ENABLED lane's ──────────────────────────────────────
+
+
+def test_spotlight_the_run_health_hours_are_the_latest_enabled_lanes(monkeypatch, caplog):
+    """One nightly check and one final word judge both lanes, so each waits for the LATEST enabled lane (review_lane:
+    timing from the main hour alone was right only while the spotlight's hours came first). A closed lane never moves
+    them; the hour rule keeps the main lane's the latest whenever the lane is open; at spotlight hour 18 the lane is
+    CLOSED (18 + 6 > 16, an ERROR) — and were one open there, both jobs would wait for it."""
+    assert ds._enabled_lane_hours() == (16,)
+    assert (ds.health_hour_et(), ds.final_hour_et()) == (22, 16)            # the lane closed: the hours of before
+    _spot_lane(monkeypatch)
+    assert ds._enabled_lane_hours() == (16, 10)
+    assert (ds.health_hour_et(), ds.final_hour_et()) == (22, 16)            # 10 + 6 <= 16: still the main lane's
+    caplog.set_level(logging.ERROR, logger=selection.__name__)
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_HOUR_ET", 18)
+    assert not selection.spotlight_lane_open()
+    assert any("CLOSED" in r.getMessage() and "18" in r.getMessage() for r in caplog.records)
+    assert ds._enabled_lane_hours() == (16,) and (ds.health_hour_et(), ds.final_hour_et()) == (22, 16)
+    # the max itself (unreachable through the hour rule): a lane open at 18 holds both jobs until its hours pass
+    monkeypatch.setattr(selection, "spotlight_lane_open", lambda: True)
+    assert ds._enabled_lane_hours() == (16, 18)
+    assert (ds.health_hour_et(), ds.final_hour_et()) == (23, 18)
+    assert not ds.health_due(_et(2026, 11, 17, 22, 59)) and ds.health_due(_et(2026, 11, 17, 23, 0))
+    assert not ds.final_due(_et(2026, 11, 18, 17, 59)) and ds.final_due(_et(2026, 11, 18, 18, 0))
+    monkeypatch.setattr(settings, "MARKETING_MAX_RUN_ATTEMPTS", 0)          # no attempts cap: midnight, as before
+    assert ds.health_hour_et() == ds.LAST_HOUR_ET
+
+
+@pytest.mark.parametrize("bad", [None, "10", 24, -1, True, 10.0])
+def test_spotlight_an_unreadable_spotlight_hour_is_the_declared_default_logged(monkeypatch, caplog, bad):
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_HOUR_ET", bad)
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    assert ds.spotlight_hour_et() == 10 == ds.lane_hour_et("spotlight")
+    assert ds.lane_hour_et("main") == 16
+    assert any("MARKETING_SPOTLIGHT_HOUR_ET" in r.getMessage() for r in caplog.records)
+    for lane in ("junk", None, "MAIN", ""):
+        with pytest.raises(ValueError):
+            ds.lane_hour_et(lane)
+
+
+def test_spotlight_a_spotlight_only_day_makes_both_jobs_due_only_while_the_lane_is_open(monkeypatch):
+    """Wednesday is no posting day ("mon,tue,thu,sat"): as a spotlight day ("wed") the nightly check is due on it and
+    the final word the day after — and with the switch off, neither (the main lane's days are unchanged)."""
+    assert not ds.health_due(_et(2026, 11, 18, 22, 0)) and not ds.final_due(_et(2026, 11, 19, 16, 0))
+    _spot_lane(monkeypatch, "wed")
+    assert ds.health_due(_et(2026, 11, 18, 22, 0)) and not ds.health_due(_et(2026, 11, 18, 21, 59))
+    assert ds.final_due(_et(2026, 11, 19, 16, 0)) and not ds.final_due(_et(2026, 11, 19, 15, 59))
+    assert ds.health_due(_et(2026, 11, 17, 22, 0)) and not ds.health_due(_et(2026, 11, 20, 22, 0))   # Tue / Fri
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+    assert not ds.health_due(_et(2026, 11, 18, 22, 0)) and not ds.final_due(_et(2026, 11, 19, 16, 0))
+
+
+# ── the texts (pure) ──────────────────────────────────────────────────────────
+
+
+def test_spotlight_nightly_texts_name_the_lane_its_hours_and_its_own_posts(monkeypatch):
+    """Every spotlight text names its run "<day> · spotlight", its lane's hours (10:15 / 10:00 ET) and "this spotlight
+    run's posts" — never "this day's posts", which the main run of that day may well have posted."""
+    assert _spot_health(None) == (
+        f"⚠️ Marketing: no run for Tue 2026-11-17 · spotlight, a spotlight day — the worker never claimed it. "
+        f"{_HINT_SPOT}; the spotlight lane posts nothing for this day.")
+    assert _spot_health(_spot("failed", run_date="2026-11-17", stage="scripted", attempts=6,
+                              last_error="ffmpeg exited 137")) == (
+        "⚠️ Marketing run Tue 2026-11-17 · spotlight FAILED after stage scripted (the last completed stage): all 6 "
+        "attempts used; this spotlight run's posts will not go out. Last error: ffmpeg exited 137. Check the "
+        "marketing-worker logs.")
+    assert _spot_health(_spot("failed", run_date="2026-11-17", stage="scripted", attempts=2)) == (
+        "⚠️ Marketing run Tue 2026-11-17 · spotlight FAILED after stage scripted (the last completed stage): attempt 2 "
+        "of 6; the worker retries hourly until midnight ET and resumes it on tomorrow's early ticks — a final word "
+        "comes tomorrow after 16:00 ET. Last error: (none recorded). Check the marketing-worker logs.")
+    abandoned = _spot("in_progress", run_date="2026-11-17", stage="scripted", attempts=6,
+                      updated_at=_iso_of(_et(2026, 11, 17, 15, 40)))
+    assert "no retries remain — the run will close failed." in _spot_health(abandoned)
+    # the series note never rides here, and the posts-recorded wording is the same for both lanes
+    recorded = _spot("failed", run_date="2026-11-17", stage="assets_ready", attempts=6)
+    assert ds._POSTS_RECORDED in _spot_health(recorded) and "will not go out" not in _spot_health(recorded)
+    refused = _spot_health(_spot("skipped", run_date="2026-11-17", stage="scripted",
+                                 metadata={"skip_reason": "template_refused"}))
+    assert refused.startswith("⚠️ Marketing run Tue 2026-11-17 · spotlight was SKIPPED (template_refused): ")
+    assert "MARKETING_SPOTLIGHT_ENABLED" in refused
+    # quiet: a good run, a rest day — and on the spotlight lane alone, a day where nothing qualified
+    for quiet in (_spot("media_ready", run_date="2026-11-17"),
+                  _spot("skipped", run_date="2026-11-17", stage="planned", metadata={"skip_reason": "rest_day"}),
+                  _spot("skipped", run_date="2026-11-17", stage="planned", metadata=dict(_QUIET_SKIP))):
+        assert _spot_health(quiet) is None, quiet
+        assert _spot_final(quiet, checked_at=None) is None, quiet
+    assert _spot_health(None, posting_day=False) is None
+    # the MAIN lane keeps a nothing_qualified skip loud (it never writes one: a sign something is wrong)
+    main = _health(_run("skipped", run_date="2026-10-03", stage="planned", metadata={"skip_reason": "nothing_qualified"}))
+    assert main.startswith("⚠️ Marketing run Sat 2026-10-03 was SKIPPED (nothing_qualified): ")
+    for lane in ("junk", None, ""):
+        with pytest.raises(ValueError):
+            _spot_health(None, lane=lane)
+        with pytest.raises(ValueError):
+            _spot_final(None, lane=lane)
+
+
+def test_spotlight_final_words_name_the_lane_and_its_resume_hour():
+    assert _spot_final(None, checked_at=None) == (
+        "⚠️ Marketing: no run for Tue 2026-11-17 · spotlight, a spotlight day — the worker never claimed it, so the "
+        f"spotlight lane posted nothing for this day (the nightly check never went out). {_HINT_SPOT}.")
+    assert _spot_final(None) is None                       # after a check, its "no run" alert was final
+    resumed = _spot("failed", run_date="2026-11-17", stage="scripted", attempts=3,
+                    updated_at=_iso_of(_et(2026, 11, 18, 9, 20)))
+    assert _spot_final(resumed) == (
+        "⚠️ Marketing run Tue 2026-11-17 · spotlight ended FAILED after stage scripted (the last completed stage): "
+        f"attempt 3 of 6; {_NO_RETRY_SPOT}. This spotlight run's posts will not go out. Last error: (none recorded).")
+    stuck = _spot("in_progress", run_date="2026-11-17", stage="voiced", attempts=2,
+                  updated_at=_iso_of(_et(2026, 11, 17, 11, 40)))
+    assert _spot_final(stuck).startswith(
+        "⚠️ Marketing run Tue 2026-11-17 · spotlight never finished — the spotlight run is lost: in_progress after "
+        "stage voiced")
+    none = _spot("media_ready", run_date="2026-11-17", metadata={"posts_recorded": 0},
+                 finished_at=_iso_of(_et(2026, 11, 18, 9, 30)))
+    assert _spot_final(none) == ("✅ Marketing run Tue 2026-11-17 · spotlight recovered at 11-18 09:30 ET — it "
+                                 "recorded no posts, so the spotlight lane posts nothing for this day.")
+
+
+# ── C0 (2026-11-16): the hours are derived at every spotlight hour, and a closed lane promises no retry ──────────
+
+
+@pytest.mark.parametrize("hour", [9, 0])
+def test_spotlight_every_hour_a_spotlight_text_names_is_derived_from_its_setting(monkeypatch, hour):
+    """The second review: every spotlight text was tested at the default hour 10 only, so a hard-coded hour passed.
+    At MARKETING_SPOTLIGHT_HOUR_ET 9 and 0 (both inside the hour rule: h + 6 <= 16) the cron hint, the resume limit and
+    the retry outlook follow the setting — and at hour 0 there is no early tick of tomorrow to promise."""
+    _spot_lane(monkeypatch)
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_HOUR_ET", hour)
+    assert selection.spotlight_lane_open() and ds.lane_hour_et("spotlight") == hour == ds.spotlight_hour_et()
+    assert ds._enabled_lane_hours() == (16, hour) and (ds.health_hour_et(), ds.final_hour_et()) == (22, 16)
+    hint = f"Check the marketing-worker cron on Railway (hourly from {hour:02d}:15 ET) and its last logs"
+    assert hint in _spot_health(None) and hint in _spot_final(None, checked_at=None)
+    assert "10:15" not in _spot_health(None)
+    resumed = _spot("failed", run_date="2026-11-17", stage="scripted", attempts=3,
+                    updated_at=_iso_of(_et(2026, 11, 17, 23, 20) if hour == 0 else _et(2026, 11, 18, hour - 1, 20)))
+    final = _spot_final(resumed)
+    assert f"no retry is left (the worker resumes a day only until {hour:02d}:00 ET the next day)" in final
+    assert "10:00 ET" not in final
+    failed = _spot_health(_spot("failed", run_date="2026-11-17", stage="scripted", attempts=2))
+    assert "the worker retries hourly until midnight ET" in failed
+    assert ("early ticks" in failed) is (hour != 0)
+    # the main lane's texts never move with the spotlight hour
+    assert "hourly from 16:15 ET" in _health(None, run_date=SPOT_TUE, posting_day=True, now=_SPOT_NIGHT)
+
+
+#: Every `_LANE_CLOSED` line names the switches that close the lane (`selection.spotlight_day_problem`).
+_CLOSED_WORDS = ("the spotlight lane is closed for that day now", "MARKETING_SPOTLIGHT_ENABLED",
+                 "MARKETING_SPOTLIGHT_WEEKDAYS", "MARKETING_NEWS_SERIES", "cannot claim it again")
+
+
+def _names_the_closed_lane(text: Optional[str]) -> bool:
+    return text is not None and all(w in text for w in _CLOSED_WORDS)
+
+
+def test_spotlight_a_closed_lane_never_promises_a_retry_or_blames_the_cron():
+    """A spotlight run below the attempts cap whose lane has closed since (`lane_open` False): the claim gate refuses
+    every claim of that date, resumes included — so the nightly check never says "the worker retries hourly" or
+    "resumes it on tomorrow's early ticks", and the final word never says "check the marketing-worker cron" or "the
+    worker resumes a day only until …"; each names the closed lane instead."""
+    failed = _spot("failed", run_date="2026-11-17", stage="selected", attempts=1, last_error="ledger 520")
+    night = _spot_health(failed, lane_open=False)
+    assert night == (
+        "⚠️ Marketing run Tue 2026-11-17 · spotlight FAILED after stage selected (the last completed stage): attempt 1 "
+        f"of 6; no retry: {ds._LANE_CLOSED}; this spotlight run's posts will not go out. Last error: ledger 520. Check "
+        "the marketing-worker logs.")
+    assert _names_the_closed_lane(night) and "retries hourly" not in night and "final word" not in night
+    abandoned = _spot("in_progress", run_date="2026-11-17", stage="scripted", attempts=2,
+                      updated_at=_iso_of(_et(2026, 11, 17, 11, 40)))
+    text = _spot_health(abandoned, lane_open=False)
+    assert "attempt 2 of 6 was abandoned; no retry: the spotlight lane is closed" in text
+    assert "retries hourly" not in text and _names_the_closed_lane(text)
+    # unreadable attempts: closed decides (nothing can retry it)
+    assert _names_the_closed_lane(_spot_health({**failed, "attempts": "x"}, lane_open=False))
+    # the final word, unchanged since the check
+    word = _spot_final(failed, lane_open=False)
+    assert word == (
+        "⚠️ Marketing run Tue 2026-11-17 · spotlight is still FAILED after stage selected (the last completed stage), "
+        f"attempt 1 of 6: no retry happened — {ds._LANE_CLOSED}. This spotlight run's posts will not go out. Last "
+        "error: ledger 520.")
+    assert "cron" not in word
+    stuck = _spot_final(abandoned, lane_open=False)
+    assert stuck.endswith(f" No retry: {ds._LANE_CLOSED}.") and "cron" not in stuck
+    # the final word, changed after the check (resumed, then the lane closed): never "resumes a day only until"
+    resumed = {**failed, "attempts": 2, "updated_at": _iso_of(_et(2026, 11, 18, 9, 20))}
+    later = _spot_final(resumed, lane_open=False)
+    assert _names_the_closed_lane(later) and "only until" not in later
+    running = {**abandoned, "updated_at": _iso_of(_SPOT_FINAL - timedelta(minutes=5))}
+    assert f"if this attempt fails, no retry: {ds._LANE_CLOSED}" in _spot_final(running, lane_open=False)
+    # what stays: a run at the cap, a skip and a good run read the same whatever the lane says
+    capped = _spot("failed", run_date="2026-11-17", stage="scripted", attempts=6)
+    for run in (capped, _spot("skipped", run_date="2026-11-17", stage="planned", metadata=dict(_QUIET_SKIP)),
+                _spot("media_ready", run_date="2026-11-17")):
+        assert _spot_health(run, lane_open=False) == _spot_health(run)
+        assert _spot_final(run, lane_open=False) == _spot_final(run)
+
+
+def test_spotlight_lane_open_never_changes_a_main_text():
+    for run in (None, _run("failed", run_date="2026-11-17", stage="voiced", attempts=2),
+                _run("in_progress", run_date="2026-11-17", stage="voiced", attempts=2,
+                     updated_at=_iso_of(_et(2026, 11, 17, 11, 40)))):
+        base = dict(run_date=SPOT_TUE, posting_day=True, max_attempts=6, stale_seconds=HEALTH_STALE_SECONDS)
+        assert ds.evaluate_run_health(run, now=_SPOT_NIGHT, lane_open=False, **base) == \
+            ds.evaluate_run_health(run, now=_SPOT_NIGHT, **base)
+        assert ds.evaluate_run_final(run, now=_SPOT_FINAL, checked_at=_SPOT_NIGHT, lane_open=False, **base) == \
+            ds.evaluate_run_final(run, now=_SPOT_FINAL, checked_at=_SPOT_NIGHT, **base)
+
+
+@pytest.mark.parametrize("close", ["switch_off", "hour_rule", "weekday_dropped", "series_pulled"])
+@pytest.mark.asyncio
+async def test_spotlight_a_lane_closed_after_a_failure_is_said_by_the_nightly_check_and_the_final_word(
+        bot, digest_jobs, digest_ledger, monkeypatch, close):
+    """The second review's case, through the jobs: Tue's spotlight run failed at 10:15 (attempt 1 of 6); later that day
+    the owner closed the lane — the switch, the hour rule (spotlight hour 11: 11 + 6 > 16), the weekday, or the
+    per-series switch (the Tuesday's spotlight then holds no series once the main lane's Money Map is dropped). The
+    22:00 check names the closed lane (no retry promised), and Wednesday's 16:00 word never blames the cron."""
+    _spot_lane(monkeypatch)
+    _night_rows(digest_ledger)
+    _seed_health_run(digest_ledger, _run("media_ready", run_date="2026-11-17"))
+    _seed_health_run(digest_ledger, _spot("failed", run_date="2026-11-17", stage="selected", attempts=1,
+                                          updated_at=_iso_of(_et(2026, 11, 17, 10, 16))))
+    patch = {"switch_off": ("MARKETING_SPOTLIGHT_ENABLED", False), "hour_rule": ("MARKETING_SPOTLIGHT_HOUR_ET", 11),
+             "weekday_dropped": ("MARKETING_SPOTLIGHT_WEEKDAYS", "thu,sat"),
+             "series_pulled": ("MARKETING_NEWS_SERIES", "ceo_buys,insider_buys,thirteen_f,money_map")}[close]
+    monkeypatch.setattr(settings, *patch)
+    assert not selection.is_spotlight_day(SPOT_TUE)
+    assert (await _health_at(digest_jobs, _SPOT_NIGHT))["sent"] == 1
+    night = _sends(bot)[0]["text"]
+    assert night.startswith("⚠️ Marketing run Tue 2026-11-17 · spotlight FAILED after stage selected")
+    assert _names_the_closed_lane(night) and "retries hourly" not in night and "early ticks" not in night
+    assert (await _health_at(digest_jobs, _SPOT_FINAL))["sent"] == 1
+    final = _sends(bot)[1]["text"]
+    assert "spotlight is still FAILED" in final and _names_the_closed_lane(final) and "cron" not in final
+
+
+@pytest.mark.asyncio
+async def test_spotlight_an_open_lane_keeps_the_retry_promise_and_the_cron_hint(bot, digest_jobs, digest_ledger,
+                                                                               monkeypatch):
+    """The twin: the lane still open, the same failed run keeps today's texts — the retry outlook at night and, with no
+    retry having happened, the cron hint the next afternoon."""
+    _spot_lane(monkeypatch)
+    _night_rows(digest_ledger)
+    _seed_health_run(digest_ledger, _run("media_ready", run_date="2026-11-17"))
+    _seed_health_run(digest_ledger, _spot("failed", run_date="2026-11-17", stage="selected", attempts=1,
+                                          updated_at=_iso_of(_et(2026, 11, 17, 10, 16))))
+    assert (await _health_at(digest_jobs, _SPOT_NIGHT))["sent"] == 1
+    assert "the worker retries hourly until midnight ET" in _sends(bot)[0]["text"]
+    assert (await _health_at(digest_jobs, _SPOT_FINAL))["sent"] == 1
+    assert "no retry happened — check the marketing-worker cron" in _sends(bot)[1]["text"]
+
+
+# ── the jobs: both lanes, ONE message ─────────────────────────────────────────
+
+
+def _night_rows(digest_ledger) -> None:
+    """Monday's main run, published — so Tuesday's 22:00 tick (which also owes Monday's final word) says nothing
+    about Monday."""
+    _seed_health_run(digest_ledger, _run("published", run_date=SPOT_MON.isoformat()))
+
+
+@pytest.mark.asyncio
+async def test_spotlight_the_nightly_check_judges_both_lanes_in_one_message_main_first(bot, digest_jobs,
+                                                                                       digest_ledger, monkeypatch):
+    _spot_lane(monkeypatch)
+    _night_rows(digest_ledger)
+    main = _seed_health_run(digest_ledger, _run("failed", run_date="2026-11-17", stage="voiced", attempts=6,
+                                                last_error="voice OOM", updated_at=_iso_of(_et(2026, 11, 17, 21, 40))))
+    spot = _seed_health_run(digest_ledger, _spot("failed", run_date="2026-11-17", stage="scripted", attempts=6,
+                                                 last_error="ffmpeg exited 137",
+                                                 updated_at=_iso_of(_et(2026, 11, 17, 15, 40))))
+    counters = await _health_at(digest_jobs, _SPOT_NIGHT)
+    assert counters["sent"] == 1 and counters["failed"] == 0
+    (msg,) = _sends(bot)
+    knobs = dict(run_date=SPOT_TUE, posting_day=True, now=_SPOT_NIGHT, max_attempts=6,
+                 stale_seconds=settings.MARKETING_RUN_STALE_SECONDS)
+    main_text = ds.evaluate_run_health(main, **knobs)
+    assert main_text.startswith("⚠️ Marketing run Tue 2026-11-17 FAILED after stage voiced")
+    assert msg["text"] == f"{main_text}\n\n{ds.evaluate_run_health(spot, lane='spotlight', **knobs)}"
+    assert "\n\n⚠️ Marketing run Tue 2026-11-17 · spotlight FAILED after stage scripted" in msg["text"]
+    assert utf16_len(msg["text"]) <= ds.MAX_DIGEST_UNITS
+    assert digest_jobs.rows[ds.JOB_HEALTH]["run_day"] == SPOT_TUE
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_good_main_day_sends_only_the_spotlight_line_and_a_quiet_one_sends_nothing(
+        bot, digest_jobs, digest_ledger, monkeypatch):
+    _spot_lane(monkeypatch)
+    _night_rows(digest_ledger)
+    _seed_health_run(digest_ledger, _run("media_ready", run_date="2026-11-17"))
+    spot = _seed_health_run(digest_ledger, _spot("skipped", run_date="2026-11-17", stage="planned",
+                                                 metadata=dict(_QUIET_SKIP)))
+    assert (await _health_at(digest_jobs, _SPOT_NIGHT))["sent"] == 0      # nothing qualified: quiet
+    assert _sends(bot) == [] and digest_jobs.rows[ds.JOB_HEALTH]["run_day"] == SPOT_TUE
+    # the next Thursday: the spotlight lane never claimed its day — that line alone, no blank line before it
+    _seed_health_run(digest_ledger, _run("media_ready", run_date="2026-11-19"))
+    _seed_health_run(digest_ledger, _run("skipped", run_date="2026-11-18", stage="planned", metadata=_REST))  # Wed
+    assert (await _health_at(digest_jobs, _et(2026, 11, 19, 22, 0)))["sent"] == 1
+    (msg,) = _sends(bot)
+    assert msg["text"] == (f"⚠️ Marketing: no run for Thu 2026-11-19 · spotlight, a spotlight day — the worker never "
+                           f"claimed it. {_HINT_SPOT}; the spotlight lane posts nothing for this day.")
+    assert spot["status"] == "skipped"
+    # Wednesday was a rest day of both lanes: no final word was claimed for it (`_final_owed` looked and said no)
+    assert ds._FINAL_OWED == {"day": SPOT_THU, "owed": False}
+    assert [c[0] for c in digest_jobs.claims].count(ds.JOB_HEALTH_FINAL) == 1      # Tuesday's tick, for Monday
+
+
+@pytest.mark.asyncio
+async def test_spotlight_with_the_lane_closed_and_no_spotlight_row_the_nightly_message_is_the_main_lanes_alone(
+        bot, digest_jobs, digest_ledger):
+    """The switch off (the default): the main lane's message, byte for byte — no spotlight line, no blank line."""
+    _night_rows(digest_ledger)
+    main = _seed_health_run(digest_ledger, _run("failed", run_date="2026-11-17", stage="voiced", attempts=2,
+                                                updated_at=_iso_of(_et(2026, 11, 17, 21, 40))))
+    assert (await _health_at(digest_jobs, _SPOT_NIGHT))["sent"] == 1
+    (msg,) = _sends(bot)
+    assert msg["text"] == ds.evaluate_run_health(main, run_date=SPOT_TUE, posting_day=True, now=_SPOT_NIGHT,
+                                                 max_attempts=6, stale_seconds=settings.MARKETING_RUN_STALE_SECONDS)
+    assert "spotlight" not in msg["text"] and "\n\n" not in msg["text"]
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_spotlight_row_is_judged_by_its_own_record_after_the_switch_went_off(bot, digest_jobs,
+                                                                                              digest_ledger):
+    """A run the lane claimed before the owner switched it off (the default here): its row says the day was a spotlight
+    day, so its refusal still reaches the owner."""
+    _night_rows(digest_ledger)
+    _seed_health_run(digest_ledger, _run("media_ready", run_date="2026-11-17"))
+    _seed_health_run(digest_ledger, _spot("skipped", run_date="2026-11-17", stage="scripted",
+                                          metadata={"skip_reason": "template_refused"}))
+    assert not selection.is_spotlight_day(SPOT_TUE)
+    assert (await _health_at(digest_jobs, _SPOT_NIGHT))["sent"] == 1
+    (msg,) = _sends(bot)
+    assert msg["text"].startswith("⚠️ Marketing run Tue 2026-11-17 · spotlight was SKIPPED (template_refused): ")
+
+
+@pytest.mark.asyncio
+async def test_spotlight_the_final_word_judges_both_lanes_against_the_one_nightly_record(bot, digest_jobs,
+                                                                                         digest_ledger, monkeypatch):
+    """Tuesday's check went out (both lanes failed below the cap); no retry touched the main run, the spotlight run was
+    resumed at 09:15 Wednesday and failed again: Wednesday's 16:00 word names both — main first, one message."""
+    _spot_lane(monkeypatch)
+    _night_rows(digest_ledger)
+    _seed_health_run(digest_ledger, _run("failed", run_date="2026-11-17", stage="voiced", attempts=2,
+                                         updated_at=_iso_of(_et(2026, 11, 17, 21, 40))))
+    spot = _seed_health_run(digest_ledger, _spot("failed", run_date="2026-11-17", stage="scripted", attempts=2,
+                                                 updated_at=_iso_of(_et(2026, 11, 17, 11, 40))))
+    assert (await _health_at(digest_jobs, _SPOT_NIGHT))["sent"] == 1
+    spot.update(attempts=3, updated_at=_iso_of(_et(2026, 11, 18, 9, 20)))
+    assert (await _health_at(digest_jobs, _SPOT_FINAL))["sent"] == 1
+    final = _sends(bot)[1]["text"]
+    main_part, spot_part = final.split("\n\n")
+    assert main_part.startswith("⚠️ Marketing run Tue 2026-11-17 is still FAILED after stage voiced")
+    assert spot_part == (
+        "⚠️ Marketing run Tue 2026-11-17 · spotlight ended FAILED after stage scripted (the last completed stage): "
+        f"attempt 3 of 6; {_NO_RETRY_SPOT}. This spotlight run's posts will not go out. Last error: (none recorded).")
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_final_word_owed_only_by_the_spotlight_runs_own_record_still_goes_out(
+        bot, digest_jobs, digest_ledger, monkeypatch):
+    """B3PD-2 for the spotlight lane: Wednesday was a spotlight day ("wed"); its nightly check never went out and its
+    run failed at the cap. The owner switches the lane off Thursday morning — Wednesday is then no day of either lane,
+    and only the spotlight run's own row owes the final word (`_final_owed` reads it after the main run)."""
+    _spot_lane(monkeypatch, "wed")
+    _seed_health_run(digest_ledger, _run("skipped", run_date="2026-11-18", stage="planned", metadata=_REST))
+    _seed_health_run(digest_ledger, _spot("failed", run_date="2026-11-18", stage="scripted", attempts=6,
+                                          last_error="ffmpeg exited 137",
+                                          updated_at=_iso_of(_et(2026, 11, 18, 15, 40))))
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+    assert not ds.final_due(_et(2026, 11, 19, 16, 0))
+    assert (await _health_at(digest_jobs, _et(2026, 11, 19, 16, 0)))["sent"] == 1
+    (msg,) = _sends(bot)
+    assert msg["text"] == (
+        "⚠️ Marketing run Wed 2026-11-18 · spotlight ended FAILED after stage scripted (the last completed stage): all "
+        "6 attempts used. This spotlight run's posts will not go out. Last error: ffmpeg exited 137.")
+    assert ds._FINAL_OWED == {"day": SPOT_THU, "owed": True}
+    assert [c[0] for c in digest_jobs.claims] == [ds.JOB_HEALTH_FINAL]
+
+
+# ── a day where nothing qualified: quiet only when its own trail shows a quiet day ──────────
+
+
+def test_spotlight_a_skip_series_note_names_why_nothing_posted():
+    """A spotlight day where nothing qualified mirrors `series` = skip (script_service `_heal_skip_mirror`): its note
+    names every series that fell through, infrastructure first — never "" for a day whose data source failed."""
+    note = ds._series_note
+    assert note({"metadata": {"series": "skip", "series_trail": [
+        {"series": "money_map", "outcome": "timeout", "reason": "no answer in 120s"}, dict(_SKIP_STEP)]}}) == (
+        "nothing posted (fell back from Money Map: its data source timed out)")
+    assert note({"metadata": dict(_QUIET_SKIP)}) == (
+        "nothing posted (fell back from Insider Spotlight: nothing qualified; Money Map: everything was already "
+        "posted)")
+    # a trail that names no series (a holder that could not draw, a switch that emptied the chain): the skip says it
+    assert note({"metadata": {"series": "skip", "series_trail": [dict(_SKIP_STEP)]}}) == ""
+    assert note({"metadata": {"series": "skip"}}) == "" and note({"metadata": {"series": "skip", "series_trail": 7}}) == ""
+    # the main lane's notes are unchanged (no main trail ever reaches SKIP)
+    assert note({"metadata": {"series": "money_map", "series_trail": [
+        {"series": "ceo_buys", "outcome": "no_candidates"}, {"series": "money_map", "outcome": "chosen"}]}}) == (
+        "Money Map (fell back from CEO Buys: nothing qualified)")
+
+
+@pytest.mark.parametrize("trail, words", [
+    ([{"series": "money_map", "outcome": "timeout", "reason": "no answer in 120s"}, _SKIP_STEP],
+     "Money Map: its data source timed out"),
+    ([{"series": "money_map", "outcome": "unavailable", "reason": "FMPUnavailableException"}, _SKIP_STEP],
+     "Money Map: its data source was unavailable"),
+    ([{"series": "money_map", "outcome": "error", "reason": "news_source_unavailable"}, _SKIP_STEP],
+     "Money Map: an error"),
+    ([{"series": "insider_spotlight", "outcome": "no_candidates"}, {"series": "money_map", "outcome": "budget"},
+      _SKIP_STEP], "Money Map: out of time"),
+])
+def test_spotlight_a_nothing_qualified_skip_behind_a_failed_data_source_alerts_and_names_it(trail, words):
+    """OBS-1 on the spotlight lane (lane review, 2026-11-15): a chain that fell through because a series' data source
+    timed out, was unavailable, errored or ran out of time is NOT a quiet day — the nightly check and the final word
+    both alert, with the trail's words, and the digest row names it too."""
+    run = _nq([dict(t) for t in trail])
+    for text in (_spot_health(run), _spot_final(run, checked_at=None)):
+        assert text is not None
+        assert text.startswith(f"⚠️ Marketing run Tue 2026-11-17 · spotlight was SKIPPED (nothing_qualified): {_NQ_HINT}. "
+                               f"Selection: nothing posted (fell back from "), text
+        assert words in text and text.endswith(").")
+    assert ds._run_row_text(run).startswith("skipped — nothing qualified · nothing posted (fell back from ")
+    assert words in ds._run_row_text(run)
+
+
+def test_spotlight_a_timed_out_money_map_reads_in_full():
+    run = _nq([{"series": "money_map", "outcome": "timeout", "reason": "no answer in 120s"}, dict(_SKIP_STEP)])
+    assert _spot_health(run) == (
+        f"⚠️ Marketing run Tue 2026-11-17 · spotlight was SKIPPED (nothing_qualified): {_NQ_HINT}. Selection: nothing "
+        "posted (fell back from Money Map: its data source timed out).")
+
+
+@pytest.mark.parametrize("why, run", [
+    ("no mirror at all (a lost mirror write)", _nq()),
+    ("a mirror that is not the skip", _nq([dict(_SKIP_STEP)], series="money_map")),
+    ("an empty trail", _nq([])),
+    ("a trail that is not a list", _nq({"series": "money_map"})),
+    ("a step that is not an object", _nq(["money_map", dict(_SKIP_STEP)])),
+    ("an outcome this code does not know", _nq([{"series": "money_map", "outcome": "mystery"}, dict(_SKIP_STEP)])),
+    ("an outcome that is not a string", _nq([{"series": "money_map", "outcome": ["timeout"]}, dict(_SKIP_STEP)])),
+])
+def test_spotlight_a_nothing_qualified_skip_whose_trail_cannot_prove_a_quiet_day_alerts(why, run):
+    """Quiet needs PROOF: a skip whose own trail does not show every series fell through on content alerts (fail
+    loud) — never quiet on a guess."""
+    text = _spot_health(run)
+    assert text is not None and text.startswith(
+        "⚠️ Marketing run Tue 2026-11-17 · spotlight was SKIPPED (nothing_qualified): "), why
+    assert _spot_final(run, checked_at=None) is not None, why
+
+
+@pytest.mark.parametrize("trail", [
+    [dict(_SKIP_STEP)],
+    [{"series": "money_map", "outcome": "no_candidates", "reason": "money_map_none_qualified"}, dict(_SKIP_STEP)],
+    [{"series": "insider_spotlight", "outcome": "all_recent"}, {"series": "money_map", "outcome": "all_refused"},
+     dict(_SKIP_STEP)],
+    [{"series": "money_map", "outcome": "other_lane", "reason": "other_lane_company"}, dict(_SKIP_STEP)],
+    [{"series": "skip", "outcome": "no_candidates", "reason": "worker_without_news_templates"}],
+    # C0 (2026-11-16): no new Form 4 day to check on a CURRENT feed (the Tuesday after a Monday holiday, 10:00) is a
+    # content skip — never `insider_feed_behind`, which reaches the trail as `unavailable` and alerts
+    [{"series": "insider_spotlight", "outcome": "no_candidates", "reason": "insider_spotlight_no_new_window"},
+     dict(_SKIP_STEP)],
+])
+def test_spotlight_a_nothing_qualified_skip_whose_trail_shows_a_quiet_day_stays_quiet(trail):
+    run = _nq(trail)
+    assert _spot_health(run) is None and _spot_final(run, checked_at=None) is None
+    assert ds._run_row_text(run).startswith("skipped — nothing qualified")       # the digest still lists it
+
+
+def test_spotlight_a_main_run_never_keeps_a_nothing_qualified_skip_quiet():
+    """A main run never writes `nothing_qualified` (its chain ends in the lesson): one that somehow carries it is loud
+    even with a trail a spotlight run would keep quiet — the quiet rule is the spotlight lane's alone — and with no
+    mirror it reads exactly the hint, no trail line."""
+    assert _health(_run("skipped", run_date="2026-10-03", stage="planned",
+                        metadata={"skip_reason": "nothing_qualified"})) == (
+        f"⚠️ Marketing run Sat 2026-10-03 was SKIPPED (nothing_qualified): {_NQ_HINT}.")
+    loud = _health(_run("skipped", run_date="2026-10-03", stage="planned", metadata=dict(_QUIET_SKIP)))
+    assert loud is not None and loud.startswith("⚠️ Marketing run Sat 2026-10-03 was SKIPPED (nothing_qualified): ")
+
+
+# ── a spotlight-only weekday is no main posting day ───────────────────────────
+
+
+def test_spotlight_the_nightly_record_proves_a_main_posting_day_only_when_the_spotlight_cannot_explain_it(
+        monkeypatch):
+    _spot_lane(monkeypatch, "wed")
+    f = ds._main_lane_nightly
+    assert not selection.is_posting_day(SPOT_WED) and selection.is_spotlight_day(SPOT_WED)
+    for how in (ds.NIGHTLY_CHECKED, ds.NIGHTLY_TIME_UNKNOWN):
+        assert f(SPOT_WED, None, how) == ds.NIGHTLY_NEVER               # the check may have run for the spotlight alone
+        assert f(SPOT_TUE, None, how) == how                            # a main posting day: as before
+    assert f(SPOT_WED, None, ds.NIGHTLY_LATER_DAY) == ds.NIGHTLY_NEVER
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+    assert f(SPOT_WED, None, ds.NIGHTLY_CHECKED) == ds.NIGHTLY_CHECKED  # no spotlight day, no row: B3PD-2 as before
+    assert f(SPOT_WED, _spot("media_ready", run_date="2026-11-18"), ds.NIGHTLY_CHECKED) == ds.NIGHTLY_NEVER
+
+
+@pytest.mark.parametrize("main_row", [
+    None,                                                                     # the worker never claimed the rest day
+    dict(status="failed", stage="planned", attempts=1),                       # stopped before its first kick
+    dict(status="in_progress", stage="planned", attempts=1),                  # abandoned before its first kick
+    dict(status="skipped", stage="planned", metadata={"skip_reason": "rest_day"}),
+])
+@pytest.mark.asyncio
+async def test_spotlight_a_spotlight_only_weekday_never_reads_as_a_main_posting_day_the_next_afternoon(
+        bot, digest_jobs, digest_ledger, monkeypatch, main_row):
+    """Lane review, 2026-11-15: the one nightly check also runs on a spotlight day the main lane does not post on
+    ("wed" beside "mon,tue,thu,sat"). Its success used to prove a MAIN posting day to the next day's final word
+    (`judged_posting_day`), so a main run that was never claimed on that rest day, or stopped before its first kick,
+    got a false "no run … a posting day" / "never finished" alert. Its own row decides now."""
+    _spot_lane(monkeypatch, "wed")
+    _seed_health_run(digest_ledger, _run("published", run_date=SPOT_TUE.isoformat()))
+    _seed_health_run(digest_ledger, _spot("media_ready", run_date=SPOT_WED.isoformat()))
+    if main_row is not None:
+        _seed_health_run(digest_ledger, _run(run_date=SPOT_WED.isoformat(),
+                                             updated_at=_iso_of(_et(2026, 11, 18, 16, 20)), **main_row))
+    assert (await _health_at(digest_jobs, _et(2026, 11, 18, 22, 0)))["sent"] == 0
+    assert digest_jobs.rows[ds.JOB_HEALTH]["run_day"] == SPOT_WED              # the nightly check SUCCEEDED that day
+    assert ds.final_due(_et(2026, 11, 19, 16, 0))
+    assert (await _health_at(digest_jobs, _et(2026, 11, 19, 16, 0)))["sent"] == 0
+    assert _sends(bot) == []
+
+
+# ── the weekly digest: each lane of a day, main first ─────────────────────────
+
+
+def test_spotlight_the_digest_lists_each_lane_of_a_day_main_first(monkeypatch):
+    _spot_lane(monkeypatch)   # Tue / Thu / Sat are spotlight days of the week 09-28 → 10-04
+    runs = [_run("published", run_date=d) for d in ("2026-09-28", "2026-09-29", "2026-10-01", "2026-10-03")]
+    runs[1:1] = [_spot("skipped", run_date="2026-09-29", stage="planned",
+                       metadata={"skip_reason": "nothing_qualified"})]          # out of order on purpose
+    runs.append(_spot("media_ready", run_date="2026-10-01", metadata={
+        "series": "money_map", "series_trail": [{"series": "insider_spotlight", "outcome": "no_candidates"},
+                                                {"series": "money_map", "outcome": "chosen"}]}))
+    lines = _digest([], runs=runs).splitlines()
+    i = lines.index("Runs:")
+    assert lines[i + 1:i + 8] == [
+        "• Mon 09-28 published",
+        "• Tue 09-29 published",
+        "• Tue 09-29 spotlight: skipped — nothing qualified",
+        "• Thu 10-01 published",
+        "• Thu 10-01 spotlight: media_ready · Money Map (fell back from Insider Spotlight: nothing qualified)",
+        "• Sat 10-03 published",
+        "• Sat 10-03 spotlight: no run (a spotlight day)",
+    ]
+    # the switch off: the rows that exist are still listed (their own record) — a day without one says nothing
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+    off = _digest([], runs=runs).splitlines()
+    assert "• Sat 10-03 spotlight: no run (a spotlight day)" not in off
+    assert "• Tue 09-29 spotlight: skipped — nothing qualified" in off
+    # a row whose lane does not read back is listed apart, never folded into either lane
+    junk = _digest([], runs=[_run("published", run_date="2026-10-01", lane="junk")]).splitlines()
+    assert "• Thu 10-01 lane ?: published" in junk and "• Thu 10-01 no run (a posting day)" in junk
+
+
+def test_spotlight_the_digest_names_the_spotlight_run_in_its_post_rows_peak_and_fallbacks():
+    code = next(iter(REJECT_REASONS))
+    spot_key = "2026-10-01:spotlight:{}:text".format
+    posts = [
+        _post("x", "rejected", run_date="2026-10-01", meta={"review": {"decision": "rejected", "reason": code}}),
+        _post("x", "rejected", run_date="2026-10-01", idempotency_key=spot_key("x"),
+              meta={"review": {"decision": "rejected", "reason": code}}),
+        _post("bluesky", "failed", run_date="2026-10-01", idempotency_key=spot_key("bluesky"), last_error="boom"),
+        _post("facebook", "published", run_date="2026-10-01", meta={"image_fallback": "image_dropped"}),
+        _post("linkedin", "published", run_date="2026-10-01", idempotency_key=spot_key("linkedin"),
+              meta={"image_fallback": "image_dropped"}),
+    ]
+    runs = [_run("published", run_date="2026-09-29", timings={"voice_cgroup_peak_mb": 2_000}),
+            _spot("media_ready", run_date="2026-09-29", timings={"voice_cgroup_peak_mb": 5_000})]
+    escalated = [_post("x", "queued", run_date="2026-10-01", idempotency_key=spot_key("x"),
+                       meta={"escalated_at": "2026-10-01T20:40:00+00:00"})]
+    s = _summary(posts, runs=runs, escalated=escalated)
+    reason = REJECT_REASONS[code]
+    assert s["rejections"]["rows"] == [("X", "10-01", reason, "text"), ("X", "10-01 · spotlight", reason, "text")]
+    assert s["failed_rows"] == [("BLUESKY", "10-01 · spotlight", "boom", "text")]
+    assert s["image_fallback"] == [(date(2026, 10, 1), "main", [(IMAGE_FALLBACK_REASONS["image_dropped"], 1)]),
+                                   (date(2026, 10, 1), "spotlight", [(IMAGE_FALLBACK_REASONS["image_dropped"], 1)])]
+    lines = ds.compose_digest(s).splitlines()
+    assert f"  ❌ X · run 10-01 · {reason} · text" in lines and f"  ❌ X · run 10-01 · spotlight · {reason} · text" in lines
+    assert "  ✖ BLUESKY · run 10-01 · spotlight · boom · text" in lines
+    assert "Worker memory peak: 5,000 MB (voice, Tue 09-29 · spotlight) ⚠️ above 3,200 MB" in lines
+    assert "  X · run 10-01 · spotlight · since 10-01 16:40 ET" in lines
+    i = lines.index("🖼 Picture not used on 1 day (text posts instead):")      # one day, two runs
+    assert lines[i + 1:i + 3] == [f"  Thu 10-01: {IMAGE_FALLBACK_REASONS['image_dropped']} (1 post)",
+                                  f"  Thu 10-01 · spotlight: {IMAGE_FALLBACK_REASONS['image_dropped']} (1 post)"]
+
+
+# ── the runway: every row of today counts (review_lane: never [:1]) ───────────
+
+
+@pytest.mark.parametrize("with_today, before_today, limit, k", [
+    ([], [], 240, 0),
+    (["a"], [], 240, 1),
+    (["t1", "t2"], [], 240, 2),
+    (["t1", "t2", "a", "b"], ["a", "b"], 240, 2),
+    (["t", "a", "b"], ["a", "b"], 240, 1),
+    (["a", "b"], ["a", "b"], 240, 0),
+    # cut reads (the ledger outgrew the limit): matched by content
+    (["t", "a", "b", "c"], ["a", "b", "c", "d"], 4, 1),
+    (["t1", "t2", "a", "b", "c"], ["a", "b", "c", "d", "e"], 5, 2),
+    (["a", "b", "c", "d"], ["a", "b", "c", "d"], 4, 0),
+    # a day the limit splits may come back as either of its rows: the last position is never compared
+    (["t", "a", "b", "x"], ["a", "b", "y", "z"], 4, 1),
+])
+def test_spotlight_the_runway_counts_every_row_of_today(with_today, before_today, limit, k):
+    assert ds._rows_of_today(with_today, before_today, limit=limit) == k
+
+
+@pytest.mark.parametrize("with_today, before_today, limit, k", [
+    (["a"], ["a", "b"], 240, 0),                          # fewer rows through today: a write between the reads
+    (["t1", "t2", "t3"], [], 240, 2),                     # three rows on one day: never more than the lanes
+    (["p", "q", "r", "s"], ["w", "x", "y", "z"], 4, 1),   # no shift lines up: the old rule (they differ → 1)
+])
+def test_spotlight_two_runway_reads_that_do_not_line_up_are_logged_never_guessed_beyond(caplog, with_today,
+                                                                                         before_today, limit, k):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    assert ds._rows_of_today(with_today, before_today, limit=limit) == k
+    assert any("runway" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_lesson_day_whose_spotlight_row_landed_after_the_lesson_still_reads_as_picked(
+        digest_ledger):
+    """review_lane: on a day with two rows the main lesson is not always the newest — a spotlight retry after 16:15 ET
+    lands ABOVE it — and `with_today[:1]` read that day as "not picked", moving the first repeat a lesson day early."""
+    now = _et(2026, 10, 5, 23, 0)                          # Mon 2026-10-05, a posting day, after both lanes ran
+    today = now.astimezone(ET).date()
+    rows = digest_ledger.fake.tables[mrs.SCRIPTS].rows
+    # the spotlight row is inserted BEFORE the lesson: it is above it in the ledger read whether or not
+    # recent_source_refs' (run_date, created_at) sort survives, so this test guards `_rows_of_today` on its own
+    # (run_service's test pins the sort)
+    rows += [
+        {"run_id": str(uuid.uuid4()), "run_date": "2026-10-03", "source_ref": "journey:1",
+         "created_at": "2026-10-03T20:20:00+00:00", "tokens_used": 0},
+        {"run_id": str(uuid.uuid4()), "run_date": today.isoformat(), "lane": "spotlight",
+         "source_ref": "news:money_map:ZQCT:2025", "created_at": "2026-10-05T21:15:00+00:00", "tokens_used": 0},
+        {"run_id": str(uuid.uuid4()), "run_date": today.isoformat(), "source_ref": "journey:3",
+         "created_at": "2026-10-05T20:20:00+00:00", "tokens_used": 0},
+    ]
+    report = await ds.gather_digest(digest_ledger, now)
+    pool, used = [f"journey:{i}" for i in range(10)], ["journey:3", "journey:1"]
+    picked = ds.pool_runway(pool, used, today=today, today_picked=True)
+    assert picked != ds.pool_runway(pool, used, today=today, today_picked=False)    # the case matters
+    assert report["runway"] == picked
+
+
+@pytest.mark.asyncio
+async def test_spotlight_the_cost_line_sums_both_lanes_scripts_and_a_doubled_lane_is_unreadable(digest_ledger):
+    rows = digest_ledger.fake.tables[mrs.SCRIPTS].rows
+    rows += [{"run_id": str(uuid.uuid4()), "run_date": "2026-09-29", "source_ref": None, "tokens_used": 40_000},
+             {"run_id": str(uuid.uuid4()), "run_date": "2026-09-29", "lane": "spotlight", "source_ref": None,
+              "tokens_used": 20_000}]
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert report["cost"]["last"]["gemini"] == (60_000 * ds.GEMINI_MICROS_PER_MILLION_TOKENS + 500_000) // 1_000_000
+    rows.append({"run_id": str(uuid.uuid4()), "run_date": "2026-09-29", "lane": "spotlight", "source_ref": None,
+                 "tokens_used": 1})
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert report["cost"]["last"]["gemini"] is None
+    assert "Gemini unreadable" in ds.compose_digest(report)
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_main_row_with_or_without_its_lane_key_reads_the_same(bot, digest_jobs, digest_ledger,
+                                                                                monkeypatch):
+    """A row read before migration 210 has no `lane` key; after it, every row carries lane 'main' (the column default).
+    Both are the main lane's: the same digest rows, the same health text — and neither is ever a spotlight row."""
+    _spot_lane(monkeypatch)
+    for lane in (None, "main"):
+        rows = [_run("failed", run_date="2026-09-29", stage="voiced", lane=lane), _run("published", lane=lane)]
+        assert ("lane" in rows[0]) is (lane is not None)
+        lines = _digest([], runs=rows).splitlines()
+        assert "• Tue 09-29 failed after voiced" in lines and "• Sat 10-03 published" in lines
+        assert not [ln for ln in lines if "spotlight: " in ln and "no run" not in ln]
+    digest_ledger.fake.tables[mrs.RUNS].rows.append(
+        _run("failed", run_date="2026-11-17", stage="voiced", attempts=6, lane=None,
+             updated_at=_iso_of(_et(2026, 11, 17, 21, 40))))
+    _night_rows(digest_ledger)
+    assert (await _health_at(digest_jobs, _SPOT_NIGHT))["sent"] == 1
+    (msg,) = _sends(bot)
+    main_part, spot_part = msg["text"].split("\n\n")
+    assert main_part.startswith("⚠️ Marketing run Tue 2026-11-17 FAILED after stage voiced")
+    assert spot_part.startswith("⚠️ Marketing: no run for Tue 2026-11-17 · spotlight, a spotlight day")
+
+
+# ── the per-post ART part of the cost line (workstream C, decision 13, 2026-11-16) ─────────────────────
+#
+# The art record and its usage ride in `marketing_scripts.output.art` (no migration); the digest reads them with the
+# monthly cap's own read (`run_service.art_usage_between`: ANY number of scripts a day — both lanes) and prices them
+# the cap's way (`run_service.art_spend_of`). By hand, in integer micro-dollars, at the record's own image price
+# ($0.134) and Opus 5.5's list prices ($4 / $20 per 1M input / output — 4 and 20 micros a token):
+#   last week, Tue 09-29 (main): 2 images = 268,000 + 4,000 in × 4 + 3,000 out × 20 = 76,000 → 344,000 ($0.344).
+#   Usage 234,804 + 344,000 = 578,804 ($0.579); total 3,914,475 + 344,000 = 4,258,475 ($4.258).
+#   the week before, Thu 09-24: 1 image + 1 unconfirmed image call = 268,000, no Claude call → 268,000 ($0.268).
+#   Usage 185,664 + 268,000 = 453,664 ($0.454).
+
+from app.services.marketing import post_art as _pa  # noqa: E402
+
+_ART_OPUS = {"input": 4_000, "output": 3_000, "cache_read": 0, "cache_write": 0}
+COST_ART = ("💵 Cost last week ≈ $4.258: X $0.061 (our ledger) · Gemini ≈ $0.124 · art ≈ $0.344 (2 images) · "
+            "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)")
+
+
+def _usage_art(last: str = "≈ $0.579", before: str = "≈ $0.186", *, claude: bool = False) -> str:
+    """The usage line of a fortnight with art in either week: art joins the label (after Claude, before the worker)."""
+    label = "X + Gemini + Claude + art + worker" if claude else "X + Gemini + art + worker"
+    return f"Usage ({label}): last week {last} · week before {before}"
+
+
+def _art_usage_of(images: int = 2, uncertain: int = 0, claude: Optional[Dict[str, Any]] = None,
+                  **over: Any) -> Dict[str, Any]:
+    usage = {"images": images, "images_uncertain": uncertain, "image_micros": 134_000,
+             "image_model": "gemini-3-pro-image", "claude": {} if claude is None else claude,
+             "claude_uncertain": {}}
+    usage["estimated_micros"] = _pa.estimated_micros(usage)
+    usage.update(over)
+    return usage
+
+
+def _art_row(day: str, *, lane: str = "main", status: str = "ok", **usage: Any) -> Dict[str, Any]:
+    """One `art_usage_between` row: the raw `output.art` record (only what the spend read looks at)."""
+    return {"run_date": day, "lane": lane,
+            "art": {"version": "art-v1", "status": status, "reason": None if status == "ok" else "check_failed",
+                    "models": {"brief": "claude-opus-5-5", "check": "claude-opus-5-5", "image": "gemini-3-pro-image"},
+                    "usage": _art_usage_of(**usage)}}
+
+
+def _gate_row(day: str, reason: str = "not_a_company_series", lane: str = "main") -> Dict[str, Any]:
+    """A build's gate record: the switch on, nothing eligible — zero spend."""
+    return {"run_date": day, "lane": lane, "art": {"version": "art-v1", "status": "failed", "reason": reason,
+                                                   "usage": {"images": 0, "images_uncertain": 0,
+                                                             "estimated_micros": 0}}}
+
+
+_ART_WEEK = [_art_row("2026-09-29", claude={"claude-opus-5-5": _ART_OPUS})]
+_ART_BEFORE = [_art_row("2026-09-24", images=1, uncertain=1)]
+
+
+@pytest.fixture
+def art_prices(monkeypatch):
+    """The art's prices are read at call time: pin them (the record's own image price wins over the setting)."""
+    monkeypatch.setattr(settings, "MARKETING_ART_IMAGE_MICROS", 134_000)
+    monkeypatch.setattr(settings, "MARKETING_ART_CLAUDE_MODEL", "claude-opus-5-5")
+    monkeypatch.setattr(settings, "CAYDEX_CLAUDE_MAX_TOKENS", 16_000)
+
+
+def test_art_a_fortnight_without_art_renders_byte_for_byte_as_before(art_prices):
+    """No art read given (()), an empty read, rows without art (None), and gate records only (the switch on, nothing
+    eligible: zero spend) are each the worked example, byte for byte: no art part, no art in the usage label, and no
+    "art" key in either week's part."""
+    for rows in ((), [], [{"run_date": "2026-09-29", "lane": "main", "art": None}],
+                 [_gate_row("2026-09-29"), _gate_row("2026-09-24", "text_only_day"),
+                  _gate_row("2026-09-29", "budget_cap", lane="spotlight")]):
+        s = _cost_summary(art_rows=rows)
+        assert ds.compose_digest(s).splitlines()[2:5] == [COST_A, USAGE_A, ""], rows
+        assert not {"art", "art_images", "art_uncertain"} & (set(s["cost"]["last"]) | set(s["cost"]["before"]))
+        assert {k: s["cost"]["last"][k] for k in _LAST_KEYS} == EXPECTED_LAST
+        assert " art " not in ds.compose_digest(s) and "art ≈" not in ds.compose_digest(s)
+
+
+def test_art_a_week_with_art_prices_its_images_and_checks_on_the_cost_line(art_prices):
+    s = _cost_summary(art_rows=_ART_WEEK)
+    last, before = s["cost"]["last"], s["cost"]["before"]
+    assert (last["art"], last["art_images"], last["art_uncertain"]) == (344_000, 2, 0)
+    assert (last["usage"], last["total"], last["unreadable"]) == (578_804, 4_258_475, [])
+    assert "art" not in before, "the week before had no art: its part stays as it was"
+    assert ds.compose_digest(s).splitlines()[2:5] == [COST_ART, _usage_art(), ""]
+    # the alert line counts art as usage: $0.50 is passed only because of it ($0.235 without)
+    lines = ds.compose_digest(_cost_summary(art_rows=_ART_WEEK, cost_warn_micros=500_000)).splitlines()
+    assert lines[2:5] == [COST_ART, _usage_art(), "⚠️ Usage ≈ $0.579 passed your $0.50 alert line"]
+    # no model or provider is named on the art part (the record names them; the digest never does)
+    art_part = COST_ART.split(" · ")[2]
+    assert art_part == "art ≈ $0.344 (2 images)"
+
+
+def test_art_two_runs_on_one_day_both_count(art_prices):
+    """Two lanes post on one day (migration 210): the spotlight run's art is summed beside the main run's — no
+    one-row-per-day assumption. 344,000 + 344,000 = 688,000; usage 922,804; total 4,602,475."""
+    rows = _ART_WEEK + [_art_row("2026-09-29", lane="spotlight", claude={"claude-opus-5-5": _ART_OPUS})]
+    s = _cost_summary(art_rows=rows)
+    assert (s["cost"]["last"]["art"], s["cost"]["last"]["art_images"]) == (688_000, 4)
+    assert ds.compose_digest(s).splitlines()[2:4] == [
+        "💵 Cost last week ≈ $4.602: X $0.061 (our ledger) · Gemini ≈ $0.124 · art ≈ $0.688 (4 images) · "
+        "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)", _usage_art("≈ $0.923")]
+
+
+def test_art_in_the_week_before_only_joins_the_usage_label_never_last_weeks_parts(art_prices):
+    s = _cost_summary(art_rows=_ART_BEFORE)
+    assert (s["cost"]["before"]["art"], s["cost"]["before"]["art_images"], s["cost"]["before"]["art_uncertain"]) == (
+        268_000, 1, 1)
+    assert "art" not in s["cost"]["last"]
+    assert ds.compose_digest(s).splitlines()[2:4] == [COST_A, _usage_art("≈ $0.235", "≈ $0.454")]
+    both = _cost_summary(art_rows=_ART_WEEK + _ART_BEFORE)
+    assert ds.compose_digest(both).splitlines()[2:4] == [COST_ART, _usage_art(before="≈ $0.454")]
+
+
+def test_art_an_unconfirmed_image_call_is_counted_at_full_price_and_said(art_prices):
+    """An image call that answered no picture may still have billed: priced at its full price (the cap's rule) and
+    said on the line. 1 image + 1 unconfirmed = 268,000; usage 502,804; total 4,182,475."""
+    s = _cost_summary(art_rows=[_art_row("2026-10-01", images=1, uncertain=1)])
+    assert ds.compose_digest(s).splitlines()[2:4] == [
+        "💵 Cost last week ≈ $4.182: X $0.061 (our ledger) · Gemini ≈ $0.124 · art ≈ $0.268 (1 image, 1 unconfirmed) · "
+        "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)", _usage_art("≈ $0.503")]
+
+
+def test_art_with_claude_both_parts_show_in_order(art_prices):
+    rows = _with_claude({"2026-09-29": {"claude-sonnet-5-5": _SONNET, "claude-opus-5-5": _OPUS}})
+    lines = ds.compose_digest(_cost_summary(script_rows=rows, art_rows=_ART_WEEK)).splitlines()
+    # 3,949,375 + 344,000 = 4,293,375; usage 269,704 + 344,000 = 613,704
+    assert lines[2:4] == [
+        "💵 Cost last week ≈ $4.293: X $0.061 (our ledger) · Gemini ≈ $0.107 · Claude ≈ $0.052 · art ≈ $0.344 "
+        "(2 images) · worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage_art("≈ $0.614", claude=True)]
+
+
+def test_art_a_record_priced_higher_today_counts_at_the_larger_figure(art_prices, monkeypatch):
+    """`art_spend_of`: each record counts the LARGER of its stored estimate and today's re-pricing (the cap's own
+    rule) — a stored estimate below what its usage stands for is never what the digest prints."""
+    row = _art_row("2026-09-29", claude={"claude-opus-5-5": _ART_OPUS}, estimated_micros=1_000)
+    assert ds._art_week([row], WEEK_START, WEEK_END) == ({"micros": 344_000, "images": 2, "images_uncertain": 0},
+                                                         True)
+    high = _art_row("2026-09-29", estimated_micros=900_000)
+    assert ds._art_week([high], WEEK_START, WEEK_END)[0]["micros"] == 900_000
+
+
+@pytest.mark.parametrize("junk", [
+    "junk", 7, {"usage": "x"}, {"usage": None},
+    {"usage": {"images": 1, "images_uncertain": 0, "estimated_micros": None}},          # a minimal, lost-spend record
+    {"usage": {"images": -1, "images_uncertain": 0, "estimated_micros": 0}},
+    {"usage": {"images": True, "images_uncertain": 0, "estimated_micros": 0}},
+    {"usage": {"images": 1, "images_uncertain": 0, "estimated_micros": "134000"}},
+    {"usage": {"images": 0, "images_uncertain": 0, "estimated_micros": 0, "claude": {"claude-mystery-9": {"input": 5}}}},
+])
+def test_art_a_record_whose_spend_cannot_be_read_is_unreadable_never_a_guess(art_prices, junk, caplog):
+    """The floor: 234,804 + the fee = 3,914,475, said "≥" with the part named."""
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    rows = _ART_WEEK + [{"run_date": "2026-10-01", "lane": "main", "art": junk}]
+    s = _cost_summary(art_rows=rows)
+    assert s["cost"]["last"]["art"] is None and s["cost"]["last"]["unreadable"] == ["art"]
+    assert ds.compose_digest(s).splitlines()[2:4] == [
+        "💵 Cost last week ≥ $3.914 (art unreadable): X $0.061 (our ledger) · Gemini ≈ $0.124 · art unreadable · "
+        "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage_art("≥ $0.235 (art unreadable)")]
+    assert any("art" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+    # the same junk on a day outside both weeks is never read
+    stray = _ART_WEEK + [{"run_date": "2026-10-05", "lane": "main", "art": junk}]
+    assert ds.compose_digest(_cost_summary(art_rows=stray)).splitlines()[2:4] == [COST_ART, _usage_art()]
+
+
+def test_art_a_failed_read_is_unreadable_in_both_weeks_never_none():
+    """The read failed (None): either week MAY have had art — both say "art unreadable", the sums are floors."""
+    s = _cost_summary(art_rows=None)
+    assert (s["cost"]["last"]["art"], s["cost"]["before"]["art"]) == (None, None)
+    assert ds.compose_digest(s).splitlines()[2:4] == [
+        "💵 Cost last week ≥ $3.914 (art unreadable): X $0.061 (our ledger) · Gemini ≈ $0.124 · art unreadable · "
+        "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage_art("≥ $0.235 (art unreadable)", "≥ $0.186 (art unreadable)")]
+    assert ds._art_week(None, WEEK_START, WEEK_END) == (None, True)
+
+
+def test_art_an_undatable_art_record_is_unreadable_and_an_undatable_row_without_art_is_not(art_prices):
+    for bad_day in (None, "garbage", 20260929, datetime(2026, 9, 29, tzinfo=timezone.utc)):
+        rows = _ART_WEEK + [dict(_art_row("2026-09-29"), run_date=bad_day)]
+        assert ds._art_week(rows, WEEK_START, WEEK_END) == (None, True), bad_day
+        quiet = _ART_WEEK + [{"run_date": bad_day, "lane": "main", "art": None}]
+        assert ds._art_week(quiet, WEEK_START, WEEK_END)[0]["micros"] == 344_000, bad_day
+    assert ds._art_week(["junk"], WEEK_START, WEEK_END) == (None, True)
+    assert ds._art_week([{"run_date": date(2026, 9, 29), "lane": "main", "art": _ART_WEEK[0]["art"]}],
+                        WEEK_START, WEEK_END)[0]["micros"] == 344_000
+
+
+def test_art_a_sum_beyond_a_million_dollars_is_unreadable(art_prices):
+    row = _art_row("2026-09-29", estimated_micros=10 ** 12 + 1)
+    assert ds._art_week([row], WEEK_START, WEEK_END) == (None, True)
+    assert ds._art_week([_art_row("2026-09-29", estimated_micros=10 ** 12)], WEEK_START, WEEK_END)[0]["micros"] == (
+        10 ** 12)
+
+
+@pytest.mark.asyncio
+async def test_art_gather_reads_both_lanes_art_from_the_ledgers_own_rows(digest_ledger, platforms_forbidden,
+                                                                         monkeypatch, art_prices):
+    """End to end through the real read (`art_usage_between` → `output.art`): the main run's and the spotlight run's
+    art of Tue 09-29 are both counted; a script without art, one with a gate record and one outside the window count
+    nothing."""
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 16.0)
+    _seed_costs(digest_ledger)
+    scripts = digest_ledger.fake.tables[mrs.SCRIPTS].rows
+    for row in scripts:
+        if row["run_date"] == "2026-09-29":
+            row["output"] = {"series": "money_map", "art": _ART_WEEK[0]["art"]}
+        elif row["run_date"] == "2026-10-01":
+            row["output"] = {"series": "ceo_buys", "art": _gate_row("2026-10-01")["art"]}
+        elif row["run_date"] == "2026-09-28":
+            row["output"] = {"series": "ceo_buys"}
+    scripts.append({"run_id": str(uuid.uuid4()), "run_date": "2026-09-29", "lane": "spotlight", "source_ref": None,
+                    "tokens_used": 0, "output": {"series": "insider_spotlight", "art": _ART_WEEK[0]["art"]}})
+    scripts.append({"run_id": str(uuid.uuid4()), "run_date": "2026-10-05", "lane": "main", "source_ref": None,
+                    "tokens_used": 0, "output": {"art": "junk on a day outside both weeks"}})
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert (report["cost"]["last"]["art"], report["cost"]["last"]["art_images"]) == (688_000, 4)
+    assert ds.compose_digest(report).splitlines()[2:4] == [
+        "💵 Cost last week ≈ $4.602: X $0.061 (our ledger) · Gemini ≈ $0.124 · art ≈ $0.688 (4 images) · "
+        "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)", _usage_art("≈ $0.923")]
+    assert platforms_forbidden == []
+
+
+@pytest.mark.asyncio
+async def test_art_gather_without_art_is_the_worked_example_and_a_failed_art_read_degrades_only_art(
+        digest_ledger, monkeypatch, caplog, art_prices):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 16.0)
+    _seed_costs(digest_ledger)
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert ds.compose_digest(report).splitlines()[1:5] == ["Mon 2026-09-28 → Sun 2026-10-04 (ET)", COST_A, USAGE_A, ""]
+    monkeypatch.setattr(digest_ledger, "art_usage_between", _Exploding(mrs.MarketingRunError("art_usage_between 503")))
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert {k: report["cost"]["last"][k] for k in COST_LAST} == COST_LAST          # every other part still read
+    assert report["cost"]["last"]["unreadable"] == ["art"] and report["live"] == _SEED_COSTS_LIVE
+    assert ds.compose_digest(report).splitlines()[2:4] == [
+        "💵 Cost last week ≥ $3.914 (art unreadable): X $0.061 (our ledger) · Gemini ≈ $0.124 · art unreadable · "
+        "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
+        _usage_art("≥ $0.235 (art unreadable)", "≥ $0.186 (art unreadable)")]
+    assert any("art_usage_between 503" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)

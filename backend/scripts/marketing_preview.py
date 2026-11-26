@@ -6,8 +6,8 @@ marketing_preview.py — dry-run the class-A marketing writer for a human read
 Runs selection → writer → validators for sample dates or for every eligible item, with the REAL
 Gemini key from backend/.env, and prints Markdown. It writes NOTHING: no marketing_runs row, no
 marketing_scripts row, no bucket object. That is the point — sampling future dates through the
-worker instead would CLAIM those days (`marketing_runs.run_date` is UNIQUE) and the real day would
-later be skipped as "already done".
+worker instead would CLAIM those days (`marketing_runs` is UNIQUE on (run_date, lane) since migration
+210 — one run per day per lane) and the real day would later be skipped as "already done".
 
 Usage (from backend/):
     ./venv/bin/python scripts/marketing_preview.py --next 5          # next 5 calendar days (ET)

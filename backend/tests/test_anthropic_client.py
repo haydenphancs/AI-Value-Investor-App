@@ -412,3 +412,213 @@ def test_session_custom_headers_never_reach_the_api(monkeypatch):
     assert _KEY in headers.get("authorization", "") or headers.get("x-api-key") == _KEY
     assert headers.get("anthropic-version") == "2026-10-21"
     assert "x-gw" not in headers
+
+
+# ── vision + a caller's deadline (the marketing per-post art, owner decision 2026-11-15) ──────────
+# "Google draws, Claude checks": the art brief and check reach this client through
+# llm_provider.ClaudeOnly with `images` (the drawn picture) and a `deadline_seconds` that fits the
+# art step's budget. Everything else keeps today's request, byte for byte.
+
+_JPEG = b"\xff\xd8\xff\xe0" + b"\x00\x10JFIF" + bytes(range(256)) * 4
+_PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 2
+
+
+@pytest.mark.asyncio
+async def test_without_images_the_request_body_is_byte_identical_to_todays(monkeypatch):
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_message()) for _ in range(4)])
+    await _call()                                   # today's call: no new keyword at all
+    await _call(images=())
+    await _call(images=[], deadline_seconds=None)
+    await _call(images=None)
+    assert len(seen) == 4
+    assert seen[1].content == seen[0].content
+    assert seen[2].content == seen[0].content
+    assert seen[3].content == seen[0].content
+    assert json.loads(seen[0].content)["messages"] == [{"role": "user", "content": "PROMPT"}]
+
+
+@pytest.mark.asyncio
+async def test_images_are_base64_blocks_sent_before_the_text_in_order(monkeypatch):
+    import base64
+
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_message())])
+    result = await _call(images=[(_JPEG, "image/jpeg"), (bytearray(_PNG), "image/png")],
+                         usage_tag="marketing_art_check")
+    content = json.loads(seen[0].content)["messages"][0]["content"]
+    assert [b["type"] for b in content] == ["image", "image", "text"], "image blocks first, the text last"
+    assert content[0]["source"] == {"type": "base64", "media_type": "image/jpeg",
+                                    "data": base64.standard_b64encode(_JPEG).decode("ascii")}
+    assert content[1]["source"]["media_type"] == "image/png"
+    assert base64.standard_b64decode(content[1]["source"]["data"]) == _PNG
+    assert content[2] == {"type": "text", "text": "PROMPT"}
+    body = json.loads(seen[0].content)
+    assert body["system"] == "SYS" and body["output_config"]["effort"] == "low"
+    for banned in ("temperature", "top_p", "top_k"):
+        assert banned not in body
+    assert result["text"] == '{"a": 1}' and result["usage"]["input"] == 100
+
+
+def _bad_images():
+    gif = b"GIF89a" + b"\x00" * 64
+    return {
+        "gif": [(gif, "image/gif")],
+        "webp": [(b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 32, "image/webp")],
+        "upper_case_type": [(_JPEG, "IMAGE/JPEG")],
+        "png_declared_jpeg": [(_PNG, "image/jpeg")],
+        "jpeg_declared_png": [(_JPEG, "image/png")],
+        "empty": [(b"", "image/jpeg")],
+        "str_data": [("not bytes", "image/jpeg")],
+        "type_not_str": [(_JPEG, None)],
+        "not_a_pair": [(_JPEG,)],
+        "triple": [(_JPEG, "image/jpeg", "extra")],
+        "bare_bytes": _JPEG,
+        "bare_str": "image/jpeg",
+        "generator": ((d, t) for d, t in [(_JPEG, "image/jpeg")]),
+        "dict": {"data": _JPEG},
+        "too_many": [(_JPEG, "image/jpeg")] * (ac.MAX_IMAGES + 1),
+    }
+
+
+@pytest.mark.parametrize("name", list(_bad_images()))
+@pytest.mark.asyncio
+async def test_a_bad_image_is_refused_typed_before_any_io(monkeypatch, name):
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_message())])
+    with pytest.raises(ac.ClaudeRequestInvalidException) as info:
+        await _call(images=_bad_images()[name])
+    assert seen == [], "nothing was sent"
+    text = str(info.value)
+    assert "JFIF" not in text and "PNG" not in text.replace("image/png", ""), "never a byte of the image"
+    assert "PROMPT" not in text and _KEY not in text
+    assert info.value.tokens_used == 0 and info.value.usage is None
+    assert info.value.billing_unknown is False, "nothing was sent, so nothing can have billed"
+
+
+@pytest.mark.asyncio
+async def test_the_request_checks_run_before_the_key_is_even_needed(monkeypatch):
+    """No key AND a bad image → the image refusal, not ClaudeConfigException: the checks are pure and
+    come first (a refused request never constructs the client)."""
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", None)
+    monkeypatch.setattr(ac, "_client", None)
+    with pytest.raises(ac.ClaudeRequestInvalidException):
+        await _call(images=[(_JPEG, "image/gif")])
+    with pytest.raises(ac.ClaudeRequestInvalidException):
+        await _call(deadline_seconds=0)
+    assert ac._client is None
+    with pytest.raises(ac.ClaudeConfigException):
+        await _call(images=[(_JPEG, "image/jpeg")])
+
+
+@pytest.mark.asyncio
+async def test_an_image_over_the_apis_base64_limit_is_refused_and_one_at_it_is_sent(monkeypatch):
+    # base64 length = 4 × ceil(n / 3): 3,932,160 raw bytes is exactly 5 MiB of base64, one more is over
+    at_limit = b"\xff\xd8\xff" + b"\x00" * (3 * ac.MAX_IMAGE_BASE64_CHARS // 4 - 3)
+    over = at_limit + b"\x00"
+    assert len(ac.image_blocks([(at_limit, "image/jpeg")])[0]["source"]["data"]) == ac.MAX_IMAGE_BASE64_CHARS
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_message())])
+    with pytest.raises(ac.ClaudeRequestInvalidException) as info:
+        await _call(images=[(over, "image/jpeg")])
+    assert seen == [] and "base64" in str(info.value)
+    await _call(images=[(at_limit, "image/jpeg")])
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_usage_line_counts_images_only_on_a_call_that_sent_them(monkeypatch, caplog):
+    _install(monkeypatch, [httpx2.Response(200, json=_message(i=1500, o=40)),
+                           httpx2.Response(200, json=_message(i=100, o=20))])
+    with caplog.at_level("INFO", logger="app.integrations.anthropic_client"):
+        await _call(images=[(_JPEG, "image/jpeg")], usage_tag="marketing_art_check")
+        await _call(usage_tag="marketing_writer")
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("CLAUDE_USAGE")]
+    assert lines == [
+        "CLAUDE_USAGE tag=marketing_art_check model=claude-sonnet-5-5 input=1500 output=40 cache_read=0 "
+        "cache_write=0 total=1540 stop=end_turn images=1",
+        "CLAUDE_USAGE tag=marketing_writer model=claude-sonnet-5-5 input=100 output=20 cache_read=0 "
+        "cache_write=0 total=120 stop=end_turn",
+    ], "an image-free call's line is exactly today's"
+
+
+@pytest.mark.asyncio
+async def test_a_shorter_deadline_ends_in_the_typed_timeout_here_not_an_outer_cancel(monkeypatch):
+    _install(monkeypatch, [])
+    monkeypatch.setattr(settings, "CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS", 120.0)
+
+    async def slow(**_kw: Any) -> Any:
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(ac._client.messages, "create", slow)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(ac.ClaudeTimeoutException) as info:
+        await _call(deadline_seconds=0.05, images=[(_JPEG, "image/jpeg")])
+    assert loop.time() - started < 2.0, "the caller's deadline, not the configured 120 s"
+    assert "0.05s deadline" in str(info.value) and "images=1" in str(info.value)
+    assert info.value.billing_unknown is True, "it may have billed: a spend cap counts it at its worst"
+    assert (info.value.tokens_used, info.value.usage) == (0, None)
+
+
+@pytest.mark.parametrize("value,expected", [(None, 120.0), (30, 30.0), (37.5, 37.5), (500, 120.0),
+                                            (120.0, 120.0)])
+def test_the_call_deadline_is_the_shorter_of_the_callers_and_the_configured(monkeypatch, value, expected):
+    monkeypatch.setattr(settings, "CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS", 120.0)
+    assert ac.call_deadline(value) == expected
+
+
+@pytest.mark.parametrize("value", [0, 0.0, -1, float("nan"), float("inf"), True, "30", [30]])
+@pytest.mark.asyncio
+async def test_a_deadline_that_is_not_a_positive_finite_number_is_refused_before_any_io(monkeypatch, value):
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_message())])
+    with pytest.raises(ac.ClaudeRequestInvalidException):
+        await _call(deadline_seconds=value)
+    assert seen == []
+
+
+@pytest.mark.asyncio
+async def test_billing_unknown_marks_only_the_failures_that_may_have_billed(monkeypatch):
+    # a dropped connection: the request may have reached the API
+    def handler(request):
+        raise httpx2.ReadError("connection reset by peer")
+
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", _KEY)
+    monkeypatch.setattr(ac, "_client", anthropic.AsyncAnthropic(
+        api_key=_KEY, max_retries=0,
+        http_client=anthropic.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler))))
+    with pytest.raises(ac.ClaudeUnavailableException) as dropped:
+        await _call()
+    assert dropped.value.billing_unknown is True
+    # an HTTP answer (an overload) or an abnormal answer is known: nothing unknown about its bill
+    _install(monkeypatch, [httpx2.Response(529, json={"type": "error", "error": {
+        "type": "overloaded_error", "message": "Overloaded"}}), httpx2.Response(200, json=_message(stop="refusal"))])
+    with pytest.raises(ac.ClaudeUnavailableException) as overloaded:
+        await _call()
+    with pytest.raises(ac.ClaudeRefusalException) as refused:
+        await _call()
+    assert overloaded.value.billing_unknown is False and refused.value.billing_unknown is False
+    assert ac.ClaudeException("x").billing_unknown is False
+    assert ac.ClaudeTimeoutException("x").billing_unknown is True
+    assert ac.ClaudeBreakerOpenException("x").billing_unknown is False
+
+
+def test_the_account_breaker_set_is_exactly_used_up_credits_and_auth_inside_the_roles_set():
+    assert set(ac.ACCOUNT_BREAKER_EXCEPTIONS) == {ac.ClaudeCreditsExhaustedException, ac.ClaudeAuthException}
+    assert set(ac.ACCOUNT_BREAKER_EXCEPTIONS) < set(ac.BREAKER_EXCEPTIONS), "the roles keep the wider set"
+    for cls in (ac.ClaudeRateLimitException, ac.ClaudeUnavailableException, ac.ClaudeTimeoutException,
+                ac.ClaudeRequestInvalidException, ac.ClaudeBreakerOpenException):
+        assert not issubclass(cls, ac.ACCOUNT_BREAKER_EXCEPTIONS), cls.__name__
+    for cls in (ac.ClaudeRequestInvalidException, ac.ClaudeBreakerOpenException):
+        assert issubclass(cls, ac.ClaudeException)
+        assert not issubclass(cls, ac.BREAKER_EXCEPTIONS), "neither ever opens the router's breaker"
+
+
+def test_the_new_exceptions_classify_as_the_ai_engine_too():
+    from app.api.error_response import ErrorCode, classify_exception
+
+    for cls in (ac.ClaudeRequestInvalidException, ac.ClaudeBreakerOpenException):
+        code, _status = classify_exception(cls("status=429 timed out"))
+        assert code == ErrorCode.GEMINI_UNAVAILABLE, cls.__name__
+
+
+def test_the_module_docstring_names_the_art_use_and_no_other():
+    doc = ac.__doc__ or ""
+    assert "ClaudeOnly" in doc and "per-post ART" in doc
+    assert "four roles" in doc and "Nothing else in the app calls Claude" in doc

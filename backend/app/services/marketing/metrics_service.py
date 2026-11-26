@@ -180,13 +180,14 @@ MEASURE_MAX_AGE = timedelta(days=30)
 #: platforms × 4 posting days a week × 30 days ≈ 140 rows today; at Batch 3's seven days with its three
 #: extra videos (Facebook, LinkedIn, Threads) ~11 a day × 30 days ≈ 330.
 MEASURE_SCAN_LIMIT = 300
-#: The ceiling, never the expected volume: one run a day (`marketing_runs.run_date` UNIQUE) records at most
-#: one post per (platform, format) (`marketing_posts` UNIQUE (run_id, platform, format) over
-#: POST_FORMATS_BY_PLATFORM's 13 pairs plus Batch 3's 3 of EXTRA_POST_FORMATS_BY_PLATFORM — 16), published
-#: on its run day or the next, so 30 days hold at most 32 × 16 = 512 published posts: 4 × 300 = 1,200 is
-#: that bound with more than ×2 to spare (a test derives it from the two maps, so widening them past it
-#: fails the build).
-MEASURE_SCAN_PAGES = 4
+#: The ceiling, never the expected volume: one run per (day, lane) (`marketing_runs` UNIQUE (run_date, lane),
+#: migration 210 — the main lane and the spotlight lane) records at most one post per (platform, format)
+#: (`marketing_posts` UNIQUE (run_id, platform, format) over POST_FORMATS_BY_PLATFORM's 13 pairs plus Batch 3's 3
+#: of EXTRA_POST_FORMATS_BY_PLATFORM — 16), published on its run day or the next, so 30 days (plus a week of slack
+#: for a late reconcile) hold at most 37 × 16 × 2 = 1,184 published posts: 5 × 300 = 1,500 is that bound (4 → 5
+#: pages with the spotlight lane; a test derives it from the two maps and RUN_LANES, with room for one more
+#: pair, so widening them past it fails the build).
+MEASURE_SCAN_PAGES = 5
 #: No new platform read starts after this many seconds in one tick.
 READ_BUDGET_SECONDS = 120.0
 #: After this many ledger failures in one run, no read starts and no write is attempted until a later

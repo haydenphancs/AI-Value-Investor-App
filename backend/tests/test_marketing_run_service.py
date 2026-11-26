@@ -12,7 +12,7 @@ import json
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
@@ -198,8 +198,18 @@ def _compare(stored: Any, wanted: Any, op: str) -> bool:
     return {"lt": a < b, "lte": a <= b, "gt": a > b, "gte": a >= b}[op]
 
 
+#: Columns the fake reads as their NOT NULL DEFAULT when a row lacks them — mirroring the column default for rows a
+#: test appends straight to `.rows` (bypassing `insert`, which applies the table defaults itself). `lane` (migration
+#: 210: `marketing_runs.lane` / `marketing_scripts.lane TEXT NOT NULL DEFAULT 'main'`) is the only one: every row
+#: written before the lanes, and every main-lane INSERT (which never sends the column), is the main lane's.
+_READ_DEFAULTS: Dict[str, Any] = {"lane": schemas.RUN_LANE_MAIN}
+
+
 def _col(row: Dict[str, Any], col: str) -> Any:
-    """A column, or a PostgREST `json->>key` text path into a JSONB column."""
+    """A column, or a PostgREST `json->>key` text path into a JSONB column. A row without a `_READ_DEFAULTS` column
+    reads as its default, as the real column would."""
+    if col in _READ_DEFAULTS and col not in row:
+        return _READ_DEFAULTS[col]
     if "->>" in col:
         base, key = col.split("->>", 1)
         doc = row.get(base)
@@ -306,14 +316,17 @@ class _Query:
             return _Result(rows if self._limit is None else rows[: self._limit])
         if self.op == "insert":
             row = dict(self.payload)
-            for cols in self.t.unique:
-                key = tuple(str(row.get(c)) for c in cols)
-                if any(tuple(str(r.get(c)) for c in cols) == key for r in self.t.rows):
-                    raise _unique_violation(cols)
             if self.t.generated_id:
                 row.setdefault("id", str(uuid.uuid4()))
+            # Defaults BEFORE the unique check, as in Postgres; a column the row lacks is compared as its read
+            # default (`_col`): the main lane's INSERT never sends `lane`, and its (run_date, 'main') must still
+            # meet an existing main row (migration 210).
             for k, v in self.t.defaults.items():
                 row.setdefault(k, v() if callable(v) else v)
+            for cols in self.t.unique:
+                key = tuple(str(_col(row, c)) for c in cols)
+                if any(tuple(str(_col(r, c)) for c in cols) == key for r in self.t.rows):
+                    raise _unique_violation(cols)
             self.t.rows.append(row)
             return _Result([dict(row)])
         if self.op == "update":
@@ -402,13 +415,18 @@ class FakeSupabase:
         #: path -> {"size", "mimetype"} overriding what the listing reports (a mismatch test).
         self.object_meta: dict = {}
         self.tables = {
-            mrs.RUNS: _Table([("run_date",)], {"stage": "planned", "status": "planned", "attempts": 0,
-                                                "timings": dict, "metadata": dict, "content_class": "A"}),
+            # migration 210: one run per (day, lane). `lane` (NOT NULL DEFAULT 'main') is NOT stored by the fake
+            # when an INSERT omits it — it reads as 'main' (`_col`, `_READ_DEFAULTS`) — so a test can see exactly
+            # what the INSERT sent (the main lane's never sends it).
+            mrs.RUNS: _Table([("run_date", "lane")], {"stage": "planned", "status": "planned", "attempts": 0,
+                                                       "timings": dict, "metadata": dict, "content_class": "A"}),
             mrs.ASSETS: _Table([("storage_path",)], {"metadata": dict}),
             # `metrics` defaults to {} like the real column (migration 170: NOT NULL DEFAULT '{}').
             mrs.POSTS: _Table([("idempotency_key",), ("run_id", "platform", "format")],
                               {"attempts": 0, "cost_micros": 0, "metadata": dict, "metrics": dict}),
             # migration 173: run_id is the PRIMARY KEY (first-write-wins selection claim).
+            # migration 210: `lane` reads as 'main' when absent (`_READ_DEFAULTS`); insert_script sends it only off
+            # the main lane.
             mrs.SCRIPTS: _Table([("run_id",)], {"status": "selected", "fact_sheet": dict,
                                                 "violations": list, "generations": 0,
                                                 "tokens_used": 0}, generated_id=False),
@@ -422,6 +440,14 @@ class FakeSupabase:
         return self.tables[name]
 
 
+def _declared_spotlight_lane(monkeypatch, settings_obj) -> None:
+    """MARKETING_SPOTLIGHT_ENABLED / _WEEKDAYS / _HOUR_ET at their declared defaults (`Settings.model_fields`)."""
+    from app.config import Settings
+
+    for name in ("MARKETING_SPOTLIGHT_ENABLED", "MARKETING_SPOTLIGHT_WEEKDAYS", "MARKETING_SPOTLIGHT_HOUR_ET"):
+        monkeypatch.setattr(settings_obj, name, Settings.model_fields[name].default)
+
+
 @pytest.fixture
 def svc(monkeypatch):
     fake = FakeSupabase()
@@ -433,6 +459,9 @@ def svc(monkeypatch):
     monkeypatch.setattr(mrs.settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "")
     monkeypatch.setattr(mrs.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
     monkeypatch.setattr(mrs.settings, "MARKETING_INSTAGRAM_TRIAL_MODE", "off")
+    # The spotlight lane (migration 210) at its declared defaults — closed — whatever this machine's environment or
+    # backend/.env says: `news_recent_limit()` and every claim gate read it. The tests that need it open say so (`_spot`).
+    _declared_spotlight_lane(monkeypatch, mrs.settings)
     service = MarketingRunService(supabase=fake)
     service.fake = fake  # type: ignore[attr-defined]
     return service
@@ -575,7 +604,7 @@ async def test_two_claimers_on_one_stale_snapshot_yield_exactly_one_winner(svc, 
                                  now=NOW - timedelta(hours=3), claim_nonce="nonce-orig")
     snapshot = dict(svc.fake.tables[mrs.RUNS].rows[0])
 
-    async def stale_read(_run_date):
+    async def stale_read(_run_date, lane="main"):
         return dict(snapshot)
 
     monkeypatch.setattr(svc, "get_run_by_date", stale_read)
@@ -1044,7 +1073,10 @@ def test_migration_176_adds_the_caps_and_run_date_the_script_service_writes():
     it in a form that works on the LIVE table (ALTER … ADD COLUMN IF NOT EXISTS), not only on a
     fresh database:
 
-    * `reject_reason` CHECK == the reasons the service writes and the worker maps, NULL allowed;
+    * `reject_reason` CHECK ⊆ the reasons the service writes and the worker maps, NULL allowed — a
+      SUBSET since 210 added `nothing_qualified` (superseded like content_class; the LATEST migration
+      that adds the named CHECK must equal them —
+      test_reject_reason_check_reads_the_latest_migration_that_adds_it);
     * `run_date` ends NOT NULL (selection's `recent` reads it) and is backfilled from the run
       BEFORE the constraint, so a pre-existing row cannot fail the migration;
     * `content_rejections` NOT NULL DEFAULT 0 (the content cap counts from it);
@@ -1063,7 +1095,9 @@ def test_migration_176_adds_the_caps_and_run_date_the_script_service_writes():
     assert re.match(r"\s*TEXT\b", rr, re.I), rr
     cm = re.search(r"CHECK\s*\((.*)\)", rr, re.S | re.I)
     assert cm, "no reject_reason CHECK"
-    assert set(re.findall(r"'([a-z_]+)'", cm.group(1))) == set(schemas.SCRIPT_REJECT_REASONS)
+    assert set(re.findall(r"'([a-z_]+)'", cm.group(1))) <= set(schemas.SCRIPT_REJECT_REASONS)
+    assert set(re.findall(r"'([a-z_]+)'", cm.group(1))) == {
+        "content", "writer_unavailable", "empty_pool", "source_ineligible"}     # 176 as applied, frozen
     assert re.search(r"reject_reason\s+IS\s+NULL", cm.group(1), re.I), "reject_reason must allow NULL"
 
     assert re.search(r"\bINTEGER\s+NOT\s+NULL\s+DEFAULT\s+0", add_column("content_rejections"), re.I)
@@ -1225,7 +1259,7 @@ async def test_closing_an_exhausted_run_loses_cleanly_to_a_late_workers_own_writ
     snapshot = dict(svc.fake.tables[mrs.RUNS].rows[0])  # stale in_progress, attempts 1
     svc.fake.tables[mrs.RUNS].rows[0].update({"status": "failed", "last_error": "late worker: boom"})
 
-    async def stale_read(_d):
+    async def stale_read(_d, lane="main"):
         return dict(snapshot)
 
     monkeypatch.setattr(svc, "get_run_by_date", stale_read)
@@ -4140,17 +4174,18 @@ async def test_script_tokens_between_is_inclusive_projected_and_ordered(svc, mon
         _script_row(svc, day, tokens)                                                      # stored out of order
     selects = _spy_selects(monkeypatch, svc, mrs.SCRIPTS)
     got = await svc.script_tokens_between(date(2026, 9, 28), date(2026, 10, 4))
-    # inclusive at both ends, oldest first, three keys only, RAW values (the digest validates each count:
+    # inclusive at both ends, oldest first, four keys only, RAW values (the digest validates each count:
     # a junk one must reach it as junk and read "unreadable", never be coerced to 0 here). claude_usage
-    # (migration 206) is NULL unless Claude billed — a row written without it reads None.
-    assert got == [{"run_date": "2026-09-28", "tokens_used": 21_000, "claude_usage": None},
-                   {"run_date": "2026-09-30", "tokens_used": "12", "claude_usage": None},
-                   {"run_date": "2026-10-01", "tokens_used": None, "claude_usage": None},
-                   {"run_date": "2026-10-04", "tokens_used": 22_100, "claude_usage": None}]
-    assert selects == [("run_date,tokens_used,claude_usage",)]
+    # (migration 206) is NULL unless Claude billed — a row written without it reads None. `lane` (migration
+    # 210) is the double-count guard's second key; a row without one is the main lane's.
+    assert got == [{"run_date": "2026-09-28", "lane": "main", "tokens_used": 21_000, "claude_usage": None},
+                   {"run_date": "2026-09-30", "lane": "main", "tokens_used": "12", "claude_usage": None},
+                   {"run_date": "2026-10-01", "lane": "main", "tokens_used": None, "claude_usage": None},
+                   {"run_date": "2026-10-04", "lane": "main", "tokens_used": 22_100, "claude_usage": None}]
+    assert selects == [("run_date,lane,tokens_used,claude_usage",)]
     assert await svc.script_tokens_between("2026-09-28", "2026-10-04") == got             # ISO strings
     assert await svc.script_tokens_between(date(2026, 10, 5), date(2026, 10, 5)) == [
-        {"run_date": "2026-10-05", "tokens_used": 5, "claude_usage": None}]               # a one-day window
+        {"run_date": "2026-10-05", "lane": "main", "tokens_used": 5, "claude_usage": None}]   # a one-day window
     # a stored usage comes back raw too, junk included
     usage = {"claude-sonnet-5-5": {"input": 900, "output": 300, "cache_read": 0, "cache_write": 0}}
     for row in svc.fake.tables[mrs.SCRIPTS].rows:
@@ -4170,11 +4205,19 @@ async def test_script_tokens_between_is_inclusive_projected_and_ordered(svc, mon
 
 @pytest.mark.asyncio
 async def test_script_tokens_between_refuses_more_scripts_than_days(svc):
-    """One script per run (PK run_id) and one run per day (UNIQUE run_date): more rows than days means
-    a day holds two, and a sum could count one twice — the read raises instead of returning them."""
+    """One script per run (PK run_id) and one run per (day, lane) (UNIQUE (run_date, lane), migration 210): more
+    rows than days × lanes, or two on one (day, lane), means a day holds a second script of one lane, and a sum
+    could count one twice — the read raises instead of returning them. The two LANES of one day are two scripts
+    and both count."""
     for day in ("2026-10-01", "2026-10-02", "2026-10-03"):
         _script_row(svc, day, 1000)
     assert len(await svc.script_tokens_between(date(2026, 10, 1), date(2026, 10, 3))) == 3   # one a day
+    spot = _script_row(svc, "2026-10-02", 700, lane="spotlight")                # the day's spotlight script
+    got = await svc.script_tokens_between(date(2026, 10, 1), date(2026, 10, 3))
+    assert [(r["run_date"], r["lane"], r["tokens_used"]) for r in got] == [
+        ("2026-10-01", "main", 1000), ("2026-10-02", "main", 1000), ("2026-10-02", "spotlight", 700),
+        ("2026-10-03", "main", 1000)]                                           # main before spotlight in a day
+    svc.fake.tables[mrs.SCRIPTS].rows.remove(spot)
     _script_row(svc, "2026-10-02", 1000)                       # a second script on one day (a hand edit)
     with pytest.raises(mrs.MarketingRunError,
                        match=r"script_tokens_between: 4 scripts for the 3 days 2026-10-01\.\.2026-10-03"):
@@ -4194,11 +4237,17 @@ async def test_script_tokens_between_refuses_a_repeated_day_in_a_sparse_window_t
     for day in ("2026-09-22", "2026-09-29", "2026-10-01", "2026-10-03"):
         _script_row(svc, day, 1000)
     assert len(await svc.script_tokens_between(date(2026, 9, 21), date(2026, 10, 4))) == 4
-    _script_row(svc, "2026-10-01", 2000)                       # a second script on one day (a hand edit)
-    with pytest.raises(mrs.MarketingRunError, match=r"5 scripts for the 14 days .* a day holds two"):
+    _script_row(svc, "2026-10-01", 2000, lane="spotlight")     # the day's other LANE: two scripts, both count
+    assert len(await svc.script_tokens_between(date(2026, 9, 21), date(2026, 10, 4))) == 5
+    _script_row(svc, "2026-10-01", 2000)                       # a second MAIN script on one day (a hand edit)
+    with pytest.raises(mrs.MarketingRunError, match=r"6 scripts for the 14 days .* a \(day, lane\) holds two"):
         await svc.script_tokens_between(date(2026, 9, 21), date(2026, 10, 4))
-    # a window that does not include the repeated day is unaffected
-    assert len(await svc.script_tokens_between(date(2026, 9, 21), date(2026, 9, 30))) == 2
+    _script_row(svc, "2026-09-29", 2000, lane="spotlight")
+    _script_row(svc, "2026-09-29", 2000, lane="spotlight")     # two SPOTLIGHT scripts on one day: refused too
+    with pytest.raises(mrs.MarketingRunError, match=r"a \(day, lane\) holds two"):
+        await svc.script_tokens_between(date(2026, 9, 21), date(2026, 9, 30))
+    # a window that includes neither repeated (day, lane) is unaffected
+    assert len(await svc.script_tokens_between(date(2026, 9, 21), date(2026, 9, 28))) == 1
 
 
 @pytest.mark.asyncio
@@ -4582,7 +4631,8 @@ def test_an_ungated_class_is_a_422_and_a_refused_template_a_409_never_a_retried_
 _IMAGE_POST = {"title": "Three habits that compound",
                "paragraphs": ["Small, steady saving adds up over the years.",
                               "Costs you avoid keep working for you."]}
-_IMAGE_FOOTER = "Educational only · not investment advice · Written with AI assistance · Sep 17, 2026 · Caydex"
+#: news-v23 (restyle 2026-11-19): a lesson picture's footer is the one short line (`post_copy.image_footer`)
+_IMAGE_FOOTER = "Not investment advice"
 _TEXT_PLATFORMS = ("facebook", "linkedin", "x", "threads", "bluesky")
 
 
@@ -4788,7 +4838,8 @@ async def test_a_post_image_drawing_the_accepted_text_and_its_footer_registers(s
     ([t.upper() if i == 0 else t for i, t in enumerate(_drawn())], "not the accepted image post"),
     (_drawn() + [_CARD["title"]], "not the accepted image post"),        # a VIDEO card is not image text
     (_drawn() + [_DISCLAIMER_CARD], "not the accepted image post"),
-    (_drawn() + ["Caydex"], "not the accepted image post"),              # the video's end card neither
+    # the video's end card neither (news-v23: the brand row's "Caydex" IS allowed — the restyle tests at the end)
+    (_drawn() + ["caydexinvest.com"], "not the accepted image post"),
     (_drawn()[:-1], "does not draw its footer"),
     ([_IMAGE_POST["title"]], "does not draw its footer"),
     (_drawn() + [{"t": "x"}], "not the accepted image post"),            # never a TypeError
@@ -4906,6 +4957,12 @@ def test_the_assets_route_carries_the_image_pointer(monkeypatch):
         {"voice_asset_id": None, "video_asset_id": None, "assets": []}))
     r = client.get("/api/v1/internal/marketing/runs/r1/assets", headers=headers)
     assert r.status_code == 200 and r.json()["image_asset_id"] is None
+    # the run's lane rides along (migration 210); a service that predates it (no key) reads as the main lane
+    assert r.json()["lane"] == "main"
+    monkeypatch.setattr(mi, "get_marketing_run_service", lambda: Svc(
+        {"voice_asset_id": None, "video_asset_id": None, "assets": [], "lane": "spotlight"}))
+    r = client.get("/api/v1/internal/marketing/runs/r1/assets", headers=headers)
+    assert r.status_code == 200 and r.json()["lane"] == "spotlight"
 
 
 # ── C7: create_posts records each platform in its frozen format ───────────────
@@ -4976,7 +5033,7 @@ async def test_an_image_post_needs_the_runs_own_verified_pointer(svc, pointer):
     elif pointer == "the video":
         run_row["metadata"]["image_asset_id"] = (await _ready_asset(svc, rid))["id"]
     elif pointer == "another run's image":
-        # A ready post image of ANOTHER run (one run per day: its row is seeded directly).
+        # A ready post image of ANOTHER run (its row seeded directly — e.g. the day's other lane's run).
         foreign = dict(image, id=str(uuid.uuid4()), run_id=str(uuid.uuid4()))
         svc.fake.tables[mrs.ASSETS].rows.append(foreign)
         run_row["metadata"]["image_asset_id"] = foreign["id"]
@@ -5269,13 +5326,32 @@ def test_a_claim_declaring_a_capability_this_web_does_not_know_keeps_the_claim(d
     assert all(repr(c) in warned[0] for c in unknown)
 
 
-@pytest.mark.parametrize("bad", [[42], "post_image", ["post_image"] * 9, None, [None], [["post_image"]]])
+@pytest.mark.parametrize("bad", [[42], "post_image", ["post_image"] * 17, None, [None], [["post_image"]]])
 def test_a_claim_with_a_malformed_capability_list_is_still_refused(bad):
     """Typed and bounded as before: only an unknown STRING is forgiven."""
     from pydantic import ValidationError
 
     with pytest.raises(ValidationError):
         schemas.RunClaimRequest.model_validate({**_CLAIM_BASE, "capabilities": bad})
+
+
+def test_phase3_the_claim_bound_is_sixteen_and_the_worker_still_fits_every_older_webs_eight():
+    """news-v23 phase 3 (2026-11-20): the claim takes up to 16 capabilities (a ninth needs this web live first); the
+    worker declares at most 8 — the bound of every web before this one — so a deploy in either order never costs it a
+    claim (an older web drops the strings it does not know; a list over its bound would be a 422)."""
+    from pydantic import ValidationError
+
+    assert schemas.RunClaimRequest.model_validate({**_CLAIM_BASE, "capabilities": ["post_image"] * 16})
+    with pytest.raises(ValidationError):
+        schemas.RunClaimRequest.model_validate({**_CLAIM_BASE, "capabilities": ["post_image"] * 17})
+    assert len(schemas.WORKER_CAPABILITIES) <= 8
+    import ast
+    import pathlib
+
+    tree = ast.parse(pathlib.Path(__file__).resolve().parents[1].joinpath("marketing", "main.py").read_text())
+    declared = [ast.literal_eval(n.value) for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "WORKER_CAPABILITIES" for t in n.targets)]
+    assert declared and all(len(d) <= 8 for d in declared)
 
 
 # ── Drop 2 D1: migration 190 widens marketing_runs.content_class to A/C/F ─────────────────
@@ -5462,6 +5538,233 @@ def test_add_before_drop_is_refused_by_the_static_check():
     moved = original.replace(drop, "", 1).replace("COMMENT ON COLUMN", drop + "COMMENT ON COLUMN", 1)
     assert moved != original
     assert "ADD before DROP" in _static_190_problems(moved)
+
+
+# ── Spotlight lane (2026-11-15): migration 210 — the (run_date, lane) claim and `nothing_qualified` ────────
+# One run per (ET day, lane): marketing_runs.lane + UNIQUE (run_date, lane) replacing UNIQUE (run_date), the same
+# lane column on marketing_scripts, and the spotlight's "nothing qualified" reject reason. The owner applies it
+# by hand (never Claude); these checks pin its text against the code that will write it.
+
+_MIGRATION_210 = _MIGRATIONS_D1 / "210_marketing_run_lanes.sql"
+_RR_CONSTRAINT = "marketing_scripts_reject_reason_valid"
+#: Both forms that name the reject-reason CHECK: 176's inline `CONSTRAINT … CHECK (…)` inside its ADD COLUMN, and
+#: 210's `ADD CONSTRAINT … CHECK (…)`.
+_RR_CHECK_RE = _re_d1.compile(
+    rf"CONSTRAINT\s+{_RR_CONSTRAINT}\s+CHECK\s*\(\s*reject_reason\s+IS\s+NULL\s+OR\s+reject_reason\s+IN\s*"
+    r"\(([^)]*)\)\s*\)", _re_d1.I)
+_RR_DROP_RE = _re_d1.compile(rf"DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+{_RR_CONSTRAINT}\b", _re_d1.I)
+_RR_ADD_RE = _re_d1.compile(rf"ADD\s+CONSTRAINT\s+{_RR_CONSTRAINT}\b", _re_d1.I)
+
+
+def _reject_reason_checks(migrations: _Path_d1) -> List[tuple]:
+    """[(file name, reason set)] of every migration that names the reject-reason CHECK, in migration order."""
+    found = []
+    for path in sorted(migrations.glob("[0-9][0-9][0-9]_*.sql")):
+        for m in _RR_CHECK_RE.finditer(_strip_sql_comments(path.read_text())):
+            found.append((path.name, set(_re_d1.findall(r"'([a-z_]+)'", m.group(1)))))
+    return found
+
+
+def _static_210_problems(text: str) -> List[str]:
+    """Why a migration-210 text breaks its contract, or [] — every check names itself."""
+    re_ = _re_d1
+    sql = _strip_sql_comments(text)
+    bare = _without_literals(sql)
+    stmts = [s.strip() for s in bare.split(";") if s.strip()]
+    problems: List[str] = []
+    if not stmts or stmts[0].upper() != "BEGIN":
+        problems.append("does not open with BEGIN")
+    if not stmts or stmts[-1].upper() != "COMMIT":
+        problems.append("does not end with COMMIT")
+    for table in ("marketing_runs", "marketing_scripts"):
+        if not re_.search(rf"ALTER\s+TABLE\s+public\.{table}\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+lane\s+TEXT\s+NOT\s+"
+                          rf"NULL\s+DEFAULT\s+'{schemas.RUN_LANE_MAIN}'\s*;", sql, re_.I):
+            problems.append(f"{table}: no ADD COLUMN IF NOT EXISTS lane TEXT NOT NULL DEFAULT 'main'")
+        name = f"{table}_lane_valid"
+        drop = re_.search(rf"ALTER\s+TABLE\s+public\.{table}\s+DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+{name}\b", sql, re_.I)
+        add = re_.search(rf"ALTER\s+TABLE\s+public\.{table}\s+ADD\s+CONSTRAINT\s+{name}\s+CHECK\s*\(\s*lane\s+IN\s*"
+                         r"\(([^)]*)\)\s*\)", sql, re_.I)
+        if not add:
+            problems.append(f"{table}: no named lane CHECK")
+        else:
+            if set(re_.findall(r"'([a-z_]+)'", add.group(1))) != set(schemas.RUN_LANES):
+                problems.append(f"{table}: the lane CHECK does not list exactly RUN_LANES")
+            if not drop or drop.start() > add.start():
+                problems.append(f"{table}: the lane CHECK is not DROP IF EXISTS before ADD")
+    key_drop = re_.search(r"ALTER\s+TABLE\s+public\.marketing_runs\s+DROP\s+CONSTRAINT\s+IF\s+EXISTS\s+"
+                          r"marketing_runs_run_date_lane_key\b", sql, re_.I)
+    key_add = re_.search(r"ALTER\s+TABLE\s+public\.marketing_runs\s+ADD\s+CONSTRAINT\s+marketing_runs_run_date_lane_key"
+                         r"\s+UNIQUE\s*\(\s*run_date\s*,\s*lane\s*\)", sql, re_.I)
+    if not key_add:
+        problems.append("no ADD of UNIQUE (run_date, lane)")
+    elif not key_drop or key_drop.start() > key_add.start():
+        problems.append("the (run_date, lane) key is not DROP IF EXISTS before ADD")
+    blocks = list(re_.finditer(r"\bDO\s+\$\$(.*?)\$\$", sql, re_.S | re_.I))
+    if len(blocks) != 1:
+        problems.append(f"expected ONE DO block dropping the old UNIQUE (run_date), found {len(blocks)}")
+    else:
+        do = blocks[0]
+        for must, why in (
+                (r"conrelid\s*=\s*'public\.marketing_runs'::regclass", "the DO block is not bound to marketing_runs"),
+                (r"contype\s*=\s*'u'", "the DO block does not select UNIQUE constraints only"),
+                (r"pg_get_constraintdef\(\s*oid\s*\)\s*=\s*'UNIQUE \(run_date\)'",
+                 "the DO block does not match the old key by its definition"),
+                (r"EXECUTE\s+format\(\s*'ALTER TABLE public\.marketing_runs DROP CONSTRAINT %I'",
+                 "the DO block does not drop by a quoted identifier")):
+            if not re_.search(must, do.group(1), re_.I):
+                problems.append(why)
+        if key_add and do.start() < key_add.start():
+            problems.append("the old UNIQUE (run_date) is dropped before the (run_date, lane) key is added")
+    if re_.search(r"DROP\s+CONSTRAINT\s+(?:IF\s+EXISTS\s+)?marketing_runs_run_date_key\b", bare, re_.I):
+        problems.append("the old key is dropped by a hard-coded name (the DO block matches its definition)")
+    rr = _RR_CHECK_RE.search(sql)
+    rr_drop = _RR_DROP_RE.search(sql)
+    if not rr:
+        problems.append("no reject-reason CHECK")
+    else:
+        if set(re_.findall(r"'([a-z_]+)'", rr.group(1))) != set(schemas.SCRIPT_REJECT_REASONS):
+            problems.append("the reject-reason CHECK does not list exactly SCRIPT_REJECT_REASONS")
+        if not rr_drop or rr_drop.start() > rr.start():
+            problems.append("the reject-reason CHECK is not DROP IF EXISTS before ADD")
+    for bad in (r"\bINSERT\s+INTO\b", r"\bUPDATE\s+\w", r"\bDELETE\s+FROM\b", r"\bDROP\s+TABLE\b", r"\bTRUNCATE\b",
+                r"\bGRANT\b", r"\bREVOKE\b", r"\bCREATE\s+TRIGGER\b", r"\bDROP\s+COLUMN\b", r"\bALTER\s+COLUMN\b",
+                r"\bmarketing_posts\b", r"\bmarketing_assets\b"):
+        if re_.search(bad, bare, re_.I):
+            problems.append(f"unexpected statement {bad}")
+    comments = {
+        "marketing_runs": _comment_literal(sql, "TABLE public.marketing_runs"),
+        "marketing_runs.lane": _comment_literal(sql, "COLUMN public.marketing_runs.lane"),
+        "marketing_scripts.lane": _comment_literal(sql, "COLUMN public.marketing_scripts.lane"),
+        "marketing_scripts.reject_reason": _comment_literal(sql, "COLUMN public.marketing_scripts.reject_reason"),
+    }
+    for name, got in comments.items():
+        if got is None:
+            problems.append(f"no comment on {name}")
+        elif got == _SAME_LINE:
+            problems.append(f"the {name} comment joins string literals on one line (a syntax error)")
+    table = comments["marketing_runs"]
+    if table and table != _SAME_LINE and ("(run_date, lane)" not in table or "UNIQUE run_date)" in table):
+        problems.append("the marketing_runs comment does not describe the (run_date, lane) claim")
+    reasons = comments["marketing_scripts.reject_reason"]
+    if reasons and reasons != _SAME_LINE and not all(r in reasons for r in schemas.SCRIPT_REJECT_REASONS):
+        problems.append("the reject_reason comment does not name every SCRIPT_REJECT_REASONS value")
+    return problems
+
+
+_210_KEY = ("ALTER TABLE public.marketing_runs DROP CONSTRAINT IF EXISTS marketing_runs_run_date_lane_key;\n"
+            "ALTER TABLE public.marketing_runs\n"
+            "    ADD CONSTRAINT marketing_runs_run_date_lane_key UNIQUE (run_date, lane);\n")
+
+
+def _move_210_key_after_the_do_block(text: str) -> str:
+    """The real file with the (run_date, lane) key added AFTER the DO block drops the old one (a window with no key)."""
+    assert _210_KEY in text, "the fixture text moved"
+    return text.replace(_210_KEY, "", 1).replace("-- (c) marketing_scripts.lane", _210_KEY + "\n-- (c) marketing_scripts.lane", 1)
+
+
+def test_migration_210_adds_the_lane_and_the_lane_claim():
+    """210 against the code that will write it: `lane` on both tables, ADD COLUMN IF NOT EXISTS … NOT NULL DEFAULT
+    'main' (the main lane's INSERT never sends it, so it stays byte for byte today's); each named lane CHECK ==
+    RUN_LANES; UNIQUE (run_date, lane) ADDED before the DO block drops the old UNIQUE (run_date), matched by
+    DEFINITION (so a re-run finds nothing and the name never matters); the reject-reason CHECK re-created with
+    `nothing_qualified`; one transaction; no data, grant or trigger change."""
+    text = _MIGRATION_210.read_text()
+    assert _static_210_problems(text) == []
+    assert text.startswith("-- 210_marketing_run_lanes.sql")
+    assert "apply BEFORE the web deploy that carries the spotlight lane" in text
+    assert "Verify after applying" in text and "UNIQUE (run_date, lane)" in text
+
+
+@pytest.mark.parametrize("mutate, expect", [
+    (lambda t: t.replace("BEGIN;", "", 1), "does not open with BEGIN"),
+    (lambda t: t.replace("COMMIT;", "", 1), "does not end with COMMIT"),
+    (lambda t: t.replace("CHECK (lane IN ('main', 'spotlight'))", "CHECK (lane IN ('main'))", 1),
+     "marketing_runs: the lane CHECK does not list exactly RUN_LANES"),
+    (lambda t: t.replace("ALTER TABLE public.marketing_scripts ADD COLUMN IF NOT EXISTS lane",
+                         "ALTER TABLE public.marketing_scripts ADD COLUMN lane", 1),
+     "marketing_scripts: no ADD COLUMN IF NOT EXISTS lane"),
+    (lambda t: t.replace("lane TEXT NOT NULL DEFAULT 'main';", "lane TEXT NOT NULL DEFAULT 'spotlight';", 1),
+     "marketing_runs: no ADD COLUMN IF NOT EXISTS lane"),
+    (lambda t: t.replace("ALTER TABLE public.marketing_scripts DROP CONSTRAINT IF EXISTS marketing_scripts_lane_valid;",
+                         "", 1), "marketing_scripts: the lane CHECK is not DROP IF EXISTS before ADD"),
+    (lambda t: t.replace("UNIQUE (run_date, lane);", "UNIQUE (run_date);", 1), "no ADD of UNIQUE (run_date, lane)"),
+    (lambda t: t.replace("pg_get_constraintdef(oid) = 'UNIQUE (run_date)'",
+                         "conname = 'marketing_runs_run_date_key'", 1), "by its definition"),
+    (lambda t: t.replace("::regclass\n           AND contype = 'u'\n", "::regclass\n", 1), "UNIQUE constraints only"),
+    (lambda t: _move_210_key_after_the_do_block(t), "dropped before the (run_date, lane) key is added"),
+    (lambda t: t.replace("'source_ineligible', 'nothing_qualified')", "'source_ineligible')", 1),
+     "exactly SCRIPT_REJECT_REASONS"),
+    (lambda t: t.replace("ALTER TABLE public.marketing_scripts DROP CONSTRAINT IF EXISTS "
+                         "marketing_scripts_reject_reason_valid;", "", 1),
+     "the reject-reason CHECK is not DROP IF EXISTS before ADD"),
+    (lambda t: t.replace("COMMIT;", "UPDATE public.marketing_runs SET lane = 'main';\nCOMMIT;"), "unexpected statement"),
+    (lambda t: t.replace("COMMIT;", "ALTER TABLE public.marketing_runs DROP CONSTRAINT IF EXISTS "
+                                    "marketing_runs_run_date_key;\nCOMMIT;"), "hard-coded name"),
+    (lambda t: t.replace("'§12). The media worker CLAIMS a day''s run by inserting this row (UNIQUE (run_date, lane), '\n",
+                         "'§12). The media worker CLAIMS a day''s run by inserting this row (UNIQUE (run_date, lane), ' ",
+                         1), "one line"),
+    (lambda t: t.replace("(UNIQUE (run_date, lane), '", "(UNIQUE run_date), '", 1), "(run_date, lane) claim"),
+])
+def test_the_210_static_check_fails_on_each_broken_variant(mutate, expect):
+    """Guard against the guard: each mutation of the real file is caught, by the named check."""
+    original = _MIGRATION_210.read_text()
+    broken = mutate(original)
+    assert broken != original, "the mutation did not apply — the fixture text moved"
+    assert any(expect in p for p in _static_210_problems(broken)), _static_210_problems(broken)
+
+
+def test_reject_reason_check_reads_the_latest_migration_that_adds_it():
+    """The CHECK the database enforces is the LATEST migration that names `marketing_scripts_reject_reason_valid`
+    (176 created it inline; 210 re-creates it with `nothing_qualified`), and it must equal SCRIPT_REJECT_REASONS — a
+    reason the service writes that the CHECK lacks is a 23514 on the kick path. The list only ever widens, and every
+    `ADD CONSTRAINT` of it follows a DROP … IF EXISTS (176's inline form is skipped on an existing column, so a later
+    reason can only arrive that way)."""
+    found = _reject_reason_checks(_MIGRATIONS_D1)
+    assert [name[:3] for name, _ in found][:1] == ["176"], found
+    latest_name, latest = found[-1]
+    assert int(latest_name[:3]) >= 210, latest_name
+    assert latest == set(schemas.SCRIPT_REJECT_REASONS), (latest_name, latest)
+    for (_, older), (_, newer) in zip(found, found[1:]):
+        assert older <= newer, (older, newer)
+    for path in sorted(_MIGRATIONS_D1.glob("[0-9][0-9][0-9]_*.sql")):
+        sql = _strip_sql_comments(path.read_text())
+        add = _RR_ADD_RE.search(sql)
+        if add:
+            drop = _RR_DROP_RE.search(sql)
+            assert drop and drop.start() < add.start(), path.name
+    snapshot = (_MIGRATIONS_D1.parent / "schema_snapshot.sql").read_text()
+    assert f"CONSTRAINT {_RR_CONSTRAINT} CHECK" in snapshot
+
+
+def test_the_run_lanes_and_the_lane_echo():
+    """RUN_LANES (migration 210) and the additive `MarketingRun.lane` echo: a row read before 210 is applied carries no
+    column and is the main lane — the column's own default."""
+    assert schemas.RUN_LANES == ("main", "spotlight")
+    assert (schemas.RUN_LANE_MAIN, schemas.RUN_LANE_SPOTLIGHT) == schemas.RUN_LANES
+    row = {"id": "r1", "run_date": "2026-11-17", "status": "in_progress", "stage": "planned", "content_class": "A"}
+    assert schemas.MarketingRun.model_validate(row).lane == "main"
+    assert schemas.MarketingRun.model_validate({**row, "lane": "spotlight"}).lane == "spotlight"
+    assert schemas.MarketingRun.model_validate(row).model_dump()["lane"] == "main"
+    assert schemas.SCRIPT_REJECT_REASONS[-1] == "nothing_qualified"
+    assert len(set(schemas.SCRIPT_REJECT_REASONS)) == len(schemas.SCRIPT_REJECT_REASONS)
+
+
+def test_once_210_is_in_the_snapshot_its_lane_checks_and_claim_key_hold_there_too():
+    """Forward guard for the re-dump after the owner applies 210: once the snapshot carries the lane, its CHECKs list
+    exactly RUN_LANES and marketing_runs holds NO run_date-only unique key (the DO block's drop really happened).
+    Until then the snapshot is 208's and this checks the pre-210 state is what 210 expects to find."""
+    snapshot = (_MIGRATIONS_D1.parent / "schema_snapshot.sql").read_text()
+    runs_body = _re_d1.search(r"CREATE TABLE public\.marketing_runs \((.*?)\n\);", snapshot, _re_d1.S).group(1)
+    if not _re_d1.search(r"^\s+lane text", runs_body, _re_d1.M):
+        # not applied yet: the key 210's DO block matches by definition is the one there
+        assert _re_d1.search(r"ALTER TABLE ONLY public\.marketing_runs\s+ADD CONSTRAINT \w+ UNIQUE \(run_date\);",
+                             snapshot)
+        return
+    for table in ("marketing_runs", "marketing_scripts"):
+        m = _re_d1.search(rf"CONSTRAINT {table}_lane_valid CHECK \(\(lane = ANY \(ARRAY\[([^\]]*)\]", snapshot)
+        assert m and set(_re_d1.findall(r"'([a-z_]+)'::text", m.group(1))) == set(schemas.RUN_LANES), table
+    assert "UNIQUE (run_date, lane)" in snapshot
+    assert not _re_d1.search(r"ONLY public\.marketing_runs\s+ADD CONSTRAINT \w+ UNIQUE \(run_date\);", snapshot)
 
 
 # ── Drop 2 D2: content classes, the setting, server-owned keys, WorkerScript ───────────────
@@ -6001,10 +6304,15 @@ def test_parse_first_comment_platforms_re_validates_a_raw_value(raw, expected, l
 # other. VIDEO_BRAND_TEXT became a superset (the legacy CTA stays allowed for older workers / rollbacks).
 
 from app.services.marketing import template_onscreen  # noqa: E402
+from app.services.marketing import news_templates  # noqa: E402
+
+#: Every accepted template a registration test seeds was composed by THIS code (final review 2026-11-20: a picture or
+#: video of a template another TEMPLATE_VERSION composed is refused 409 before any on-screen check).
+_TPL_VERSION = news_templates.TEMPLATE_VERSION
 
 _B2_HOOK = "Why do small habits beat big plans?"
-_B2_FOOTER = ("Educational only · not investment advice · Source: SEC Form 4 · Nov 13, 2026 · Caydex · "
-              "Not affiliated with anyone named")
+#: news-v23 (restyle 2026-11-19): a template picture's footer is its family's one short line
+_B2_FOOTER = "Not investment advice · Source: SEC Form 4 · filed Nov 13, 2026"
 _B2_LOGOS = [{"key": "GME", "name": "GameStop", "url": None, "sha256": None, "bytes": None, "width": None,
               "height": None}]
 _B2_SPEC = {"layout": "spotlight", "version": 1, "kicker": "FORM 4 · LAST WEEK", "footer": _B2_FOOTER,
@@ -6016,9 +6324,11 @@ _B2_TPL_CARD = {"title": "What was filed", "body": "One Form 4 in the week."}
 _B2_TPL_DISCLAIMER = "Built by a fixed template from public data. Caydex · Nov 13, 2026"
 #: The template's ALT text (its `image_post`): never drawn, by the post image or by a data card.
 _B2_ALT = {"title": "A chief executive disclosed a purchase", "paragraphs": ["One filing.", "Held directly."]}
-#: Strings only the post image (so only a data card) draws — none is a card, the opening card or brand text.
+#: Strings only the post image (so only a data card) draws — none is a card, the opening card or brand text. Since
+#: news-v23 (restyle 2026-11-19) the picture's short footer is not among them: every template video card may draw it
+#: (the restyle tests at the end of this file).
 _B2_IMAGE_ONLY = ["FORM 4 · LAST WEEK", "GME", "Disclosed buying by its CEO", "One filing in the week",
-                  "Held directly", _B2_FOOTER]
+                  "Held directly"]
 
 
 def test_batch_2_constants_are_pinned():
@@ -6041,7 +6351,11 @@ async def test_batch_2_adds_the_video_v2_capability_and_a_claim_records_it(svc):
     """The Batch 2 worker declares `video_v2`; the server knows it (a claim keeps it, never a WARNING) and
     records it like any capability — and a re-claim by a pre-Batch-2 image removes it."""
     assert schemas.WORKER_CAPABILITY_VIDEO_V2 == "video_v2"
-    assert schemas.WORKER_CAPABILITIES == ("post_image", "news_templates", "layouts_2b", "video_v2")
+    # append-only: 2026-11-15 added `layout_feature` (the spotlight series' `feature` picture) LAST, and 2026-11-16
+    # `post_art` (workstream C, the per-post art) after it, then `look_v23` (the restyle) and `theme_angles` (news-v23
+    # phase 3, the weekly theme post's angles)
+    assert schemas.WORKER_CAPABILITIES == ("post_image", "news_templates", "layouts_2b", "video_v2", "layout_feature",
+                                           "post_art", "look_v23", "theme_angles")
     req = schemas.RunClaimRequest.model_validate({**_CLAIM_BASE, "capabilities": list(schemas.WORKER_CAPABILITIES)})
     assert req.capabilities == sorted(schemas.WORKER_CAPABILITIES)
     day = date(2026, 9, 17)
@@ -6163,15 +6477,18 @@ async def test_a_frozen_hook_card_with_an_undrawable_hook_allows_nothing(svc, ca
 
 
 async def _b2_template_run(svc, features: Any = _MISSING, *, tamper=None, store_state: Any = "live",
-                           day: date = date(2026, 9, 17)) -> str:
+                           day: date = date(2026, 9, 17), capabilities: Tuple[str, ...] = ()) -> str:
     """A held run whose accepted script is a Company Weekly TEMPLATE (class C: ceo_buys) — opening card,
     one text card, the post image (`image_spec` + footer + its logo), the alt text — with its formats frozen
     and, unless `_MISSING`, the frozen `video_features`. Seeded directly: the on-screen check reads no
-    fact sheet (the template's own re-check is create_posts', tested in test_marketing_template_flow)."""
-    row, _ = await svc.claim_run(day, worker_version="b2", dry_run=True, now=NOW, claim_nonce=_n())
+    fact sheet (the template's own re-check is create_posts', tested in test_marketing_template_flow).
+    `capabilities`: what its holder declares on the claim (none by default, as before)."""
+    row, _ = await svc.claim_run(day, worker_version="b2", dry_run=True, now=NOW, claim_nonce=_n(),
+                                 capabilities=capabilities)
     rid = row["id"]
     output = {"posts": {p: _server_copy(p) for p in ("tiktok", "x")}, "content_class": "C",
-              "authorship": "template", "series": "ceo_buys", "video_layout": "per_line",
+              "authorship": "template", "template_version": _TPL_VERSION, "series": "ceo_buys",
+              "video_layout": "per_line",
               "hook": "One chief executive disclosed a purchase last week.", "cards": [dict(_B2_TPL_CARD)],
               "disclaimer_card": _B2_TPL_DISCLAIMER, "opening_card": copy.deepcopy(_B2_OPENING),
               "image_spec": copy.deepcopy(_B2_SPEC), "image_footer": _B2_FOOTER, "logos": copy.deepcopy(_B2_LOGOS),
@@ -6200,7 +6517,7 @@ def test_the_template_fixture_validates_and_its_image_only_strings_are_the_data_
                                                  footer=_B2_FOOTER) is None
     assert template_onscreen.validate_opening_card(_B2_OPENING, template_onscreen.logo_keys(_B2_LOGOS)) is None
     image = template_onscreen.image_strings(_B2_SPEC, _B2_LOGOS)
-    assert set(_B2_IMAGE_ONLY) <= set(image) and image[-1] == _B2_FOOTER
+    assert set(_B2_IMAGE_ONLY) <= set(image) and image[-1] == _B2_FOOTER and _B2_FOOTER not in _B2_IMAGE_ONLY
     others = set(_template_drawn()) | {_B2_TPL_CARD["title"], _B2_TPL_CARD["body"]}
     assert not set(_B2_IMAGE_ONLY) & others                  # each one is drawn ONLY by the picture
 
@@ -7329,3 +7646,1811 @@ async def test_a_default_gemini_run_writes_no_written_by_note(svc):
     rid, specs = await _comment_run(svc, "live")
     posts = await svc.create_posts(rid, specs, claim=_holder(svc, rid))
     assert all(schemas.POST_METADATA_WRITTEN_BY not in p["metadata"] for p in posts)
+
+
+# ══ Spotlight lane (migration 210, 2026-11-15): the ledger per (day, lane) ════════════════════════════════════
+# The main lane's claim body, keys and paths stay byte for byte; the spotlight run claims its own row through
+# `lane=spotlight` (only while `selection.is_spotlight_day`), its keys and objects carry the lane, an existing row
+# of ANOTHER run is refused (never adopted), and the readers keyed by run_date see both lanes.
+
+_SPOT_DAY = date(2026, 9, 17)                       # a Thursday: one of the default "tue,thu,sat"
+assert _SPOT_DAY.weekday() == 3
+
+
+#: The per-series switch the spotlight tests claim under: the 2a four plus the insider spotlight. C0 (2026-11-16): a
+#: spotlight day needs a series the MAIN lane's chain does not hold that day — on Thursday _SPOT_DAY the main chain
+#: is Money Map → lesson, so with the 2a default alone the spotlight would hold no series and not be scheduled.
+_SPOT_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"
+
+
+def _spot(monkeypatch, *, on=True, days="tue,thu,sat", classes="A,C,F", hour=10, attempts=6, run_hour=16,
+          series=_SPOT_SERIES):
+    """The spotlight lane's settings (open by default: 10 + 6 <= 16, a news class and a spotlight series)."""
+    for name, value in (("MARKETING_SPOTLIGHT_ENABLED", on), ("MARKETING_SPOTLIGHT_WEEKDAYS", days),
+                        ("MARKETING_CONTENT_CLASSES", classes), ("MARKETING_SPOTLIGHT_HOUR_ET", hour),
+                        ("MARKETING_MAX_RUN_ATTEMPTS", attempts), ("MARKETING_RUN_HOUR_ET", run_hour),
+                        ("MARKETING_NEWS_SERIES", series)):
+        monkeypatch.setattr(mrs.settings, name, value)
+
+
+async def _claim_lane(svc, lane, *, day=_SPOT_DAY, now=NOW, nonce=None, resume_only=False):
+    return await svc.claim_run(day, worker_version="t", dry_run=False, now=now, claim_nonce=nonce or _n(),
+                               resume_only=resume_only, lane=lane)
+
+
+# ── pure: keys, paths, labels ─────────────────────────────────────────────────
+
+
+def test_main_keys_and_paths_are_byte_for_byte_todays_and_the_spotlight_ones_carry_the_lane():
+    d = date(2026, 11, 17)
+    # main: exactly the pre-lane shapes (the default lane and the explicit one)
+    assert idempotency_key_for(d, "x", "text") == idempotency_key_for(d, "x", "text", lane="main") == "2026-11-17:x:text"
+    assert storage_path_for(d, "video", SHA, "mp4") == storage_path_for(d, "video", SHA, "mp4", lane="main") == \
+        "2026-11-17/video-aaaaaaaaaaaaaaaa.mp4"
+    # spotlight: the lane rides in both, after the date — key[:10] is still the run date
+    key = idempotency_key_for(d, "x", "text", lane="spotlight")
+    assert key == "2026-11-17:spotlight:x:text" and key[:10] == "2026-11-17"
+    assert storage_path_for(d, "video", SHA, "mp4", lane="spotlight") == "2026-11-17/spotlight/video-aaaaaaaaaaaaaaaa.mp4"
+    assert storage_path_for(d, "manifest", SHA, "json", lane="spotlight") != storage_path_for(d, "manifest", SHA, "json")
+    for bad in ("Spotlight", "", "art", None, 1):
+        with pytest.raises(ValueError):
+            idempotency_key_for(d, "x", "text", lane=bad)
+        with pytest.raises(ValueError):
+            storage_path_for(d, "video", SHA, "mp4", lane=bad)
+    # Upload-Post's request id pattern takes the spotlight key plus the attempt suffix
+    assert re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", f"{key}:a1")
+
+
+@pytest.mark.parametrize("key, lane", [
+    ("2026-11-17:x:text", "main"), ("2026-11-17:spotlight:x:text", "spotlight"),
+    ("2026-11-17:facebook:video", "main"), ("2026-11-17:spotlight:linkedin:video", "spotlight"),
+    ("2026-11-17:main:x:text", None), ("2026-11-17:spotlight:x", None), ("2026-11-17:myspace:text", None),
+    ("2026-11-17:spotlight:x:hologram", None), ("2026-13-40:x:text", None), ("not-a-key", None), ("", None),
+    (None, None), ("2026-11-17:x:text:extra", None),
+])
+def test_post_lane_reads_both_key_shapes_and_nothing_else(key, lane):
+    post = {"idempotency_key": key}
+    assert mrs.post_lane(post) == lane
+    if lane is not None:
+        assert mrs.post_run_date(post) == date(2026, 11, 17) and mrs.is_fresh(post, date(2026, 11, 18))
+
+
+def test_lane_labels_name_the_spotlight_and_leave_main_as_it_was():
+    assert mrs.lane_label("2026-11-17", "main") == mrs.lane_label("2026-11-17", None) == "2026-11-17"
+    assert mrs.lane_label("2026-11-17", "spotlight") == "2026-11-17 · spotlight"
+    assert mrs.run_label({"run_date": "2026-11-17"}) == "2026-11-17"                       # no lane column: main
+    assert mrs.run_label({"run_date": "2026-11-17", "lane": "spotlight"}) == "2026-11-17 · spotlight"
+    assert mrs.run_label({"run_date": "2026-11-17", "lane": "bogus"}) == "2026-11-17 · ?"   # never guessed as main
+    assert mrs.run_label({}) == "?" and mrs.run_label(None) == "? · ?"
+    assert mrs.post_run_label({"idempotency_key": "2026-11-17:x:text"}) == "2026-11-17"
+    assert mrs.post_run_label({"idempotency_key": "2026-11-17:spotlight:x:text"}) == "2026-11-17 · spotlight"
+    # a malformed key renders as it always did (its first 10 characters): the main alert text is unchanged
+    assert mrs.post_run_label({"idempotency_key": "not-a-key"}) == "not-a-key"
+    assert mrs.post_run_label({}) == ""
+
+
+def test_run_lane_reads_a_missing_lane_as_main_and_refuses_an_unknown_one():
+    assert mrs.run_lane({}) == mrs.run_lane({"lane": None}) == "main"
+    assert mrs.run_lane({"lane": "spotlight"}) == "spotlight"
+    for bad in ({"lane": "Spotlight"}, {"lane": ""}, {"lane": 1}, {"lane": ["main"]}, None, "main"):
+        with pytest.raises(ValueError):
+            mrs.run_lane(bad)
+
+
+# ── the claim, per lane ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_main_and_spotlight_claims_of_one_day_are_two_rows(svc, monkeypatch):
+    _spot(monkeypatch)
+    main, r1 = await _claim_lane(svc, "main")
+    spot, r2 = await _claim_lane(svc, "spotlight")
+    assert (r1, r2) == (CLAIMED, CLAIMED) and main["id"] != spot["id"]
+    rows = svc.fake.tables[mrs.RUNS].rows
+    assert len(rows) == 2 and all(r["run_date"] == "2026-09-17" for r in rows)
+    # the main INSERT never sends `lane` (byte for byte today's body); the spotlight's does
+    assert "lane" not in rows[0] and rows[1]["lane"] == "spotlight"
+    assert mrs.run_lane(main) == "main" and mrs.run_lane(spot) == "spotlight"
+    # each lane's second claim meets its OWN row
+    _, again_main = await _claim_lane(svc, "main")
+    again, again_spot = await _claim_lane(svc, "spotlight")
+    assert (again_main, again_spot) == (IN_PROGRESS, IN_PROGRESS) and again["id"] == spot["id"]
+    # each lane's reader answers its own row
+    assert (await svc.get_run_by_date(_SPOT_DAY))["id"] == main["id"]
+    assert (await svc.get_run_by_date(_SPOT_DAY, "spotlight"))["id"] == spot["id"]
+    assert (await svc.get_run_for_date("2026-09-17", lane="spotlight"))["id"] == spot["id"]
+    assert (await svc.get_run_for_date("2026-09-17"))["id"] == main["id"]
+    with pytest.raises(MarketingRequestInvalid, match="unknown lane"):
+        await svc.get_run_by_date(_SPOT_DAY, "bogus")
+    with pytest.raises(MarketingRequestInvalid, match="unknown lane"):
+        await _claim_lane(svc, "bogus")
+
+
+@pytest.mark.asyncio
+async def test_the_main_claim_body_is_byte_for_byte_todays(svc, monkeypatch):
+    """Whatever the spotlight switch says, the main lane's INSERT carries exactly the keys it always did."""
+    inserted = []
+    real = svc.fake.tables[mrs.RUNS].insert
+
+    def spy(payload):
+        inserted.append(dict(payload))
+        return real(payload)
+
+    monkeypatch.setattr(svc.fake.tables[mrs.RUNS], "insert", spy)
+    for on in (False, True):
+        _spot(monkeypatch, on=on)
+        await svc.claim_run(_SPOT_DAY - timedelta(days=0 if on else 1), worker_version="t", dry_run=True, now=NOW,
+                            claim_nonce=_n())
+    assert [sorted(p) for p in inserted] == [sorted(["run_date", "status", "stage", "worker_version", "dry_run",
+                                                     "attempts", "started_at", "updated_at", "metadata"])] * 2
+
+
+@pytest.mark.parametrize("why", ["switch_off", "weekday", "no_news_class", "hours", "no_days", "main_lanes_series"])
+@pytest.mark.asyncio
+async def test_a_closed_spotlight_lane_is_not_scheduled_before_any_read_or_write(svc, monkeypatch, why):
+    # "main_lanes_series" (C0, 2026-11-16): the 2a default switch — the Thursday's only spotlight series is the main
+    # lane's Money Map, so the spotlight chain holds no series: the day is not scheduled, exactly like a closed lane
+    _spot(monkeypatch, on=why != "switch_off", days={"weekday": "mon,wed", "no_days": ""}.get(why, "tue,thu,sat"),
+          classes="A" if why == "no_news_class" else "A,C,F", hour=11 if why == "hours" else 10,
+          series="ceo_buys,insider_buys,thirteen_f,money_map" if why == "main_lanes_series" else _SPOT_SERIES)
+    # an abandoned run the sweep WOULD close, to prove the sweep never ran
+    old = {"id": str(uuid.uuid4()), "run_date": "2026-09-10", "status": "in_progress", "stage": "voiced",
+           "attempts": 2, "metadata": {}, "started_at": (NOW - timedelta(days=7)).isoformat(),
+           "updated_at": (NOW - timedelta(days=7)).isoformat()}
+    svc.fake.tables[mrs.RUNS].rows.append(dict(old))
+    reads = _counting_reads(monkeypatch)
+    for resume_only in (False, True):
+        row, reason = await _claim_lane(svc, "spotlight", resume_only=resume_only)
+        assert (row, reason) == (None, mrs.NOT_SCHEDULED)
+    assert reads == []
+    assert svc.fake.tables[mrs.RUNS].rows == [old]          # nothing inserted, nothing swept
+    # the main lane is untouched by the spotlight's state
+    _, reason = await _claim_lane(svc, "main")
+    assert reason == CLAIMED
+
+
+@pytest.mark.asyncio
+async def test_yesterdays_spotlight_run_resumes_while_yesterday_is_still_a_spotlight_day(svc, monkeypatch):
+    _spot(monkeypatch)
+    wed, thu = date(2026, 9, 16), _SPOT_DAY
+    # Thursday's run, killed: Friday's out-of-window tick resumes it (yesterday is a spotlight day)
+    row, _ = await _claim_lane(svc, "spotlight", day=thu, now=NOW - timedelta(hours=5))
+    await svc.update_run(row["id"], status="failed", last_error="killed", finished=True)
+    re_, reason = await _claim_lane(svc, "spotlight", day=thu, resume_only=True)
+    assert reason == CLAIMED and re_["id"] == row["id"] and re_["attempts"] == 2
+    # Wednesday is not a spotlight day: its resume is not scheduled (nothing read)
+    assert await _claim_lane(svc, "spotlight", day=wed, resume_only=True) == (None, mrs.NOT_SCHEDULED)
+    # a resume with nothing there is NO_RUN, as on the main lane
+    _spot(monkeypatch, days="tue,wed,thu,sat")
+    assert await _claim_lane(svc, "spotlight", day=wed, resume_only=True) == (None, NO_RUN)
+    assert len(svc.fake.tables[mrs.RUNS].rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_claim_matrix_holds_per_lane(svc, monkeypatch):
+    """Re-claim CAS, nonce recovery and the attempts cap act on the lane's own row; the other lane's row is
+    never touched."""
+    _spot(monkeypatch, attempts=3, run_hour=16)
+    main, _ = await _claim_lane(svc, "main", nonce="a" * 32)
+    spot, _ = await _claim_lane(svc, "spotlight", nonce="b" * 32, now=NOW - timedelta(hours=3))
+    main_before = dict(_stored(svc, main["id"]))
+    # nonce recovery: the spotlight's own lost response
+    _spot(monkeypatch, attempts=3)
+    got, reason = await _claim_lane(svc, "spotlight", nonce="b" * 32)
+    assert reason == CLAIMED and got["id"] == spot["id"] and got["attempts"] == 1
+    # stale → re-claimed with a CAS; then failed twice more → the cap
+    got, reason = await _claim_lane(svc, "spotlight")
+    assert reason == CLAIMED and got["attempts"] == 2
+    for expect in (CLAIMED, ATTEMPTS_EXHAUSTED):
+        await svc.update_run(spot["id"], status="failed", finished=True)
+        got, reason = await _claim_lane(svc, "spotlight")
+        assert reason == expect
+    assert got["attempts"] == 3 and _stored(svc, spot["id"])["lane"] == "spotlight"
+    assert _stored(svc, main["id"]) == main_before
+
+
+@pytest.mark.asyncio
+async def test_a_claim_never_hands_back_a_row_of_another_lane(svc, monkeypatch, caplog):
+    """Defence in depth: a read that lost its lane filter (or a hand edit) must not hand the main worker the
+    spotlight's day — a ledger error (503), logged at ERROR, never the row."""
+    import logging
+
+    _spot(monkeypatch)
+    spot, _ = await _claim_lane(svc, "spotlight")
+
+    async def unfiltered(run_date, lane="main"):
+        return dict(_stored(svc, spot["id"]))
+
+    monkeypatch.setattr(svc, "get_run_by_date", unfiltered)
+    svc.fake.tables[mrs.RUNS].rows.append({"id": str(uuid.uuid4()), "run_date": "2026-09-17",
+                                           "status": "in_progress", "attempts": 1, "metadata": {}})
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingRunError, match="is lane 'spotlight', not 'main'"):
+            await _claim_lane(svc, "main")
+    assert any("REFUSED" in r.getMessage() and spot["id"] in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_closes_an_abandoned_spotlight_run_and_names_its_lane(svc, monkeypatch):
+    _spot(monkeypatch)
+    stamp = (NOW - timedelta(days=5)).isoformat()
+    for lane in ("main", "spotlight"):
+        row = {"id": f"{lane}-run", "run_date": "2026-09-12", "status": "in_progress", "stage": "voiced",
+               "attempts": 1, "metadata": {}, "started_at": stamp, "updated_at": stamp}
+        if lane != "main":
+            row["lane"] = lane
+        svc.fake.tables[mrs.RUNS].rows.append(row)
+    await _claim_lane(svc, "spotlight")
+    main_row, spot_row = _stored(svc, "main-run"), _stored(svc, "spotlight-run")
+    assert main_row["status"] == spot_row["status"] == "failed"
+    # the main run's text is what it always was; the spotlight's names its lane
+    assert main_row["last_error"].startswith("abandoned outside the claim window: run_date 2026-09-12 (today ")
+    assert spot_row["last_error"].startswith("abandoned outside the claim window: run_date 2026-09-12 lane "
+                                             "spotlight (today ")
+
+
+# ── assets: the lane's folder, and no cross-run adoption ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_spotlight_run_registers_under_its_own_folder_and_identical_bytes_make_two_rows(svc, monkeypatch):
+    _spot(monkeypatch)
+    main, _ = await _claim_lane(svc, "main")
+    spot, _ = await _claim_lane(svc, "spotlight")
+    a_main, up_main = await svc.register_asset(main["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12,
+                                               claim=_holder(svc, main["id"]))
+    a_spot, up_spot = await svc.register_asset(spot["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12,
+                                               claim=_holder(svc, spot["id"]))
+    assert a_main["storage_path"] == "2026-09-17/manifest-aaaaaaaaaaaaaaaa.json"
+    assert a_spot["storage_path"] == "2026-09-17/spotlight/manifest-aaaaaaaaaaaaaaaa.json"
+    assert up_main["path"] == a_main["storage_path"] and up_spot["path"] == a_spot["storage_path"]
+    assert a_main["id"] != a_spot["id"] and (a_main["run_id"], a_spot["run_id"]) == (main["id"], spot["id"])
+    # the spotlight object verifies and completes like any other (the nested prefix lists fine)
+    svc.fake.objects.add(a_spot["storage_path"])
+    done = await svc.complete_asset(a_spot["id"], claim=_asset_holder(svc, a_spot["id"]))
+    assert done["status"] == "ready"
+    back = await svc.read_back(spot["id"], claim=_holder(svc, spot["id"]))
+    assert back["lane"] == "spotlight" and [a["id"] for a in back["assets"]] == [a_spot["id"]]
+    assert back["assets"][0]["public_url"].endswith("/marketing-media/2026-09-17/spotlight/manifest-aaaaaaaaaaaaaaaa.json")
+    assert (await svc.read_back(main["id"], claim=_holder(svc, main["id"])))["lane"] == "main"
+    # the same bytes again on the spotlight run: its own row, no re-upload
+    again, upload = await svc.register_asset(spot["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12,
+                                             claim=_holder(svc, spot["id"]))
+    assert again["id"] == a_spot["id"] and upload is None
+
+
+@pytest.mark.asyncio
+async def test_register_asset_never_adopts_another_runs_row(svc, monkeypatch, caplog):
+    import logging
+
+    _spot(monkeypatch)
+    spot, _ = await _claim_lane(svc, "spotlight")
+    path = storage_path_for(_SPOT_DAY, "manifest", SHA, "json", lane="spotlight")
+    stranger = {"id": str(uuid.uuid4()), "run_id": str(uuid.uuid4()), "kind": "manifest", "storage_path": path,
+                "content_type": "application/json", "bytes": 12, "sha256": SHA, "status": "ready", "metadata": {}}
+    svc.fake.tables[mrs.ASSETS].rows.append(stranger)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match="another run; not adopted"):
+            await svc.register_asset(spot["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12,
+                                     claim=_holder(svc, spot["id"]))
+    assert any("REFUSED" in r.getMessage() and stranger["run_id"] in r.getMessage() for r in caplog.records)
+    assert svc.fake.tables[mrs.ASSETS].rows == [stranger]
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_lane_does_not_read_back_is_refused_not_guessed(svc, monkeypatch):
+    row, _ = await svc.claim_run(_SPOT_DAY, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    _stored(svc, row["id"])["lane"] = "morning"
+    with pytest.raises(MarketingRequestInvalid, match="unknown lane 'morning'"):
+        await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12,
+                                 claim=_holder(svc, row["id"]))
+    with pytest.raises(MarketingRequestInvalid, match="unknown lane 'morning'"):
+        await svc.read_back(row["id"], claim=_holder(svc, row["id"]))
+    assert svc.fake.tables[mrs.ASSETS].rows == []
+
+
+# ── posts: the lane's keys, its gates, and no cross-run adoption ─────────────
+
+
+async def _spot_template_run(svc, monkeypatch, *, template="money_map", klass="F", lane="spotlight"):
+    monkeypatch.setattr(mrs.news_templates, "revalidate", lambda *_a, **_k: [])
+    row, _ = await _claim_lane(svc, lane)
+    await svc.insert_script({"run_id": row["id"], "status": "accepted", "template_id": template,
+                             "source_ref": f"news:{template}:COST:2025", "fact_sheet": {},
+                             "output": {"posts": {p: _server_copy(p) for p in ("x", "bluesky")},
+                                        "content_class": klass, "authorship": "template", "series": template}})
+    return row
+
+
+_TEXT_SPECS = [{"platform": "x", "format": "text"}, {"platform": "bluesky", "format": "text"}]
+
+
+@pytest.mark.asyncio
+async def test_a_spotlight_runs_posts_carry_the_lane_in_their_keys(svc, monkeypatch):
+    _spot(monkeypatch)
+    main = await _spot_template_run(svc, monkeypatch, lane="main")
+    spot = await _spot_template_run(svc, monkeypatch)
+    m_posts = await svc.create_posts(main["id"], _TEXT_SPECS, claim=_holder(svc, main["id"]))
+    s_posts = await svc.create_posts(spot["id"], _TEXT_SPECS, claim=_holder(svc, spot["id"]))
+    assert [p["idempotency_key"] for p in m_posts] == ["2026-09-17:x:text", "2026-09-17:bluesky:text"]
+    assert [p["idempotency_key"] for p in s_posts] == ["2026-09-17:spotlight:x:text",
+                                                       "2026-09-17:spotlight:bluesky:text"]
+    assert all(mrs.post_lane(p) == "spotlight" and mrs.post_run_date(p) == _SPOT_DAY for p in s_posts)
+    assert all(p["status"] == "pending_review" and p["run_id"] == spot["id"] for p in s_posts)
+    # a retry adopts its OWN rows through the key
+    again = await svc.create_posts(spot["id"], _TEXT_SPECS, claim=_holder(svc, spot["id"]))
+    assert [p["id"] for p in again] == [p["id"] for p in s_posts] and len(svc.fake.tables[mrs.POSTS].rows) == 4
+
+
+@pytest.mark.asyncio
+async def test_create_posts_never_adopts_another_runs_post_on_its_key(svc, monkeypatch, caplog):
+    import logging
+
+    _spot(monkeypatch)
+    spot = await _spot_template_run(svc, monkeypatch)
+    _p5_post(svc, status="pending_review", key="2026-09-17:spotlight:x:text")     # another run's row on the key
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match="already belongs to another run"):
+            await svc.create_posts(spot["id"], _TEXT_SPECS[:1], claim=_holder(svc, spot["id"]))
+    assert any("not adopted" in r.getMessage() for r in caplog.records)
+    assert [p["run_id"] for p in svc.fake.tables[mrs.POSTS].rows if p["run_id"] == spot["id"]] == []
+
+
+@pytest.mark.asyncio
+async def test_a_spotlight_template_is_refused_once_the_lane_is_switched_off(svc, monkeypatch, caplog):
+    import logging
+
+    from app.api.error_response import ErrorCode, classify_exception
+
+    _spot(monkeypatch)
+    spot = await _spot_template_run(svc, monkeypatch)
+    main = await _spot_template_run(svc, monkeypatch, lane="main")
+    _spot(monkeypatch, on=False)
+    real_list_assets = svc.list_assets
+
+    async def no_asset_read(run_id):
+        raise AssertionError("the lane refusal comes before any asset read")
+
+    monkeypatch.setattr(svc, "list_assets", no_asset_read)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingTemplateRefused, match="MARKETING_SPOTLIGHT_ENABLED") as ei:
+            await svc.create_posts(spot["id"], _TEXT_SPECS, claim=_holder(svc, spot["id"]))
+    assert classify_exception(ei.value) == (ErrorCode.MARKETING_TEMPLATE_REFUSED, 409)
+    assert any("TEMPLATE REFUSED" in r.getMessage() and spot["id"] in r.getMessage() for r in caplog.records)
+    assert svc.fake.tables[mrs.POSTS].rows == []
+    # the main lane's identical template that day is NOT gated by the spotlight's switch
+    monkeypatch.setattr(svc, "list_assets", real_list_assets)
+    posts = await svc.create_posts(main["id"], _TEXT_SPECS, claim=_holder(svc, main["id"]))
+    assert [p["idempotency_key"] for p in posts] == ["2026-09-17:x:text", "2026-09-17:bluesky:text"]
+
+
+@pytest.mark.parametrize("raw, ok", [("ceo_buys,insider_buys,thirteen_f,money_map", True),
+                                     ("ceo_buys,insider_buys,thirteen_f", False), ("", False)])
+@pytest.mark.asyncio
+async def test_the_series_kill_switch_gates_the_spotlight_lane_too(svc, monkeypatch, raw, ok):
+    """MARKETING_NEWS_SERIES ∩ the shipped series is the ONE per-series kill switch, for both lanes: a series pulled
+    in an emergency is never posted by the spotlight run either."""
+    _spot(monkeypatch)
+    spot = await _spot_template_run(svc, monkeypatch)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", raw)      # pulled after the claim (an emergency)
+    if ok:
+        assert len(await svc.create_posts(spot["id"], _TEXT_SPECS, claim=_holder(svc, spot["id"]))) == 2
+    else:
+        with pytest.raises(mrs.MarketingTemplateRefused, match="MARKETING_NEWS_SERIES"):
+            await svc.create_posts(spot["id"], _TEXT_SPECS, claim=_holder(svc, spot["id"]))
+        assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.asyncio
+async def test_a_lesson_on_the_spotlight_lane_is_a_422_never_a_post(svc, monkeypatch):
+    """The lane never writes a lesson (its chain ends in a skip): a class-A script on it is a contract breach,
+    refused before the judge gate and any read of the run's media."""
+    _spot(monkeypatch)
+    spot, _ = await _claim_lane(svc, "spotlight")
+    await _accept_script(svc, spot["id"], ["x"])
+    with pytest.raises(MarketingRequestInvalid, match="spotlight lane"):
+        await svc.create_posts(spot["id"], [{"platform": "x", "format": "text"}], claim=_holder(svc, spot["id"]))
+    assert svc.fake.tables[mrs.POSTS].rows == []
+
+
+@pytest.mark.asyncio
+async def test_an_expiring_spotlight_post_names_its_lane_and_a_main_alert_is_unchanged(svc):
+    t = _P5_TODAY
+    day = t - timedelta(days=3)
+    main = _p5_post(svc, status="approved", key=f"{day.isoformat()}:x:text", metadata={"dry_run": False})
+    spot = _p5_post(svc, status="approved", key=f"{day.isoformat()}:spotlight:x:text", metadata={"dry_run": False})
+    fresh = _p5_post(svc, status="approved", key=f"{t.isoformat()}:spotlight:x:text", metadata={"dry_run": False})
+    assert await svc.expire_stale_posts(t) == 2
+    m, s = _live_post(svc, main["id"])["metadata"], _live_post(svc, spot["id"])["metadata"]
+    assert f"(run {day.isoformat()}) — it was approved but never went out" in m["alert_text"]
+    assert f"(run {day.isoformat()} · spotlight) — it was approved but never went out" in s["alert_text"]
+    assert _live_post(svc, fresh["id"])["status"] == "approved"          # a spotlight key's date decides
+
+
+# ── the script rows and the readers keyed by run_date ────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_insert_script_takes_its_lane_from_the_run_in_one_place(svc, monkeypatch):
+    _spot(monkeypatch)
+    main, _ = await _claim_lane(svc, "main")
+    spot, _ = await _claim_lane(svc, "spotlight")
+    inserted = []
+    real = svc.fake.tables[mrs.SCRIPTS].insert
+
+    def spy(payload):
+        inserted.append(dict(payload))
+        return real(payload)
+
+    monkeypatch.setattr(svc.fake.tables[mrs.SCRIPTS], "insert", spy)
+    reads = _counting_reads(monkeypatch)
+    # with the run in hand: no extra read; without it: one read of the run
+    await svc.insert_script({"run_id": main["id"], "run_date": "2026-09-17", "status": "rest_day"}, run=main)
+    await svc.insert_script({"run_id": spot["id"], "run_date": "2026-09-17", "status": "rest_day"})
+    assert reads == ["insert_script", "get_run", "insert_script"]
+    assert "lane" not in inserted[0] and inserted[1]["lane"] == "spotlight"      # main body byte for byte
+    # a row naming its own lane passes; naming the other lane, or the wrong run passed, is refused
+    other, _ = await svc.claim_run(_SPOT_DAY - timedelta(days=1), worker_version="t", dry_run=True, now=NOW,
+                                   claim_nonce=_n())
+    with pytest.raises(mrs.MarketingRunError, match="the row says 'spotlight'"):
+        await svc.insert_script({"run_id": other["id"], "status": "rest_day", "lane": "spotlight"})
+    with pytest.raises(mrs.MarketingRunError, match="is not run"):
+        await svc.insert_script({"run_id": other["id"], "status": "rest_day"}, run=spot)
+    with pytest.raises(MarketingRunNotFound):
+        await svc.insert_script({"run_id": str(uuid.uuid4()), "status": "rest_day"})
+    created, ours = await svc.insert_script({"run_id": other["id"], "status": "rest_day", "lane": "main"})
+    assert ours and "lane" not in inserted[-1]
+
+
+@pytest.mark.asyncio
+async def test_list_runs_between_reads_both_lanes_main_first_within_a_day(svc, monkeypatch):
+    _spot(monkeypatch, days="mon,tue,wed,thu,fri,sat,sun")
+    for d in (date(2026, 9, 17), date(2026, 9, 16)):
+        await svc.claim_run(d, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n(), lane="spotlight")
+        await svc.claim_run(d, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    reads = []
+    real_limit = _Query.limit
+
+    def spy(self, n):
+        reads.append(n)
+        return real_limit(self, n)
+
+    monkeypatch.setattr(_Query, "limit", spy)
+    got = await svc.list_runs_between(date(2026, 9, 16), date(2026, 9, 17))
+    assert [(r["run_date"], mrs.run_lane(r)) for r in got] == [
+        ("2026-09-16", "main"), ("2026-09-16", "spotlight"), ("2026-09-17", "main"), ("2026-09-17", "spotlight")]
+    assert reads == [4]                                    # the window's days × the lanes, exactly
+    assert [mrs.run_lane(r) for r in await svc.list_runs_between("2026-09-17", "2026-09-17")] == ["main", "spotlight"]
+
+
+async def _script_on(svc, run, ref, *, created_at=None, status="selected"):
+    row = {"run_id": run["id"], "run_date": run["run_date"], "status": status, "source_ref": ref}
+    if created_at:
+        row["created_at"] = created_at
+    await svc.insert_script(row, run=run)
+
+
+@pytest.mark.asyncio
+async def test_recent_source_refs_sees_the_same_days_other_lane_and_never_its_own(svc, monkeypatch):
+    _spot(monkeypatch, days="mon,tue,wed,thu,fri,sat,sun")
+    d0, d1 = date(2026, 9, 16), _SPOT_DAY
+    runs = {}
+    for d in (d0, d1):
+        for lane in ("main", "spotlight"):
+            runs[(d, lane)], _ = await _claim_lane(svc, lane, day=d)
+    # d0's spotlight row is INSERTED first but CREATED earlier: the store's order is the insertion order (the fake's
+    # ORDER BY run_date is stable), so only the (run_date, created_at) sort puts the main lane's newer pick first —
+    # the order the digest runway (`_rows_of_today`) relies on (lane review: the tie-break was unpinned).
+    await _script_on(svc, runs[(d0, "spotlight")], "news:money_map:AAA:2025", created_at="2026-09-16T14:00:00+00:00")
+    await _script_on(svc, runs[(d0, "main")], "lesson:a", created_at="2026-09-16T20:00:00+00:00")
+    await _script_on(svc, runs[(d1, "spotlight")], "news:money_map:BBB:2025", created_at="2026-09-17T14:00:00+00:00")
+    # without a lane: exactly what it always read — strictly before the day, a day's two picks newest first
+    assert [r["source_ref"] for r in svc.fake.tables[mrs.SCRIPTS].rows][:2] == ["news:money_map:AAA:2025", "lesson:a"]
+    assert await svc.recent_source_refs(d1, 10) == ["lesson:a", "news:money_map:AAA:2025"]
+    # the MAIN lane at 16:00: the spotlight's 10:00 pick of the SAME day comes first
+    assert await svc.recent_source_refs(d1, 10, lane="main") == [
+        "news:money_map:BBB:2025", "lesson:a", "news:money_map:AAA:2025"]
+    assert await svc.recent_source_refs(d1, 1, lane="main") == ["news:money_map:BBB:2025"]
+    # the SPOTLIGHT lane never reads its own same-day row; it sees the main's once that exists
+    assert await svc.recent_source_refs(d1, 10, lane="spotlight") == ["lesson:a", "news:money_map:AAA:2025"]
+    await _script_on(svc, runs[(d1, "main")], "lesson:b")
+    assert await svc.recent_source_refs(d1, 10, lane="spotlight") == ["lesson:b", "lesson:a", "news:money_map:AAA:2025"]
+    assert await svc.recent_source_refs(d1, 0, lane="main") == []
+    with pytest.raises(MarketingRequestInvalid):
+        await svc.recent_source_refs(d1, 3, lane="noon")
+
+
+@pytest.mark.asyncio
+async def test_lane_scripts_between_reads_the_accepted_scripts_of_both_lanes_bounded(svc, monkeypatch):
+    _spot(monkeypatch, days="mon,tue,wed,thu,fri,sat,sun")
+    d0, d1 = date(2026, 9, 16), _SPOT_DAY
+    m0, _ = await _claim_lane(svc, "main", day=d0)
+    s1, _ = await _claim_lane(svc, "spotlight", day=d1)
+    m1, _ = await _claim_lane(svc, "main", day=d1)
+    await _script_on(svc, m0, "news:money_map:AAA:2025", status="accepted")
+    await _script_on(svc, s1, "news:money_map:BBB:2025", status="accepted")
+    await _script_on(svc, m1, "lesson:a", status="generating")              # not accepted: not read
+    got = await svc.lane_scripts_between(d0, d1)
+    assert [(r["run_date"], r["lane"], r["source_ref"]) for r in got] == [
+        ("2026-09-16", "main", "news:money_map:AAA:2025"), ("2026-09-17", "spotlight", "news:money_map:BBB:2025")]
+    assert set(got[0]) == {"run_id", "run_date", "lane", "source_ref", "template_id", "output"}
+    assert await svc.lane_scripts_between(d1, d0) == []
+    # past the (days × lanes) bound: refused, never a partial window
+    for _ in range(3):
+        svc.fake.tables[mrs.SCRIPTS].rows.append({"run_id": str(uuid.uuid4()), "run_date": "2026-09-17",
+                                                  "status": "accepted", "source_ref": "x"})
+    with pytest.raises(mrs.MarketingRunError, match="lane_scripts_between"):
+        await svc.lane_scripts_between(d1, d1)
+
+
+# ── C0 (2026-11-16): the last Form 4 window an insider spotlight CHECKED (the next window's start) ─────────────────
+# Replaces B2's "previous run of the lane": a 13F-led Saturday checks no Form 4 window, so the next window must start
+# after the last one CHECKED (recorded on the series' trail entry), never at the previous run's date.
+
+
+def _checked_script(svc, day: str, *, lane: Optional[str] = "spotlight", window=None, series="insider_spotlight",
+                    status="accepted", extra_trail=(), **extra) -> None:
+    """A script row of `lane` on `day` whose selection trail holds `series`' entry, with `window` (start, end) recorded
+    when given (an entry without it when None), plus `extra_trail` entries."""
+    entry: Dict[str, Any] = {"series": series, "outcome": "no_candidates"}
+    if window is not None:
+        entry[mrs.TRAIL_WINDOW_KEY] = window if isinstance(window, dict) else {"start": window[0], "end": window[1]}
+    row = {"run_id": str(uuid.uuid4()), "run_date": day, "status": status,
+           "fact_sheet": {"selection": {"trail": [*extra_trail, entry]}}, **extra}
+    if lane is not None:
+        row["lane"] = lane
+    svc.fake.tables[mrs.SCRIPTS].rows.append(row)
+
+
+@pytest.mark.asyncio
+async def test_last_checked_window_is_the_newest_recorded_one_of_the_lane_inside_the_bound(svc):
+    before = date(2026, 11, 24)
+    assert await svc.last_checked_window("spotlight", "insider_spotlight", before=before, within_days=14) is None
+    _checked_script(svc, "2026-11-12", window=("2026-11-05", "2026-11-11"))                   # older
+    _checked_script(svc, "2026-11-19", window=("2026-11-16", "2026-11-18"), status="rejected")  # newest recorded
+    # the 13F-led Saturday: no insider window recorded (its trail chose the 13F spotlight) — passed over
+    _checked_script(svc, "2026-11-21", series="thirteen_f_spotlight")
+    # a main-lane row, the run date itself and a later row: never read
+    _checked_script(svc, "2026-11-20", lane=None, window=("2026-11-19", "2026-11-19"))
+    _checked_script(svc, "2026-11-24", window=("2026-11-20", "2026-11-23"))
+    _checked_script(svc, "2026-11-25", window=("2026-11-24", "2026-11-24"))
+    got = await svc.last_checked_window("spotlight", "insider_spotlight", before=before, within_days=14)
+    assert got == (date(2026, 11, 16), date(2026, 11, 18))
+    # the bound: a window recorded only on a row before it is none
+    assert await svc.last_checked_window("spotlight", "insider_spotlight", before=before, within_days=2) is None
+    # the main lane's own read sees the main row
+    assert await svc.last_checked_window("main", "insider_spotlight", before=before, within_days=14) == (
+        date(2026, 11, 19), date(2026, 11, 19))
+
+
+@pytest.mark.parametrize("window", [
+    {"start": "2026-11-18", "end": "2026-11-16"},          # inverted
+    {"start": "2026-11-16", "end": "2026-11-19"},          # ends on its own run date (not before it)
+    {"start": "2026-11-01", "end": "2026-11-18"},          # longer than a week
+    {"start": "2026-11-16"}, {"start": 1, "end": 2}, {"start": "soon", "end": "2026-11-18"}, "junk", None,
+])
+@pytest.mark.asyncio
+async def test_a_recorded_window_that_does_not_read_back_is_passed_over_for_an_older_one(svc, caplog, window):
+    """Never a guessed later start that could skip filings: a junk window on the newest row is passed over (WARNING
+    naming the row) for the next older recorded one."""
+    _checked_script(svc, "2026-11-12", window=("2026-11-05", "2026-11-11"))
+    row_window = window if isinstance(window, dict) else {"bad": window}
+    _checked_script(svc, "2026-11-19", window=row_window)
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        got = await svc.last_checked_window("spotlight", "insider_spotlight", before=date(2026, 11, 24),
+                                            within_days=14)
+    assert got == (date(2026, 11, 5), date(2026, 11, 11))
+    assert any("does not read back" in r.getMessage() and "2026-11-19" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_last_checked_window_reads_once_and_bounded(svc, monkeypatch):
+    _checked_script(svc, "2026-11-19", window=("2026-11-16", "2026-11-18"))
+    seen: List[Any] = []
+    real_select = svc.fake.tables[mrs.SCRIPTS].select
+
+    def spy(*cols):
+        q = real_select(*cols)
+        real_limit = q.limit
+
+        def limit(n):
+            seen.append((cols, n))
+            return real_limit(n)
+
+        q.limit = limit
+        return q
+
+    monkeypatch.setattr(svc.fake.tables[mrs.SCRIPTS], "select", spy)
+    assert await svc.last_checked_window("spotlight", "insider_spotlight", before=date(2026, 11, 24),
+                                         within_days=14) == (date(2026, 11, 16), date(2026, 11, 18))
+    assert seen == [(("run_id,run_date,fact_sheet",), 15)]
+    # past the bound (one script per run, one run per (day, lane)): refused, never a partial answer
+    for i in range(14):
+        _checked_script(svc, f"2026-11-{10 + i % 9:02d}")
+    with pytest.raises(mrs.MarketingRunError, match="last_checked_window"):
+        await svc.last_checked_window("spotlight", "insider_spotlight", before=date(2026, 11, 24), within_days=14)
+
+
+@pytest.mark.parametrize("kw, exc", [
+    ({"lane": "side"}, mrs.MarketingRequestInvalid), ({"series": "lesson"}, ValueError), ({"series": None}, ValueError),
+    ({"within_days": 0}, ValueError), ({"within_days": -1}, ValueError), ({"within_days": True}, ValueError),
+    ({"within_days": 7.0}, ValueError), ({"before": datetime(2026, 11, 19, 10)}, ValueError),
+    ({"before": "soon"}, ValueError),
+])
+@pytest.mark.asyncio
+async def test_last_checked_window_refuses_a_bad_argument_before_any_read(svc, monkeypatch, kw, exc):
+    async def no_read(*_a, **_k):
+        raise AssertionError("no read before the arguments are checked")
+
+    monkeypatch.setattr(mrs, "_exec", no_read)
+    args = {"lane": "spotlight", "series": "insider_spotlight", "before": date(2026, 11, 19), "within_days": 7, **kw}
+    lane, series = args.pop("lane"), args.pop("series")
+    with pytest.raises(exc):
+        await svc.last_checked_window(lane, series, **args)
+
+
+@pytest.mark.parametrize("stored", [None, "junk", "2026-11-30", "2026-11-01"],
+                         ids=["null", "not_a_day", "after_the_bound", "before_the_bound"])
+@pytest.mark.asyncio
+async def test_last_checked_window_never_guesses_a_day_that_does_not_read_back(svc, monkeypatch, stored):
+    """A row whose run date is unreadable, or outside what the read asked for (a filter PostgREST did not apply),
+    RAISES — a window built on a guessed date could skip filings."""
+    class Answer:
+        data = [{"run_id": "r", "run_date": stored, "fact_sheet": {}}]
+
+    async def fake_exec(query, *, op, **ids):
+        return Answer()
+
+    monkeypatch.setattr(mrs, "_exec", fake_exec)
+    with pytest.raises(mrs.MarketingRunError, match="last_checked_window"):
+        await svc.last_checked_window("spotlight", "insider_spotlight", before=date(2026, 11, 19), within_days=7)
+
+
+@pytest.mark.asyncio
+async def test_last_checked_window_raises_on_a_failed_read(svc, monkeypatch):
+    """A failed read is a MarketingRunError naming the operation, the lane and the day — never None (nothing checked)."""
+    async def boom(_query):
+        raise RuntimeError("520 from the edge")
+
+    monkeypatch.setattr(mrs, "sb_exec", boom)
+    with pytest.raises(mrs.MarketingRunError) as err:
+        await svc.last_checked_window("spotlight", "insider_spotlight", before=date(2026, 11, 19), within_days=7)
+    assert "last_checked_window failed" in str(err.value) and "lane=spotlight" in str(err.value)
+    assert "before=2026-11-19" in str(err.value) and "520 from the edge" in str(err.value)
+
+
+def test_the_trail_window_key_is_one_name_in_both_modules():
+    from app.services.marketing import script_service as ss
+
+    assert mrs.TRAIL_WINDOW_KEY == ss.TRAIL_WINDOW_KEY == "window"
+    # and the run / post series_trail mirrors never carry it
+    script = {"fact_sheet": {"selection": {"trail": [
+        {"series": "insider_spotlight", "outcome": "no_candidates", "window": {"start": "2026-11-16",
+                                                                               "end": "2026-11-18"}}]}}}
+    assert mrs._series_trail(script) == [{"series": "insider_spotlight", "outcome": "no_candidates"}]
+
+
+# ══ 2026-11-15: the `feature` picture (the spotlight series) — only a `layout_feature` holder registers one ══════
+
+_FEATURE_SPEC = {"layout": "feature", "version": 1, "kicker": "FILED NOV 17–18 · FORM 4", "footer": _B2_FOOTER,
+                 "header": {"logo": "GME", "name": "GameStop", "chip": "GME"}, "figure": "$2M",
+                 "figure_label": "of stock, per the Form 4", "headline": "GameStop's CEO disclosed buying stock",
+                 "facts": [{"label": "Shares", "value": "14K"},
+                           {"label": "Cost per share, as filed", "value": "$142.10–$143.85"}]}
+#: A drop-2b `pair` picture whose investee has no logo (only GME is in _B2_LOGOS): registered as before, whatever the
+#: holder declared — the new check is the feature layout's alone.
+_PAIR_SPEC = {"layout": "pair", "version": 1, "kicker": "COMPANY STAKES", "footer": _B2_FOOTER,
+              "left": {"logo": "GME", "name": "GameStop"}, "right": {"name": "Nscale"}, "figure": "$777.4M",
+              "label": "invested"}
+
+
+async def _register_template_image(svc, rid: str, spec: Dict[str, Any]) -> Dict[str, Any]:
+    meta = {"onscreen_text": template_onscreen.image_strings(spec, _B2_LOGOS), "image_role": schemas.IMAGE_ROLE_POST}
+    asset, _ = await svc.register_asset(rid, kind="card", ext="jpg", sha256="f" * 64, size_bytes=1, metadata=meta,
+                                        claim=_holder(svc, rid))
+    return asset
+
+
+def test_the_feature_and_pair_fixtures_validate():
+    for spec in (_FEATURE_SPEC, _PAIR_SPEC):
+        assert template_onscreen.validate_image_spec(spec, template_onscreen.logo_keys(_B2_LOGOS),
+                                                     footer=_B2_FOOTER) is None
+
+
+@pytest.mark.parametrize("caps, accepted", [
+    (tuple(schemas.WORKER_CAPABILITIES), True),
+    (("layout_feature",), True),
+    (("post_image", "news_templates", "layouts_2b", "video_v2"), False),     # the Batch 2 worker: no feature
+    ((), False),                                                              # an older image: declared nothing
+])
+@pytest.mark.asyncio
+async def test_a_feature_picture_registers_only_from_a_holder_that_declared_layout_feature(svc, caplog, caps, accepted):
+    """The server never freezes a feature picture's image posts for a holder without `layout_feature`
+    (script_service), so one registered by such a holder is contract drift: 422 (never retried), logged at ERROR
+    with the run and what the holder declared — never accepted on the worker's word. The capability is the one the
+    run's CURRENT claim recorded (a re-claim by an older image during the day takes it away)."""
+    import logging
+
+    rid = await _b2_template_run(svc, [], capabilities=caps,
+                                 tamper=lambda o: o.update(image_spec=copy.deepcopy(_FEATURE_SPEC)))
+    if accepted:
+        asset = await _register_template_image(svc, rid, _FEATURE_SPEC)
+        assert asset["kind"] == "card" and asset["metadata"]["image_role"] == schemas.IMAGE_ROLE_POST
+        return
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match="layout_feature"):
+            await _register_template_image(svc, rid, _FEATURE_SPEC)
+    hits = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR and "'feature' picture" in r.getMessage()]
+    assert len(hits) == 1 and rid in hits[0] and "layout_feature" in hits[0]
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a.get("run_id") == rid and a.get("kind") == "card"]
+
+
+@pytest.mark.parametrize("caps", [(), ("post_image", "news_templates")])
+@pytest.mark.asyncio
+async def test_the_other_layouts_register_exactly_as_before_whatever_the_holder_declared(svc, caps):
+    """No over-block: the new check is the `feature` layout's ALONE — a spotlight or a drop-2b `pair` picture
+    registers from a holder that declared neither `layout_feature` nor `layouts_2b`, byte for byte as before."""
+    for day, spec in ((date(2026, 9, 17), _B2_SPEC), (date(2026, 9, 18), _PAIR_SPEC)):
+        rid = await _b2_template_run(svc, [], capabilities=caps, day=day,
+                                     tamper=lambda o, spec=spec: o.update(image_spec=copy.deepcopy(spec)))
+        asset = await _register_template_image(svc, rid, spec)
+        assert asset["kind"] == "card"
+
+
+@pytest.mark.asyncio
+async def test_the_feature_check_is_a_default_closed_keyword():
+    """`_check_template_image_text` called without the holder's capabilities (a future caller that forgets them)
+    refuses a feature picture — fail closed — and checks every other layout as before."""
+    output = {"image_footer": _B2_FOOTER, "image_spec": copy.deepcopy(_FEATURE_SPEC), "logos": copy.deepcopy(_B2_LOGOS)}
+    drawn = template_onscreen.image_strings(_FEATURE_SPEC, _B2_LOGOS)
+    with pytest.raises(MarketingRequestInvalid, match="layout_feature"):
+        mrs.MarketingRunService._check_template_image_text("r1", output, drawn)
+    mrs.MarketingRunService._check_template_image_text("r1", output, drawn, capabilities=frozenset({"layout_feature"}))
+    plain = {**output, "image_spec": copy.deepcopy(_B2_SPEC)}
+    mrs.MarketingRunService._check_template_image_text("r1", plain, template_onscreen.image_strings(_B2_SPEC, _B2_LOGOS))
+
+
+def test_a_feature_picture_is_never_a_data_card_on_the_server():
+    """Owner decision 5 (2026-11-15): the cost per share on a feature picture never reaches a video — so the
+    server never offers it as the data card: `data_card_strings` (the freeze's, the read-back's and the on-screen
+    check's ONE predicate) is None for it, while the same output with a spotlight picture has its strings."""
+    output = {"authorship": "template", "image_footer": _B2_FOOTER, "image_spec": copy.deepcopy(_FEATURE_SPEC),
+              "logos": copy.deepcopy(_B2_LOGOS), "post_formats": {"tiktok": "video"}}
+    assert template_onscreen.validate_image_spec(output["image_spec"], template_onscreen.logo_keys(_B2_LOGOS),
+                                                 footer=_B2_FOOTER) is None
+    assert mrs.data_card_strings(output) is None
+    assert mrs.data_card_strings({**output, "image_spec": copy.deepcopy(_B2_SPEC)})       # anti-vacuity
+
+
+@pytest.mark.asyncio
+async def test_a_feature_picture_frozen_with_a_data_card_allows_no_picture_strings_on_the_video(svc):
+    """A hand-edited row that froze `data_card` on a feature template: the video may NOT draw the picture's
+    strings (the cost per share among them) — 422 — while today's video (no picture strings) registers."""
+    rid = await _b2_template_run(svc, ["data_card"], capabilities=tuple(schemas.WORKER_CAPABILITIES),
+                                 tamper=lambda o: o.update(image_spec=copy.deepcopy(_FEATURE_SPEC)))
+    with pytest.raises(MarketingRequestInvalid):
+        await _register_video(svc, rid, _template_drawn("$142.10–$143.85"))
+    rid2 = await _b2_template_run(svc, ["data_card"], capabilities=tuple(schemas.WORKER_CAPABILITIES),
+                                  day=date(2026, 9, 18),
+                                  tamper=lambda o: o.update(image_spec=copy.deepcopy(_FEATURE_SPEC)))
+    await _register_video(svc, rid2, _template_drawn())
+
+
+# ══ Post art (workstream C, slice C3, 2026-11-16): the ledger half of the per-post art ══════════════════════════════
+#
+# Owner decisions 2026-11-15 ("Google draws, Claude checks", "Picture and video cover", main lane "Video cover now,
+# pictures later"): `store_art` keeps a PASSED picture content-addressed and immutable (the logos precedent, no asset
+# row); `art_usage_between` / `art_spend_between` read the month's spend from `output.art.usage` (two runs a day, no
+# migration); a drawn surface DECLARES the art it drew (the post image's `art_sha256`, the video's
+# `opening_art_sha256`) and the server checks it against the accepted output's record; `art_note` is what every post
+# notes. Art is never required: no declaration registers exactly as before.
+
+import hashlib  # noqa: E402
+import io  # noqa: E402
+import logging  # noqa: E402
+
+from app.services.marketing import post_art  # noqa: E402
+
+_ART_SUPA = "https://sb.example"
+_ART_SHA = hashlib.sha256(b"the accepted art").hexdigest()
+_ART_OTHER_SHA = hashlib.sha256(b"another picture").hexdigest()
+_ART_USAGE = {"images": 1, "images_uncertain": 0, "image_micros": 134_000, "image_model": "gemini-3-pro-image",
+              "claude": {"claude-opus-5-5": {"input": 3000, "output": 2000, "cache_read": 0, "cache_write": 0}},
+              "claude_uncertain": {}}
+
+
+@pytest.fixture
+def art_settings(monkeypatch):
+    from test_marketing_post_art import keep_art_on_money_map
+
+    for name, value in {"SUPABASE_URL": _ART_SUPA, "MARKETING_MEDIA_BUCKET": "marketing-media",
+                        "MARKETING_ART_IMAGE_MICROS": 134_000, "CAYDEX_CLAUDE_MAX_TOKENS": 16000}.items():
+        monkeypatch.setattr(mrs.settings, name, value)
+    # owner decision 2026-11-20 ("use it nowhere for now"): no shipped series carries art — the kept declaration
+    # checks are exercised on the Money Map, put back into the art set for the test only (the shipped sets' own
+    # refusal: test_as_shipped_a_money_map_output_may_declare_art_on_neither_surface)
+    keep_art_on_money_map(monkeypatch)
+
+
+def _art_usage(**over) -> Dict[str, Any]:
+    usage = {**copy.deepcopy(_ART_USAGE), **over}
+    usage.setdefault("estimated_micros", post_art.estimated_micros(usage))
+    return usage
+
+
+def _art_record(sha: str = _ART_SHA, *, status: str = "ok", surfaces=("picture", "cover"), **over) -> Dict[str, Any]:
+    """An art record as `post_art.make_post_art` writes it (ok: the stored picture's five keys too)."""
+    rec: Dict[str, Any] = {
+        "version": post_art.ART_VERSION, "status": status, "reason": None if status == "ok" else "check_failed",
+        "company": {"symbol": "GME", "name": "GameStop"}, "surfaces": list(surfaces), "facts": {"company": "GameStop"},
+        "subject": "a heavy steel bank vault door standing half open, blank and unmarked", "treatment": "duotone_press",
+        "treatment_source": "brief", "palette": "blueprints", "prompt_sha1": "abc", "redraw_prompt_sha1": None,
+        "briefs": 1, "attempts": 1, "checks": [{"pass": True, "flags": [], "notes": ""}],
+        "models": {"brief": "claude-opus-5-5", "check": "claude-opus-5-5", "image": "gemini-3-pro-image"},
+        "usage": _art_usage(), "seconds": 41.2,
+    }
+    if status == "ok":
+        rec.update(url=post_art.expected_art_url(sha), sha256=sha, bytes=480_000, width=1376, height=774)
+    rec.update(over)
+    return rec
+
+
+def _jpeg(width: int = 1376, height: int = 774) -> bytes:
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), (40, 60, 90)).save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+class _ArtStorage:
+    """One bucket that UPLOADS (the run fake's `_Bucket` only lists): `objects` path → (bytes, content type);
+    `upload` refuses an existing key (409, `x-upsert: false`); `race` lands another writer's object just before ours."""
+
+    def __init__(self) -> None:
+        self.objects: Dict[str, tuple] = {}
+        self.uploads: List[tuple] = []
+        self.removed: List[str] = []
+        self.lists = 0
+        self.fail_upload: Optional[BaseException] = None
+        self.fail_list: Optional[BaseException] = None
+        self.race: Optional[tuple] = None
+
+    def from_(self, _bucket):
+        return self
+
+    def list(self, prefix, options=None):
+        self.lists += 1
+        if self.fail_list is not None:
+            raise self.fail_list
+        name = (options or {}).get("search")
+        return [{"name": p.rsplit("/", 1)[-1], "metadata": {"size": len(d), "mimetype": t}}
+                for p, (d, t) in self.objects.items()
+                if p.rsplit("/", 1)[0] == prefix and (not name or p.endswith(name))]
+
+    def upload(self, path, data, options=None):
+        self.uploads.append((path, dict(options or {})))
+        if self.fail_upload is not None:
+            raise self.fail_upload
+        if self.race is not None:
+            self.objects[path], self.race = self.race, None
+        if path in self.objects:
+            exc = RuntimeError("{'statusCode': 409, 'error': Duplicate, 'message': The resource already exists}")
+            exc.status, exc.code = 409, "Duplicate"  # type: ignore[attr-defined]
+            raise exc
+        self.objects[path] = (bytes(data), (options or {}).get("content-type"))
+        return {"path": path}
+
+    def remove(self, paths):
+        self.removed.extend(paths)
+
+
+@pytest.fixture
+def art_store(svc, art_settings):
+    storage = _ArtStorage()
+    svc.fake.storage = storage
+    return storage
+
+
+# ── store_art: content-addressed, immutable, no asset row ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_store_art_keeps_a_passed_picture_content_addressed_with_no_asset_row(svc, art_store):
+    data = _jpeg()
+    entry = await svc.store_art(data, width=1376, height=774)
+    sha = hashlib.sha256(data).hexdigest()
+    path = f"art/{sha[:32]}.jpg"
+    assert entry == {"path": path, "url": f"{_ART_SUPA}/storage/v1/object/public/marketing-media/{path}",
+                     "sha256": sha, "bytes": len(data), "width": 1376, "height": 774}
+    assert entry["url"] == post_art.expected_art_url(sha) == svc.public_url(post_art.art_path(sha))
+    (upload,) = art_store.uploads
+    assert upload == (path, {"content-type": "image/jpeg", "cache-control": "31536000", "upsert": "false"})
+    assert art_store.objects[path] == (data, "image/jpeg")                  # the bytes exactly as given
+    assert svc.fake.tables[mrs.ASSETS].rows == [] and art_store.removed == []
+    # what it answers is exactly what post_art's store step checks against, and drawable
+    assert post_art.art_problem({**entry, "status": "ok", "version": post_art.ART_VERSION}) is None
+
+
+@pytest.mark.asyncio
+async def test_store_art_reuses_the_same_object_and_never_uploads_twice(svc, art_store, caplog):
+    data = _jpeg()
+    first = await svc.store_art(data, width=1376, height=774)
+    with caplog.at_level(logging.INFO, logger=mrs.logger.name):
+        again = await svc.store_art(data, width=1376, height=774)
+    assert again == first and len(art_store.uploads) == 1
+    assert any("marketing art: reusing" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_store_art_adopts_a_concurrent_writers_equal_object(svc, art_store):
+    data = _jpeg()
+    art_store.race = (data, "image/jpeg")                     # another process stored the same bytes first
+    entry = await svc.store_art(data, width=1376, height=774)
+    assert entry is not None and entry["sha256"] == hashlib.sha256(data).hexdigest()
+    assert len(art_store.uploads) == 1 and art_store.removed == []
+
+
+@pytest.mark.parametrize("there", [(b"\xff\xd8\xff other", "image/jpeg"), (None, "image/png")])
+@pytest.mark.asyncio
+async def test_store_art_never_overwrites_or_deletes_another_object_at_its_key(svc, art_store, caplog, there):
+    data = _jpeg()
+    path = post_art.art_path(hashlib.sha256(data).hexdigest())
+    other = (there[0] if there[0] is not None else data, there[1])     # another size, or the same size but a PNG
+    art_store.objects[path] = other
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        assert await svc.store_art(data, width=1376, height=774) is None
+    assert art_store.objects[path] == other and art_store.uploads == [] and art_store.removed == []
+    assert any("already holds another object" in r.getMessage() and path in r.getMessage() for r in caplog.records)
+    # the race variant: a different object lands between our stat and our upload — refused the same way
+    art_store.objects.clear()
+    art_store.race = other
+    assert await svc.store_art(data, width=1376, height=774) is None
+    assert art_store.objects[path] == other and art_store.removed == []
+
+
+@pytest.mark.parametrize("data, width, height, why", [
+    (b"", 1376, 774, "nothing storable"),
+    ("not bytes", 1376, 774, "nothing storable"),
+    (b"\x89PNG\r\n\x1a\n" + b"0" * 64, 1376, 774, "not a JPEG"),
+    (b"\xff\xd8\xff" + b"0" * post_art.ART_MAX_BYTES, 1376, 774, "cap"),
+    (None, 1376, 1376, "cannot be a drawable art entry"),               # square
+    (None, 800, 450, "cannot be a drawable art entry"),                 # under the width floor
+    (None, 1376.0, 774, "cannot be a drawable art entry"),              # a float size
+    (None, True, 774, "cannot be a drawable art entry"),
+])
+@pytest.mark.asyncio
+async def test_store_art_refuses_before_any_io(svc, art_store, caplog, data, width, height, why):
+    if data is None:
+        data = _jpeg()
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        assert await svc.store_art(data, width=width, height=height) is None
+    assert art_store.lists == 0 and art_store.uploads == []
+    assert any(why in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]
+
+
+@pytest.mark.asyncio
+async def test_store_art_degrades_to_no_art_on_every_storage_failure(svc, art_store, caplog):
+    data = _jpeg()
+    art_store.fail_upload = RuntimeError("bucket 520")
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        assert await svc.store_art(data, width=1376, height=774) is None
+    assert any("upload of art/" in r.getMessage() for r in caplog.records)
+    art_store.fail_upload = None
+    art_store.fail_list = RuntimeError("list 503")
+    assert await svc.store_art(data, width=1376, height=774) is None
+    assert art_store.objects == {} and art_store.removed == []
+
+
+# ── the month's spend: every script, two a day, raw output.art ───────────────
+
+
+def _art_script(svc, run_date: str, *, art: Any = None, lane: Optional[str] = None, status: str = "accepted",
+                output: Any = "default") -> Dict[str, Any]:
+    out = {"posts": {}, "series": "insider_spotlight"} if output == "default" else output
+    if isinstance(out, dict) and art is not None:
+        out = {**out, "art": art}
+    row = {"run_id": str(uuid.uuid4()), "run_date": run_date, "status": status, "template_id": "insider_spotlight",
+           "output": out, **({"lane": lane} if lane else {})}
+    svc.fake.tables[mrs.SCRIPTS].rows.append(row)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_art_spend_between_sums_every_run_two_a_day_from_the_output(svc, art_settings, monkeypatch):
+    usage = _art_usage()
+    one = usage["estimated_micros"]
+    assert one == 134_000 + post_art.estimated_micros({**usage, "images": 0})     # the image + the Claude tokens
+    _art_script(svc, "2026-11-03", art=_art_record())                             # main
+    _art_script(svc, "2026-11-03", art=_art_record(status="failed"), lane="spotlight")   # the same day's spotlight
+    _art_script(svc, "2026-11-05", art=None)                                      # a day without art
+    _art_script(svc, "2026-11-07", art=None, output=None)                         # a rest day (NULL output)
+    _art_script(svc, "2026-11-09", status="rejected", art=_art_record(status="failed"))  # any status counts
+    _art_script(svc, "2026-12-01", art=_art_record())                             # outside the window
+    selects = _spy_selects(monkeypatch, svc, mrs.SCRIPTS)
+    spent = await svc.art_spend_between(date(2026, 11, 1), date(2026, 11, 30))
+    assert spent == {"micros": 3 * one, "images": 3, "images_uncertain": 0, "runs": 3}
+    assert selects == [("run_date,lane,output",)]                  # no JSON-path alias: extracted in Python
+    rows = await svc.art_usage_between(date(2026, 11, 3), date(2026, 11, 3))
+    assert [r["lane"] for r in rows] == ["main", "spotlight"] and all(r["art"]["usage"] == usage for r in rows)
+    assert await svc.art_usage_between(date(2026, 11, 30), date(2026, 11, 1)) == []   # inverted: nothing read
+
+
+@pytest.mark.asyncio
+async def test_art_spend_counts_uncertain_calls_and_the_larger_of_stored_and_repriced(svc, art_settings):
+    shaky = _art_usage(images=0, images_uncertain=2, claude={}, claude_uncertain={"claude-opus-5-5": 1})
+    worst_call = post_art.claude_call_worst_micros("claude-opus-5-5")
+    assert shaky["estimated_micros"] == 2 * 134_000 + worst_call
+    _art_script(svc, "2026-11-02", art=_art_record(status="failed", usage=shaky))
+    low = _art_usage(estimated_micros=1)                     # a stored estimate below what the usage costs
+    _art_script(svc, "2026-11-04", art=_art_record(usage=low))
+    spent = await svc.art_spend_between(date(2026, 11, 1), date(2026, 11, 30))
+    assert spent["micros"] == shaky["estimated_micros"] + _art_usage()["estimated_micros"]
+    assert (spent["images"], spent["images_uncertain"], spent["runs"]) == (1, 2, 2)
+
+
+@pytest.mark.parametrize("art", [
+    "junk", 7,                                                               # a record that is not an object
+    {"status": "failed"},                                                    # no usage
+    {"status": "failed", "usage": {"images": 0, "images_uncertain": 0, "estimated_micros": None}},  # the minimal one
+    {"status": "ok", "usage": {**_ART_USAGE, "estimated_micros": "134000"}},
+    {"status": "ok", "usage": {**_ART_USAGE, "estimated_micros": -1}},
+    {"status": "ok", "usage": {**_ART_USAGE, "images": True, "estimated_micros": 1}},
+    {"status": "ok", "usage": {**_ART_USAGE, "claude": {"an-unpriced-model": {"input": 5}}, "estimated_micros": 1}},
+])
+@pytest.mark.asyncio
+async def test_an_unreadable_art_spend_raises_never_a_guess(svc, art_settings, art):
+    _art_script(svc, "2026-11-02", art=_art_record())
+    _art_script(svc, "2026-11-03", art=art)
+    with pytest.raises(mrs.MarketingRunError, match="art_spend_between"):
+        await svc.art_spend_between(date(2026, 11, 1), date(2026, 11, 30))
+    assert mrs.art_spend_of(await svc.art_usage_between(date(2026, 11, 1), date(2026, 11, 30))) is None
+
+
+@pytest.mark.asyncio
+async def test_an_output_that_is_not_an_object_is_unreadable_never_skipped(svc, art_settings):
+    _art_script(svc, "2026-11-02", output="a string output")
+    with pytest.raises(mrs.MarketingRunError):
+        await svc.art_spend_between(date(2026, 11, 1), date(2026, 11, 30))
+
+
+@pytest.mark.asyncio
+async def test_the_art_spend_read_is_bounded_and_raises_past_the_bound(svc, art_settings, monkeypatch):
+    for lane in ("main", "spotlight"):                         # a full (day, lane) window: 2 rows on 1 day — fine
+        _art_script(svc, "2026-11-02", art=_art_record(), lane=lane)
+    assert (await svc.art_spend_between(date(2026, 11, 2), date(2026, 11, 2)))["runs"] == 2
+    _art_script(svc, "2026-11-02", art=_art_record())           # a third row on one day: past days × lanes
+    with pytest.raises(mrs.MarketingRunError, match="art_usage_between: more than 2 scripts"):
+        await svc.art_spend_between(date(2026, 11, 2), date(2026, 11, 2))
+    # the read asks for exactly bound + 1 rows: a truncated answer can never pass as the whole window
+    limits: List[Optional[int]] = []
+    real = mrs._exec
+
+    async def spy(query, *, op, **ids):
+        if op == "art_usage_between":
+            limits.append(query._limit)
+        return await real(query, op=op, **ids)
+
+    monkeypatch.setattr(mrs, "_exec", spy)
+    assert (await svc.art_spend_between(date(2026, 11, 1), date(2026, 11, 30)))["runs"] == 3   # 3 rows in 30 days
+    assert limits == [30 * 2 + 1]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_spend_read_raises(svc, art_settings, monkeypatch):
+    async def boom(query, *, op, **ids):
+        raise mrs.MarketingRunError(f"{op}: PostgREST 503")
+
+    monkeypatch.setattr(mrs, "_exec", boom)
+    with pytest.raises(mrs.MarketingRunError, match="art_usage_between"):
+        await svc.art_spend_between(date(2026, 11, 1), date(2026, 11, 30))
+
+
+# ── what a drawn surface may declare ──────────────────────────────────────────
+
+
+_FEATURE_LOGOS = [{"key": "GME", "name": "GameStop", "url": None, "sha256": None, "bytes": None, "width": None,
+                   "height": None}]
+
+
+@pytest.fixture
+def picture_art_stand_in(monkeypatch):
+    """Owner decisions 2026-11-20 ("Drop it from insider posts (Recommended)"): no series draws art on its PICTURE any
+    more (`post_art.PICTURE_SERIES` is empty; the Money Map's art is its cover alone). The declaration checks a future
+    picture series would need stay — proven here on the insider spotlight's `feature` output as a STAND-IN picture
+    series, patched into the sets (the real sets refuse it: `test_no_insider_output_may_declare_art_on_either_surface`)."""
+    from app.services.marketing import post_art as _pa
+
+    monkeypatch.setattr(_pa, "PICTURE_SERIES", ("insider_spotlight",))
+    monkeypatch.setattr(_pa, "ART_SERIES", frozenset(_pa.ART_SERIES | {"insider_spotlight"}))
+    monkeypatch.setattr(_pa, "NEVER_ART_SERIES", frozenset(_pa.NEVER_ART_SERIES - {"insider_spotlight"}))
+
+
+async def _art_run(svc, *, series: str = "insider_spotlight", art: Any = _MISSING, spec: Any = None,
+                   day: date = date(2026, 9, 17), caps: Tuple[str, ...] = tuple(schemas.WORKER_CAPABILITIES)) -> str:
+    """A held run whose accepted script is a TEMPLATE of `series` (an insider spotlight by default: its `feature`
+    picture, its opening card) carrying `art` unless _MISSING. Seeded directly, like `_b2_template_run`: the
+    registration checks read no fact sheet."""
+    row, _ = await svc.claim_run(day, worker_version="art", dry_run=True, now=NOW, claim_nonce=_n(),
+                                 capabilities=caps)
+    rid = row["id"]
+    output = {"posts": {p: _server_copy(p) for p in ("tiktok", "bluesky")}, "content_class": "C",
+              "authorship": "template", "template_version": _TPL_VERSION, "series": series,
+              "video_layout": "per_line",
+              "hook": "One chief executive disclosed a purchase last week.", "cards": [dict(_B2_TPL_CARD)],
+              "disclaimer_card": _B2_TPL_DISCLAIMER, "opening_card": copy.deepcopy(_B2_OPENING),
+              "image_spec": copy.deepcopy(spec if spec is not None else _FEATURE_SPEC), "image_footer": _B2_FOOTER,
+              "logos": copy.deepcopy(_FEATURE_LOGOS), "image_post": copy.deepcopy(_B2_ALT),
+              "post_formats": {"tiktok": "video", "bluesky": "image"}, "store_state": "live"}
+    if art is not _MISSING:
+        output["art"] = art
+    _, ours = await svc.insert_script({"run_id": rid, "status": "accepted", "source_ref": f"news:{series}:GME:x",
+                                       "template_id": series, "generation_id": str(uuid.uuid4()), "output": output})
+    assert ours
+    return rid
+
+
+def _picture_strings(spec: Any = None) -> List[str]:
+    return template_onscreen.image_strings(spec if spec is not None else _FEATURE_SPEC, _FEATURE_LOGOS)
+
+
+async def _register_picture(svc, rid: str, drawn: List[str], **art_meta: Any) -> Dict[str, Any]:
+    meta = {"onscreen_text": list(drawn), "image_role": schemas.IMAGE_ROLE_POST, **art_meta}
+    asset, _ = await svc.register_asset(rid, kind="card", ext="jpg", sha256="f" * 64, size_bytes=1, metadata=meta,
+                                        claim=_holder(svc, rid))
+    return asset
+
+
+async def _register_art_video(svc, rid: str, drawn: List[str], **art_meta: Any) -> Dict[str, Any]:
+    meta = {"onscreen_text": list(drawn), "voice_asset_id": _ready_voice(svc, rid)["id"], **art_meta}
+    asset, _ = await svc.register_asset(rid, kind="video", ext="mp4", sha256=SHA, size_bytes=1, metadata=meta,
+                                        claim=_holder(svc, rid))
+    return asset
+
+
+_LABEL = template_onscreen.ART_LABEL
+
+
+#: The art records the declaration matrices name, built INSIDE each test (their url reads the settings the test set).
+_ART_CASES = {
+    "none": lambda: _MISSING,
+    "ok": lambda: _art_record(),
+    "failed": lambda: _art_record(status="failed"),
+    "cover_only": lambda: _art_record(surfaces=["cover"]),
+    "picture_only": lambda: _art_record(surfaces=["picture"]),
+    "not_drawable": lambda: _art_record(url="https://elsewhere.example/a.jpg"),
+}
+
+
+@pytest.mark.parametrize("art, declared, label, problem", [
+    ("none", None, False, None),                                      # a day before art: exactly as before
+    ("ok", None, False, None),                                        # art never required (older worker, fallback)
+    ("ok", _ART_SHA, True, None),                                     # the accepted art with its label
+    ("ok", _ART_OTHER_SHA, True, "art_mismatch"),
+    ("ok", _ART_SHA, False, "art_label_missing"),
+    ("ok", None, True, "art_label_without_art"),
+    ("ok", "F" * 64, True, "art_declaration_invalid"),                # never on the worker's word
+    ("failed", _ART_SHA, True, "art_not_accepted"),
+    ("none", _ART_SHA, True, "art_not_accepted"),
+    ("cover_only", _ART_SHA, True, "art_surface_not_allowed"),        # a cover-only record: no picture art
+    ("not_drawable", _ART_SHA, True, "art_not_accepted"),             # an ok record that does not validate
+])
+@pytest.mark.asyncio
+async def test_what_a_post_image_may_declare_about_its_art(svc, art_settings, picture_art_stand_in, caplog, art,
+                                                         declared, label, problem):
+    rid = await _art_run(svc, art=_ART_CASES[art]())
+    drawn = _picture_strings() + ([_LABEL] if label else [])
+    kw = {} if declared is None else {"art_sha256": declared}
+    if problem is None:
+        asset = await _register_picture(svc, rid, drawn, **kw)
+        assert asset["kind"] == "card" and asset["metadata"].get("art_sha256") == declared
+        return
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match=problem):
+            await _register_picture(svc, rid, drawn, **kw)
+    assert any(problem in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a.get("run_id") == rid and a.get("kind") == "card"]
+
+
+@pytest.mark.asyncio
+async def test_a_main_lane_picture_never_carries_art_while_its_cover_may(svc, art_settings):
+    """Decision 4: "Video cover now, pictures later" — a cover-only record (the main lane's single-company Money Map:
+    owner decisions 2026-11-20, the one art series left) lets its VIDEO declare the art, never its picture — even a
+    hand-edited record that lists the picture (`art_surfaces` allows the picture only for `post_art.PICTURE_SERIES`).
+    Mutation-checked by hand (2026-11-20): without that series check the second refusal turned green."""
+    for surfaces in (["cover"], ["picture", "cover"]):
+        rid = await _art_run(svc, series="money_map", art=_art_record(surfaces=surfaces), spec=_B2_SPEC,
+                             caps=("post_image", "news_templates", "layouts_2b"),
+                             day=date(2026, 9, 17) + timedelta(days=len(surfaces)))
+        with pytest.raises(MarketingRequestInvalid, match="art_surface_not_allowed"):
+            await _register_picture(svc, rid, _picture_strings(_B2_SPEC) + [_LABEL], art_sha256=_ART_SHA)
+        await _register_picture(svc, rid, _picture_strings(_B2_SPEC))                 # today's picture registers
+        await _register_art_video(svc, rid, _template_drawn(_LABEL), opening_art_sha256=_ART_SHA)
+
+
+@pytest.mark.asyncio
+async def test_as_shipped_a_money_map_output_may_declare_art_on_neither_surface(svc, art_settings, monkeypatch):
+    """Owner decision 2026-11-20 ("Drop it from insider posts (Recommended) :: Keep the code but use it nowhere for
+    now" — "Put it on Money Map covers" declined): with the SHIPPED art sets, a Money Map output carrying even an `ok`
+    cover-art record (a hand edit, a stored output from a kept-art build) draws it nowhere — its video's and its
+    picture's declarations are `art_not_accepted`; its plain picture and video still register. Mutation-checked by
+    hand: `COVER_ONLY_SERIES = ("money_map",)` let the video declare the art."""
+    from test_marketing_post_art import (SHIPPED_ART_SERIES, SHIPPED_COVER_ONLY_SERIES,
+                                         SHIPPED_NEVER_ART_SERIES)
+
+    for name, value in (("COVER_ONLY_SERIES", SHIPPED_COVER_ONLY_SERIES), ("ART_SERIES", SHIPPED_ART_SERIES),
+                        ("NEVER_ART_SERIES", SHIPPED_NEVER_ART_SERIES)):
+        monkeypatch.setattr(post_art, name, value)
+    rid = await _art_run(svc, series="money_map", art=_art_record(surfaces=["cover"]), spec=_B2_SPEC,
+                         caps=("post_image", "news_templates", "layouts_2b"), day=date(2026, 9, 24))
+    with pytest.raises(MarketingRequestInvalid, match="art_not_accepted"):
+        await _register_art_video(svc, rid, _template_drawn(_LABEL), opening_art_sha256=_ART_SHA)
+    with pytest.raises(MarketingRequestInvalid, match="art_not_accepted"):
+        await _register_picture(svc, rid, _picture_strings(_B2_SPEC) + [_LABEL], art_sha256=_ART_SHA)
+    await _register_picture(svc, rid, _picture_strings(_B2_SPEC))
+    await _register_art_video(svc, rid, _template_drawn())
+
+
+@pytest.mark.asyncio
+async def test_no_insider_output_may_declare_art_on_either_surface(svc, art_settings):
+    """Owner decisions 2026-11-20 ("Drop it from insider posts (Recommended)"): an insider output carrying even an `ok`
+    art record (a hand edit, a bug) draws it nowhere — its picture's and its video's declarations are `art_not_accepted`
+    (`post_art.drawable_art`: an insider series is never an art series), its plain picture and video still register."""
+    for i, series in enumerate(("insider_spotlight", "ceo_buys", "insider_buys")):
+        rid = await _art_run(svc, series=series, art=_art_record(), day=date(2026, 9, 20) + timedelta(days=i))
+        with pytest.raises(MarketingRequestInvalid, match="art_not_accepted"):
+            await _register_picture(svc, rid, _picture_strings() + [_LABEL], art_sha256=_ART_SHA)
+        with pytest.raises(MarketingRequestInvalid, match="art_not_accepted"):
+            await _register_art_video(svc, rid, _template_drawn(_LABEL), opening_art_sha256=_ART_SHA)
+        await _register_picture(svc, rid, _picture_strings())
+        await _register_art_video(svc, rid, _template_drawn())
+
+
+@pytest.mark.parametrize("art, declared, label, problem", [
+    ("none", None, False, None),
+    ("ok", None, False, None),                                        # never required
+    ("ok", _ART_SHA, True, None),
+    ("cover_only", _ART_SHA, True, None),                             # the main lane's cover
+    ("ok", _ART_OTHER_SHA, True, "art_mismatch"),
+    ("ok", _ART_SHA, False, "art_label_missing"),
+    ("ok", None, True, "art_label_without_art"),
+    ("ok", "not-a-sha", True, "art_declaration_invalid"),
+    ("failed", _ART_SHA, True, "art_not_accepted"),
+    ("none", _ART_SHA, True, "art_not_accepted"),
+    ("picture_only", _ART_SHA, True, "art_surface_not_allowed"),
+])
+@pytest.mark.asyncio
+async def test_what_a_template_video_may_declare_about_its_cover_art(svc, art_settings, picture_art_stand_in, caplog,
+                                                                     art, declared, label, problem):
+    rid = await _art_run(svc, art=_ART_CASES[art]())
+    drawn = _template_drawn(*([_LABEL] if label else []))
+    kw = {} if declared is None else {"opening_art_sha256": declared}
+    if problem is None:
+        asset = await _register_art_video(svc, rid, drawn, **kw)
+        assert asset["kind"] == "video" and asset["metadata"].get("opening_art_sha256") == declared
+        return
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match=problem):
+            await _register_art_video(svc, rid, drawn, **kw)
+    assert any(problem in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a.get("run_id") == rid and a.get("kind") == "video"]
+
+
+@pytest.mark.asyncio
+async def test_a_lesson_never_draws_art_on_either_surface(svc, art_settings, caplog):
+    """A lesson's picture or video that declares art — or draws the label alone — is refused BY NAME (422), even
+    when a hand-edited lesson row carries an ok art record (drawable_art: never for a lesson)."""
+    rid = await _image_run(svc)
+    _script_output(svc, rid)["art"] = _art_record()
+    with caplog.at_level(logging.ERROR):
+        for kw, drawn in (({"art_sha256": _ART_SHA}, _drawn() + [_LABEL]), ({}, _drawn() + [_LABEL]),
+                          ({"art_sha256": _ART_SHA}, _drawn())):
+            with pytest.raises(MarketingRequestInvalid, match="a lesson's post image never draws art"):
+                await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                         metadata=_image_meta(onscreen_text=drawn, **kw), claim=_holder(svc, rid))
+    await _post_image(svc, rid)                                                       # today's picture registers
+    rid2 = await _b2_lesson_run(svc, [], day=date(2026, 9, 18))
+    _script_output(svc, rid2)["art"] = _art_record()
+    for kw, drawn in (({"opening_art_sha256": _ART_SHA}, _lesson_drawn(_LABEL)), ({}, _lesson_drawn(_LABEL))):
+        with pytest.raises(MarketingRequestInvalid, match="opening-card art is refused"):
+            meta = _video_metadata(svc, rid2)
+            meta.update(onscreen_text=drawn, **kw)
+            await svc.register_asset(rid2, kind="video", ext="mp4", sha256=SHA, size_bytes=1, metadata=meta,
+                                     claim=_holder(svc, rid2))
+    await _register_video(svc, rid2, _lesson_drawn())
+
+
+def test_the_declaration_check_is_a_default_closed_keyword(art_settings, picture_art_stand_in):
+    """`_check_template_image_text` called WITHOUT the declaration (a caller that forgets it) allows no label — the
+    keyword defaults to no art."""
+    output = {"authorship": "template", "series": "insider_spotlight", "image_footer": _B2_FOOTER,
+              "image_spec": copy.deepcopy(_FEATURE_SPEC), "logos": copy.deepcopy(_FEATURE_LOGOS), "art": _art_record()}
+    caps = frozenset({"layout_feature"})
+    with pytest.raises(MarketingRequestInvalid, match="art_label_without_art"):
+        mrs.MarketingRunService._check_template_image_text("r1", output, _picture_strings() + [_LABEL],
+                                                           capabilities=caps)
+    mrs.MarketingRunService._check_template_image_text("r1", output, _picture_strings() + [_LABEL],
+                                                       capabilities=caps, declared_art=_ART_SHA)
+    mrs.MarketingRunService._check_template_image_text("r1", output, _picture_strings(), capabilities=caps)
+
+
+# ── the note every post carries ───────────────────────────────────────────────
+
+
+def test_art_note_says_what_the_record_says_and_what_was_drawn(art_settings, picture_art_stand_in):
+    output = {"authorship": "template", "series": "insider_spotlight", "art": _art_record(
+        attempts=2, checks=[{"pass": False, "flags": ["text_or_numbers", "bogus"], "notes": "x"},
+                            {"pass": True, "flags": [], "notes": ""}],
+        subject="  a heavy steel\nbank vault door  " + "x" * 400)}
+    note = mrs.art_note(output, picture=True, cover=False)
+    assert note == {"status": "ok", "reason": None, "subject": note["subject"], "treatment": "duotone_press",
+                    "redrawn": True, "flags": ["text_or_numbers"], "surfaces": ["picture", "cover"],
+                    "drawn": {"picture": True, "cover": False}}
+    assert note["subject"].startswith("a heavy steel bank vault door ") and len(note["subject"]) == 300
+    assert "\n" not in note["subject"]
+    blob = json.dumps(note)
+    for word in ("claude", "gemini", "url", "sha256", "usage", "micros", "http"):
+        assert word not in blob.lower(), word                     # never a model, a url or the spend
+    failed = mrs.art_note({**output, "art": _art_record(status="failed", reason="budget_cap", treatment="weird")},
+                          picture=False, cover=False)
+    assert (failed["status"], failed["reason"], failed["treatment"]) == ("failed", "budget_cap", None)
+    assert mrs.art_note({"series": "x"}, picture=False, cover=False) is None           # no record: nothing stamped
+    assert mrs.art_note({**output, "art": None}, picture=False, cover=False) is None
+
+
+@pytest.mark.parametrize("art, status, reason", [
+    ("junk", "unreadable", None),
+    ({"status": "weird"}, "failed", "internal_error"),
+    ({"status": "failed", "reason": "made_up"}, "failed", "internal_error"),
+    ("not_drawable", "failed", "internal_error"),                     # an ok record that cannot be drawn
+])
+def test_an_art_note_of_a_broken_record_reads_failed_never_ok(art_settings, caplog, art, status, reason):
+    art = _ART_CASES[art]() if isinstance(art, str) and art in _ART_CASES else art
+    output = {"authorship": "template", "series": "insider_spotlight", "art": art}
+    with caplog.at_level(logging.ERROR):
+        note = mrs.art_note(output, picture=False, cover=False, run_id="r9")
+    assert (note["status"], note["reason"]) == (status, reason)
+    assert note["drawn"] == {"picture": False, "cover": False}
+
+
+def test_art_surfaces_read_only_a_drawable_record(art_settings, picture_art_stand_in):
+    output = {"authorship": "template", "series": "insider_spotlight", "art": _art_record(surfaces=["cover", "x"])}
+    assert mrs.art_surfaces(output) == ("cover",)
+    assert mrs.art_surfaces({**output, "art": _art_record(status="failed")}) == ()
+    assert mrs.art_surfaces({**output, "authorship": "ai"}) == ()                      # a lesson: never
+    assert mrs.art_surfaces({"series": "insider_spotlight"}) == ()
+
+
+# ── create_posts: a LESSON output's art is ignored, loudly ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_lesson_rows_art_record_never_reaches_its_posts(svc, art_settings, caplog):
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    await _accept_script(svc, rid, ["x"])
+    _script_output(svc, rid)["art"] = _art_record()
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        (post,) = await svc.create_posts(rid, [{"platform": "x", "format": "text"}], claim=_holder(svc, rid))
+    assert "art" not in post["metadata"] and post["metadata"]["made_with_ai"] is True
+    assert any("a LESSON output carries an art record" in r.getMessage() for r in caplog.records)
+
+
+# ══ news-v23 (the restyle, owner-approved 2026-11-19): the short footer and the brand row ═════════════════════════
+#
+# RESTYLE_SPEC §1: every picture and every video card carries the brand row (the Caydex tile + the word "Caydex",
+# BRAND_ROW_WORD) with its family's kicker pill on the right (a lesson: LESSON_KICKER; a template: its image_spec /
+# opening_card `kicker`), and ONE short footer line (`post_copy.image_footer`). Owner: "add our LOGO and 'Caydex' some
+# where on top of the image (or video)"; of the footer, "if we can't remove, then say it shortly". The server allows
+# those strings EXACTLY (never a variant, never another family's kicker) and never requires the brand row (either
+# deploy order registers); a picture must still draw its footer, and an output whose stored footer is the long one of
+# news-v22 registers no picture.
+
+_RESTYLE_BRAND = schemas.BRAND_ROW_WORD
+_RESTYLE_LESSON_KICKER = schemas.LESSON_KICKER
+
+
+def test_restyle_the_brand_row_strings_are_pinned_and_drawable():
+    assert schemas.BRAND_ROW_WORD == "Caydex" == schemas.VIDEO_BRAND_TEXT[0]
+    assert schemas.LESSON_KICKER == "INVESTING LESSON"
+    assert schemas.PICTURE_BRAND_TEXT == ("Caydex",)
+    assert schemas.LESSON_BRAND_TEXT == ("Caydex", "INVESTING LESSON")
+    for text in (*schemas.LESSON_BRAND_TEXT, post_copy.IMAGE_FOOTER_HEAD):
+        assert template_onscreen.drawable_problem(text) is None
+        schemas.validate_onscreen_text([text])
+    # the kicker says what the post is, nothing else: no claim, no hype, nothing a rule reads
+    from app.services.marketing.compliance import clean, scan_text
+    assert [(v.code, v.detail) for v in scan_text("k", clean(schemas.LESSON_KICKER))] == []
+    assert [(v.code, v.detail) for v in scan_text("k", clean(schemas.BRAND_ROW_WORD))] == [("brand_mention", "caydex")]
+
+
+@pytest.mark.asyncio
+async def test_restyle_a_lesson_picture_may_draw_the_brand_row_and_its_kicker(svc):
+    rid = await _image_run(svc)
+    image = await _post_image(svc, rid, metadata=_image_meta(onscreen_text=[_RESTYLE_BRAND, _RESTYLE_LESSON_KICKER,
+                                                                            *_drawn()]))
+    assert image["status"] == "ready"
+    # never required: the picture without the brand row (an older worker) registers too
+    rid2 = (await svc.claim_run(date(2026, 9, 16), worker_version="t", dry_run=False, now=NOW,
+                                claim_nonce=_n()))[0]["id"]
+    await _accept_image_script(svc, rid2, {"x": "image"})
+    await _post_image(svc, rid2, sha="d" * 64)
+
+
+@pytest.mark.parametrize("bad", [
+    "caydex", "CAYDEX", "Caydex ", " Caydex", "Caydex Inc.", "Caydex Research", "Caydex · INVESTING LESSON",
+    "Investing lesson", "INVESTING LESSON ", "INVESTING LESSONS", "INSIDE A THEME", "13F SEASON", "MONEY MAP",
+])
+@pytest.mark.asyncio
+async def test_restyle_a_lesson_picture_takes_the_brand_row_only_as_exact_strings(svc, bad):
+    rid = await _image_run(svc)
+    with pytest.raises(MarketingRequestInvalid, match="not the accepted image post"):
+        await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                 metadata=_image_meta(onscreen_text=[*_drawn(), bad]), claim=_holder(svc, rid))
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] == "card"]
+
+
+_RESTYLE_OLD_LESSON_FOOTER = ("Educational only · not investment advice · Written with AI assistance · Sep 17, 2026 · "
+                              "Caydex")
+
+
+@pytest.mark.asyncio
+async def test_restyle_a_lesson_picture_drawing_the_old_long_footer_is_refused(svc):
+    """The accepted output carries today's short footer: the long footer of news-v22 is foreign text, and a picture
+    that draws it instead of the short line is missing its footer too."""
+    rid = await _image_run(svc)
+    for drawn, match in (([*_drawn(), _RESTYLE_OLD_LESSON_FOOTER], "not the accepted image post"),
+                         ([*_drawn()[:-1], _RESTYLE_OLD_LESSON_FOOTER], "not the accepted image post"),
+                         (_drawn()[:-1] + [_RESTYLE_BRAND, _RESTYLE_LESSON_KICKER], "does not draw its footer")):
+        with pytest.raises(MarketingRequestInvalid, match=match):
+            await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                     metadata=_image_meta(onscreen_text=drawn), claim=_holder(svc, rid))
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] == "card"]
+
+
+@pytest.mark.parametrize("stored", [
+    _RESTYLE_OLD_LESSON_FOOTER,                                         # accepted before the restyle
+    "Not investment advice · Source: company filings",                  # a template's footer on a lesson
+    "not investment advice", "Not investment advice ·", "x" * 500,
+])
+@pytest.mark.asyncio
+async def test_restyle_a_lesson_whose_stored_footer_is_not_todays_registers_its_picture_with_todays(svc, caplog,
+                                                                                                    stored):
+    """news-v23 fix round: a lesson picture's footer is the CODE-OWNED constant (post_copy.IMAGE_FOOTER_HEAD), never the
+    stored copy. A lesson accepted before the restyle (its stored footer the long one) that resumes after the deploy
+    used to 422 on every retry — a whole day's media lost (a lesson has no TEMPLATE_VERSION to refuse it otherwise).
+    The read-back sends the constant (`worker_script`), the picture draws it and registers; the stored copy is never
+    allowed instead of it."""
+    import logging
+
+    from app.services.marketing import post_copy, script_service
+
+    rid = await _image_run(svc)
+    _script_output(svc, rid)["image_footer"] = stored
+    old = [_IMAGE_POST["title"], *_IMAGE_POST["paragraphs"], stored]
+    with pytest.raises(MarketingRequestInvalid, match="not the accepted image post|does not draw its footer"):
+        await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                 metadata=_image_meta(onscreen_text=old), claim=_holder(svc, rid))
+    drawn = [_IMAGE_POST["title"], *_IMAGE_POST["paragraphs"], post_copy.IMAGE_FOOTER_HEAD]
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                 metadata=_image_meta(onscreen_text=drawn), claim=_holder(svc, rid))
+    assert any("stores a footer from before" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+    assert [a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] == "card"]
+    out = _script_output(svc, rid)
+    assert script_service.worker_script(out)["image_footer"] == post_copy.IMAGE_FOOTER_HEAD
+
+
+async def _restyle_template_image_run(svc, *, footer: str = _B2_FOOTER) -> str:
+    """A template run (ceo_buys) whose x post is frozen as an image, its stored footer `footer` (on the spec too)."""
+    def tamper(o):
+        o["post_formats"] = {"tiktok": "video", "x": "image"}
+        o["image_footer"] = footer
+        o["image_spec"]["footer"] = footer
+    return await _b2_template_run(svc, tamper=tamper)
+
+
+def _restyle_template_picture(*extra: str, footer: str = _B2_FOOTER) -> List[str]:
+    strings = [s for s in template_onscreen.image_strings({**_B2_SPEC, "footer": footer}, _B2_LOGOS)]
+    return [*extra, *strings]
+
+
+@pytest.mark.asyncio
+async def test_restyle_a_template_picture_may_draw_the_brand_word_and_its_own_kicker(svc):
+    rid = await _restyle_template_image_run(svc)
+    drawn = _restyle_template_picture(_RESTYLE_BRAND)
+    assert _B2_SPEC["kicker"] in drawn                     # the kicker pill is the spec's own kicker
+    image = await _post_image(svc, rid, metadata=_image_meta(onscreen_text=drawn))
+    assert image["status"] == "ready"
+
+
+@pytest.mark.parametrize("bad", [
+    _RESTYLE_LESSON_KICKER,                    # a lesson's kicker never rides a template picture
+    "caydex", "Caydex ", "CAYDEX", "13F SEASON", "INSIDE A THEME",
+    _B2_OPENING["kicker"],                     # the fixture's VIDEO kicker differs from its picture's: never swapped
+])
+@pytest.mark.asyncio
+async def test_restyle_a_template_picture_takes_the_brand_row_only_as_exact_strings(svc, bad):
+    rid = await _restyle_template_image_run(svc)
+    with pytest.raises(MarketingRequestInvalid, match="not its image_spec's strings"):
+        await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                 metadata=_image_meta(onscreen_text=_restyle_template_picture(bad)),
+                                 claim=_holder(svc, rid))
+
+
+_RESTYLE_OLD_TEMPLATE_FOOTER = ("Educational only · not investment advice · Source: SEC Form 4 filings · Filed "
+                                "Nov 9–15, 2026 · Caydex · Not affiliated with anyone named")
+
+
+@pytest.mark.parametrize("stored", [
+    _RESTYLE_OLD_TEMPLATE_FOOTER,             # accepted before the restyle (news-v22)
+    "Not investment advice",                  # a lesson's footer on a template
+    "Not investment advice · Source: SEC Form 4 filings · filed Nov 9–15, 2026",       # the caption's source label
+    "Not investment advice · Source: SEC Form 4",                                       # its date missing
+])
+@pytest.mark.asyncio
+async def test_restyle_a_template_output_whose_stored_footer_is_not_a_short_one_registers_no_picture(svc, caplog,
+                                                                                                   stored):
+    import logging
+
+    rid = await _restyle_template_image_run(svc, footer=stored)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match="not its series' short footer"):
+            await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                     metadata=_image_meta(onscreen_text=_restyle_template_picture(footer=stored)),
+                                     claim=_holder(svc, rid))
+    assert any("image_footer is not its series' short footer" in r.getMessage() for r in caplog.records)
+
+
+def test_final_stale_template_problem_names_any_version_but_this_codes():
+    assert mrs.stale_template_problem({"template_version": _TPL_VERSION}) is None
+    for out in ({"template_version": "news-v21"}, {"template_version": "news-v24"}, {}, {"template_version": None},
+                {"template_version": 23}, None, "news-v23"):
+        problem = mrs.stale_template_problem(out)
+        assert problem is not None and _TPL_VERSION in problem, out
+
+
+@pytest.mark.parametrize("version", ["news-v21", "news-v22", None])
+@pytest.mark.parametrize("kind", ["card", "video"])
+@pytest.mark.asyncio
+async def test_final_a_template_another_version_composed_registers_no_media_and_is_the_409_skip(svc, caplog, kind,
+                                                                                                version):
+    """Final review 2026-11-20: a Company Weekly day accepted under news-v21 (today's web) and resumed after the deploy
+    reads back with `look: news-v23`, so the new worker draws its stored LONG footer on the picture and on every video
+    card — and the on-screen checks refused both with a 422 (`not its series' short footer` / not allowed): a FAILED
+    attempt, re-claimed and re-rendered up to MARKETING_MAX_RUN_ATTEMPTS (6) times, with failed-run alerts, for a day
+    create_posts' `template_changed` 409 would skip anyway. The registration now asks the version FIRST: 409
+    MARKETING_TEMPLATE_REFUSED (the worker skips the day `template_refused`), nothing registered, logged ERROR.
+    Mutation-checked by hand (2026-11-20): with the version check removed, the picture case went back to the 422."""
+    import logging
+
+    from app.api.error_response import ErrorCode, classify_exception
+
+    def tamper(o):
+        o["post_formats"] = {"tiktok": "video", "x": "image"}
+        o["image_footer"] = o["image_spec"]["footer"] = _RESTYLE_OLD_TEMPLATE_FOOTER    # what news-v21 stored
+        if version is None:
+            o.pop("template_version")
+        else:
+            o["template_version"] = version
+    rid = await _b2_template_run(svc, tamper=tamper)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingTemplateRefused) as ei:
+            if kind == "card":
+                await svc.register_asset(
+                    rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1, claim=_holder(svc, rid),
+                    metadata=_image_meta(onscreen_text=_restyle_template_picture(
+                        footer=_RESTYLE_OLD_TEMPLATE_FOOTER)))
+            else:
+                await _register_video(svc, rid, _template_drawn(_RESTYLE_OLD_TEMPLATE_FOOTER))
+    assert classify_exception(ei.value) == (ErrorCode.MARKETING_TEMPLATE_REFUSED, 409)
+    assert _TPL_VERSION in str(ei.value) and repr(version)[:20] in str(ei.value)
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a["kind"] in ("card", "video")]   # none registered
+    assert any("TEMPLATE REFUSED" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_final_the_version_check_leaves_this_codes_templates_alone(svc):
+    """Anti-vacuity: the same picture and video of a template THIS code composed register."""
+    rid = await _restyle_template_image_run(svc)
+    image = await _post_image(svc, rid, metadata=_image_meta(onscreen_text=_restyle_template_picture()))
+    assert image["status"] == "ready"
+    assert (await _register_video(svc, rid, _template_drawn(_B2_FOOTER)))["kind"] == "video"
+
+
+@pytest.mark.asyncio
+async def test_final_the_version_check_leaves_every_lesson_alone(svc):
+    """A lesson carries no template version: its picture registers (with today's footer, the restyle's lesson rule)."""
+    lesson = await _image_run(svc)
+    assert (await _post_image(svc, lesson))["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_restyle_a_template_picture_without_its_footer_is_refused(svc):
+    rid = await _restyle_template_image_run(svc)
+    drawn = [t for t in _restyle_template_picture(_RESTYLE_BRAND) if t != _B2_FOOTER]
+    with pytest.raises(MarketingRequestInvalid, match="does not draw its footer"):
+        await svc.register_asset(rid, kind="card", ext="jpg", sha256="c" * 64, size_bytes=1,
+                                 metadata=_image_meta(onscreen_text=drawn), claim=_holder(svc, rid))
+
+
+@pytest.mark.asyncio
+async def test_restyle_a_lesson_video_may_draw_the_brand_row_its_kicker_and_the_short_footer(svc):
+    rid = await _b2_lesson_run(svc)
+    await _register_video(svc, rid, _lesson_drawn(_RESTYLE_BRAND, _RESTYLE_LESSON_KICKER,
+                                                  post_copy.IMAGE_FOOTER_HEAD))
+    rid2 = await _b2_lesson_run(svc, day=date(2026, 9, 18))
+    await _register_video(svc, rid2, _lesson_drawn())                    # never required
+
+
+@pytest.mark.parametrize("bad", ["INVESTING LESSON ", "Investing Lesson", "13F SEASON", _RESTYLE_OLD_LESSON_FOOTER,
+                                 "Not investment advice · Source: company filings", "caydex"])
+@pytest.mark.asyncio
+async def test_restyle_a_lesson_video_takes_the_brand_row_only_as_exact_strings(svc, bad):
+    rid = await _b2_lesson_run(svc)
+    with pytest.raises(MarketingRequestInvalid, match="not the accepted script"):
+        await _register_video(svc, rid, _lesson_drawn(bad))
+
+
+@pytest.mark.parametrize("features", [_MISSING, [], ["data_card"]])
+@pytest.mark.asyncio
+async def test_restyle_a_template_video_may_draw_the_brand_word_and_its_short_footer_whatever_the_features(
+        svc, features):
+    """Every template video card may carry the brand row (its kicker is the opening card's, already allowed) and the
+    picture's short footer — with or without a data card."""
+    rid = await _b2_template_run(svc, features)
+    await _register_video(svc, rid, _template_drawn(_RESTYLE_BRAND, _B2_FOOTER))
+    await _register_video(svc, rid, _template_drawn())                   # never required
+
+
+@pytest.mark.parametrize("bad", [_RESTYLE_LESSON_KICKER, _RESTYLE_OLD_TEMPLATE_FOOTER, post_copy.IMAGE_FOOTER_HEAD,
+                                 "Not investment advice · Source: company filings"])
+@pytest.mark.asyncio
+async def test_restyle_a_template_video_never_takes_a_lesson_kicker_or_another_footer(svc, bad):
+    rid = await _b2_template_run(svc)
+    with pytest.raises(MarketingRequestInvalid, match="not the accepted script"):
+        await _register_video(svc, rid, _template_drawn(bad))
+
+
+@pytest.mark.asyncio
+async def test_restyle_a_template_video_whose_stored_footer_is_the_long_one_may_not_draw_it(svc):
+    def tamper(o):
+        o["image_footer"] = o["image_spec"]["footer"] = _RESTYLE_OLD_TEMPLATE_FOOTER
+    rid = await _b2_template_run(svc, tamper=tamper)
+    with pytest.raises(MarketingRequestInvalid, match="not the accepted script"):
+        await _register_video(svc, rid, _template_drawn(_RESTYLE_OLD_TEMPLATE_FOOTER))
+    await _register_video(svc, rid, _template_drawn(_RESTYLE_BRAND))     # the rest of the video still registers
+
+
+# ── news-v23 phase 3 (2026-11-20): the weekly theme post — its rotation read and its `ranked` picture's capability ──
+
+from app.services.marketing import company_news_rules as R  # noqa: E402
+
+def _theme_script(svc, run_date: str, source_ref: Optional[str], *, template_id: str = "theme_explainer",
+                  status: str = "accepted", lane: Optional[str] = None) -> None:
+    row = {"run_id": str(uuid.uuid4()), "run_date": run_date, "status": status, "template_id": template_id,
+           "source_ref": source_ref, "output": {}, **({"lane": lane} if lane else {})}
+    svc.fake.tables[mrs.SCRIPTS].rows.append(row)
+
+
+@pytest.mark.asyncio
+async def test_phase3_theme_refs_between_reads_every_theme_key_of_the_whole_window_oldest_first(svc):
+    """The rotation's OWN bounded read (`script_service._theme_source_kw` asks THEME_HISTORY_DAYS back): every theme
+    script of the window — any status, old and new keys — oldest first, nothing outside it, no other series, no
+    row without a key. Twelve weeks of weekly theme posts all come back however much else was posted (the general
+    `recent` read is sized by rows, and a busy ledger would push a theme from ten weeks ago out of it)."""
+    end = date(2026, 11, 25)
+    start = end - timedelta(days=R.THEME_HISTORY_DAYS)
+    weekly = [end - timedelta(days=7 * k) for k in range(12)]                     # twelve Wednesdays, 0..77 days back
+    for i, d in enumerate(reversed(weekly)):
+        ref = (f"news:theme_explainer:slug-{i}:make_money:{d}" if i % 2 else
+               f"news:theme_explainer:slug-{i}:{d - timedelta(days=3)}")               # an old key on some
+        _theme_script(svc, d.isoformat(), ref, status="rejected" if i == 3 else "accepted")
+    for k in range(200):                                                          # a busy ledger of other series
+        _theme_script(svc, (end - timedelta(days=k % 80)).isoformat(), f"news:money_map:X{k}:FY2025",
+                      template_id="money_map")
+    _theme_script(svc, (start - timedelta(days=1)).isoformat(), "news:theme_explainer:too-old:biggest:x")
+    _theme_script(svc, (end + timedelta(days=1)).isoformat(), "news:theme_explainer:future:biggest:x")
+    _theme_script(svc, end.isoformat(), None)                                      # no key: a crash before the pick
+    got = await svc.theme_refs_between(start, end)
+    assert len(got) == 12 and all(r.startswith("news:theme_explainer:slug-") for r in got)
+    assert [R.theme_ref_items(r)[0] for r in got] == [f"slug-{i}" for i in range(12)]          # oldest first
+    assert all(R.theme_ref_items(r) is not None for r in got)
+    assert await svc.theme_refs_between(end, start) == []                          # inverted: nothing read
+    # the window the script service asks for reaches ten weeks back with room to spare
+    assert (end - start).days == R.THEME_HISTORY_DAYS >= 70
+
+
+@pytest.mark.asyncio
+async def test_phase3_the_theme_read_is_bounded_and_raises_past_the_bound(svc):
+    for lane in ("main", "spotlight"):
+        _theme_script(svc, "2026-11-25", f"news:theme_explainer:a-{lane}:make_money:2026-11-25", lane=lane)
+    assert len(await svc.theme_refs_between(date(2026, 11, 25), date(2026, 11, 25))) == 2
+    _theme_script(svc, "2026-11-25", "news:theme_explainer:b:make_money:2026-11-25")
+    with pytest.raises(mrs.MarketingRunError, match="theme_refs_between: more than 2 theme scripts"):
+        await svc.theme_refs_between(date(2026, 11, 25), date(2026, 11, 25))
+
+
+_RANKED_FOOTER = "Not investment advice · Source: company filings and market data"
+_RANKED_LOGOS = [{"key": k, "name": n, "url": None, "sha256": None, "bytes": None, "width": None, "height": None}
+                 for k, n in (("GEV", "GE Vernova"), ("NEE", "NextEra Energy"), ("ETN", "Eaton"),
+                              ("CEG", "Constellation Energy"))]
+_RANKED_SPEC = {"layout": "ranked", "version": 1, "kicker": "INSIDE A THEME", "footer": _RANKED_FOOTER,
+                "title": "Power the Machine", "subtitle": "4 companies · market value as of Nov 24, 2026",
+                "rows": [{"rank": str(i + 1), "logo": e["key"], "chip": e["key"], "name": e["name"], "value": v,
+                          "ratio": r} for i, (e, v, r) in enumerate(zip(_RANKED_LOGOS, ("$171B", "$152B", "$134B",
+                                                                                         "$98B"),
+                                                                       (1.0, 0.8889, 0.7836, 0.5731)))],
+                "icon": "bolt"}
+
+
+def test_phase3_the_ranked_fixture_validates():
+    assert template_onscreen.validate_image_spec(_RANKED_SPEC, template_onscreen.logo_keys(_RANKED_LOGOS),
+                                                 footer=_RANKED_FOOTER) is None
+
+
+@pytest.mark.parametrize("caps, accepted", [
+    (tuple(schemas.WORKER_CAPABILITIES), True),
+    (("theme_angles",), True),
+    (tuple(c for c in schemas.WORKER_CAPABILITIES if c != "theme_angles"), False),   # the look_v23 worker
+    ((), False),
+])
+@pytest.mark.asyncio
+async def test_phase3_a_ranked_picture_registers_only_from_a_holder_that_declared_theme_angles(svc, caplog, caps,
+                                                                                              accepted):
+    """The server freezes the market-value angle only for a holder with `theme_angles` (the adapter is offered
+    "make_money" alone otherwise), so a `ranked` picture registered by another holder is contract drift: 422, logged
+    at ERROR with the run and what the holder declared — never accepted on the worker's word."""
+    import logging
+
+    def tamper(o):
+        o.update(image_spec=copy.deepcopy(_RANKED_SPEC), image_footer=_RANKED_FOOTER, logos=copy.deepcopy(_RANKED_LOGOS))
+
+    rid = await _b2_template_run(svc, [], capabilities=caps, tamper=tamper)
+    meta = {"onscreen_text": template_onscreen.image_strings(_RANKED_SPEC, _RANKED_LOGOS),
+            "image_role": schemas.IMAGE_ROLE_POST}
+
+    async def register():
+        return (await svc.register_asset(rid, kind="card", ext="jpg", sha256="f" * 64, size_bytes=1, metadata=meta,
+                                         claim=_holder(svc, rid)))[0]
+
+    if accepted:
+        assert (await register())["kind"] == "card"
+        return
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match="theme_angles"):
+            await register()
+    hits = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR and "'ranked' picture" in r.getMessage()]
+    assert len(hits) == 1 and rid in hits[0] and "theme_angles" in hits[0]
+    assert not [a for a in svc.fake.tables[mrs.ASSETS].rows if a.get("run_id") == rid and a.get("kind") == "card"]
+
+
+def test_phase3_the_ranked_check_is_default_closed():
+    output = {"image_footer": _RANKED_FOOTER, "image_spec": copy.deepcopy(_RANKED_SPEC),
+              "logos": copy.deepcopy(_RANKED_LOGOS)}
+    drawn = template_onscreen.image_strings(_RANKED_SPEC, _RANKED_LOGOS)
+    with pytest.raises(MarketingRequestInvalid, match="theme_angles"):
+        mrs.MarketingRunService._check_template_image_text("r1", output, drawn)
+    mrs.MarketingRunService._check_template_image_text("r1", output, drawn, capabilities=frozenset({"theme_angles"}))
+
+
+# ── news-v23 phase 3, the theme's last three angles (2026-11-20): their tables register only from a theme_angles holder ──
+
+@pytest.mark.parametrize("angle", ["growth_profit", "insiders", "congress"])
+def test_phase3_a_table_picture_is_default_closed_without_theme_angles(angle):
+    """`figures`, `ledger` and `tally` are `WORKER_LAYOUTS_THEME` too: the registration check refuses one from a holder
+    that did not declare `theme_angles` (422 — contract drift), and accepts it from one that did."""
+    import test_marketing_news_templates as NT
+    from app.services.marketing import news_templates
+
+    rec = {"growth_profit": NT.silicon_growth, "insiders": NT.cyber_insiders, "congress": NT.battlefield_congress}[angle]()
+    out = news_templates.compose(rec, run_date=NT.THEME_WED, store_state="live", allow_x_url=False)
+    logos = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None, "bytes": None, "width": None,
+              "height": None} for r in out["logo_refs"]]
+    output = {"image_footer": out["image_footer"], "image_spec": out["image_spec"], "logos": logos}
+    drawn = template_onscreen.image_strings(out["image_spec"], logos)
+    assert drawn and schemas.layout_capabilities(out["image_spec"]["layout"]) == ("theme_angles",)
+    with pytest.raises(MarketingRequestInvalid, match="theme_angles"):
+        mrs.MarketingRunService._check_template_image_text("r1", output, drawn)
+    mrs.MarketingRunService._check_template_image_text("r1", output, drawn, capabilities=frozenset({"theme_angles"}))

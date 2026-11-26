@@ -169,10 +169,12 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **19** modules): `fmp`, `gemini`, `anthropic_client` (Claude, the
-SECOND provider for the marketing and Learn weekly writer/judge roles only, behind per-role switches that
-default to Gemini; called only by `app/services/llm_provider.py`, which falls back to the same Gemini call on
-any Claude failure, 2026-10-30), `coingecko`, `fred`,
+**Integrations** (`backend/app/integrations/`, **19** modules): `fmp`, `gemini`, `anthropic_client` (Claude,
+for marketing and Learn weekly work only, reached only through `app/services/llm_provider.py`: there it is the
+SECOND provider for the marketing and Learn weekly writer/judge roles, behind per-role switches that default to
+Gemini, with the same Gemini call as the fallback on any Claude failure, 2026-10-30; and, through
+`llm_provider.ClaudeOnly` with NO Gemini fallback, the measurement scripts and, since 2026-11-15, the marketing
+per-post art's brief and vision check, whose picture Gemini's `generate_image` draws, §12.21), `coingecko`, `fred`,
 `finra_short_interest`, `apewisdom`, `alternative_me`, `census`, `openfda`, `uspto`, `app_store`,
 `openai_compat`, `telegram` (the marketing review bot, §12.9), `x_api`, `bluesky` and `upload_post`
 (the marketing publisher's platforms, §12.10), and `brave_search` (the Brave Search API behind report
@@ -2129,7 +2131,7 @@ whether any of it runs:
 | theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
 | Trillion Club daily / weekly / stake finder (§3 item 5: reconcile first, then the members' own 13D/13Gs, then full-text search; the Monday run also re-checks published machine rows) | 07:00 ET every day / Monday 08:00 ET / 18:30 ET every day (boot +480 s; claim stale after 3,600 s; each attempt cancelled after 3,000 s; 3 attempts a day, hourly) | `TRILLION_CLUB_JOBS_ENABLED` (**off**); the finder also needs `TRILLION_CLUB_STAKE_FINDER_ENABLED` (**off**), `SEC_EDGAR_USER_AGENT` and the review bot; kill switch row `trillion_club_stake_finder` |
 | Wiser weekly engine (§12.18): cache sync, Thursday topic card (`learn_weekly_topic`, day claim), Friday 07:00 ET auto-pick, build (lease per piece, every tick), narration sweep, Telegram review, publish / expiry, Friday 15:00 ET deadman (`learn_weekly_deadman`, day claim) | a tick every 5 min | `LEARN_WEEKLY_ENABLED`, `LEARN_DEEP_DIVE_ENABLED` (**off**); every piece dry-run while `LEARN_WEEKLY_DRY_RUN` (**on**); build kill switch `learn_weekly_build` |
-| marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10, then four day-keyed jobs, §12.11: measure `marketing_metrics_daily` 06:00 ET; run health `marketing_run_health` on a posting day at the run hour + `MARKETING_MAX_RUN_ATTEMPTS`, capped at 23:00 (22:00 ET by default), and `marketing_run_health_final` the day after at the run hour (16:00 ET by default; the run hour is `MARKETING_RUN_HOUR_ET`, the web's mirror of the worker's); the weekly digest `marketing_digest_weekly` Monday 09:00 ET, Tuesday catch-up) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep, feed and both run-health checks: the `MARKETING_TELEGRAM_*` settings (unset = off); measure: `MARKETING_ENABLED` and `MARKETING_METRICS_ENABLED` (**off**); digest: the review bot and `MARKETING_DIGEST_ENABLED` (**off**) / — |
+| marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10, then four day-keyed jobs, §12.11: measure `marketing_metrics_daily` 06:00 ET; run health `marketing_run_health` on a posting day at the run hour + `MARKETING_MAX_RUN_ATTEMPTS`, capped at 23:00 (22:00 ET by default), and `marketing_run_health_final` the day after at the run hour (16:00 ET by default; the run hour is `MARKETING_RUN_HOUR_ET`, the web's mirror of the worker's; since 2026-11-15 both judge every lane of the day in one message, timed from the latest enabled lane's hour, §12.19); the weekly digest `marketing_digest_weekly` Monday 09:00 ET, Tuesday catch-up) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep, feed and both run-health checks: the `MARKETING_TELEGRAM_*` settings (unset = off); measure: `MARKETING_ENABLED` and `MARKETING_METRICS_ENABLED` (**off**); digest: the review bot and `MARKETING_DIGEST_ENABLED` (**off**) / — |
 | push dispatch, scheduled senders, price alerts | 60 s / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
 
 A quarterly or weekly phase that does not complete is retried inside the same run's 20-hour
@@ -5600,7 +5602,10 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
     at all. Since Drop 2a the class comes from the SCRIPT (its template id), not the run mirror, and
     classes C and F have their own branch: the class enabled in `MARKETING_CONTENT_CLASSES`, template
     authorship, and `news_templates.revalidate` passing (else 409 `MARKETING_TEMPLATE_REFUSED`, the day
-    skipped `template_refused`); C/F posts are never auto-approved (§12.13).
+    skipped `template_refused`); C/F posts are never auto-approved (§12.13). The picture and video
+    registrations of a template another `TEMPLATE_VERSION` composed get that same 409 before their
+    on-screen checks (2026-11-20), so a day accepted before a deploy and resumed after it is skipped once
+    instead of failing every attempt on its old footer.
   - a post leaves `pending_review` only through `review_post` (a human's decision): ONE
     conditional UPDATE on `status = pending_review` that records who decided (`approved_by`,
     `metadata.review`), so a double tap or two reviewers can never flip a decided post — or
@@ -5625,8 +5630,9 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
   skip rule mirrors `.gitignore` exactly: only the package-ROOT out, models and .cache
   directories (and `__pycache__` anywhere) — a nested models package under, say, a voice
   stage ships in the image, so it is scanned.
-- **The claim is a UNIQUE row, never a clock.** `marketing_runs.run_date` is unique; the INSERT
-  is the claim (147's lesson). The cron is hourly so a slot Railway skipped (previous run
+- **The claim is a UNIQUE row, never a clock.** `marketing_runs` is unique on (`run_date`, `lane`)
+  (migration 210; `run_date` alone before it): one run per ET day per lane, main or spotlight
+  (§12.19), and the INSERT is the claim (147's lesson). The cron is hourly so a slot Railway skipped (previous run
   still alive) or a container killed mid-stage is retried on the first tick after
   `MARKETING_RUN_STALE_SECONDS` (2700 s — deliberately below the hourly period, or the retry
   would depend on boot jitter). Railway cron is UTC-only, has no DST handling, no
@@ -5635,8 +5641,8 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
   Liveness is the later of `started_at` and `updated_at` (every checkpoint bumps it). A stale
   row is re-claimed with a compare-and-swap on the observed `attempts` value (which the
   re-claim increments — conditioning on `status` alone was a no-op), capped at
-  `MARKETING_MAX_RUN_ATTEMPTS`; a per-process claim nonce lets a worker recognise its own
-  claim when the response was lost. A run that exhausts its attempts is closed `failed` once
+  `MARKETING_MAX_RUN_ATTEMPTS`; a claim nonce, fresh for every claim (one per process before the
+  lanes), lets a worker recognise its own claim when the response was lost. A run that exhausts its attempts is closed `failed` once
   (WARNING), and every claim — of any date — first sweeps runs abandoned OUTSIDE the claim
   window (`planned`/`in_progress`, dated before yesterday ET, stale) to `failed` with the same
   compare-and-swap: a run killed on its last in-window or resume tick is never claimed again,
@@ -5646,7 +5652,8 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
   ONE conditional UPDATE fenced on the status and the observed `updated_at` that is also the
   write-ahead (the attempt, its cost, `metadata.publish.state = sending`). Idempotency is per
   platform (§12.10): Bluesky derives its record key from `idempotency_key`
-  (`<run_date>:<platform>:<format>`) and writes only if nothing is there; X takes no key at all,
+  (`<run_date>:<platform>:<format>`; a spotlight run's `<run_date>:spotlight:<platform>:<format>`, §12.19)
+  and writes only if nothing is there; X takes no key at all,
   so an X post whose outcome is unknown is reconciled against our own timeline and never resent.
   An outcome that is not certain — a timeout after sending, a 5xx, a ledger failure AFTER the
   outlet accepted the post, a crash after the claim — leaves the row `queued` for
@@ -5661,7 +5668,7 @@ Railway CRON service "marketing-media"             FastAPI web service (this lif
 `marketing-media` is a PUBLIC bucket on purpose (migration 170): Meta and Upload-Post fetch
 the MP4 by URL, and podcast enclosures must be stable unsigned URLs — Spotify re-fetches an
 enclosure only when its path changes. Paths are content-addressed
-(`<run_date>/<kind>-<sha256[:16]>.<ext>`), immutable, and an asset is `ready` only after the
+(`<run_date>/<kind>-<sha256[:16]>.<ext>`; a spotlight run's under `<run_date>/spotlight/`, §12.19), immutable, and an asset is `ready` only after the
 API has verified the object, never on the worker's word: it must be present, with the byte size
 and content type that were registered (read from the Storage listing's metadata). Both paths to
 `ready` run that ONE check (`_verify_object`) — `complete_asset`, and `register_asset`'s branch
@@ -5674,6 +5681,17 @@ size + type + the worker's ffprobe gate + the registration checks of what a vide
 and draws (§12.8) are the verification. The worker's preflight
 manifest is content-addressed too — its generation time lives in the asset row's metadata —
 so a re-claimed attempt re-registers the same path instead of minting a new public object.
+
+Two kinds of object live OUTSIDE any run's folder, content-addressed by their own bytes and with no asset row:
+the company logos (Drop 2a, §12.13), under the bucket's `logos` prefix as `<sha256[:32]>.<png|jpg>`, and the
+per-post art (2026-11-16, §12.21), under its `art` prefix as `<sha256[:32]>.jpg`. Both are written by the WEB
+(`run_service.store_logo` / `run_service.store_art`), never by the worker: stat first, reuse an equal object (same
+size and content type), upload with upsert off and a one-year cache, stat again after a lost race, and never
+overwrite or delete (a published post may reference the object). Any run with the same bytes reuses the object:
+the key is the content, never a run's folder, so the two lanes (§12.19) have no row to adopt from each other through
+it. An art object is stored only after its picture
+passed the vision check, and the worker fetches it only from its own run's bucket origin and only when its full
+sha256 equals the read-back's.
 
 Public means fetchable by URL, not LISTABLE: migration 170 had mirrored 136/137 and granted
 `anon`/`authenticated` a SELECT policy on the bucket, which migration 153 had already removed
@@ -6148,8 +6166,11 @@ accept); the `assets_ready` stage then records the day's posts and the run close
   verified `video_asset_id` back (written in the same PATCH as `stage=rendered`) and fails loudly
   if a video outlet has none.
 - **Budget.** Each stage starts only with its own margin of the 30-minute tick left
-  (`STAGE_START_MARGINS`: 12 min for voice and render, 4 for the posts, 2 for the quick stages
-  and for a media stage on a day with no video). A stage started at the latest allowed moment,
+  (`STAGE_START_MARGINS`: 14 min for voice and render, 4 for the posts, 2 for the quick stages
+  and for a media stage on a day with no video). The media margin was 12 min at first, 13 since Drop 2a (a
+  template day's logo downloads) and 14 since 2026-11-16 (the per-post art, §12.21: the post image's render
+  share doubled to 40 s for the draw-with-art-then-without fallback, and the art download joined it), so the
+  render's worst case, 799.25 s, stays inside its 840 s margin. A stage started at the latest allowed moment,
   with every backend call exhausting its retries and one heartbeat stuck as long, still ends well
   inside `MARKETING_RUN_STALE_SECONDS` — and heartbeats every minute keep its claim live — pinned
   per stage by a test. (On a slow backend it can end past the 30-minute tick; the stale window is
@@ -6461,7 +6482,11 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   read was capped. Each part fails alone to
   "unreadable" and the total then reads "≥ $T (X unreadable)"; a part beyond ±$1,000,000 is
   unreadable; never NaN, inf or a silent 0. Both settings are `Field(ge=0, le=10_000,
-  allow_inf_nan=False)`, so a bad value fails the deploy.
+  allow_inf_nan=False)`, so a bad value fails the deploy. Since 2026-11-16 a week with per-post art spend adds
+  "· art ≈ $x (n images)" — ", k unconfirmed" when an image call's billing is unknown — as one more USAGE part (in
+  the total, the usage label and the alert sum), read from both lanes' `marketing_scripts.output` (§12.21); a
+  failed or unpriceable read shows "art unreadable" and the totals become "≥" floors. With art on, a week's usage
+  will usually pass the default $1.00 alert line.
 - **The run-health alert** (`digest_service.health_cycle`; the decision is the pure
   `evaluate_run_health`) checks today's run once, at the first tick at or after the run hour plus
   `MARKETING_MAX_RUN_ATTEMPTS` on a posting day, capped at 23:00 ET (23:00 too when no attempts cap
@@ -6489,7 +6514,10 @@ its pure helpers and the shared day-job runner) and `app/services/marketing/dige
   promises a final word the next day. A finished run says nothing, except one line when a stage's
   cgroup memory peak passed 85% of the container limit the run's preflight recorded
   (`metadata.preflight.voice.memory_limit`; 3,200 MB when none was readable). 8 GB since 2026-10-30
-  (7,629 MiB → above 6,484 MB); the 4 GB service peaked at 3,345 MB on 2026-10-28.
+  (7,629 MiB → above 6,484 MB); the 4 GB service peaked at 3,345 MB on 2026-10-28. Since the spotlight lane
+  (2026-11-15, §12.19) the nightly check and the final word judge every lane of the day in ONE message, main first,
+  each due at the latest enabled lane's hour; the spotlight run's lines are labelled and the main lane's texts are
+  unchanged.
 - **The final word** (`marketing_run_health_final`, the pure `evaluate_run_final`) re-reads
   yesterday's run at the first tick at or after the run hour on the day after a posting day (16:00
   ET by default): the worker resumes a day's failed or abandoned run only on ticks before its run
@@ -6584,7 +6612,13 @@ before (the one unconditional change: videos open on their first content card).
   and judged like the cards; dropped — never a package rejection — when it fails) with a burned
   code-owned footer (`post_copy.image_footer`). Registered as a `card` with `image_role = post_image` and
   its declared `onscreen_text`; the server accepts only the accepted output's image strings and requires
-  the footer (`run_service._check_post_image_text`).
+  the footer (`run_service._check_post_image_text`). Since news-v23 (the restyle, owner-approved 2026-11-19:
+  "if we can't remove, then say it shortly") the footer is ONE short line — "Not investment advice" on a lesson,
+  "Not investment advice · Source: <family source>[ · <date>]" on a template (`post_copy.FOOTER_WHEN_PATTERNS`);
+  the captions keep the full disclaimer, the AI line and "Not affiliated with anyone named". Every picture and
+  video card may also draw the brand row's word (`schemas.marketing.BRAND_ROW_WORD`) and its kicker pill (a
+  lesson's `LESSON_KICKER`, a template's own `kicker`) — exact strings, allowed, never required; an output whose
+  stored footer is the long one of before registers no picture (`run_service.picture_footer_problem`).
 - **Publishing images**: Upload-Post `upload_photos` (Facebook, LinkedIn, Threads), Bluesky `uploadBlob` +
   `app.bsky.embed.images` (the record, with its locally computed blob CID, still built once in the
   write-ahead claim; the blob re-uploaded at send time), X v2 media upload + alt text (alt text journaled
@@ -6592,7 +6626,8 @@ before (the one unconditional change: videos open on their first content card).
   confirms the price). Every outlet downloads the picture with a byte cap and checks its sha256 against
   the asset row before sending it anywhere.
 - **The worker declares what it can render** (`capabilities: ["post_image", "news_templates", "layouts_2b"]` on the
-  claim, recorded as server-owned `metadata.worker_capabilities`); formats freeze as "image" only when the
+  claim in this drop — eight since the restyle, §12.22 — recorded as server-owned `metadata.worker_capabilities`);
+  formats freeze as "image" only when the
   run's holder declared it, so an old worker image degrades to text posts instead of failing the day, and a
   news day is built only for a holder that declared `news_templates` (else it becomes the lesson). The
   claim drops an unknown capability string with a WARNING rather than refusing it, so a newer worker never
@@ -6627,7 +6662,8 @@ Everything sits behind `MARKETING_CONTENT_CLASSES` ("A" = lessons only, byte-ide
   each series from source (never from the Pro cards): Form 4 code-P buys through a parity-tested copy of
   the CEO-buy rules (`app/services/_insider_buys_common.py`), 13F share-count diffs only between ADJACENT quarters
   (`_whale_common.select_13f_comparison`), Money Map from the revenue-breakdown, profit-power and
-  company-facts services (curated pool + Trillion Club + Emerging Frontiers companies). It returns typed,
+  company-facts services (curated pool + Trillion Club companies; the Emerging Frontiers members left that pool with
+  news-v23 — owner 2026-11-19, "make sure to use big or popular companies only"). It returns typed,
   allow-listed records (`app/services/marketing/company_news_rules.py`); a leak test fails on any price, % move, chart, person or
   member field. It fails closed: an upstream failure raises, nothing qualified returns a skip reason.
 - **Templates** (`app/services/marketing/news_templates.py`, pure): deterministic copy pinned verbatim in a lexicon; a strict
@@ -6640,13 +6676,16 @@ Everything sits behind `MARKETING_CONTENT_CLASSES` ("A" = lessons only, byte-ide
   at write time and again in `create_posts`.
 - **The build** runs as a background task at the first kick (≤ 240 s; the kick waits ≤ 20 s and answers
   `generating`), falls back series by series to the lesson, and inserts the accepted row first-write-wins
-  with 0 tokens and template authorship. Template copy says "Built by a fixed template from public data"
-  and "Not affiliated with anyone named"; `made_with_ai` is False on template images/text, True on video.
+  with 0 tokens and template authorship. Since 2026-11-16 the build and its optional per-post art step share
+  one 280 s ceiling from the build's start (§12.21). Template copy says "Built by a fixed template from public data"
+  and "Not affiliated with anyone named"; `made_with_ai` is False on template images/text, True on video
+  (since 2026-11-15 also True on a template image whose picture drew the per-post art, §12.21).
 - **Visuals**: company logos (the FMP profile image, validated by `app/services/marketing/logo_check.py`, stored content-addressed
   under the bucket's logos prefix, never overwritten) drawn unaltered on a light plate with a wordmark
   fallback; the video opens on a code-owned opening card (logo + headline number) with one card per
   narration line; the 4:5 post image uses one of the `template_onscreen` layouts (rows, spotlight, bars in
-  2a). The server checks every drawn string against the template's declared strings.
+  2a). The server checks every drawn string against the template's declared strings. (Since 2026-11-16 a
+  single-company opening card may also draw the per-post art, §12.21.)
 - **Form 4 posts fail closed at the company level** (review rounds, 2026-10-09/10): any Form 4/A of the
   issuer — read by the issuer CIK across every share class — filed from the window start through the run
   day refuses that company for the week, and a CEO/CFO is shown only when every word of the officer title
@@ -6664,21 +6703,77 @@ Built and shipped in code, OFF in production until the owner lists each series i
   month, fail closed; only `Purchase` rows; distinct members per company counted through an in-memory hash
   that is discarded at once — no identity field (names, office, district, owner, link, `senateID`) ever
   reaches a record, a log line or a fact sheet; at least 2 members; copy "N members of Congress disclosed
-  purchases of <Company> stock in <Month>", never a chamber, party, state or dollar total.
+  purchases of <Company> stock in <Month>", never a chamber, party, state or dollar total. Since news-v23 (owner
+  2026-11-19: "for congress disclosed, i want to have 2-3 companies at once") ONE post of the month's 2-3 companies
+  (`company_news_rules.CongressMonth`, the most members first, the month's one ledger key): a list whose every row
+  states a count of at least 2; one qualifying company is no post (`congress_too_few_companies`).
 - **company_stakes** (class F, every Tuesday — after congress_count / thirteen_f in the chain, so in 13F
   season or on a Congress Tuesday it runs only when those produce nothing): the Trillion Club stakes, the published
   catalogue included (an owner-revertible night decision), a named investee with a disclosed figure, the
-  stake's own value basis as the verb; a "pair" image (investor → investee).
+  stake's own value basis as the verb; a "pair" image (investor → investee) until news-v23. Since news-v23 (owner
+  2026-11-19: "filter for companies that public only. no private" + "add 1-3 more companies for the NVIDIA") ONE post
+  of ONE investor's stakes in PUBLIC companies (`company_news_rules.CompanyStakes`, 1-4 rows — review 2026-11-20,
+  the spec's bound — the largest figure first, one row per investee issuer): a stake is public only with a kind that can be (`PUBLIC_STAKE_KINDS`), a listed U.S. symbol, a profile the
+  common-stock gate accepts naming that company and `isActivelyTrading` exactly True — fail closed, a private,
+  unlisted or not-trading investee is dropped and never named; the investor with the most not-yet-posted public stakes
+  leads; a `rows` list (stakes_nvidia.jpg: the investor's plate, each row's basis word over its amount and its "As of
+  {date} · {source}" line), the picture drawing every stake, the cover three and "+N more stakes in the caption";
+  the ledger key names every stake (`news:company_stakes:<id>+<id>…`), so each is posted once; a stake the template
+  refuses is dropped from its post and remembered. It needs a `look_v23` worker (a row's `label`).
 - **earnings** (class F, Thursdays in earnings season — Wed/Thu/Fri when those days post, §12.17): one ET day per calendar call, a digit-shift guard,
   a minimum estimate size, a USD REPORTING currency (the trading currency is not enough), profile batches
   until enough large companies qualify; the copy states the reported EPS beside the analysts' estimate on
   the same basis — never "earned", "expected", "beat" or "miss"; since news-v21 (2026-10-20) no revenue figure
-  is printed (the revenue pair is a check only — §12.17).
+  was printed (the revenue pair a check only — §12.17) until news-v23 (owner 2026-11-19, "Revenue always": every post
+  prints the revenue pair, the owner accepting the GE-type basis risk; the table's note says the basis can differ).
+  Since news-v23 ONE table of 2-4 companies (`company_news_rules.EarningsDay`, the largest first): per company EPS and
+  revenue as Estimate | Reported | Surprise, the surprise one decimal, green "+" / red "−", "—" when it would mislead
+  (|EPS estimate| < $0.05 — unreachable today behind the adapter's $0.10 floor — or no revenue estimate); a refused
+  company is dropped, never the post; one qualifying company is no post (`earnings_too_few_companies`); the ledger key
+  names every company (`news:earnings:<SYM>:<day>+…`), so each is posted once. The table needs a `look_v23` worker
+  (`script_service._without_look_series` keeps earnings off an older holder's chain).
 - **theme_explainer** (class F, a fallback on Monday, Tuesday and Thursday; Saturday is the lesson only): Emerging Frontiers theme names and members with
   each member's largest filed segment, never performance, momentum, ETF reasons or generated text; a
-  "grid" image; "{n} of its {m} companies" when the company gate dropped members.
+  "grid" image; "{n} of its {m} companies" when the company gate dropped members. **Since news-v23 phase 3
+  (2026-11-20) the WEEKLY theme post, leading Wednesday** (owner 2026-11-19, RESTYLE_SPEC §2 item 7): Wednesday's chain
+  is theme → earnings (in season) → Money Map → lesson; since the owner decisions of 2026-11-20 it is also the quiet
+  Form 4 day's fallback (Monday, and the spotlight days — §12.23), so Wednesday is no longer the only theme day; Thursday's earnings post covers
+  8 report days so Wednesday's report day is never lost. The active themes rotate oldest-posted first, never one
+  posted in the last 28 days, under the key `news:theme_explainer:<slug>:<angle>:<run_date>` (an older key counts as
+  the first angle on its date), from the build's own 84-day ledger read (`runs.theme_refs_between`). Angles rotate per
+  theme — "how they make money" (the grid: "<segment> · 88% of revenue", an older fiscal year tagged on its tile;
+  since phase 4 every member's breakdown is read, largest first, the tiles are the members with a fact by market value
+  from the same memoised batch "who's biggest" reads, only those 12 carry their fact, and a member whose newest segment
+  stack includes intersegment sales walks back to its newest net year within four years — read through
+  `RevenueBreakdownService.get_segment_years`, the card's own two feeds, in-memory tier only — always tagged),
+  "who's biggest" (a `ranked` list by a dated market value from ONE licensed market-capitalization batch call, never
+  a price), "growth + profit" (a `figures` table: each member's latest fiscal year from ONE licensed annual
+  income-statement call — revenue growth over the year before and net income per $100 of revenue, green / red by sign;
+  a member whose figures could be wrong is left out), the "insider scorecard" (a `ledger` table: each member's Form 4
+  code-P purchases and code-S sales of its stock filed in the 90 days before the run, in dollars as filed, from the
+  per-issuer insider-trading search read (`get_insider_trading`), bounded at three pages; any Form 4/A of the issuer in the window, or an
+  unreadable read, leaves the company out — never a zero; never called "open-market"; only US common listings are
+  read, a read holding no row of its issuer is not counted as "checked", and a joint filing's copies under each
+  reporting owner count once) and "Congress" (a `tally`:
+  members with purchases disclosed by two or more distinct members of Congress in the month, from the congress_count
+  series' own memoised walk, identity-free count and listing gate) — each needing four companies with data, else the
+  next (up to five angle evaluations a call, each under its own share of the series' 120 s so a slow source loses only
+  its angle's turn). The insider and Congress angles are class-C filings: they run only while class C is
+  on, and create_posts checks it again. A member whose name the table cannot draw is left out before any read. A theme row's
+  NULL `tickers_as_of` means the app's live list and counts as current (owner decision 2026-11-20, "Trust the app's
+  lists": `company_news_adapter._theme_as_of` dates the record by the run day, flagged so nothing prints it; the row's
+  `updated_at` is not read); a PRESENT `tickers_as_of` keeps the 70-day rule (`THEME_STALE_DAYS`), an unreadable one
+  is `theme_stale`. The tile and row
+  bounds are measured on the server with the worker's own font (`text_metrics`: Pillow's hinted advances at the 22 px
+  floor plus every pair the face's GPOS `kern` widens — an upper bound of both layout engines, within a hair of them;
+  2026-11-20, after a flat per-glyph allowance dropped KLA's share). Segment names are drawn in ONE case
+  (`news_templates.segment_title_case`: a word the feed wrote all in lower case is capitalised) and a long filed name
+  by its short label (`THEME_SEGMENT_SHORT_LABELS`, each key a name a theme member can carry: ≤ 40 characters). The
+  market-value picture, the three
+  tables (their video cover is the same table's first six rows) and the theme marks (ticker chips, icon, list cover)
+  need a worker that declares `theme_angles`; an older one gets the first angle without them.
 - The "pair" and "grid" layouts are drawn only by a worker that declares the `layouts_2b` capability; without
-  it the server drops company_stakes and theme_explainer from that day's chain. Release order: migration 190
+  it the server drops theme_explainer (and, before news-v23, company_stakes) from that day's chain. Release order: migration 190
   → web → worker (the committed web predates worker capabilities).
 
 ### 12.15 Batch 1 (2026-10-16/19): Company Weekly made safe, measured, quieter
@@ -6837,10 +6932,13 @@ behaviour byte for byte, proven by tests that pin every Telegram message and Upl
   refused. Earnings compared a GAAP revenue actual with an ADJUSTED-revenue consensus for issuers like GE
   Aerospace (the post read +9.6% for a like-for-like +3.2%). FMP never says which basis a revenue estimate is
   on, and a gate built on the issuer's earlier quarters was shown to miss GE's and Travelers' 2025 reports, so
-  since news-v21 earnings posts print EPS against the estimate only; the revenue pair stays a required
-  data-quality and quarter check that is never printed. The same doubt can touch EPS when the feed's actual is
-  the GAAP figure and the consensus is not (a one-off gain): the template's caveat names the EPS basis, and the
-  owner's review of a very large "surprise" is the gate. The Form 4 roundup captions became format-neutral
+  since news-v21 earnings posts printed EPS against the estimate only; the revenue pair stayed a required
+  data-quality and quarter check that was never printed. (news-v23, owner 2026-11-19, "Revenue always": the revenue
+  pair is printed again in the earnings table, and the owner accepts this GE-type risk — §12.14.) The same doubt can touch EPS when the feed's actual is
+  the GAAP figure and the consensus is not (a one-off gain): the template's caveat says an estimate's basis can
+  differ (since the review of 2026-11-20 it covers every figure, revenue included, in every caption and in every
+  earnings video's narration — never the EPS alone, never a hook claiming the analysts' basis), and the owner's
+  review of a very large "surprise" is the gate. The Form 4 roundup captions became format-neutral
   ("The purchases: …"; news-v20) because they also ride text posts.
 
 ### 12.18 Wiser weekly engine: the Friday Feature Deep Dive (2026-10-22)
@@ -6945,6 +7043,633 @@ per-row check; the service rule needs no writes); reusing `sec_concept_service` 
 forms pinned to the buyback check); `chat_numeric_grounding` as a gate (log-only, exempts years);
 a day claim for the build (Regenerate must rebuild the same day — the piece lease is the guard);
 the marketing compliance scan as a whole-field gate.
+
+### 12.19 The spotlight lane: a second daily run (2026-11-15, migration 210)
+
+Owner decision 2026-11-15: "Add a second daily post" on "Tue, Thu, Sat", "Full set: video + picture", in its own
+morning slot. Built 2026-11-15 and not deployed: every switch is off, and migration 210 must be applied before the
+web that carries it deploys (that web filters every run read on `lane`). Plan
+`~/.claude/plans/i-need-to-improve-wondrous-boot.md`.
+
+- **One run per (day, lane).** `marketing_runs.lane` is `main` or `spotlight` (NOT NULL DEFAULT `main`), and the claim
+  key is UNIQUE (`run_date`, `lane`); 210 drops the old UNIQUE (`run_date`) by its definition. The main lane's INSERT
+  never sends the column, so its rows, post keys and storage paths are byte for byte what they were. A spotlight run's
+  posts are keyed `<run_date>:spotlight:<platform>:<format>` (the first ten characters stay the date for every reader)
+  and its assets live under `<run_date>/spotlight/`; `register_asset` and `create_posts` refuse to adopt another
+  run's row on the same path or key. `marketing_scripts.lane` copies the run's lane in one place
+  (`run_service.insert_script`).
+- **Its own claim route**, `POST /api/v1/internal/marketing/lanes/spotlight/claim`, with the same body and answer as
+  `POST /api/v1/internal/marketing/runs/claim`. Not a field on that route: its request model ignores unknown fields,
+  so an older web would have claimed MAIN. It answers `not_scheduled` before any read or write unless
+  `selection.is_spotlight_day` holds: `MARKETING_SPOTLIGHT_ENABLED` on, the weekday listed in
+  `MARKETING_SPOTLIGHT_WEEKDAYS` (unreadable → empty → closed, never the default), `MARKETING_SPOTLIGHT_HOUR_ET` +
+  `MARKETING_MAX_RUN_ATTEMPTS` ≤ `MARKETING_RUN_HOUR_ET` (else an ERROR and the lane closed), a news class in
+  `MARKETING_CONTENT_CLASSES`, and (fix round C0, 2026-11-16) a spotlight series left in that day's chain once the
+  main lane's series are dropped. One predicate (`selection.spotlight_day_problem`) serves the claim gate, the kick
+  and the run-health checks / digest, so a day that could only skip is no spotlight day anywhere: no row, no alert.
+- **The worker** (`marketing/main.py`) tries, each tick: yesterday's resumes (each before its own lane's hour), then
+  today's main, then today's spotlight, with a fresh nonce per claim, and runs ONE pipeline per tick. A 404 or 405
+  from an older web skips the lane with a WARNING. `MARKETING_SPOTLIGHT_HOUR_ET` (default 10) is set on both services
+  (an AST test pins the two defaults equal); `MARKETING_RUN_LANE` (worker only) restricts a manual run to one lane.
+- **What it posts** (`selection.spotlight_plan_for`): the insider LIST (3-5 companies), the theme (a quiet insider
+  window's fallback), the 13F list (in season) and the Money Map — never the lesson (as built on 2026-11-15 it posted
+  single-company series only; the restyle and the owner decisions of 2026-11-20 made its insider and 13F posts lists,
+  §12.22-12.23). Never the weekly ceo_buys / insider_buys roundups either: their ledger keys roll with the date, so a
+  spotlight day would repost Monday's. In 13F season, on the week's last spotlight day: 13F spotlight → insider list →
+  theme → Money Map → SKIP; otherwise insider list → theme → (13F spotlight in season) → Money Map → SKIP. Both lanes are gated by
+  `MARKETING_NEWS_SERIES` ∩ the shipped series, at selection and again at `create_posts`, and a spotlight post also
+  by `MARKETING_SPOTLIGHT_ENABLED`. The chain a run walks is `selection.spotlight_chain`: the spotlight never takes a
+  series the MAIN lane's enabled chain holds that day (C0, 2026-11-16 — a spotlight Money Map sent the main lane's
+  same-day Money Map to a second weekly lesson, against "One Learn lesson a week"). Money Map, the one series both
+  calendars name, stays the spotlight's only on a day the main chain does not reach it (Saturday's lesson-only day, a
+  main rest day). With the spotlight pair and `theme_explainer` not listed, the lane therefore runs on Saturdays only;
+  with `theme_explainer` listed a Tuesday / Thursday spotlight can post the theme (the main lane holds it only on
+  Monday and Wednesday).
+- **A day where nothing qualified is visible, never the lesson.** The SKIP terminal writes a `rejected` script with
+  reason `nothing_qualified` (210's CHECK); the run closes `skipped`, and the script kick mirrors its selection trail
+  onto the run (`series` = skip). The weekly digest lists the day with its trail. The run-health texts stay quiet on
+  a plain quiet day, and alert, naming the trail, when a series' data source timed out, was unavailable, errored or
+  ran out of time (OBS-1), or when the trail never reached the run.
+- **Cross-lane exclusion** (`MarketingScriptService._cross_lane`): the other lane's same-day picks; a LEAD company
+  drawn in the last 2 ET days, compared by its issuer root and its display name (`script_service.lead_keys`: GOOGL and
+  GOOG are one company — C0) — a spotlight run checks both lanes, a main run only spotlight rows, so with no spotlight
+  row the main day is unchanged; and a series the other lane used that day (the guard for anything the calendars
+  cannot see). A main run reads through run_date + 1, so yesterday's main run resumed today sees today's spotlight
+  pick. An exclusion is never a template refusal, so it never reaches the Money Map or stake refusal memos. A
+  several-company post (an earnings day, a Congress month — one record per call) drops only its excluded LEAD and posts
+  the rest (`script_service.narrow_other_lane_lead`, review 2026-11-20); below two companies it is excluded whole.
+- **Reporting.** One nightly check and one final word judge both lanes in ONE message, main first, at the latest
+  enabled lane's hour (the main lane's while the hour rule holds). A spotlight text names its run "<day> · spotlight";
+  the main lane's texts are unchanged. A spotlight run whose lane has closed since (its date no longer a spotlight
+  day) is never promised a retry or blamed on the cron: its line names the closed lane and the switches (C0). A nightly check that may have run for a spotlight-only weekday never proves a
+  main posting day: the main run's own row decides. The digest lists each lane of a day; the review bot and the
+  publish feed name a spotlight run "<date> · spotlight"; the metrics scans read 5 pages (both lanes' posts).
+- **Rollback.** Switches off first. Never roll the web back past the lane build while a spotlight row is dated today
+  or yesterday ET: the old web reads a day's run by `run_date` alone and can hand the spotlight row to a main claim.
+  Even after that wait, the old web misreports the first two Monday digests whose window holds a spotlight row (its
+  runs read stops at one row per day, so the week's last days drop out, and its token read raises on a day with two
+  scripts). An older WORKER never calls the spotlight claim route, so the lane goes off before the worker rolls back,
+  or every spotlight day reads "the worker never claimed it". The steps are in 210's header.
+
+Rejected: a `lane` field on the existing claim route (an older web ignores it and claims MAIN); a separate
+spotlight series switch (a second kill switch to forget in an emergency); the weekly roundups in the spotlight chain;
+a `rest_day` row for a day where nothing qualified (it would read as no posting day); art objects under the run's
+path (art is content-addressed with no asset row, like the logos — §12.3, §12.21).
+
+### 12.20 The spotlight series, the `feature` picture and first-line prefixes (2026-11-15, news-v22)
+
+*Superseded in part by §12.23 (owner decisions 2026-11-20): the insider spotlight is a LIST of 3-5 issuers (the five largest; 3-8 until the final review of 2026-11-26), drawn as a
+`rows` list; no series draws the `feature` picture.*
+
+Owner decisions 2026-11-15: "Captions + picture" (the filing's cost per share) and "Loosen caption hype words" (scope
+"Spotlights + Form 4 + earnings"). Built 2026-11-15/16 with the lane (§12.19), not deployed; both series ship in
+code but run only once listed in `MARKETING_NEWS_SERIES`, and only on the spotlight lane.
+
+- **Two class-C series, deterministic templates** (`app/services/marketing/news_templates.py`, TEMPLATE_VERSION
+  news-v22; records in `app/services/marketing/company_news_rules.py`, collectors in the one FMP adapter,
+  `app/services/marketing/company_news_adapter.py`):
+  - `insider_spotlight` — ONE issuer's Form 4 purchases: the largest qualifying CEO, CFO or director, and up to four
+    more insiders of the same issuer (a lower bound, "at least"). Every Form 4 gate of the weekly roundups applies
+    (company-level 4/A refusal, sitting-role allow-list, co-officers, Congress drop, members-elect window, price
+    plausibility). Its window runs from the day after the last window an earlier insider spotlight CHECKED (C0,
+    2026-11-16: recorded on that series' selection-trail entry whenever its collector checked one — chosen, refused or
+    nothing qualified — and read back by `run_service.last_checked_window` over 14 days; none: the run date − 7, and
+    never earlier) to the day before the newest filing the market-wide walk holds (`R.spotlight_window`). So a
+    13F-led day, which checks no Form 4 window, loses no filing. No new day to check is a quiet skip
+    (`insider_spotlight_no_new_window`) while the feed is current (its newest filing at most two federal business days
+    old, `R.spotlight_feed_current`), else `insider_feed_behind`, an infrastructure outcome. The amendment, role and
+    co-officer look-back (`amend_since`) is kept separate from the purchase window (whose purchases a person's row
+    must hold whole) and is never shorter than the roundups' week. An issuer is spotlighted at most once in 14 days,
+    by its root symbol (share-class twins) and its display name. Ledger key
+    `news:insider_spotlight:<SYM>:<window_start>`.
+  - `thirteen_f_spotlight` — ONE filer's latest 13F: two to eight of its holdings (`THIRTEEN_F_SPOTLIGHT_MAX_MOVES`),
+    each newly reported, closed out, or more / fewer shares by at least 25% with no split in the quarter
+    (`split_restated` drops that holding only), the largest dollar change first (`R.thirteen_f_spotlight_order`). The
+    adapter runs the spotlight's own gates (vouched, `split_restated`, the 25% floor: `_spotlight_gated`) BEFORE the
+    walker's dollar-only cut (`_cut`), folds share-class twins by `R.issuer_root` (`share_class_overlap`) and records
+    `eligible_moves` and `filing_moves` (None when a count was withheld or may leave a change out, `ctx.counts_partial`).
+    Berkshire (the lead filer) stays on the main lane. One 13F post per filer per quarter across BOTH lanes; the ledger
+    key names the LEAD (largest) holding.
+  - **The ONE 13F list** (news-v23, owner 2026-11-19: "the range from 2 to 6 are okay"; the approved Berkshire and
+    Pershing list mocks). BOTH 13F series — the main lane's roundup
+    and the spotlight — draw one `rows` design: the kicker "13F FILING", the title "<FILER>'S" white + "LATEST 13F"
+    gold, the filer's plate (logo disc in a gold ring + ticker pill) top-right only when the filer is listed (the
+    cross-lane lead stays the first row, never the plate: `script_service.lead_company`), the grey
+    column label "Change in shares", and 2-6 rows ranked by the largest dollar change (unknown values last): the
+    holding's logo disc, its ticker chip GREEN (increase / new) or RED (reduced / closed out), its name, the grey
+    status ("Increased to <N> shares" / "Reduced to <N> shares" / "New holding" / "Closed out") and the signed change
+    right-aligned in the chip's colour (U+2212; "+5.6M", "−14.6M"). No counts subtitle, no fact rows, no quarter text
+    on the picture. More than six changes: "+N more changes in the caption" under the rows. **No single-holding 13F
+    post anywhere**: both records hold two to eight moves, the adapter answers `too_few_holdings` after every gate, the
+    composer refuses a forged one; the single-holding `feature` post (its direction-first headlines, fact rows and
+    art) was removed. "Closed out" replaces "no longer reported" / "None on its latest 13F" / "lists no … shares" /
+    "None listed"; "sold", "exited", "dumped" stay banned — the words compare the HOLDING at two quarter ends, never
+    a trade. The video cover IS the list (`opening_card.list`: the first three rows and "+N more …" — three since the
+    review of 2026-11-20: the approved mock's four rows run into the burned-caption band, and four rows above it were
+    squeezed; four at the mock's size with the hook's captions left out is an open owner decision), kept above the
+    burned-caption band; neither 13F series has a data card or art. Both lanes' records hold the filing's largest
+    changes by dollar size (the roundup's per-kind reserve was removed the same day). "+N more" is a promise kept per caption field
+    (`_Parts.field_paragraphs` / `field_required` / `field_fallbacks`): a caption that can ride the picture lists the
+    rows it leaves out, one that can ride the video the rows the cover leaves out (an extra video post's caption is
+    re-checked, `cover_caption`); Facebook, LinkedIn, Instagram and the YouTube description list every row when they
+    fit, else the cover's rest; Threads the cover's rest, else the picture's; X and Bluesky list the picture's rest
+    only when they ride the picture — the composition is told which platforms will (`picture_outlets`, frozen into the
+    output, bounding the freeze); a text X / Bluesky post lists the rows from the top, and a pictured one that cannot
+    keep the promise is written as a text post and frozen as text (`text_outlets`, `image_fallback` reason
+    `caption_list_long`) — never dropped (review 2026-11-20). Caption rows are share counts only. Narration names the filer entity and the
+    companies, never a person. A worker without `look_v23` gets today's plain cover and a picture cut to five rows
+    without its "+N more" line (`script_service._without_list_cover`, `_pre_v23_section`) — subsets the server allows.
+    **Buy-out check** (both series, `company_news_adapter._closed_out_checked`): a closed-out holding stays only when
+    its profile says `isActivelyTrading` is exactly True and FMP's delisted-companies list (paged back to the day
+    after the previous quarter's end, memoized 6 h, both series sharing it) does not list it from that day on — else
+    it is dropped (`closed_out_not_trading` / `closed_out_delisted`); a list that cannot vouch drops every closed-out
+    row (`closed_out_unchecked`), each with a WARNING naming the filer and the symbol. TEMPLATE_VERSION stays news-v23.
+    Measured (basic engine): real lists at picture step 0-3, cover 0-4; the 60-character W-only worst cases fit only
+    at the floor step.
+  - **The filing's cost per share** (`InsiderPurchase.cost_per_share_min_usd` / `_max_usd`: the Form 4 lines' own
+    prices, never the profile price) appears ONLY in a caption paragraph and on the picture — today the insider list's
+    grey row `detail` line, "… a share, as filed" (§12.23; the `feature` picture's fact rows that first carried it are
+    drawn by no series since 2026-11-20), always
+    "as filed", never the word "price", and printed with every decimal place the filing carries (two at least,
+    `COST_MAX_PLACES` = 4 at most; a cost filed more finely refuses that candidate — review of 2026-11-16: rounding
+    to cents printed figures the filing does not contain). Never in the hook, narration, cards, the cover, a data
+    card, the alt text or the YouTube title, nor on the picture outside its facts: `_validate_cost_placement` checks
+    every one of those strings, as filed and rounded to cents. Neither spotlight series has a data-card slot.
+  - The caption's first line carries the ticker in brackets ("(SYM)"); a symbol that trips a banned word or verb
+    refuses that candidate, and cashtags stay refused. Names appear only in caption body text, from the filing,
+    through the strict renderer.
+  - The insider spotlight's "How X makes money" line uses the theme's segment rules, only for the audited Money Map
+    seed and Trillion Club companies (any other company: no line, never a refusal).
+  - Build budgets: `insider_spotlight` 60 s, `thirteen_f_spotlight` 120 s, so a 13F-lead day (13F spotlight →
+    insider spotlight → Money Map) fits the 240 s template build.
+- **The `feature` picture** (`app/services/marketing/template_onscreen.py` walker, `marketing/news_layouts.py` placer,
+  geometry `cards.FEATURE_BAND_*`): a 952 × 440 px band across the card's top, then the name and chip, the figure,
+  its label, the headline and one to four fact rows. Without art the band is a flat palette panel with the kicker
+  pill top-left and the logo plate centred; with the run's per-post art (§12.21) the art fills the band, the plate
+  moves to its bottom-left and the "AI illustration" label sits at its bottom-right. The text under the band is laid
+  out the same either way, so a picture that fits without art fits with it. 440 px is the tallest band at which every composed worst case still fits
+  before the floor sizes (one step under the ceiling) and the worked examples keep their big-number size. **Redrawn by
+  the restyle (news-v23, §12.22; `news_layouts._place_feature`):** the art band now spans the canvas' top
+  (`news_layouts.FEATURE_BAND_H` 432 px) with the brand row over its navy scrim, the "AI illustration" pill at its
+  bottom-right and the logo disc in a solid gold ring cut into its bottom edge; WITHOUT art there is no band and no
+  panel — the disc, the name and its chip, the headline and the card form ONE block, balanced between the brand row
+  and the footer (visual-fidelity round 2, 2026-11-20: resting on the footer left ~260 px of plain page under the
+  brand row). Since the owner's 2026-11-20 decisions NO series draws this layout: the insider spotlight became the
+  insider LIST (a `rows` picture, §12.23) and the 13F spotlight is the ONE 13F list, so
+  `script_service.FEATURE_LAYOUT_SERIES` (derived from the templates' own specs) is empty and `layout_feature` gates
+  no series today. The layout, the capability and its guards stay for a future series that names it: a worker must
+  declare `layout_feature` to draw it — without it the web would drop such a series from the chain (WARNING), freeze
+  its picture as text, and refuse a feature picture at registration (422). A feature picture is never a
+  video data card (`DATA_CARD_LAYOUTS`). `CARD_RENDER_VERSION` cards/v5 and `RENDER_STAGE_VERSION` render/v6 were
+  bumped once for this release; every existing layout's bytes are pinned unchanged.
+- **First-line prefixes** (`FIRST_LINE_PREFIXES`, closed and code-owned): the insider spotlight "🚨 BREAKING:" while
+  fresh, else "🚨 Insider purchase alert:"; the weekly Form 4 roundups the alert only; earnings "🚨 BREAKING:" only while
+  fresh; the 13F spotlight "📊 13F filing:"; every other series none. Fresh = a Form 4 filed at most one federal
+  business day before the run with the lead's trades not late, or an earnings report at most one EXCHANGE trading day
+  before it (C0: a day counts unless both the exchange and the federal government close — never looser than the
+  federal count, so Veterans Day ages a report). Only at position 0 of a caption body or a
+  composed caption — never the YouTube title, the picture, the alt text, the cover or the video. The validator's
+  exemption is positional (an emoji or "BREAKING" anywhere else still fails). `MARKETING_FIRST_LINE_PREFIX` (False)
+  is read once per template build and frozen into `output.first_line_prefix_on`; `revalidate` re-composes from the
+  frozen value. Off: every caption is byte for byte the unprefixed composition.
+- `company_news_adapter.company_facts(symbol)` returns a company's sector and industry (name-free) for the per-post
+  art's brief (§12.21), reachable through `script_service._news_source_fn` with no new adapter import.
+
+Rejected: a cost rounded to cents under "as filed"; a data card for either spotlight series (the cost would reach a
+video); the weekly roundups on the spotlight lane (§12.19); a BREAKING prefix on a weekly roundup or a 13F filing;
+(2026-11-19) leading the 13F spotlight with the share count at the quarter's end, a % change, a trade verb for the
+change, and moving the `feature` band (shared with the insider spotlight and the art's crop) to keep the 13F worked
+example at step 6; (2026-11-19, the list) "sold" / "sold out" for a
+holding no longer listed, "its 5 largest changes" when more were eligible, a count of the rows read as the filing's,
+green / red figures, art for a list, a new layout or capability for it (`rows` already draws its row); (2026-11-19,
+the list's review) the roundup's kind-balanced cut for the spotlight, a count after "5 of its changes:" on the
+picture or on the cover (a worker-side no-break glue was rejected too: it would change the main lane's rendered rows
+and needs a render-version bump), "None on its latest 13F" on a row.
+
+### 12.21 Per-post art: Google draws, Claude checks (2026-11-15/16)
+
+*Narrowed by §12.23 (owner decisions 2026-11-20, "Drop it from insider posts (Recommended) :: Keep the code but use it
+nowhere for now; the switch stays off"): NO post carries art — since the final review of 2026-11-26 not even the Money
+Map's video cover. The code below is kept, reachable from no series; `MARKETING_ART_ENABLED` stays off.*
+
+Owner decisions 2026-11-15: "Google draws, Claude checks" (a fresh picture for each post: Claude, on the $200/month
+credit, writes the brief and inspects the result; Gemini draws it), "Picture and video cover", and for the main lane
+"Video cover now, pictures later" — with Money Moves untouched ("we don't change anything at the money moves").
+Built 2026-11-16 with the lane (§12.19) and the spotlight series (§12.20), not deployed, off until
+`MARKETING_ART_ENABLED`. Art is optional everywhere: any failure means no art, the day posts with today's drawing,
+and art never refuses, skips or fails a day. Claude cannot generate images, which is why the drawing is Gemini's.
+
+- **Who gets art** (`post_art.art_subject_for`): NOBODY today. Owner decision 2026-11-20, asked "Drop it from insider
+  posts (Recommended) :: Keep the code but use it nowhere for now; the switch stays off" against "Put it on Money Map
+  covers": `ART_SERIES` is empty and every shipped series is in `NEVER_ART_SERIES` (the Money Map included since the
+  final review of 2026-11-26 — the build had kept its video cover), so even with `MARKETING_ART_ENABLED` on a post
+  records `not_a_company_series` before any spend, and `run_service` refuses an art declaration on any picture or
+  video. The kept code's rules, for the day a series is put back: single-company records only; a `PICTURE_SERIES`
+  member (none — the `feature` picture is drawn by no series) on the picture AND the video cover, a `COVER_ONLY_SERIES`
+  member (the Money Map was the last) on the video cover only; never the 13F lists, the Congress Count, earnings, the
+  stakes list, the theme, a Form 4 post (3-5 companies), a lesson. Its tests run the pipeline on the Money Map, put
+  back into the art set for the test only (the `keep_art_on_money_map` fixture in `tests/test_marketing_post_art.py`). The day must
+  also carry the surface (an image post for the picture, a video for the cover), else `text_only_day`; the record
+  then keeps only the surfaces the day carries (`script_service._on_the_day`), so a spotlight day frozen without a
+  picture post records the cover alone and its review line never reads "(not on the picture)".
+- **The pipeline** (`app/services/marketing/post_art.py`; `make_post_art` never raises, cancellation aside). It runs
+  inside the template build (`script_service._attach_art`) after the record is chosen, composed, re-checked and
+  frozen, and before the script INSERT. Every failure is a record carrying one of a closed set of reasons
+  (`post_art.ART_REASONS`). A record made for a (run, ledger ref) is memoised in the process, failures included, so
+  a rebuild never pays twice, and a script row that already exists (a concurrent build's) is adopted with nothing
+  spent. The steps:
+  1. Brief. Claude reads name-free facts only — the display name, sector and industry
+     (`company_news_adapter.company_facts`, fetched inside the art budget, at most 8 s, best effort) and the record's
+     top revenue line; never a figure, a person, a ticker, the filing or the headline — and answers one subject
+     sentence plus one of six verdict-neutral treatments. A subject that fails Money Moves' own subject rules, names
+     the company or a ticker (two-letter names such as "HP" and "3M" included), or meets the marketing deny-list
+     (charts and data, money, politics, verdict or alarm imagery) gets one more brief, then `brief_unusable`.
+  2. Draw. `GeminiClient.generate_image` (`MARKETING_ART_IMAGE_MODEL`, 16:9, 2K, its own retries outside the
+     chat/report quota breaker) from Money Moves' prompt for that subject, byte for byte
+     (`money_moves_art_style.prompt_for`, palette "blueprints"), plus a code-owned marketing addendum: no chart,
+     arrow, ticker or data display, no money, no flag or political symbol, nothing broken, burning, falling or rising,
+     no trophy or rocket — a calm, neutral portrait of the object.
+  3. Normalise, off the event loop: a header-first decode with a pixel-bomb guard, fitted to 1376 × 774 and saved as
+     a JPEG of at most 1.9 MB, then decoded back in full. 1376 px is under Claude's high-resolution vision bound, so
+     the check sees exactly the pixels that are published.
+  4. Check. Claude inspects those exact bytes (vision) for text or numbers, a logo or brand, people, faces or hands,
+     a chart, money or a flag, alarming or judgemental imagery, and whether the subject is recognisable.
+  5. One redraw on a content failure, its prompt adding only code-owned words for the failed flags (never the
+     checker's notes), checked again; a second failure is `check_failed` and nothing is stored.
+  6. Store only a picture that passed (`run_service.store_art`, §12.3).
+- **No Gemini fallback for the brief or the check, by decision.** A Gemini check would be Google grading Google's own
+  picture, and the art is optional, so the honest fallback is no art. Claude is reached only through
+  `llm_provider.ClaudeOnly` under its `BREAKER_ACCOUNT` policy: an open shared Claude breaker means no call
+  (`claude_unavailable`), and only used-up credits or an auth failure open it — a 429, an overload or a timeout costs
+  that run's art and never pushes the marketing judge and the Learn weekly roles to Gemini. Each call runs at effort
+  low with `max_tokens` = `CAYDEX_CLAUDE_MAX_TOKENS` (Opus 5.5's thinking counts against it) and a client deadline
+  inside its time slice, so it ends in the client's typed timeout rather than being cancelled from outside, where
+  nothing would record that it may have billed. `anthropic_client` refuses an image it can tell the API would refuse
+  before any I/O. The art is not a provider role: the marketing script lease is unchanged.
+- **Time.** Each step has a minimum to start and a cap, in seconds — facts 1 / 8, brief 10 / 45, image 25 / 100,
+  normalise 5 / 20, check 10 / 45, store 5 / 15 — and starts only while its minimum plus the minimums of every step
+  after it still fit; the happy path's minimums sum to 55 s (`script_service.ART_MIN_START_SECONDS`). The build and
+  its art share ONE ceiling, `script_service.TEMPLATE_DAY_BUDGET_SECONDS` = 280 s from the build's start: the art
+  gets min(`MARKETING_ART_BUDGET_SECONDS` — 180, 60 to 240 —, what is left), is not started with less than 55 s
+  (`timeout`, nothing spent), and its two ledger reads (the adopt-first re-read and the month's spend) are cut at the
+  art's latest start and the time measured again after them. The reason is the worker's render: it may start only
+  until 1800 − 840 = 960 s into its tick, and before it come the build, the two kicks that collect it (2 × 20 s) and
+  the voice stage at its worst (630 s) — 280 + 40 + 630 = 950 ≤ 960, pinned by a test. Two budgets on top of each
+  other (240 + 240 + 40 + 630 = 1150) would push a slow day's render to the next hourly tick, an attempt spent on
+  art; instead a build that used its whole 240 s makes no art. The worker's script poll still outlasts the slowest
+  build: 240 + 240 + 40 < 900 s, pinned too. On the worker the art download adds 8 s to the render's worst case
+  (799.25 s against the 14-minute margin, §12.8).
+- **Spend and the monthly cap.** The record's usage counts the images that answered, the image calls whose billing is
+  unknown (one that returned no picture counts its two attempts), every Claude token by model and kind, and the
+  Claude calls whose billing is unknown (a timeout or a dropped connection, flagged by the client; each priced at a
+  worst call of 6,000 input tokens plus `CAYDEX_CLAUDE_MAX_TOKENS` output — $0.344 on Opus 5.5 at $4 / $20 per 1M,
+  the digest's own price table). An image costs `MARKETING_ART_IMAGE_MICROS` (134,000 = $0.134; a 2K image costs what
+  a 1K one does and is downscaled). Before any spend, the run's ET calendar month of art spend (both lanes, each
+  record at the larger of its stored estimate and today's re-pricing) plus this run's worst case — 2 draws × 2
+  attempts × $0.134 + 4 Claude calls × $0.344 = $1.912 at the defaults — must fit `MARKETING_ART_MONTHLY_BUDGET_USD`
+  ($30, 0 to 500; 0 = no art), else `budget_cap`; an unreadable month, or a record whose spend cannot be priced, is
+  `budget_unreadable`, so no art until the month ends; an unpriced Claude model is `claude_unpriced`, one ERROR per
+  value. A typical record (one draw, one brief, one check) costs about $0.15–0.45; the plan's estimate, at about 10
+  company posts a week, is $6–10 a month on the Google bill and $2–4 a month of the Claude credit. The weekly digest
+  shows it as a usage part (§12.11).
+- **Why no migration.** The record — subject, treatment, checks, models, usage and the stored object's URL, sha256,
+  size and pixels — rides in `marketing_scripts.output` under `art`; template rows keep `tokens_used` 0 and
+  `claude_usage` NULL, so the Gemini and Claude cost parts are unchanged. The object has no asset row (the logos'
+  precedent, §12.3). What the worker drew rides in the asset rows' metadata (`art_sha256` on the post image,
+  `opening_art_sha256` on the video), a note in every post's metadata (`art`), and the worker's capability is a
+  claim string. The spend read selects each run's date, lane and output and sums in Python.
+- **The blueprints palette, always.** Cold steel-blue and pale cyan on deep slate, with bone white: it sits on
+  Caydex's navy cards. Money Moves' other palettes read as verdicts on a named company (valueTraps' oxblood reads as
+  failure) or need two rival objects (battles). Six treatments are allowed (`post_art.MARKETING_TREATMENTS`, a subset
+  of Money Moves'); the post-mortem, "quietly damning", taken-apart, empty-room and evidence-print ones are left out.
+  Money Moves itself is untouched: `money_moves_art_style` is imported read-only, `post_art` defines none of its
+  names (a test reads them from the Money Moves style test's AST) and never imports `learn_weekly/cover_art.py`, and
+  the Money Moves art tests are unmodified.
+- **The read-back and the worker.** While `MARKETING_ART_ENABLED` is on — read at call time, so it is a real kill
+  switch even after a build made art — the script read-back carries `art`: the object's URL, sha256, size and pixels,
+  never the models, subject, checks or usage. The worker declares `post_art` (last in its capabilities, never
+  required; a holder without it gets `no_capability`, a WARNING naming the worker). `marketing/art.py` fetches only
+  the bucket's art object under its run's own bucket origin, requires the full sha256 and the size to match, and
+  decodes the header first (a JPEG, one frame, the entry's own size, at most 2752 × 1548 pixels); anything else is no
+  art (ERROR on a sha mismatch). It draws the art in the `feature` picture's band (§12.20) and on the video's opening
+  card: a 920 × 518 band at the top of the text zone, from y 160 (at y 240, the plan's sketch, no measured cover
+  fit; from y 160, 25 of 29 do, every real composed sample among them), one logo plate centred on its bottom edge,
+  and the kicker, chip, figure and headline under it at smaller sizes of their own. The band's top 80 px fall in the
+  platforms' 3:4 grid crop; the plate, label and text sit below it. A cover or picture whose art cannot be drawn (two
+  companies, a missing glyph, no fit, an unreadable file, too many strings) keeps today's bytes, with a WARNING.
+  The render reuse keys carry the art's sha256.
+- **The server checks what was drawn.** The worker declares the art's sha256 on the post image (`art_sha256`) and on
+  the video (`opening_art_sha256`), with the label among the drawn strings. The server refuses (422) a sha that is
+  not the accepted record's, the label without the art or the art without the label, a surface the record does not
+  allow (`art_surface_not_allowed`: a main-lane picture, or a picture on a day with no picture post — the record
+  keeps only the surfaces the day's frozen formats can show), and any art on a lesson. `create_posts` reads which
+  surfaces the verified media drew, stamps the run's art note on every post and sets `made_with_ai`.
+- **Disclosure.** Drawn art always carries a burned "AI illustration" label (a 24 px pill; picture and video cover).
+  `made_with_ai` is True on a template image post whose picture drew the art, reversing the 2026-10-09 rule
+  ("False on template images") for such a picture only (owner decision 2026-11-15); text posts stay False and video
+  stays True. No caption sentence. Identity rule: the models are named only in the server-side record and the logs;
+  the label, the read-back and the Telegram line name none.
+- **Review and preview.** Both bundle decisions (VIDEO and POSTS) carry one line: "Art: <subject> (<treatment>) ·
+  check passed · on: picture, video cover" (with the redraw and its first flags when there was one, and a surface the
+  worker skipped named), or "Art: none today — <the reason in owner words>". The subject is model text: scrubbed,
+  folded onto one line, capped at 160 characters, and shown only in Telegram. A day without art reads exactly as
+  before; the per-post review flow (bundles off) carries no art line. `scripts/marketing_news_preview.py --art` makes
+  the art for preview records — it spends money only with that flag (about $0.15–0.45 a record) and writes only under
+  its output folder — and the worker's `marketing/preview.py --art-file` draws a given picture on a cover and a
+  feature picture.
+- **Accepted residuals.** The deny-list over-blocks some honest subjects (a fire truck, a dental crown, rising
+  dough): one more brief, then no art. A partial multi-word company name ("Berkshire") is not banned; the brief's
+  rule, the check's logo-or-brand flag and the human review of every class C/F post cover it. An image call that
+  succeeded after an internal transient retry reports one image (the run's reserve covers the other). A build whose
+  INSERT lost to a concurrent row after making art logs a WARNING, and that spend is in no row, so the cap
+  under-counts it.
+
+Rejected: a Gemini fallback for the brief or the check (Google grading Google's picture; art is optional); art on
+the main lane's pictures now ("pictures later"); art on a multi-company post; a caption sentence for the AI
+disclosure; a migration or an asset row per picture; separate time budgets for the build and the art (they would
+defer the render); the opening-card band at y 240; any palette but blueprints; editing Money Moves' style module.
+
+### 12.22 The restyle: one look, list posts, the weekly theme (news-v23, 2026-11-19/20)
+
+Owner, 2026-11-19, on the approved mocks: "that's perfect!!! i love these style." and "good. now, build all. i need
+exactly these styles, colors, words". Built 2026-11-19/20 on the same unmerged branch as §12.19-§12.21, not deployed,
+in ONE set of version bumps: TEMPLATE_VERSION news-v23, `CARD_RENDER_VERSION` cards/v6, `RENDER_STAGE_VERSION`
+render/v7 (production is on news-v21, cards/v4, render/v5). No migration of its own and no new switch. The binding spec
+and the approved mocks (each with the script that drew it) live outside the repo, in the plans folder's
+RESTYLE_SPEC.md and the main checkout's gitignored marketing preview output (FINAL_REFERENCE).
+
+- **The look, on every picture and video card** (worker: `marketing/look.py` — the kit's palette and primitives —
+  `marketing/card_layouts.py` for the video cards, `marketing/news_layouts.py` for the pictures,
+  `marketing/theme_art.py` for the text-free theme icons). A navy-to-black page with a soft gold glow top-right; a
+  BRAND ROW at the top — the vendored Caydex logo tile and the word "Caydex" top-left (owner: "add our LOGO and
+  'Caydex' some where on top of the image (or video)"; a small mark, never a brand card — videos still open on the
+  company), the series' KICKER as a gold-on-navy pill on the right; a two-tone UPPERCASE headline (white, then gold) at
+  80 px, shrinking only to fit; warm-white cards (radius 26) with ticker chips; real company logos on a white disc, or
+  on a dark disc when the logo is made for a dark background; a wordmark only when there is no verified logo. Colours
+  carry meaning, each text-safe on the card: GREEN (21, 128, 61) a purchase, an increase, a new holding, a profit, a
+  positive surprise; RED (185, 28, 28) a sale, a decrease, "Closed out", a loss, a negative surprise; GOLD / GOLD_INK
+  neutral emphasis; earnings' Estimate / Reported cells neutral. Inter Bold only, every text at 22 px or more (logo
+  wordmarks aside), nothing truncated or clipped: a text that cannot fit at the floor is a `CardOverflow`, never a
+  cut. Fidelity to each mock's own sizes and gaps is pinned (`test_fidelity_*`, `test_fidelity2_*`). Since the
+  visual-fidelity round 2 (2026-11-20): a DARK picture-style square logo (`logos.dark_image_tile`: opaque, not one flat
+  plate, white reads on it — Rapid7's) IS its disc, clipped, never a mark under the rim (mock_theme_insiders'
+  `circle_tile`), while flat dark plates (Berkshire) and mid-tone tiles (Vertiv) stay whole on the white disc, as their
+  mocks drew them; ONE logo-size rule for every family (the Form 4 mock's — the earnings mock drew Starbucks smaller);
+  a date is never broken across lines (`look.date_units`); every DRAWN negative figure carries U+2212 (a Money Map's
+  eliminations, the earnings video card), while a dollar figure in the captions and the alt text keeps a plain "-"
+  (the Money Map's alt text included, `news_templates._alt_money`; a theme caption's growth keeps the picture's
+  "−2%").
+- **One short footer line per picture** (owner: "if we can't remove, then say it shortly";
+  `post_copy.image_footer`, the closed `post_copy.FOOTER_WHEN_PATTERNS` and `news_templates.FOOTER_SOURCE_OF_SERIES`):
+  a lesson "Not investment advice"; a template "Not investment advice · Source: <family source>[ · <when>]" — SEC Form
+  4 · filed <dates>, SEC Form 13F · filed <date> (an amended filing: amended <date>), company financial statements ·
+  fiscal <year>, company results and analyst consensus, congressional disclosures · <Month YYYY>, company filings (the
+  "who's biggest" theme: company filings and market data). "Educational only", "Caydex" and "Not affiliated with anyone
+  named" left the picture (it never names a person); every CAPTION keeps the full disclaimer, the AI line and the
+  non-affiliation line unchanged. A video card may draw the run's own short footer.
+- **The server allows each new string first; the worker mirrors it.** `schemas.marketing.BRAND_ROW_WORD` ("Caydex",
+  on every picture and video card) and `LESSON_KICKER` ("INVESTING LESSON", lesson surfaces only) are exact, allowed
+  and never required; a template's kicker is its own spec's string. Every read-back carries `look: news-v23`
+  (`schemas.marketing.READBACK_LOOK`): the worker draws the look's own strings (the brand word on a picture, the lesson
+  kicker, a video card's footer) only when it is there, so a new worker against an older web registers without them
+  instead of a 422. An output stored with the long footer of before registers no picture
+  (`run_service.picture_footer_problem`); a news-v21 template accepted before the deploy and resumed after it is
+  refused 409 `template_refused` at its first picture or video registration (`run_service.stale_template_problem`) —
+  the worker skips that day after one attempt.
+- **What each post family says now** (owner quotes and the full rules in each passage):
+  - *Superseded in part by §12.23 (owner decisions 2026-11-20 and the final review of 2026-11-26): every Form 4 post
+    is a list of 3-5 companies, there is no one-company Form 4 post, the video cover draws every row compact
+    (`news_templates.INS_COVER_ROWS` = 5, no "+N more"), and the insider spotlight is a `rows` list, not `feature`.*
+    Form 4 roundups keep their words ("DISCLOSED BUYING …"); purchase amounts GREEN; each row a logo disc and a
+    ticker chip; the lead row the hook narrates is the cover's first.
+  - The insider spotlight: the 3-5-company list of §12.23 (it drew the `feature` picture of §12.20 until 2026-11-20).
+  - Both 13F series: the ONE 13F list of 2-6 holdings, "Closed out" and the buy-out check, no single-holding post
+    (§12.20).
+  - Earnings: ONE table of 2-4 companies, EPS and revenue as Estimate | Reported | Surprise, revenue always (§12.14).
+    The table's "Surprise" column label and its "+X.X%" / "−X.X%" cells pass the validators only through two narrow,
+    POSITIONAL exemptions (`news_templates._SURPRISE_COLUMN_FIELD_RE`: the exact label at `columns[2]`;
+    `_SURPRISE_CELL_RE`: the table's fourth cell in its own shapes), each with must-reject twins — "surprise" and a %
+    figure stay refused everywhere else. The cell draws "—" when |EPS estimate| < $0.05
+    (`EARNINGS_SURPRISE_MIN_ABS_EPS_ESTIMATE`) — unreachable today behind the adapter's $0.10 floor
+    (`company_news_rules.EPS_MIN_ABS_ESTIMATE`, `eps_estimate_too_small`) — or when the revenue estimate is not a
+    positive figure.
+  - Congress: ONE list of 2-3 companies, each at least 2 distinct members, the counts GREEN and "purchases" on a solid
+    GREEN pill (owner: "use green color for 'purchases'. also, numbers like 6,4,3,2,2, use green color, same green as
+    the purchases"); never a name, party, state or chamber (§12.14). Every card's line reads "members disclosed" /
+    "purchases of <Co> stock": the count tile narrows (to `news_layouts.CG_TILE_NARROW_FLOOR`, about a three-company
+    card's square) before a line takes three lines, and a three-line plan keeps "of <Co> stock" whole under the pill.
+  - Company stakes: ONE investor's stakes in 1-4 PUBLIC companies (§12.14).
+  - Money Map (owner: "create 1 bar only? with 3 or more colors, each color is a part of the bar", "change net income
+    to green color", "make sure to use big or popular companies only"): the company's plate (logo disc, ticker chip),
+    then ONE stacked revenue bar (the total is revenue) with a legend (colour dot, label, value), the flow as a stepped
+    list whose last line is GREEN for a profit and RED for a loss, and the "For every $100 of revenue" callout in the
+    same colour (`news_layouts._lay_bars_level`); a segment that cannot be stacked (an eliminations line, a loss)
+    draws the legend only (`news_layouts._stackable`), never a wrong bar. Its video cover (2026-11-20) reads like the
+    picture: the picture's own headline ("HOW COSTCO" / "MAKES MONEY"), the ticker chip under the logo, then the
+    "per $100" figure in the same tone (`cards.money_map_net_tone`) with its label under it inside the card
+    (`opening_card.figure_label`: "of every $100 of revenue was net income" / "net loss for every $100 of revenue");
+    the fiscal year rides the cover's footer. The candidate pool is `MONEY_MAP_SEED` plus the Trillion Club; the
+    Emerging Frontiers members left it (§12.13). A LOSS year (net income < 0) draws the costs card instead of the
+    flow, on its picture and its cover (§12.24).
+  - The theme post: it leads Wednesday (and, since 2026-11-20, fills a quiet Form 4 day — §12.23), the 28-day
+    rotation and five angles (§12.14). A theme row's logo disc of a MISSING logo draws the row's ticker chip when the
+    name does not fit the small disc at 13 px or more (`look.Page.disc(ticker=…)`, field `ticker:<key>`; final review
+    of 2026-11-26 — FINAL_BUILD's uncached logos drew blank discs), and the grid draws a disc on every tile with a
+    chip; the ticker is already a drawn, declared and allowed string, so the server's allow-list is unchanged.
+  - The lesson picture: the two-tone title, each paragraph on its own card on a gold dot rail, the "INVESTING LESSON"
+    pill and the "Not investment advice" footer.
+- **Videos.** Every template video opens on its cover — the opening card (logo plate, headline, figure card) or, for a
+  list post, the LIST itself (`opening_card.list`: three rows on the 13F and stakes covers, four on the earnings
+  table and the theme lists, six on the theme tables, then "+N more"), kept above the burned-caption band. The brand
+  row (56 px tile, 34 px word, 28 px kicker) sits on every card. A list post has no data card and no art
+  (`template_onscreen.NO_DATA_CARD_SERIES`, `post_art.NEVER_ART_SERIES`); a Form 4 roundup's cover is its list too
+  (three rows). An opening card draws its headline ABOVE its figure card (`card_layouts._opening`), where production's
+  cards/v4 drew the figure first — so a figure's words ride UNDER it inside the card (`figure_label`, 2026-11-20: the
+  Money Map cover read "OF EVERY $100 OF COSTCO REVENUE WAS NET INCOME" over "$2.94" before). A two-tone headline
+  splits only at a sentence or clause boundary — never after "Mr." or "U.S." — else draws one block with its last line
+  gold (`look.two_tone`, 2026-11-20). A PLAIN cover (no list, no art) uses the list covers' plate — r 86, a 24 px
+  ticker pill (`cards.OPENING_DISC` = `news_layouts.PLATE_DISC`, pinned) — and starts under the brand row, never
+  centred (visual-fidelity round 2; it drew r 110 / 30 px ~170 px lower). A theme cover's sub line breaks where its
+  picture's does (the picture's `sub_break`, else only after a " · ").
+- **Capabilities and what a new web does with an older worker** (`schemas.marketing.WORKER_CAPABILITIES`; the worker
+  declares all eight, in this order: `post_image`, `news_templates`, `layouts_2b`, `video_v2`, `layout_feature`,
+  `post_art`, `look_v23`, `theme_angles`; this web's claim takes at most 16, every older web at most 8, so this worker
+  still claims against an older web, and a NINTH capability needs this web live first):
+  - an older worker never claims the spotlight lane (its claim route, `POST /lanes/spotlight/claim`, is new in this
+    release): no spotlight day runs while it is the worker;
+  - no `news_templates` → no template day (the lesson); no `layouts_2b` → no theme post (its `grid`);
+  - no `layout_feature` → nothing today: `script_service._without_feature_series` drops the series whose picture is
+    the `feature` layout, and `FEATURE_LAYOUT_SERIES` has been empty since the owner's 2026-11-20 decisions (the
+    freeze as text and the 422 at registration wait for a future feature series); no `post_art` → no art (art is used
+    nowhere anyway, §12.21);
+  - no `look_v23` → no earnings, no company stakes and no insider LIST on its chain (`script_service.LOOK_V23_SERIES`
+    = earnings, company_stakes, insider_spotlight; `_without_look_series`), the ticker chips and list covers stripped
+    from the read-back
+    (`_without_look_chips`, `_without_list_cover`), a figure label sent away with the figure it explains
+    (`_without_figure_label`) and a 13F picture cut to five rows without "+N more"
+    (`_pre_v23_section`) — subsets of the stored strings, so the server still accepts them;
+  - no `theme_angles` → only the first theme angle ("how they make money"), without its chips, icon and list cover;
+    a `ranked` / table picture frozen as text and refused at registration.
+- **Deploy order.** Migration 210 (§12.19) by hand before the web; then the worker, then the web, every switch off.
+  The look itself is safe in either order and on a rollback of either service (the `look` key above; the chips only
+  for a `look_v23` holder). The new content runs only once its series is listed: `earnings`, `congress_count`,
+  `company_stakes` and `theme_explainer` in `MARKETING_NEWS_SERIES`, `wed` in `MARKETING_POST_WEEKDAYS` for the theme,
+  "C" in `MARKETING_CONTENT_CLASSES` for the theme's insider and Congress angles; steps in documents/OWNER_TASKS.md
+  §2.1.
+- **Theme staleness — owner decision 2026-11-20, "Trust the app's lists (Recommended)":** "Your app already shows
+  these exact lists to users, so when a theme has no review date, posts treat its list as current … Each company still
+  passes its own checks (still trading, has data)." `trending_themes.tickers_as_of` is NULL on every production row:
+  such a list is never refused for its age (`company_news_adapter._theme_as_of`), the row's `updated_at` is not read,
+  and no "Members as of" date is printed. A list the owner reviews MAY get a `tickers_as_of` (a one-line UPDATE the owner
+  runs, OWNER_TASKS §2.1 step 5.6); that theme then prints its date and is refused 70 days after it
+  (`company_news_rules.THEME_STALE_DAYS`) until re-dated — a date after the run or an unreadable one is refused at once.
+- **Measured, not tuned:** every family renders at its first size step on realistic samples (the final preview set,
+  2026-11-20); the basic layout engine only (raqm is not installed where the fits were measured).
+
+Rejected: a brand CARD at the start of a video (owner: never open on our logo — the brand row is a small top mark); a
+counts subtitle on the 13F list ("the sub title seems confused"); fact rows, the quarter before or the quarter end on
+a 13F picture ("remove what users don't care"); "sold", "exited" or "dumped" for a closed-out holding; one post per
+company for earnings and Congress; private stakes; the Emerging Frontiers members in the Money Map pool; the theme
+angles the owner removed ("Earnings week, Fund moves, R&D check and Workforce") and a separate profit check and growth
+check (combined into "growth + profit"); "% from all-time high" or any price move on a theme; a wordmark in place of a
+light logo (it is drawn on a dark disc); text under 22 px; a second version bump for any later phase of the restyle;
+aging an undated theme list by its row's last write (`updated_at`, which no trigger keeps current: it refused 7 of the
+8 themes — replaced 2026-11-20 by the owner's "Trust the app's lists"); a two-tone colour change after "Mr." or in the
+middle of a phrase; a Money Map cover headline written to follow its figure; a per-company logo table (Rapid7's tile
+is a shape-and-tone rule) or a per-family logo fill (one `LOGO_REACH`); a "—" in a scorecard cell with no filing (the
+mock leaves it blank); a 300 px cap on two Congress cards on the picture (the mock's cards take the room); the mock's
+literal square count tile on two Congress cards (its 300+ px width breaks a defence name over three lines — the tile
+narrows to keep two instead).
+
+### 12.23 The Form 4 lists and the theme fallback (owner decisions 2026-11-20)
+
+Owner decisions 2026-11-20: "for insider trade, i think we discussed that there is no single company already, each post
+or each image/video will have more than 2,3, ideally are 3 - 5 companies at once." / "i pick option 1: 3-5, but if it's
+a quite week - if we don't have enough data, then use different topic like posting the theme (cyber war, AI chip,....)"
+/ video cover "All rows, compact (Recommended)" / AI art "Drop it from insider posts (Recommended)" — that option read
+"Keep the code but use it nowhere for now; the switch stays off", and the company-count option "At least 3 companies,
+at most 5 (the 5 largest purchases when more qualify)". Built 2026-11-20 on the same branch, not deployed;
+TEMPLATE_VERSION news-v23, cards/v6 and render/v7 stay (none of them has shipped). The final review of 2026-11-26 held
+the build to both answers (the cap had been 8, and the Money Map's cover had kept art).
+
+- **Three to five companies per Form 4 record, every one drawn.** `company_news_rules.INSIDER_MIN_ROWS` (3),
+  `INSIDER_MAX_ROWS` (5 — the five largest; it was 8 until the final review of 2026-11-26) and `INSIDER_PICTURE_ROWS`
+  (5) bound `InsiderBuysWeek.rows` and the new insider LIST:
+  `InsiderSpotlight.companies`, each an `InsiderSpotlightCompany` (one issuer's lead and up to four other insiders, a
+  lower bound), ordered by total (`spotlight_company_order`). The one-issuer record, its revenue line and its
+  `feature` picture are retired. The adapter answers a week or window with one or two qualifying companies with a
+  content SKIP reason (`ceo_too_few_companies`, `insider_too_few_companies`, `insider_spotlight_too_few_companies`);
+  the composer refuses a forged short record `too_few_rows`. The adapter sorts by total and keeps the five largest, so
+  the picture and the cover draw every company and no Form 4 post carries a "+N more companies" line (the templates
+  keep that path, unreachable while `INSIDER_MAX_ROWS` == `INSIDER_PICTURE_ROWS`). The amendment check reads at most
+  `INSIDER_AMENDMENT_MAX_SYMBOLS` = 5 + 3 issuers (as on main). An insider list's ledger key names every company once
+  (`news:insider_spotlight:<SYM>+<SYM>…:<window_start>`), so each company of a posted list is `already_posted` in its
+  window and cooled down for 14 days; its reader takes up to `INSIDER_SPOTLIGHT_KEY_MAX_SYMBOLS` (8) symbols, never
+  narrower than anything that could have been written. The cooldown's input names every company of every list in
+  those 14 days, bounded by `company_news_adapter.SPOTLIGHT_RECENT_MAX` = (14 + 1) × `INSIDER_MAX_ROWS` = 75 (one full
+  list a day; review of 2026-11-26 — the one-issuer bound, 64, refused every list on a 5-day spotlight week).
+- **A window too short for a list stays unchecked** (review of 2026-11-26). C0 records the Form 4 window the insider
+  spotlight checked on its trail, and the next window starts the day after it. A window whose list fell below three
+  companies (the adapter returns no `checked_window` with `insider_spotlight_too_few_companies`; the composer's
+  `too_few_rows`, `script_service.SPOTLIGHT_UNCHECKED_REFUSALS`) or whose lead the other lane drew is NOT recorded, so
+  the next spotlight's window reaches back over it (at most `SPOTLIGHT_MAX_WINDOW_DAYS`) and its one or two companies
+  can join a later company's list. Nothing was posted, so the ledger and the cooldown are untouched.
+- **The pictures and the cover.** The weekly roundup keeps the approved chip-above row (form4_roundup5.jpg: three
+  headline lines and 14 px row gaps from four rows; its held-indirectly / amended note moves to the captions at five
+  rows). The insider list (insider_multi3/5.jpg) has the two-line headline "Insiders at <N> companies" / "disclosed
+  buying stock" — N EVERY company of the post, the count the hook (burned into the cover's frame) and every caption
+  say (review of 2026-11-26; the roundup's "At least <N> <role>" counts and names every row too) —, the grey "Total
+  purchases" label, roles only ("CEO + at least 2 other insiders"), the GREEN total and a
+  grey `detail` line per row — the filing's own cost per share, "as filed" — on the PICTURE only (`ROW_KEYS` gains
+  `detail`, `ROW_DETAIL_MAX_CHARS` 64, server and worker pinned equal; `news_layouts._lay_insider_list`). Every Form 4
+  cover is the compact list of EVERY drawn row (`MAX_OPENING_ROWS` 5); a cover row carrying `detail` is refused by
+  `template_onscreen` and by the worker's `cover_image`, so no cost per share reaches a video frame. A worker without
+  `look_v23` never gets an insider list (`LOOK_V23_SERIES`).
+- **The theme fallback.** `selection` puts `theme_explainer` right after the insider series in both lanes: Monday CEO
+  buys → insider buys → theme → Money Map → lesson; spotlight insider list → theme → [13F spotlight] → Money Map →
+  SKIP (the 13F-lead Saturday keeps the 13F spotlight first; Wednesday's lead is unchanged; C0 drops the theme from a
+  spotlight chain on a day whose main chain holds it). The 28-day rule reads `runs.theme_refs_between`, which holds
+  both lanes' theme scripts, so a week may carry up to five theme posts (Mon, Tue, Wed, Thu, Sat) but never one theme
+  twice inside four weeks. Nothing reserves a theme for Wednesday: with 8 active themes and Wednesday needing 4 every
+  28 days, more than about one fallback a week uses them up and the next Wednesdays fall through to earnings / Money
+  Map until one comes free (a Wednesday pick returns on a Wednesday, so Wednesday loses slots, not its cycle) — an
+  OPEN owner call (final review of 2026-11-26; a one-fallback-a-week cap simulated clean), nothing built.
+  On the worst path (the theme spending its whole 120 s) two series no longer get their whole cap — the in-season 13F
+  spotlight (56 s) and, on the 13F-lead Saturday, the theme itself (56 s) — and Monday's Money Map starts with 24 s;
+  pinned in `tests/test_marketing_news_series_switch.py` (`_SPOTLIGHT_WORST_STARTS`).
+- **No art anywhere.** `post_art.NEVER_ART_SERIES` holds every shipped series (ceo_buys, insider_buys and
+  insider_spotlight since 2026-11-20; the Money Map since the final review of 2026-11-26 — "use it nowhere for now");
+  `PICTURE_SERIES` and `COVER_ONLY_SERIES` are empty and `run_service.art_surfaces` allows the picture surface only for
+  a PICTURE_SERIES member, so no surface is left (§12.21). The worker keeps the `feature` and one-company `spotlight`
+  layouts (a future art series; an older web during a deploy); their tests run on frozen news-v23 outputs
+  (`tests/data/frozen_layout_outputs_news_v23.json`).
+
+- **An older worker re-claiming a run the new one built** (a worker rollback mid-run; final review of 2026-11-26).
+  `script_service.worker_script` strips what such a holder's closed walker refuses only where the rest still says the
+  same: a row's ticker `chip`, an insider row's `detail` line (`template_onscreen.PRE_V23_ROW_DROPS`), a 13F list past
+  five rows, a loss year's costs card. A stake row's basis `label` and an earnings row's `table` (and its `columns`) are
+  KEPT — stripped, a commitment or fair value drew as a bare amount and earnings as names without figures, and the
+  server's allow-list (a subset) accepted both — so that worker refuses the picture and its render fails loudly
+  (retried, then the day closes failed). A theme angle 2-5 picture is sent unchanged and fails the same way. The
+  build-time gates (`_without_look_series`, `_frozen_output`'s write-time freeze to text) cover only a holder that
+  held the run while the day was built; the rollback rule is "only after the day's `media_ready` on both lanes".
+
+Not done: a Form 4 post of one or two companies (refused by the owner), or of more than five; art on any post; a cost
+per share on any video surface; a theme reserved for Wednesday (open call).
+
+### 12.24 The Money Map loss year: costs vs revenue (owner decision 2026-11-20)
+
+The owner's note: "for companies who are loss, it's a bit hard to understand … a cost or loss will have a longer red bar
+than the revenue, so users will know, all the total loss or cost will minus the revenue, so it will be the net loss",
+and his choice "A: costs vs revenue (Recommended)" (money_map_loss_A_rivian.jpg / money_map_loss_A_mixed.jpg /
+money_map_loss_A_rivian_cover.jpg). Built 2026-11-20 on the same branch, not deployed; news-v23, cards/v6 and render/v7
+stay (none has shipped). A PROFIT year is untouched, key for key and byte for byte.
+
+- **The costs card** (`news_templates._money_map_costs`, an image-spec and opening-card block `costs`,
+  `template_onscreen.COSTS_KEYS`): a navy Revenue bar over a LONGER red "Costs and expenses" bar on ONE scale, a
+  marker where revenue ends, the dashed "Net loss" box past it, a legend of the bar's parts, and a two-line callout
+  ("For every $100 of revenue, costs were $166.38," / "so the net loss was $66.38"). Every figure is DERIVED from the
+  statement lines the record already holds, so the chain is exact whatever FMP's own `operatingExpenses` says: costs =
+  revenue − net income; cost of sales = revenue − gross profit; operating expenses = gross profit − operating income;
+  interest, tax and other items = net income − operating income. Without both a gross and an operating line (or a
+  part ≤ 0) the bar is one undivided piece with no legend.
+- **Interest, tax and other items by sign.** A COST: a third, maroon part with its own legend entry. INCOME: no part —
+  the bar's last stretch (the costs it covered) is hatched and one grey line says "+$X from interest, tax and other
+  items made the loss smaller"; the solid red, and the net-loss box, end where costs end. Zero, or under half the costs
+  figure's last shown digit: omitted, operating expenses' BAR (never its value) absorbing it.
+- **Rounding.** One decimal (`money_image`'s form) unless the reader's arithmetic misses at that precision (parts ±
+  other vs costs, costs − revenue vs the net loss, within half the coarsest figure's last digit: `_lands`), then two
+  decimals for that post (`MONEY_MAP_COSTS_PLACES`) — the revenue card above it included (`flow[0]` takes the costs
+  card's revenue figure; review of 2026-11-26). The approved slack check always holds (pinned by a 700-record
+  property test). The callout's costs per $100 is 100 + the net loss per $100, so its subtraction is exact.
+- **Bounds.** `implausible_figures` (and `money_map_loss_above_revenue` at the read) refuses a net, gross or operating
+  loss larger than revenue, so the costs bar is at most twice the revenue bar. The worker widens a piece too thin to
+  see to 16 px (an inner one to 10) by taking from operating expenses, never from cost of sales — where cost of sales
+  ends against the revenue marker is a fact (`news_layouts.costs_bar_widths`). The hatched end's 16 px floor never
+  pulls the solid red back to the revenue marker (re-check 2026-11-26: a small net loss beside other income drew the
+  costs ending before revenue); the solid red keeps at least 4 px of the gap past revenue and the hatch narrows.
+- **Surfaces.** The picture draws the costs card at the mock's own sizes (`COSTS_PICTURE`) under the approved revenue
+  card, which keeps its card levels; its flow steps and one-line callout stay in the stored spec, checked but never
+  drawn or declared. The video cover is the costs card under the headline and sub line (`costs_cover_image`), its
+  sizes stepping down (`COSTS_COVER_LEVELS`, then the ramp) to stay above the burned-caption band — the mock's callout
+  ran into it; a cover that cannot fit falls back to today's figure card, still in the stored opening card. Narration
+  and captions are unchanged: they agree with the picture. The alt text describes the costs card.
+- **The alt text of an older worker's picture** (review of 2026-11-26). A worker without `look_v23` draws the flow card
+  (and a 13F list of six or more, five rows without its "+N more"), so the output also stores THAT picture's alt text,
+  `image_post_pre_v23`, for those two cases only (`news_templates.PRE_V23_ALT_SERIES`); every alt-text scan reads it
+  (`ALT_TEXT_KEYS`) and `revalidate` compares it. The cut such a worker gets is one pure function,
+  `template_onscreen.pre_v23_image_spec`, and `template_onscreen.v23_only_strings` names what only the full picture
+  draws: `outlet_base.load_post_image` sends the alt text `news_templates.picture_alt` picks from the post image's
+  declared strings — covering a worker rollback and an older worker re-claiming a built run alike.
+- **Older workers and art.** `costs` and the cover's `subtitle` reach only a `look_v23` holder (`script_service`
+  strips them for any other, which then draws today's flow card and plain cover — a subset of the stored strings);
+  `look_v23` ships in the same release, so no worker holds it without the costs card. A loss year's cover is never art:
+  `_attach_art` records `costs_cover` (`post_art.cover_is_costs_card`) before any spend (moot today: no series
+  carries art since the final review of 2026-11-26, §12.21 — the gate stands for the day the Money Map is put back).
+
+Not done: a costs view for a profit year (the owner approved the step card for those; a thin-margin year would draw two
+almost equal bars); the label "Costs, after other items" (the designers' open alternative to "Costs and expenses" on an
+other-income year, whose GAAP total is higher by the hatched amount) — an owner call.
 
 ## Appendix A: Where things live
 
@@ -7112,6 +7837,8 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-11-14 | The report's Earnings Timeline (Future Forecast) plots ADJUSTED EPS on its reported years (owner: "Switch to adjusted", after a platform survey). A reported year's EPS is the sum of its four earnings-feed quarters (`_adjusted_annual_eps`: each with a comparable consensus and a computed surprise, exactly four distinct quarter ends inside the fiscal window, the last within 7 days of the year end, gaps 75–125 days so a 12/12/12/16-week calendar such as Costco's counts), so the first forecast year's EPS change and an EPS CAGR from the last reported year are measured; a year carries its GAAP figure (`eps_gaap_label`) only where the two differ by more than max(2%, $0.03), and iOS then labels the line "Adj. EPS" (legend and popup) — a GAAP-only reporter such as Apple keeps plain "EPS". No GAAP figure, no basis note and no "n/a" analyst line on a past year are shown (owner: "we don't need to show GAAP anymore", "Remove the note"). The whole company keeps the GAAP timeline (unchanged) unless it reports in USD and its LAST reported year's sum lands within max(25%, $0.10) of FMP's consensus row for that year; an older year without four comparable quarters is N/A, never GAAP. The earnings service reads 28 quarterly income rows (was 20; earnings payload 6, its daily price series still spans 20 quarters) so all five drawn years and the YoY anchor have their quarters; report chat calls the rate "adjusted EPS CAGR"; the PDF adds no note. Shipped 1.02 shows the adjusted figures labelled plain "EPS" with no note (reports are shared, so the payload cannot differ per client) | ORCL drew GAAP $5.83 → consensus $8.15 ("+40%", mostly two measures) with the FY2027E change blank; Yahoo, stockanalysis, Finviz, Zacks, TIKR, Seeking Alpha and Morningstar all measure it on the consensus's basis: 8.15 / 7.63 = +6.8% (the feed's 1.47+2.26+1.79+2.11). Measured on 58 cached collections: within a few percent of the consensus for nearly every large company; BRK-B (GAAP-like feed), NKE, CRMD, PL, PLUG, ROKU fail the check and keep GAAP. Accepted residuals: FMP's consensus rows for OLDER years are unreliable (FY2024 ORCL 3.99, CSCO 2.29, AVGO 2.23 beside true 5.56/3.73/4.86), so only the last year is checked; a broken older feed quarter passes (ServiceNow 2022–2024, split mis-adjusted: 2023 reads +971%) | GAAP history with a blank first-year change (the line still jumps); GAAP → consensus (+40%, shown by no platform); checking every year against its consensus (drops ORCL/CSCO/AVGO/STX FY2024 on FMP's bad rows); a quarter-to-quarter continuity check (flags real one-offs: LMT, META, INTC); the adjusted figure for the last year only (moves the jump one year back) |
 | 2026-11-14 | The Earnings Timeline's price line is drawn on fiscal YEAR-ENDS (owner: "Shift the price line", "no need to add anything", and the dashed reported/forecast divider removed). `EarningsTimelineChart.yearEndShift`: a close at fraction f of fiscal year i is drawn at column i − 0.5 + f, so each year's last day lands on its own bar and EPS dot (bars and dots never move apart: "revenue and eps go together"); the legacy calendar mapping shifts the same way; the line still starts at the first bar; the "Price shown to …" caption counts closes from the first year-end. iOS only — the wire and old builds are unchanged | The bar and dot sat at the column centre, i.e. mid-year on the chart's own time scale: ORCL's Nov 13 2026 close (46% into FY2027, Jun 2026 – May 2027) ended beside the FY2027 dot, read as "FY2027 is now", and a December filer's close ran PAST its in-progress 2026 dot. Every price-vs-earnings chart surveyed (FAST Graphs, GuruFocus, Zacks; Simply Wall St for fundamentals) puts a year's value at its year END. Now ORCL's price stops between the FY2026 and FY2027 bars, a December filer's just before its 2026 bar | EPS dots at the column edge with bars centred (owner: dots and bars must stay together); a "Nov 13" end marker, dashed forecast EPS, a "Price through …" caption (declined: "no need to add anything"); regrouping into calendar years (invents figures); a caption saying dots are mid-year |
 | 2026-11-14 | Report chat answers beyond the report (owner: "I need Cay AI be able answer things outside of the report too … for data like number, it should prefer what we have in the report"; decisions "Tools + web only", "On now, every chat", "Yes, add capex", "Fix it too", "Hide, say why"). `_REPORT_GROUNDING_RULE` gains a beyond-the-report branch (Caydex's data and tools, then a web search when one runs, memory only for stable background and never for a figure; the report's figure leads, a later-dated Caydex figure follows as current; the "not in what you were given" exit is scoped to the report); the voice trailer and the resolver's fenced tail are scoped the same way; an explicit ask no tier serves gets `_WEB_UNAVAILABLE_ASKED_RULE`; the automatic tier's topics add announced plans, investments, commitments, deals, partnerships, strategy and other recent facts; the web body says an announced plan is a dated event, not a past filed figure; `check_company_financials` gains operating cash flow and capital expenditure (growth payload 9); FMP's zero-filled FCF row is a gap (growth snapshot 8); banks, insurers, lenders and brokers get no OCF series, named "not meaningful". Every-chat and automatic web search are turned on by Railway variables (`CHAT_WEB_SEARCH_ALL_CHATS_ENABLED`, `CHAT_AUTO_WEB_SEARCH_MODE`), code defaults unchanged; the 7-day shadow week is skipped by the owner's decision. Production state is recorded only after the owner confirms the variables (OWNER_TASKS §2.1). 2026-11-15: both are on in production (owner, 2026-11-14: "On now, every chat (Recommended)"); the web service deployed at 18:43 UTC runs with `CHAT_WEB_SEARCH_ALL_CHATS_ENABLED` = true and `CHAT_AUTO_WEB_SEARCH_MODE` = on. The allowlist is unset, so the automatic tier is open to every signed-in caller with consent v3; its caps are the defaults (100 searches a day, 5 per account a day), inside chat's cap of 180 web searches a day | ORCL report chat, "Search for me, how much Oracle invest in data center?" → "The report does not provide specific dollar figures…": on the local backend (no Brave key) no search could run and nothing told the user; and in any build the report rule's only exit, the voice trailer and the fenced tail kept answers inside the report, while no Caydex tool carried capex | Remembered figures for outside-the-report numbers (reverses the 2026-10-09 company tier; owner chose "Tools + web only"); opening the report tier without an explicit ask (the 2026-10-02 decision and the pre-consent privacy text); a 7-day shadow week first; keeping operating cash flow for banks (rebuilds the FCF the card calls N/M) |
+| 2026-11-15/16 | Marketing v2, built and not deployed, every switch off: a second daily post, the spotlight lane (migration 210, §12.19); two single-company spotlight series with the `feature` picture, the filed cost per share and first-line prefixes (news-v22, §12.20); per-post art (§12.21). Owner decisions 2026-11-15, quoted from the plan (`~/.claude/plans/i-need-to-improve-wondrous-boot.md`): (1) "Add a second daily post" on "Tue, Thu, Sat", "Full set: video + picture", in its own morning slot; (2) "Google draws, Claude checks": a fresh picture for each post, Claude writing the brief and inspecting the result, Gemini drawing it, Money Moves untouched ("we don't change anything at the money moves"); (3) "Loosen caption hype words": BREAKING / Alert / one emoji in the FIRST caption line only, scope "Spotlights + Form 4 + earnings"; (4) "Picture and video cover": the art and the logo also open each company video; (5) the filed cost per share in "Captions + picture", never spoken in a video or drawn on a video card; (6) main-lane posts "Video cover now, pictures later". The art's `made_with_ai` True on a template picture that drew it reverses the 2026-10-09 rule for such pictures. Session decisions (2026-11-15/16, under the owner's "finish everything"; each revertible): the art-native `feature` layout was built with the spotlight series rather than with the art, so the series ship with a flat band and gain art when it is switched on; the insider spotlight's window starts the day after the last window an earlier insider spotlight CHECKED (recorded on its selection trail), not at the previous run's date, so a 13F-led day loses no filing; earnings "BREAKING" freshness counts exchange trading days (a day counts unless both the exchange and the federal government close), which can only remove a label; the spotlight lane yields to the main lane every series the main lane's chain holds that day (a spotlight Money Map had pushed the main lane's same-day Money Map into a second weekly lesson), so until a spotlight series is listed the lane runs on Saturdays only; the build and its art share one 280 s ceiling | The owner shared 8 competitor Facebook posts (insider-buy alerts, "BREAKING … per its latest 13F") and asked for 2-3 more posts a week like them, with the company logo and Money Moves-style art and no charts. Production already posted once a day; reach came almost only from video; one run per ET day was built into the schema (`run_date` UNIQUE, migration 170); most competitor wording was banned by our validators; Claude cannot generate images | A `lane` field on the existing claim route (an older web ignores it and claims main); a separate spotlight series switch; the weekly roundups or the lesson on the spotlight lane; a rest_day row for a spotlight day where nothing qualified; a Gemini fallback for the art's brief or check; art on the main lane's pictures now; a caption sentence for the AI disclosure; a migration for the art; separate time budgets for the build and the art (they would defer the render); the cover's art band at y 240 (no measured cover fit); a cost per share rounded to cents; a BREAKING prefix on a weekly roundup or a 13F filing |
+| 2026-11-26 | Marketing v2 final review, not deployed: AI art used NOWHERE (`post_art.ART_SERIES` empty, the Money Map in `NEVER_ART_SERIES`; §12.21, §12.23); a Form 4 record holds 3-5 companies, the five largest (`INSIDER_MAX_ROWS` 5; §12.23); an older worker re-claiming a built run keeps a stake's basis label and the earnings table, so it fails loudly (`template_onscreen.PRE_V23_ROW_DROPS`; §12.23); a theme row's disc of a missing logo draws its ticker chip (§12.22) | The owner's 2026-11-20 answers were "Drop it from insider posts (Recommended) :: Keep the code but use it nowhere for now; the switch stays off" (not "Put it on Money Map covers") and "At least 3 companies, at most 5 (the 5 largest purchases when more qualify)"; the build had kept the Money Map cover's art and a cap of 8. A rollback re-claim sent a stake amount without its basis and earnings names without figures, which the server accepted | Refusing the read-back with 409 (an older worker retries a 409 six times, and it would also refuse a resume past `rendered`); stripping more keys; a theme reserved for Wednesday (an open owner call); drawing the name at 9 px or skipping the disc on a theme row |
 
 ---
 

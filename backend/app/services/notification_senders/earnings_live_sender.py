@@ -134,19 +134,69 @@ neighbouring key is the same. A failed claim or device read after those reads co
 count like any other, so it does use up the key; only a failed claim leaves `earnings_result`
 the daily pass.
 
+A RESULT FMP CHANGES (owner, 2026-11-20: "Fix inbox text"). FMP can restate a report after its
+push went out: FRO's first answer on 2026-11-20 said revenue beat by 31% and EPS by 10%, and two
+hours later its row read revenue in line and EPS missed by 12%. The record follows FMP; the phone
+cannot be changed and is not buzzed again (one push per report). So for each report a push of this
+process told, each kind, the sender keeps every text the report's inbox rows may hold (`_Told`):
+the push's, each correction's, and the record's own as each look saw it, since a held row's wake
+writes the record's words. Each look (the record's words changed, or rows were still held at the
+last one) finds the texts the record now contradicts (`_changed`: a stated verdict or percent, in
+the card's words for both kinds), and rewrites the rows past their buzz still holding one of them,
+marked "Updated: " (`PushDispatchService.revise_sent_text`), the 16:00 ET pass's own rows of that
+kind among them when they hold such a text. Each text's rows take its own merged words (`_merged`):
+the record's for every metric the record states, the text's own for one the record no longer states
+(not out, or held), so a row never says "not out yet" or "being confirmed" of a figure its phone
+showed, nor shows one its phone was spared, nor sets a row's own revenue verdict beside an EPS
+that no longer bears it out (the revenue check, COPY below). What is no contradiction: a metric
+that came in after a text was written, or a figure stated with no verdict ("reported": no
+consensus, a print that covers it, a GAAP EPS, a revenue the check withholds) that gains one. A
+text a correction wrote is the sender's own, though: the rows holding it marked follow the record
+whatever moves (owner, 2026-11-20: "Follow FMP"), so a revenue verdict a correction withheld comes
+back when the record gives one again. A row holding words the sender never saw is left as it is,
+and so is a held row: its wake reads the record. One the user opened before its wake ends unread,
+still holding old words, so while any row of the kind is held the look is repeated every
+`HELD_RETRY_SECONDS`. The held read comes first, so a row its wake ends meanwhile takes the write.
+A live push also follows the report's result rows, which a wake makes of a held live row whose
+user turned Live Results off, and every followed report's result rows a wake wrote in the live
+words (a surprise that no longer clears `MIN_SURPRISE` at the wake), a track of their own
+(`RESULT_ROWS_IN_LIVE_WORDS`) that only keeps the record's texts until a wake has written such a
+row (`copy_at_wake` marks the report): before that it reads and writes nothing. At most
+`MAX_REVISIONS_PER_ROUND` looks with writes a round, those a record change owes first, then held
+re-looks, longest due first, the rest next round; the first failed write ends the round's
+corrections and waits `HELD_RETRY_SECONDS`, so the next rounds start with the others, and the
+texts it may have written are kept first, since a write can commit and its call still fail. Each correction is a WARNING with the old and new words,
+and `EARNINGS_LIVE_INBOX_CORRECTIONS_ENABLED` turns them off. Residuals: process-local, so a restart
+forgets what it knew and a report FMP changes after it keeps its old rows (every deploy restarts the
+web process); a report no push of this process told (the 16:00 ET pass's alone) is never followed;
+a row whose wake wrote words between two looks holds words never seen, and keeps them; a row still
+held shows the push's words in the inbox until its wake (or, opened before it, until the next
+look), since a correction never writes a held row.
+
 COPY. Informational, never directive (SYSTEM_DESIGN_GUIDELINES §11.7). A lock-screen banner
 sits OUTSIDE the authenticated app, which is all FMP's Order Form licenses for display, so an
 absolute figure appears only when it comes from the company's own release (a public SEC
 document); an FMP-sourced figure is stated as beat/missed by a percentage, the shape
-`result_copy` already ships.
+`result_copy` already ships. A revenue whose surprise is more likely two measures set against
+each other than news (`_revenue_in_doubt`: 25%+ off a consensus of $100M or more, its EPS not
+moving the same way by half as much; a release's GAAP EPS neither raises nor settles it) is told
+with no beat or miss, "Revenue reported" or the release's figure alone (owner, 2026-11-20: "Add
+the check"; scoped after the 2026-11-20 review, "fix what you need to fix first"); the card and
+the sheet show FMP's numbers. The inbox corrections read it as a figure with no verdict, and a
+doubt that rests on an EPS the record holds states nothing, so a passing hold corrects nothing.
+`EARNINGS_LIVE_REVENUE_CHECK_ENABLED` turns it off. INFO `EARNINGS_LIVE_REVENUE_WITHHELD` names
+each landing whose push went out so, once, after the send; a row held for the night takes the
+record's words at its wake, which may say otherwise.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import AbstractSet, Any, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Set, Tuple
 
 from app.config import settings
 from app.services.earnings_live_service import (
@@ -197,6 +247,70 @@ _surprise_done: Set[Tuple[str, date]] = set()
 # The tickers a failed watcher read sent to the back of the round, each with the turn it went
 # back on, so the one that has waited longest goes next (A FAILED WATCHER READ in the docstring).
 _went_back: Dict[str, int] = {}
+# What each push this process sent stated, by report and kind (A RESULT FMP CHANGES in the module
+# docstring). Process-local like the sets above: a restart forgets it.
+_told: Dict[Tuple[str, date], Dict[str, "_Told"]] = {}
+#: Looks with writes one round makes at most (each writes the texts the record contradicts): the
+#: rest wait for the next round.
+MAX_REVISIONS_PER_ROUND = 20
+#: Leads a corrected inbox row, so it never reads as what the phone showed.
+UPDATED_MARK = "Updated: "
+#: How long a correction that met a held row waits to be written again, and how long one whose
+#: write failed waits before it is tried again (A RESULT FMP CHANGES).
+HELD_RETRY_SECONDS = 300
+# When a correction that met held rows may be written again, by (symbol, day, kind), on the
+# monotonic clock.
+_revise_after: Dict[Tuple[str, date, str], float] = {}
+# When a correction whose write failed may be tried again, keyed the same way: the round ends at a
+# failed write, and the wait lets the next rounds start with the others.
+_failed_until: Dict[Tuple[str, date, str], float] = {}
+
+#: The result rows a wake wrote in the live kind's words: a held `earnings_result` row whose surprise
+#: no longer clears `MIN_SURPRISE` at its wake takes `live_copy` (`_copy_from_record`). Followed as a
+#: track of its own (A RESULT FMP CHANGES): result rows, judged and rewritten by the live rules.
+RESULT_ROWS_IN_LIVE_WORDS = "earnings_result:live_words"
+# The reports a wake has written result rows for in the live kind's words (`copy_at_wake`), by
+# the route's own (symbol, report date), the `_told` key. Until a report is here its
+# `RESULT_ROWS_IN_LIVE_WORDS` track only keeps the record's texts: no row could hold them, so it
+# reads nothing, writes nothing and takes no look of the round's `MAX_REVISIONS_PER_ROUND`.
+_result_rows_in_live_words: Set[Tuple[str, date]] = set()
+#: Each followed track: (the kind of the rows it rewrites, the kind whose words it judges by).
+_TRACKS: Dict[str, Tuple[str, str]] = {
+    KIND_EARNINGS_LIVE: (KIND_EARNINGS_LIVE, KIND_EARNINGS_LIVE),
+    KIND_EARNINGS_RESULT: (KIND_EARNINGS_RESULT, KIND_EARNINGS_RESULT),
+    RESULT_ROWS_IN_LIVE_WORDS: (KIND_EARNINGS_RESULT, KIND_EARNINGS_LIVE),
+}
+
+#: What a push says about one metric: (verb, percent shown), ("reported", None) for a figure with
+#: no consensus to judge it by, or None when it states no figure.
+Stated = Optional[Tuple[str, Optional[str]]]
+
+
+@dataclass(frozen=True)
+class _Words:
+    """What one text a report's rows may hold states, metric by metric (`Stated`), and, for the live
+    kind, its words for each metric, (revenue, EPS)."""
+
+    stated: Tuple[Stated, ...]
+    phrases: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Told:
+    """What this process knows a report's rows of one kind may hold (A RESULT FMP CHANGES)."""
+
+    title: str
+    # Every text those rows may hold, without the mark: the push's, each correction's, and the
+    # record's own as each look saw it (a held row's wake writes the record's words).
+    known: Mapping[str, _Words]
+    # The record's text at the last look: a look is owed when it changes.
+    seen: str
+    # A row of this kind was still held at the last look, so one is owed every
+    # `HELD_RETRY_SECONDS` until none is: its wake may end it unread, still holding old words.
+    held: bool = False
+    # The texts a correction wrote, without the mark: rows holding one marked are the sender's own,
+    # and follow the record whatever moves (`_corrections`).
+    written: FrozenSet[str] = frozenset()
 
 
 def reset() -> None:
@@ -204,6 +318,10 @@ def reset() -> None:
     _live_done.clear()
     _surprise_done.clear()
     _went_back.clear()
+    _told.clear()
+    _revise_after.clear()
+    _failed_until.clear()
+    _result_rows_in_live_words.clear()
 
 
 def _money(value: float, *, revenue: bool) -> str:
@@ -217,50 +335,131 @@ def _money(value: float, *, revenue: bool) -> str:
     return f"{sign}${v:,.0f}"
 
 
-def _vs_consensus(m: LiveMetric) -> Optional[str]:
-    """The verdict the card and the sheet show (`EarningsMetricOutcome.result`): a surprise that
-    rounds to 0.00 on a figure off the consensus is still a beat or a miss, and only a figure
-    equal to the consensus is in line."""
+def _verdict(m: LiveMetric) -> Optional[Tuple[str, Optional[str]]]:
+    """(verb, percent shown) of a figure against its consensus, as `_vs_consensus` words it:
+    "in line", "beat" or "missed", with the whole percent or None when none is printed. None with
+    no surprise to state."""
     if m.surprise_pct is None:
         return None
     direction = m.surprise_pct
     if direction == 0 and m.actual is not None and m.estimate is not None:
         direction = m.actual - m.estimate
     if direction == 0:
-        return "in line with consensus"
+        return "in line", None
     verb = "beat" if direction > 0 else "missed"
     pct = abs(m.surprise_pct)
     shown = f"{pct:.0f}"
     if pct >= 1000 or shown == "0":
         # A near-zero consensus makes the percentage explode, and "by 0%" says nothing: Python
         # rounds half to even, so a 0.50% surprise prints "0" too, under a sheet reading +0.5%.
-        return f"{verb} consensus"
-    return f"{verb} consensus by {shown}%"
+        return verb, None
+    return verb, shown
 
 
-def _phrase(label: str, m: LiveMetric, *, revenue: bool) -> str:
+def _vs_consensus(m: LiveMetric) -> Optional[str]:
+    """The verdict the card and the sheet show (`EarningsMetricOutcome.result`): a surprise that
+    rounds to 0.00 on a figure off the consensus is still a beat or a miss, and only a figure
+    equal to the consensus is in line."""
+    verdict = _verdict(m)
+    if verdict is None:
+        return None
+    verb, shown = verdict
+    if verb == "in line":
+        return "in line with consensus"
+    return f"{verb} consensus by {shown}%" if shown is not None else f"{verb} consensus"
+
+
+#: A revenue at least this far off its consensus, in percent, is told with no beat or miss unless
+#: the EPS bears it out (`_revenue_in_doubt`).
+REVENUE_DOUBT_PCT = 25.0
+#: The EPS bears such a revenue out when it moves the same way by at least this share of it.
+REVENUE_DOUBT_EPS_SHARE = 0.5
+#: The check applies only from this revenue consensus up: the companies its research read. Below
+#: it a small company landing far from a tiny consensus is routine, as the record's own revenue
+#: guard says from the same figure (`_REVENUE_GUARD_MIN_ESTIMATE` in `earnings_live_service`).
+REVENUE_DOUBT_MIN_ESTIMATE = 100e6
+
+
+def _in_doubt(rev_estimate: Optional[float], rev_pct: Optional[float],
+              eps_pct: Optional[float], *, eps_gaap: bool) -> bool:
+    """The revenue check on its numbers (`_revenue_in_doubt`): a revenue surprise `rev_pct`, in
+    percent, against a consensus of `rev_estimate`, beside an EPS surprise `eps_pct` (None: no EPS
+    on show, or none with a surprise to state). `eps_gaap`: the EPS on show is a release's GAAP
+    figure, which neither raises a doubt nor settles one (its consensus is usually adjusted), so
+    the revenue keeps its verdict."""
+    if not settings.EARNINGS_LIVE_REVENUE_CHECK_ENABLED or eps_gaap:
+        return False
+    if rev_pct is None or abs(rev_pct) < REVENUE_DOUBT_PCT:
+        return False
+    if rev_estimate is None or rev_estimate < REVENUE_DOUBT_MIN_ESTIMATE:
+        return False
+    if eps_pct is None:
+        return True
+    same_way = (eps_pct > 0) == (rev_pct > 0)
+    return not (same_way and abs(eps_pct) >= abs(rev_pct) * REVENUE_DOUBT_EPS_SHARE)
+
+
+def _revenue_in_doubt(snap: LiveSnapshot) -> bool:
+    """Is the revenue's beat or miss more likely FMP setting one measure against a consensus on
+    another than news (owner, 2026-11-20: "Add the check")? A revenue `REVENUE_DOUBT_PCT` or more
+    off a consensus of at least `REVENUE_DOUBT_MIN_ESTIMATE`, whose EPS does not move the same way
+    by at least `REVENUE_DOUBT_EPS_SHARE` of it (a held or absent EPS, or one with no surprise to
+    state, included). A release's GAAP EPS neither raises the doubt nor settles it. The push then
+    tells the revenue with no verdict (`_phrase`); the card and the sheet still show FMP's numbers.
+    `EARNINGS_LIVE_REVENUE_CHECK_ENABLED` turns it off.
+
+    FRO's first answer on 2026-11-20 set IFRS revenue against a consensus on the industry's TCE
+    measure, +31%, beside an EPS +10%. That season 99 US reports had revenue 25%+ off a consensus
+    of $100M or more; 16 of them were read against the company's own release: 9 real surprises
+    and 7 measure mismatches. Through the record this rule keeps all 9, a release read first with
+    a GAAP EPS alone (MRNA, RUN, IONS, GOLD) included, and withholds 3 of the 7 (TFC, CNA, KKRT)
+    and FRO's first answer; the record's revenue guard already holds NAVI's and APLD's ("being
+    confirmed"); it misses BEN and HGV, whose EPS rose with the mismatched revenue. It fires on 34
+    of that season's 2,570 US reports with a consensus of $100M or more (1.3%; 0.7% of all; the
+    2026-11-20 review measured it at 7.1% of all before the floor, 19.6% of reports under it)."""
+    revenue, eps = snap.revenue, snap.eps
+    # A held figure is never shown (`actual` None): a held revenue raises no doubt, and a held EPS
+    # settles none.
+    if revenue.actual is None:
+        return False
+    shown = eps.actual is not None
+    return _in_doubt(revenue.estimate, revenue.surprise_pct,
+                     eps.surprise_pct if shown else None,
+                     eps_gaap=shown and eps.basis == BASIS_GAAP)
+
+
+def _phrase(label: str, m: LiveMetric, *, revenue: bool, verdict: bool = True) -> str:
+    """One metric's words in `live_copy`; `verdict` False tells a figure with no beat or miss."""
     if m.checking:
         # A figure exists but a sanity guard holds it (a dropped-digit signature).
         return f"{label} being confirmed"
     if m.actual is None:
         return f"{label} not out yet"
-    vs = _vs_consensus(m)
+    vs = _vs_consensus(m) if verdict else None
     if m.source == SOURCE_FILING:
         figure = f"{label} {_money(m.actual, revenue=revenue)}"
         return f"{figure} ({vs})" if vs else figure
     return f"{label} {vs}" if vs else f"{label} reported"
 
 
+def _live_phrases(snap: LiveSnapshot) -> Tuple[str, str]:
+    """`live_copy`'s words for each metric, (revenue, EPS). A revenue in doubt
+    (`_revenue_in_doubt`) is told with no verdict."""
+    eps_label = "GAAP EPS" if snap.eps.basis == BASIS_GAAP else "EPS"
+    return (_phrase("Revenue", snap.revenue, revenue=True, verdict=not _revenue_in_doubt(snap)),
+            _phrase(eps_label, snap.eps, revenue=False))
+
+
+def _live_body(phrases: Tuple[str, ...], preliminary: bool) -> str:
+    body = " · ".join(phrases) + "."
+    if preliminary:
+        body += " From the company's release."
+    return body
+
+
 def live_copy(snap: LiveSnapshot) -> Tuple[str, str]:
     """Title/body for an `earnings_live` push. States what landed and stops."""
-    eps_label = "GAAP EPS" if snap.eps.basis == BASIS_GAAP else "EPS"
-    body = " · ".join([
-        _phrase("Revenue", snap.revenue, revenue=True),
-        _phrase(eps_label, snap.eps, revenue=False),
-    ]) + "."
-    if snap.preliminary:
-        body += " From the company's release."
-    return f"{snap.symbol} results are out", body
+    return f"{snap.symbol} results are out", _live_body(_live_phrases(snap), snap.preliminary)
 
 
 @dataclass(frozen=True)
@@ -381,7 +580,13 @@ def copy_at_wake(kind: str, route: Mapping[str, Any], now: datetime, *,
         # The row waits for FMP's answer as any other ask does: the loop reads the report just
         # before the next look (A REPORT WITH NO ANSWER YET in the module docstring).
         get_earnings_live_service().read_before_look(report[0], report[1], now + WAKE_ASK_AGAIN)
-        return WakeCopy(*text, send=False, ask_again_in=WAKE_ASK_AGAIN)
+        wake = WakeCopy(*text, send=False, ask_again_in=WAKE_ASK_AGAIN)
+    if (wake is not None and text is not None and kind == KIND_EARNINGS_RESULT
+            and wake.title != result_copy(report[0], MIN_SURPRISE)[0]):
+        # A result row a wake writes in the live kind's words: its track starts looking
+        # (`_revise_changed`). Only at a wake (`text`): `instead_at_wake` asks with none, and
+        # deletes a row it would not send, so no row ever holds what it read.
+        _result_rows_in_live_words.add(report)
     return wake
 
 
@@ -482,6 +687,278 @@ def _prune(now: datetime) -> None:
     for done in (_live_done, _surprise_done):
         for key in [k for k in done if k[1] not in days]:
             done.discard(key)
+    for key in [k for k in _told if k[1] not in days]:
+        del _told[key]
+    for key in [k for k in _result_rows_in_live_words if k[1] not in days]:
+        _result_rows_in_live_words.discard(key)
+    for pending in (_revise_after, _failed_until):
+        for key in [k for k in pending if k[1] not in days]:
+            del pending[key]
+
+
+#: A figure stated with no verdict: no consensus, a print that covers it, or a GAAP EPS.
+_NO_VERDICT: Stated = ("reported", None)
+
+
+def _stated(m: LiveMetric) -> Stated:
+    """What the card states about one metric (`Stated`): no figure while it is not out yet or
+    held, so a figure a guard takes back is never 'corrected' into silence."""
+    if m.actual is None or m.checking:
+        return None
+    return _verdict(m) or _NO_VERDICT
+
+
+class _Said(NamedTuple):
+    """What a push of one kind would state about a report now (`_said_now`)."""
+
+    stated: Tuple[Stated, ...]
+    title: str
+    body: str
+    # The live kind's words for each metric, (revenue, EPS); none for the result kind.
+    phrases: Tuple[str, ...] = ()
+
+
+def _said_now(kind: str, snap: LiveSnapshot) -> Optional[_Said]:
+    """What a push of `kind` would state about `snap` now, and its words, or None when it would
+    state nothing a correction could stand on. The result kind speaks for FMP's EPS alone, and in
+    the card's words (`_vs_consensus`), so a restatement to the consensus reads "in line", and
+    one under half a percent prints no "by 0%"."""
+    if kind == KIND_EARNINGS_LIVE:
+        phrases = _live_phrases(snap)
+        revenue, eps = _stated(snap.revenue), _stated(snap.eps)
+        if revenue is not None and _revenue_in_doubt(snap):
+            # Told with no verdict, as `_live_phrases` words it. While the doubt rests on an EPS
+            # the record no longer states (held, or not out), the revenue states nothing either: a
+            # passing hold corrects nothing, and a row keeps its own words (`_merged`).
+            revenue = _NO_VERDICT if eps is not None else None
+        return _Said((revenue, eps), live_copy(snap)[0],
+                     _live_body(phrases, snap.preliminary), phrases)
+    eps = snap.eps
+    stated = _stated(eps)
+    if eps.source != SOURCE_FMP or stated is None:
+        return None
+    # `result_copy`'s title, one per symbol whatever the surprise: the one the push went out with.
+    return _Said((stated,), result_copy(snap.symbol, MIN_SURPRISE)[0],
+                 f"EPS {_vs_consensus(eps) or 'reported'}. Tap for the full picture.")
+
+
+def _contradicts(was: Stated, new: Stated) -> bool:
+    """Does the record's statement on one metric now (`new`) contradict what a push stated
+    (`was`)? Only a verdict can be contradicted: a figure sent with none that gains one is news,
+    and a metric the record no longer states (not out, or held) contradicts nothing."""
+    return was is not None and new is not None and was != new and was != _NO_VERDICT
+
+
+def _changed(then: Tuple[Stated, ...], now: Tuple[Stated, ...]) -> bool:
+    """Does `now` contradict what was sent, on any metric (`_contradicts`)?"""
+    return any(_contradicts(was, new) for was, new in zip(then, now))
+
+
+def _out_of_words(was: Stated, new: Stated) -> bool:
+    """Did a push state a metric that the record no longer states (not out, or held)?"""
+    return was is not None and new is None
+
+
+def _without_verdict(phrase: str) -> str:
+    """`_phrase`'s words for the same figure with no verdict: the release's figure alone, or
+    "reported" for FMP's."""
+    if phrase.endswith(")") and " (" in phrase:
+        return phrase[:phrase.rindex(" (")]
+    return f"{phrase.split(' ', 1)[0]} reported"
+
+
+def _own_revenue_in_doubt(revenue: Stated, snap: LiveSnapshot) -> bool:
+    """The revenue check (`_in_doubt`) on a row's own revenue verdict, at the percent it printed,
+    set beside the record's EPS, at the record's revenue consensus."""
+    if revenue is None or revenue[0] not in ("beat", "missed") or revenue[1] is None:
+        return False
+    rev_pct = float(revenue[1]) if revenue[0] == "beat" else -float(revenue[1])
+    eps = snap.eps
+    shown = eps.actual is not None
+    return _in_doubt(snap.revenue.estimate, rev_pct, eps.surprise_pct if shown else None,
+                     eps_gaap=shown and eps.basis == BASIS_GAAP)
+
+
+def _merged(kind: str, held: _Words, said: _Said, snap: LiveSnapshot) -> Tuple[str, _Words]:
+    """The words a row holding `held` takes (`_corrections`), unmarked: the record's words for
+    every metric the record states, and the row's own for one the record no longer states (not
+    out, or held), so the row never says "not out yet" or "being confirmed" of a figure its phone
+    showed, nor shows a figure its phone was spared. A row's own revenue verdict set beside the
+    record's EPS goes through the revenue check on that pair (`_own_revenue_in_doubt`), so no
+    correction writes a pair a push would never send."""
+    if kind != KIND_EARNINGS_LIVE or len(held.phrases) != len(said.phrases):
+        return said.body, _Words(said.stated, said.phrases)
+    own = [_out_of_words(was, new) for was, new in zip(held.stated, said.stated)]
+    stated = [w if k else n for k, w, n in zip(own, held.stated, said.stated)]
+    phrases = [h if k else r for k, h, r in zip(own, held.phrases, said.phrases)]
+    if own[0] and not own[1] and _own_revenue_in_doubt(stated[0], snap):
+        stated[0], phrases[0] = _NO_VERDICT, _without_verdict(phrases[0])
+    return (_live_body(tuple(phrases), snap.preliminary),
+            _Words(tuple(stated), tuple(phrases)))
+
+
+class _Write(NamedTuple):
+    """One correction: the rows past their buzz holding one of `bodies` take `text`, marked."""
+
+    was: str
+    text: str
+    words: _Words
+    bodies: Tuple[str, ...]
+
+
+def _corrections(kind: str, known: Mapping[str, _Words], written: AbstractSet[str],
+                 said: _Said, snap: LiveSnapshot) -> List[_Write]:
+    """Every write the record now owes one track's rows. A known text the record contradicts
+    (`_changed`) is rewritten on the rows holding it, marked or not. A text a correction wrote
+    (`written`) is the sender's own, so its marked rows follow the record whatever moves (owner,
+    2026-11-20: "Follow FMP"): a verdict the record took off and later gives again reaches them,
+    while a row its own push or wake left with no verdict takes a later one as news. The
+    record's own text is never one: it says what the record says."""
+    out = []
+    for was, held in known.items():
+        if was == said.body:
+            continue
+        contradicted = _changed(held.stated, said.stated)
+        if not contradicted and was not in written:
+            continue
+        text, words = _merged(kind, held, said, snap)
+        if text == was:
+            continue
+        bodies = (was, UPDATED_MARK + was) if contradicted else (UPDATED_MARK + was,)
+        out.append(_Write(was, text, words, bodies))
+    return out
+
+
+def _write_corrections(key: str, kind: str, title: str,
+                       writes: List[_Write]) -> Tuple[List[int], bool]:
+    """Whether any row of `kind` is still held, then each correction on the rows past their buzz
+    holding one of its bodies. Held is read FIRST: a row its wake ends after that read is past its
+    buzz by the write and takes it, and one the read saw held is owed another look. On a worker
+    thread: the client is sync."""
+    from app.services.push_dispatch_service import get_push_dispatch_service
+
+    service = get_push_dispatch_service()
+    held = service.holds_rows(key, kind)
+    changed = [service.revise_sent_text(key, kind, title, UPDATED_MARK + w.text, list(w.bodies))
+               for w in writes]
+    return changed, held
+
+
+def _note_told(kind: str, snap: LiveSnapshot, title: str, body: str) -> None:
+    """A push of `kind` went out for `snap` in `body`: its rows hold those words. A live push also
+    starts following the report's result rows, which a wake can make of a held live row."""
+    told = _told.setdefault((snap.symbol, snap.day), {})
+    said = _said_now(kind, snap)
+    words = (_Words(said.stated, said.phrases) if said is not None
+             else _Words((None,) * (2 if kind == KIND_EARNINGS_LIVE else 1)))
+    then = told.get(kind)
+    known: Dict[str, _Words] = dict(then.known) if then is not None else {}
+    known[body] = words
+    if said is not None:
+        known.setdefault(said.body, words)
+    told[kind] = _Told(title, known, said.body if said is not None else body,
+                       then.held if then is not None else False,
+                       then.written if then is not None else frozenset())
+    if kind == KIND_EARNINGS_LIVE and KIND_EARNINGS_RESULT not in told:
+        result = _said_now(KIND_EARNINGS_RESULT, snap)
+        told[KIND_EARNINGS_RESULT] = _Told(
+            result_copy(snap.symbol, MIN_SURPRISE)[0],
+            {result.body: _Words(result.stated)} if result is not None else {},
+            result.body if result is not None else "")
+    if RESULT_ROWS_IN_LIVE_WORDS not in told:
+        # The result rows a wake can write in live words, whichever push told the report.
+        live = _said_now(KIND_EARNINGS_LIVE, snap)
+        told[RESULT_ROWS_IN_LIVE_WORDS] = _Told(
+            live.title, {live.body: _Words(live.stated, live.phrases)}, live.body)
+
+
+async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
+    """A RESULT FMP CHANGES (module docstring): look again at each followed report whose record's
+    words changed since the last look, or whose rows were still held then (every
+    `HELD_RETRY_SECONDS`), and correct the rows still holding a text the record now contradicts.
+    Looks a record change owes go first, then held re-looks, longest due first, so recurring
+    re-looks never starve a report that just changed, nor each other. Returns the looks that
+    changed a row. Never raises: the first failed write ends the round's corrections and waits
+    `HELD_RETRY_SECONDS`, so the next rounds start with the others."""
+    if not settings.EARNINGS_LIVE_INBOX_CORRECTIONS_ENABLED:
+        return 0
+    revised = tried = put_off = 0
+    mono = time.monotonic()
+    owed: List[Tuple[int, float, int, LiveSnapshot, str, _Told, _Said]] = []
+    for snap in snapshots:
+        told = _told.get((snap.symbol, snap.day))
+        if not told:
+            continue
+        for track, then in told.items():
+            again = (snap.symbol, snap.day, track)
+            if _failed_until.get(again, 0.0) > mono:
+                continue
+            said = _said_now(_TRACKS[track][1], snap)
+            if said is None:
+                continue
+            due = _revise_after.get(again, 0.0)
+            if said.body != then.seen:
+                owed.append((0, 0.0, len(owed), snap, track, then, said))
+            elif then.held and due <= mono:
+                owed.append((1, due, len(owed), snap, track, then, said))
+    owed.sort(key=lambda o: o[:3])
+    for _, _, _, snap, track, then, said in owed:
+        rows_kind, kind = _TRACKS[track]
+        again = (snap.symbol, snap.day, track)
+        told = _told.get((snap.symbol, snap.day))
+        if told is None:
+            continue
+        known: Dict[str, _Words] = dict(then.known)
+        known.setdefault(said.body, _Words(said.stated, said.phrases))
+        writes = _corrections(kind, known, then.written, said, snap)
+        if not writes or (track == RESULT_ROWS_IN_LIVE_WORDS
+                          and (snap.symbol, snap.day) not in _result_rows_in_live_words):
+            # Nothing the record contradicts (held rows wake to the record's own words), or no
+            # result row in the live words yet: the texts are kept for when a wake writes one.
+            told[track] = _Told(then.title, known, said.body, False, then.written)
+            _revise_after.pop(again, None)
+            continue
+        if tried >= MAX_REVISIONS_PER_ROUND:
+            put_off += 1
+            continue
+        tried += 1
+        key = result_dedup_key(snap.symbol, snap.day.isoformat())
+        # Kept before the write: a write can commit and its call still fail, and a row holding a
+        # text the sender forgot is out of every later look's reach. An empty `seen` owes a look
+        # after the back-off whatever the record says then.
+        for write in writes:
+            known.setdefault(write.text, write.words)
+        written = then.written | {write.text for write in writes}
+        told[track] = _Told(then.title, known, "", then.held, written)
+        try:
+            changed, held = await asyncio.to_thread(_write_corrections, key, rows_kind,
+                                                    then.title, writes)
+        except Exception as e:
+            _failed_until[again] = mono + HELD_RETRY_SECONDS
+            logger.warning("earnings live push: %s %s changed after its %s push, but its inbox "
+                           "rows could not be updated (%s: %s); no more corrections this "
+                           "round, this one again in %ds", snap.symbol, snap.day.isoformat(),
+                           track, type(e).__name__, e, HELD_RETRY_SECONDS)
+            return revised
+        _failed_until.pop(again, None)
+        told[track] = _Told(then.title, known, said.body, held, written)
+        if held:
+            _revise_after[again] = mono + HELD_RETRY_SECONDS
+        else:
+            _revise_after.pop(again, None)
+        if sum(changed):
+            revised += 1
+            for write, rows in zip(writes, changed):
+                if rows:
+                    logger.warning("earnings live push: %s %s changed after its %s push: %d "
+                                   "inbox row(s) saying %r now say %r, no second buzz%s",
+                                   snap.symbol, snap.day.isoformat(), track, rows,
+                                   write.bodies[0], UPDATED_MARK + write.text,
+                                   "; rows still held" if held else "")
+    if put_off:
+        logger.warning("earnings live push: %d inbox correction(s) tried this round, %d more go "
+                       "next round", tried, put_off)
+    return revised
 
 
 def _to_decide(snapshots: List[LiveSnapshot], today: date) -> List[LiveSnapshot]:
@@ -554,7 +1031,18 @@ async def dispatch_landings(snapshots: List[LiveSnapshot], now: datetime) -> Dic
             if settings.EARNINGS_LIVE_PUSH_ENABLED:
                 title, body = live_copy(snap)
                 try:
-                    stats["live"] += await _notify(KIND_EARNINGS_LIVE, snap, title, body)
+                    told = await _notify(KIND_EARNINGS_LIVE, snap, title, body)
+                    stats["live"] += told
+                    _note_told(KIND_EARNINGS_LIVE, snap, title, body)
+                    if _revenue_in_doubt(snap):
+                        # The landing's words. A row held for the night takes the record's words at
+                        # its wake, which may differ (A HELD ROW'S TEXT in the module docstring).
+                        logger.info(
+                            "EARNINGS_LIVE_REVENUE_WITHHELD sym=%s day=%s rev_pct=%s eps_pct=%s "
+                            "rev_est=%s told=%d: the landing's push tells the revenue with no beat "
+                            "or miss (`_revenue_in_doubt`)", snap.symbol, snap.day.isoformat(),
+                            snap.revenue.surprise_pct, snap.eps.surprise_pct,
+                            snap.revenue.estimate, told)
                 except WatcherLookupFailed as e:
                     _give_back(_live_done, snap, ordered[i:], e)
                     break
@@ -577,6 +1065,7 @@ async def dispatch_landings(snapshots: List[LiveSnapshot], now: datetime) -> Dic
         title, body = result_copy(snap.symbol, surprise)
         try:
             stats["result"] += await _notify(KIND_EARNINGS_RESULT, snap, title, body)
+            _note_told(KIND_EARNINGS_RESULT, snap, title, body)
         except WatcherLookupFailed as e:
             _give_back(_surprise_done, snap, ordered[i:], e)
             break
@@ -587,4 +1076,7 @@ async def dispatch_landings(snapshots: List[LiveSnapshot], now: datetime) -> Dic
     if stats["live"] or stats["result"]:
         logger.info("earnings live push: %d live + %d result sends", stats["live"],
                     stats["result"])
+    # Every landed report, the ones with nothing left to send among them (`_to_decide` drops
+    # those): a correction is owed long after the last send.
+    await _revise_changed(snapshots)
     return stats

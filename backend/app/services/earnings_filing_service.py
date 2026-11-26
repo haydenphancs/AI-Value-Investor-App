@@ -129,13 +129,55 @@ a filing either: they spend no attempt.
 
 Foreign private issuers furnish results on 6-K, not 8-K; they stay FMP-only.
 
+LATE READS (owner, 2026-11-20: "Yes, read it once"). A report FMP completes before its release is
+read leaves the waiting list, yet its release is the only source of its outlook and its link: on
+2026-11-20 FMP beat BJ's 8-K by 13 min and IESC's by 39 s, and no sheet showed either. So the
+tick hands the watcher a second list (`EarningsLiveService.late_filing_symbols`, `run_once(late=)`):
+  * read after every waiting ticker, in the slots and the minute's room those leave, so the cap
+    of 25 a minute and 25 at a time holds, late reads counted in it; never placed, so a late
+    ticker is never ahead of anyone;
+  * at most every `_LATE_POLL_SECONDS` (5 min) inside its company's windows and the slow 15 min
+    outside them, only 06:00–22:00 ET on a trading day EDGAR is open (`_Watch.late`,
+    `EarningsLiveService.late_filing_symbols`): speed no longer buys a figure. A release filed
+    the business day after one of EDGAR's own holidays (Columbus Day, Veterans Day) is not read;
+  * never a ticker a read showed on foreign forms alone, and never one whose release was read, or
+    restored after a restart;
+  * at most one late model call a round, the walk of one ticker's filings included (`_check_one`'s
+    `late`). While a waiting ticker reads at the fast cadence as the call starts, after the read's
+    own SEC reads, or will at any moment the whole call could span (a window opening, EDGAR's last
+    minute: `_busy_during`), the call ends by `_LATE_MODEL_DEADLINE_SECONDS` (20 s): that ticker's
+    next read, which can still win a figure, waits at most that for one that cannot. A call cut so
+    spends no attempt; its filing is tried again in a round that starts with no such ticker, or, once
+    a twin of the issuer has read the release, at the ticker's next late read (every 5 min in its
+    windows, 15 outside), which then costs no call unless a newer filing came after the cut
+    (`_Watch.cut_on`). Tried again, the call keeps the whole deadline unless it is judged busy
+    again as it starts, and is cut again then (each such try is paid for), so a release the model
+    needs longer for still gives its outlook in a calm stretch. A cut filing later settled another
+    way (not the release, or out of attempts) leaves nothing waiting. A burst of releases FMP beat neither stretches a round nor
+    crowds the model chat and reports share;
+  * a release read late lands on a record that holds FMP's figures and its landing already:
+    it adds its outlook and its link alone. Its figures are dropped before they reach the record
+    (`earnings_filing_tick`, which judges "late" when the figure arrives, from the record alone: a
+    report FMP completed while its release was being read counts, one FMP put back on hold does
+    not): FMP's are confirmed and already told, and a release figure beside them could move a
+    verdict a push stated and hold the report "preliminary" for good. It sends nothing. A release
+    with no outlook, or whose figures all failed verification, still leaves its link, and the table
+    keeps and restores that row like any other (`held_filing_from`); so does every found release, a
+    waiting ticker's and a twin's served from the memo included (`_link_only`). Residual: a report FMP puts
+    back on hold after its release was read late shows "being confirmed" until FMP fixes it, since
+    the read's own figures were dropped and are not read again (nor after a restart).
+A company FMP beat costs one to three more submissions reads, two document reads and one model
+call (about a cent); one whose release never comes that day costs a late read every 5 or 15 min
+until 22:00 ET.
+
 A RESTART. The watch is per process, but what a read verified goes to `earnings_filing_cache` and
 a new process takes it back (`restore`, from `EarningsLiveService.restore_filings`), so a filing
 read once is not read again. Only a filing that gave nothing is read a second time, any filing a
 failed write left out of the table or a failed read of it left unrestored, and one another
 verifier kept (`FILING_VERIFIER_VERSION`), which is how a fix here reaches a filing already held.
-Each of those only while its report is today's, still pending, and the watch is open (06:00–22:00
-ET), and after 22:00 ET it waits for FMP like any other.
+Each of those only while its report is today's, still pending or complete with no filing held
+(read late, LATE READS), and the watch is open (06:00–22:00 ET), and after 22:00 ET it waits for
+FMP like any other.
 """
 
 from __future__ import annotations
@@ -233,6 +275,10 @@ _EDGAR_CLOSE = (22, 0)
 _EDGAR_LAST_MINUTE: Tuple[int, int] = divmod(_EDGAR_CLOSE[0] * 60 + _EDGAR_CLOSE[1] - 1, 60)
 _FAST_POLL_SECONDS = 60
 _SLOW_POLL_SECONDS = 900
+#: How often a report FMP completed before its release was read is read for the release's outlook
+#: and link inside its company's windows (LATE READS in the module docstring); outside them it
+#: keeps `_SLOW_POLL_SECONDS`. Speed no longer buys a figure, so a slot's minute is not spent on it.
+_LATE_POLL_SECONDS = 300
 #: What a loop reads on its minute comes due this much early, here and in the FMP cadences
 #: (`earnings_live_service.due_days`, `tracking_service._earnings_days_due`). Ticks start a minute
 #: apart give or take scheduling, and a stamp taken when a read returned sits past its tick's
@@ -282,6 +328,15 @@ _EXTRACT_TEXT_CHARS = 40_000
 #: them), every company behind it waiting. Past the deadline the read is a failed read, rested on
 #: the ladder like any other (`_Read.RETRY`, `_model_deadline_seconds`).
 _MODEL_DEADLINE_MARGIN_SECONDS = 15.0
+#: A late read's model step ends by this while a waiting ticker reads at the fast cadence, or will
+#: before a whole call could end (LATE READS in the module docstring), judged when the call starts,
+#: after the read's own SEC reads: it can win no figure, and that ticker's next read, which can,
+#: waits for it (in the 2026-11-20 review one of 100 s held a figure back 41 s). A median read takes
+#: 3-4 s. One cut short spends no attempt: its filing waits for a round that starts with no such
+#: ticker (`_Watch.wait_calm`), or for a twin to read the release (then it is served at its next
+#: late read), and is tried again then, with the whole deadline unless its own call is judged busy
+#: again, so a release the model needs longer for still gives its outlook and link.
+_LATE_MODEL_DEADLINE_SECONDS = 20.0
 #: The shortest quote that proves a figure. "EPS of $0.91" is a whole proof, because the printed
 #: number and the label at it carry what the longer floor of the outlook has to.
 _FIGURE_QUOTE_MIN_CHARS = 12
@@ -5236,6 +5291,13 @@ def poll_interval_seconds(now_et: datetime,
     return _SLOW_POLL_SECONDS
 
 
+def _link_only(filing: ResultsFiling, cik: str) -> FilingFigures:
+    """A found release's link and nothing else: what the sheet still shows of a release whose
+    figures all failed verification and that printed no outlook (or one SEC would not serve)."""
+    return FilingFigures(accession=filing.accession, accepted_at=filing.accepted_at,
+                         url=filing_index_url(cik, filing.accession))
+
+
 def _model_deadline_seconds() -> float:
     """How long one read's model step may take: a whole call, and the room behind it
     (`_MODEL_DEADLINE_MARGIN_SECONDS`), which is all a call's own timeout set to nothing or less
@@ -5262,6 +5324,8 @@ class _Read(enum.Enum):
     RETRY = "retry"
     NOT_RELEASE = "not_release"
     RELEASE = "release"
+    # A late read's model call cut by its own short deadline: no attempt spent (`_check_one`).
+    CUT = "cut"
 
 
 @dataclass
@@ -5282,11 +5346,23 @@ class _Watch:
     skipped: Set[str] = field(default_factory=set)
     # The last read showed foreign forms alone (`furnishes_on_6k`): it rests, with no slot.
     foreign: bool = False
+    # Read late: FMP completed the report before its release was read (LATE READS in the module
+    # docstring), so it is read at most every `_LATE_POLL_SECONDS`, for the outlook and the link.
+    late: bool = False
+    # The accession a late read's model call was cut on by its short deadline: read again only in
+    # a round that starts with no waiting ticker at the fast cadence, or once a twin has read that
+    # accession, which then costs no call (`_run_round`).
+    cut_on: Optional[str] = None
+
+    @property
+    def wait_calm(self) -> bool:
+        """A late read's model call was cut (`cut_on`), and the ticker waits for a calm round."""
+        return self.cut_on is not None
 
     def wait_seconds(self, interval: int) -> float:
         """How long after `checked_mono` the symbol comes due on a cadence of `interval`."""
         rest = _FOREIGN_FILER_REST_SECONDS if self.foreign else 0
-        return max(interval, self.retry_gap, rest)
+        return max(interval, self.retry_gap, rest, _LATE_POLL_SECONDS if self.late else 0)
 
 
 @dataclass(frozen=True)
@@ -5416,6 +5492,48 @@ class EarningsFilingWatcher:
         w = self._watch.setdefault((symbol.upper(), day), _Watch())
         w.done, w.figures = True, figures
         self._extracted[figures.accession] = figures
+
+    def _mark_late(self, placed: Sequence[str], late: Sequence[str],
+                   report_day: date) -> List[str]:
+        """The late list as this round reads it (LATE READS in the module docstring): `late`
+        upper-cased, once each, in the caller's order, less any ticker also waiting. Each is marked
+        `_Watch.late`, logged once when it turns late, and a ticker back among the waiting ones is
+        read at its own minute again."""
+        waiting = set(placed)
+        for symbol in placed:
+            w = self._watch.get((symbol, report_day))
+            if w is not None:
+                w.late = False
+        out = [s for s in dict.fromkeys(str(x).upper() for x in late) if s not in waiting]
+        for symbol in out:
+            key = (symbol, report_day)
+            w = self._watch.setdefault(key, _Watch())
+            if not w.late and not self._finished(key):
+                logger.info("EARNINGS_LIVE_FILING sym=%s day=%s result=late: FMP has the results, "
+                            "so its release is read for its outlook and link", symbol,
+                            report_day.isoformat())
+            w.late = True
+        return out
+
+    def _busy_during(self, wanted: Sequence[str], report_day: date, start_et: datetime,
+                     mono: float) -> bool:
+        """Would a waiting ticker of `wanted` (foreign filers aside) read at the fast cadence at
+        any moment of a late model call starting at `start_et` and running to the read's whole
+        deadline? Sampled at the start, the end, and every moment the cadence can change in
+        between, each release window's opening and EDGAR's last minute (an end past EDGAR's close
+        reads no cadence at all, which would hide that minute)."""
+        end = start_et + timedelta(seconds=_model_deadline_seconds())
+        moments = [start_et, end]
+        for hour, minute in [window[0] for window in _RELEASE_WINDOWS] + [_EDGAR_LAST_MINUTE]:
+            at = start_et.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if start_et < at < end:
+                moments.append(at)
+        for symbol in wanted:
+            if self._watch.get((symbol, report_day), _Watch()).foreign:
+                continue
+            if any(self._interval(symbol, at, mono) == _FAST_POLL_SECONDS for at in moments):
+                return True
+        return False
 
     def _due(self, key: Tuple[str, date], now_et: datetime, mono: float) -> bool:
         interval = self._interval(key[0], now_et, mono)
@@ -5574,6 +5692,7 @@ class EarningsFilingWatcher:
         cik_map: Optional[Mapping[str, str]] = None,
         sleep: Any = asyncio.sleep,
         on_figures: Optional[Callable[[str, FilingFigures], Awaitable[None]]] = None,
+        late: Sequence[str] = (),
     ) -> Dict[str, FilingFigures]:
         """One round for the symbols reporting on `report_day`. Returns NEW figures by symbol,
         and hands each to `on_figures` the moment it verifies: a round is serial, with a model
@@ -5597,6 +5716,10 @@ class EarningsFilingWatcher:
         minute (but one a give-way leaves, when that minute would cost its window), a throttle
         parks the whole watcher, and a delivery that fails is logged, and that figure is not
         offered again in this process.
+
+        `late` are the reports FMP completed before their release was read, most-watched first
+        (LATE READS in the module docstring): read after `symbols`, in the slots and the minute's
+        room those leave, never placed, at most one model call a round.
         """
         if not settings.EARNINGS_LIVE_FILINGS_ENABLED or not user_agent_configured():
             return {}
@@ -5606,7 +5729,8 @@ class EarningsFilingWatcher:
         self._start_round(mono)
         try:
             return await self._run_round(now, symbols, report_day, mono, sec=sec, gemini=gemini,
-                                         cik_map=cik_map, sleep=sleep, on_figures=on_figures)
+                                         cik_map=cik_map, sleep=sleep, on_figures=on_figures,
+                                         late=late)
         finally:
             self._round_ended = time.monotonic()
 
@@ -5622,18 +5746,34 @@ class EarningsFilingWatcher:
         cik_map: Optional[Mapping[str, str]],
         sleep: Any,
         on_figures: Optional[Callable[[str, FilingFigures], Awaitable[None]]],
+        late: Sequence[str] = (),
     ) -> Dict[str, FilingFigures]:
         """The round of `run_once`, started at `mono` on the monotonic clock."""
         if mono < self._parked_until:
             return {}
         now_et = now.astimezone(ET)
         cap = max(0, int(settings.EARNINGS_LIVE_SEC_MAX_SYMBOLS))
-        holding = [s for s in self._placed(symbols, report_day)
-                   if self._holds_a_slot((s, report_day), now_et, mono)]
+        placed = self._placed(symbols, report_day)
+        late_list = self._mark_late(placed, late, report_day)
+        holding = [s for s in placed if self._holds_a_slot((s, report_day), now_et, mono)]
         wanted = holding[:cap]
         self._forget_reads_a_minute_back(mono)
         room = max(0, cap - len(self._reads))
         due = [s for s in wanted if self._due((s, report_day), now_et, mono)][:room]
+        # LATE READS: after every waiting ticker, in the slots and the minute's room they leave. A
+        # late model call waits behind nobody when no waiting ticker reads at the fast cadence as it
+        # starts, nor will before a whole call could end (a window opening, EDGAR's last minute):
+        # then it gets the read's whole deadline, else `_LATE_MODEL_DEADLINE_SECONDS` (`busy_now`,
+        # judged at the call). A filing a cut left waiting is read again in a round that starts
+        # calm, or once a twin has read its release, which costs no call.
+        spare = min(cap - len(wanted), room - len(due))
+        calm = not self._busy_during(wanted, report_day, now_et, mono)
+        late_due = [s for s in late_list if not self._watch[(s, report_day)].foreign
+                    and (calm or not self._watch[(s, report_day)].wait_calm
+                         or self._watch[(s, report_day)].cut_on in self._extracted)
+                    and self._due((s, report_day), now_et, mono)][:max(0, spare)]
+        late_set = set(late_due)
+        due += late_due
         if not due:
             return {}
         client = sec if sec is not None else get_sec_edgar_client()
@@ -5661,7 +5801,19 @@ class EarningsFilingWatcher:
         asked = False
         # What a give-way leaves to the next round, which reads it in its place.
         left: Set[str] = set()
+
+        def busy_now() -> bool:
+            # Judged as a late read's model call starts, after its own SEC reads: the waiting
+            # reads before it, and its own, can have taken a while.
+            started = now_et + timedelta(seconds=time.monotonic() - mono)
+            return self._busy_during(wanted, report_day, started, mono)
+
         for at, symbol in enumerate(due):
+            if asked and read[-1] in late_set:
+                # One late model call a round: a burst of releases FMP beat cannot stretch it, nor
+                # crowd the model shared with chat and reports. The rest keep their stamps and are
+                # due next round; every waiting ticker was read before them.
+                break
             if asked:
                 again = self._gives_way_for(read, due[at:], report_day, now_et, mono)
                 if again:
@@ -5702,8 +5854,10 @@ class EarningsFilingWatcher:
             spent_before = sum(w.attempts.values())
             asked_before = self.model_calls
             try:
+                late_now = symbol in late_set
                 figures = await self._check_one(client, gemini, symbol, cik, report_day, w,
-                                                sleep, day_ends)
+                                                sleep, day_ends, late=late_now,
+                                                busy=busy_now if late_now else None)
             except SECRateLimitException as e:
                 park = e.retry_after if isinstance(e.retry_after, (int, float)) and e.retry_after > 0 \
                     else _THROTTLE_PARK_SECONDS
@@ -5778,7 +5932,8 @@ class EarningsFilingWatcher:
 
     async def _check_one(
         self, client: Any, gemini: Any, symbol: str, cik: str, report_day: date, w: _Watch,
-        sleep: Any, day_ends: float,
+        sleep: Any, day_ends: float, *, late: bool = False,
+        busy: Optional[Callable[[], bool]] = None,
     ) -> Optional[FilingFigures]:
         """Walk the symbol's results filings, newest first, until one settles the report.
 
@@ -5788,7 +5943,13 @@ class EarningsFilingWatcher:
         settle the report while a newer one is undecided. A record with nothing to walk that
         shows foreign forms alone says nothing about the report either, and rests the symbol.
         The same record says when the company puts its results out, on the day's first read
-        (`release_windows`), until `day_ends` on the monotonic clock.
+        (`release_windows`), until `day_ends` on the monotonic clock. A `late` read (LATE READS in
+        the module docstring) asks the model under `_LATE_MODEL_DEADLINE_SECONDS` when `busy` says
+        so as the call starts, and a call that deadline cuts spends no attempt: the filing waits
+        for a calm round, or a twin's read (`_Watch.cut_on`). Its walk ends after a filing that cost
+        a model call and settled nothing: the next filing waits for the next round. A release
+        found that verified nothing still answers with its link alone (`_link_only`), for every
+        ticker of the issuer.
         """
         self.calls += 1
         # The round came due, so the rest is served: only a new failed read owes another. Reset
@@ -5809,16 +5970,26 @@ class EarningsFilingWatcher:
                 # Read once per accession, ever. A restart keeps that too, for a filing it took back
                 # from `earnings_filing_cache` (`restore`). Ahead of the skip: a failed read was this
                 # ticker's, and a release is the filing's, so a second ticker of the issuer may have
-                # read what this one gave up on.
-                w.found, w.done = filing, True
-                w.figures = self._extracted[acc]
+                # read what this one gave up on. A release that verified nothing still has its link.
+                w.found, w.done, w.cut_on = filing, True, None
+                w.figures = self._extracted[acc] or _link_only(filing, cik)
                 return w.figures
             if acc in w.skipped:
                 continue
-            outcome, figures = await self._extract(client, gemini, symbol, cik, report_day,
-                                                   filing, sleep)
+            calls_before = self.model_calls
+            outcome, figures = await self._extract(
+                client, gemini, symbol, cik, report_day, filing, sleep,
+                busy=busy if late else None)
+            if outcome is _Read.CUT:
+                w.cut_on = acc
+                w.checked_mono = time.monotonic()
+                return None
             if outcome is _Read.RELEASE:
+                # Nothing verified, yet the release is found: its link is still worth keeping. The
+                # memo keeps "nothing verified" (None), so no ticker reads it twice.
                 self._extracted[acc] = figures
+                w.cut_on = None
+                figures = figures or _link_only(filing, cik)
                 w.found, w.done, w.figures = filing, True, figures
                 return figures
             if outcome is _Read.RETRY:
@@ -5838,11 +6009,17 @@ class EarningsFilingWatcher:
                     symbol, report_day.isoformat(), acc, tries,
                 )
             w.skipped.add(acc)
+            if w.cut_on == acc:
+                # The filing a cut left waiting is settled (not the release, or out of attempts):
+                # nothing waits for a calm round any more, nor for a twin's read of it.
+                w.cut_on = None
+            if late and self.model_calls > calls_before:
+                return None
         return None
 
     async def _extract(
         self, client: Any, gemini: Any, symbol: str, cik: str, report_day: date,
-        filing: ResultsFiling, sleep: Any,
+        filing: ResultsFiling, sleep: Any, *, busy: Optional[Callable[[], bool]] = None,
     ) -> Tuple[_Read, Optional[FilingFigures]]:
         """Read one filing and say what that settled. Figures come only with RELEASE.
 
@@ -5851,7 +6028,9 @@ class EarningsFilingWatcher:
         the size cap, or a 4xx), which would come back the same every time, so it is final, like
         everything verification decides, a raise included: it is pure, so the same text raises
         again, and every retry would pay for another model call. The model step, retries and all,
-        ends by its deadline (`_model_deadline_seconds`), or it is a failed read.
+        ends by its deadline (`_model_deadline_seconds`), or it is a failed read; a late read's
+        ends by `_LATE_MODEL_DEADLINE_SECONDS` when `busy` says so as the call starts, and is CUT
+        when that runs out.
         """
         acc = filing.accession
         day = report_day.isoformat()
@@ -5901,7 +6080,12 @@ class EarningsFilingWatcher:
                 "[earnings-live-text-capped] sym=%s acc=%s %d chars cut to %d for the model",
                 symbol, acc, len(release), len(text),
             )
-        deadline: Optional[float] = None
+        deadline = _model_deadline_seconds()
+        # Judged as the call starts, after this read's own SEC reads (LATE READS in the module
+        # docstring), and outside the call's `try`: a bug here is no failed model read.
+        cut_short = (busy is not None and _LATE_MODEL_DEADLINE_SECONDS < deadline and busy())
+        if cut_short:
+            deadline = _LATE_MODEL_DEADLINE_SECONDS
         limit: Optional[asyncio.Timeout] = None
         try:
             model = gemini
@@ -5909,7 +6093,6 @@ class EarningsFilingWatcher:
                 from app.integrations.gemini import get_gemini_client
 
                 model = get_gemini_client()
-            deadline = _model_deadline_seconds()
             self.model_calls += 1
             async with asyncio.timeout(deadline) as limit:
                 answer = await model.generate_json(
@@ -5928,9 +6111,15 @@ class EarningsFilingWatcher:
             # The deadline's own timer says when it ran out. Every other timeout is a
             # TimeoutError too, the client's own per-call one (GeminiTimeoutError) among them, and
             # is named as itself.
-            why = (f"no answer within the read's {deadline:g}s deadline"
-                   if limit is not None and limit.expired()
+            expired = limit is not None and limit.expired()
+            why = (f"no answer within the read's {deadline:g}s deadline" if expired
                    else f"{type(e).__name__}: {e}")
+            if expired and cut_short:
+                logger.info(
+                    "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=late_cut (%s): read again "
+                    "with no waiting ticker in its window", symbol, day, acc, why,
+                )
+                return _Read.CUT, None
             logger.warning(
                 "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=gemini_failed (%s)",
                 symbol, day, acc, why,

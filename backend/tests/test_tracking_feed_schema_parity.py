@@ -65,6 +65,8 @@ ALERT_KEYS = {
     "earnings_status", "report_date", "eps_actual", "revenue_actual",
     "eps_surprise_pct", "revenue_surprise_pct", "eps_basis", "results_preliminary",
     "results_checked_at", "eps_checking", "revenue_checking",
+    # The LIVE label (2026-11-20, "LIVE all day until midnight"), optional too.
+    "earnings_live_label",
 }
 WHALE_ITEM_KEYS = {
     "ticker", "company_name", "whale_count", "amount", "raw_amount",

@@ -1243,7 +1243,9 @@ def test_the_payload_carries_the_snapshots_poll():
     filed = _sheet(els.snapshot_of(_filed(), REPORT, _et(REPORT, 16, 5)))
     assert filed["status"] == "reported" and filed["poll_seconds"] == 120
     done = els.snapshot_of(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), REPORT, _et(REPORT, 17))
-    assert _sheet(done)["status"] == "reported" and _sheet(done)["poll_seconds"] is None
+    # In at 17:00 on its own day: LIVE to midnight, and one ask just after it ends the label.
+    assert _sheet(done)["status"] == "reported" and _sheet(done)["poll_seconds"] == 25206
+    assert _sheet(done)["live_label"] is True and live["live_label"] is True
 
 
 def test_a_sheet_with_no_snapshot_never_polls():
@@ -1269,7 +1271,7 @@ def test_a_filing_complete_report_polls_until_fmp_confirms():
     snap = els.snapshot_of(rec, REPORT, _et(REPORT, 16, 5))
     assert (snap.status, snap.preliminary, snap.poll_seconds) == (els.STATUS_REPORTED, True, 120)
     assert _poll(rec, _et(REPORT, 21, 59)) == 120
-    assert _poll(rec, _et(REPORT, 22)) is None
+    assert _poll(rec, _et(REPORT, 22)) == 7206, "past the reads, only the label's end is asked"
     assert _poll(rec, _et(NEXT, 5, 59)) is None
     assert _poll(rec, _et(NEXT, 12)) == 120, "the loop still asks FMP all the next day"
     assert _poll(rec, _et(NEXT, 21, 59)) == 120
@@ -1277,7 +1279,7 @@ def test_a_filing_complete_report_polls_until_fmp_confirms():
     confirmed = replace(rec, fmp_eps=0.45, fmp_revenue=17.2e9)
     snap = els.snapshot_of(confirmed, NEXT, _et(NEXT, 8))
     assert (snap.preliminary, snap.poll_seconds) == (False, None)
-    assert _poll(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), _et(REPORT, 17)) is None
+    assert _poll(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), _et(REPORT, 17)) == 25206
 
 
 _WINDOW_CASES = [
@@ -1427,7 +1429,10 @@ def test_a_preliminary_report_polls_exactly_while_the_loop_still_asks_fmp(day, a
     """Polling past those hours would re-read a record nothing is updating."""
     rec = _filed(day=day)
     assert els.snapshot_of(rec, at.date(), at).status == els.STATUS_REPORTED
-    assert _poll(rec, at) == (120 if hot else None)
+    # Outside the reads, a report on its own day still asks once, just after midnight, so its
+    # LIVE label ends with the day (THE LIVE LABEL); any later day asks nothing.
+    quiet = els.label_end_seconds(at) if day == at.date() else None
+    assert _poll(rec, at) == (120 if hot else quiet)
 
 
 def test_a_live_report_polls_at_the_live_pace_with_a_filing_figure_in_or_not():
@@ -1513,7 +1518,7 @@ def test_an_answer_this_read_could_tell_never_asks_again(found, status):
 
 
 @pytest.mark.parametrize("snap,poll", [
-    (els.snapshot_of(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), REPORT, _et(REPORT, 17)), None),
+    (els.snapshot_of(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), REPORT, _et(REPORT, 17)), 25206),
     (els.snapshot_of(_rec(), REPORT, _et(REPORT, 9)), els.EARNINGS_LIVE_POLL_SECONDS),
     (els.snapshot_of(_filed(), REPORT, _et(REPORT, 17)), els.EARNINGS_LIVE_PRELIMINARY_POLL_SECONDS),
 ], ids=["reported", "live", "preliminary"])
@@ -1566,3 +1571,80 @@ def test_a_calendar_with_no_trading_day_ends_instead_of_hanging(monkeypatch):
     monkeypatch.setattr(market_hours, "is_trading_day", lambda d: False)
     day = date(2026, 10, 29)
     assert next_trading_day(day) == day + timedelta(days=11)
+
+
+# ── THE LIVE LABEL (owner, 2026-11-20: "LIVE all day until midnight") ──────────
+
+
+@pytest.mark.parametrize("at,figures,status,label", [
+    (_et(REPORT, 2, 59, 59), {}, els.STATUS_UPCOMING, False),
+    (_et(REPORT, 2, 59, 59), {"fmp_eps": 0.44}, els.STATUS_LIVE, True),
+    (_et(REPORT, 3), {}, els.STATUS_LIVE, True),
+    (_et(REPORT, 16, 30), {"fmp_eps": 0.44, "fmp_revenue": 17.1e9}, els.STATUS_REPORTED, True),
+    (_et(REPORT, 23, 59, 59), {"fmp_eps": 0.44, "fmp_revenue": 17.1e9}, els.STATUS_REPORTED, True),
+    (_et(NEXT, 0), {"fmp_eps": 0.44, "fmp_revenue": 17.1e9}, els.STATUS_REPORTED, False),
+    (_et(NEXT, 0), {}, els.STATUS_AWAITING, False),
+    (_et(REPORT - timedelta(days=1), 12), {}, els.STATUS_UPCOMING, False),
+], ids=["before_03_nothing_in", "before_03_a_figure_in", "from_03", "in_at_16_30",
+        "in_at_23_59_59", "next_midnight_in", "next_midnight_nothing", "a_later_date"])
+def test_the_live_label_runs_all_report_day_results_in_or_not(at, figures, status, label):
+    snap = els.snapshot_of(_rec(**figures), at.date(), at)
+    assert (snap.status, snap.live_label) == (status, label)
+    assert els.live_label(snap.status, REPORT, at.date()) is label
+
+
+def test_a_row_reading_as_the_report_before_wears_no_label():
+    """ONE REPORT, TWO DATES: the company reported the day before, so today's leftover row is not
+    LIVE, whatever its own date says."""
+    before = _rec(day=REPORT - timedelta(days=1), fmp_eps=0.44, fmp_revenue=17.1e9)
+    leftover = _rec(day=REPORT, report_before=before)
+    snap = els.snapshot_of(leftover, REPORT, _et(REPORT, 9))
+    assert snap.reads_as == REPORT - timedelta(days=1) and snap.status == els.STATUS_REPORTED
+    assert snap.live_label is False
+
+
+@pytest.mark.parametrize("at", [_et(REPORT, 8, 10), _et(REPORT, 14), _et(REPORT, 23)],
+                         ids=["at_its_fill", "afternoon", "late_evening"])
+def test_a_leftover_row_fmp_fills_wears_no_label_and_asks_nothing_at_midnight(at):
+    """Once FMP fills its leftover row with figures of its own, the row reads as itself, on its
+    own date: still the report before's leftover, so neither the badge nor a midnight ask (the
+    2026-11-20 review: LIVE all day on a report made the evening before)."""
+    before = _rec(day=REPORT - timedelta(days=1), fmp_eps=0.44, fmp_revenue=17.1e9)
+    leftover = _rec(day=REPORT, report_before=before, fmp_eps=0.44, fmp_revenue=17.1e9)
+    snap = els.snapshot_of(leftover, REPORT, at)
+    assert snap.reads_as is None and snap.status == els.STATUS_REPORTED
+    assert (snap.live_label, snap.poll_seconds) == (False, None)
+    assert els.card_fields(snap, REPORT)["earnings_live_label"] is False
+    assert _sheet(snap)["live_label"] is False
+
+
+def test_the_poll_follows_the_label_it_is_given():
+    at = _et(REPORT, 17)
+    assert els.sheet_poll_seconds(els.STATUS_REPORTED, False, REPORT, at) == 25206
+    assert els.sheet_poll_seconds(els.STATUS_REPORTED, False, REPORT, at, labelled=False) is None
+    assert els.sheet_poll_seconds(els.STATUS_LIVE, False, REPORT, at, labelled=False) == 30
+
+
+@pytest.mark.parametrize("at,seconds", [
+    (_et(REPORT, 17), 25206),
+    (datetime(2026, 10, 29, 23, 59, 59, 999999, tzinfo=ET), 6),
+    (_et(NEXT, 0), 86406),
+    (datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc), 84606),   # 01:30 EDT, the clocks go back
+    (datetime(2027, 3, 14, 6, 30, tzinfo=timezone.utc), 77406),   # 01:30 EST, they go forward
+], ids=["evening", "the_last_microsecond", "midnight", "clocks_back", "clocks_forward"])
+def test_the_label_end_ask_lands_just_after_midnight_et(at, seconds):
+    """Measured between instants: a wall-clock difference is an hour off on a clock-change day."""
+    assert els.label_end_seconds(at) == seconds
+    assert at + timedelta(seconds=seconds) > datetime.combine(
+        at.astimezone(ET).date() + timedelta(days=1), datetime.min.time(), tzinfo=ET)
+
+
+def test_the_card_and_the_sheet_carry_the_label_and_a_card_with_no_record_carries_none():
+    done = els.snapshot_of(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), REPORT, _et(REPORT, 17))
+    assert els.card_fields(done, REPORT)["earnings_live_label"] is True
+    assert _sheet(done)["live_label"] is True
+    later = els.snapshot_of(_rec(fmp_eps=0.44, fmp_revenue=17.1e9), NEXT, _et(NEXT, 9))
+    assert els.card_fields(later, REPORT)["earnings_live_label"] is False
+    assert els.card_fields(None, REPORT) == {"report_date": "2026-10-29",
+                                             "earnings_status": els.STATUS_UPCOMING}
+    assert _sheet(None)["live_label"] is False

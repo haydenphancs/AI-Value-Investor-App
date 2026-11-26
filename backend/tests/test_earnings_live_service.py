@@ -103,7 +103,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 import pytest
@@ -1183,7 +1183,7 @@ async def test_a_filing_after_a_shown_zero_still_reaches_its_record(monkeypatch)
 
     await els.earnings_live_tick(_et(REPORT, 16, 5), fmp=fmp, watched=["JOBY"], dispatch=_dispatch)
     stats = await els.earnings_filing_tick(_et(REPORT, 16, 5), watched=["JOBY"])
-    assert stats == {"watched": 1, "pending": 1, "filings": 0}
+    assert stats == {"watched": 1, "pending": 1, "late": 0, "filings": 0}
     watcher.figures = {"JOBY": _filed_revenue(31e6)}
     stats = await els.earnings_filing_tick(_et(REPORT, 16, 21), watched=["JOBY"])
     assert stats["filings"] == 1
@@ -3402,9 +3402,13 @@ async def test_a_future_card_keeps_its_rows_consensus(monkeypatch):
 
 
 class _Watcher:
-    def __init__(self, figures=None):
+    def __init__(self, figures=None, late_figures=None):
         self.figures = figures or {}
+        # What a late read finds (LATE READS), handed over like the waiting list's.
+        self.late_figures = late_figures or {}
         self.calls: List[tuple] = []
+        # The late list each round was handed (LATE READS), apart from `calls`.
+        self.late_calls: List[tuple] = []
         self.kept: Optional[List[date]] = None
         self.restored: List[tuple] = []
 
@@ -3414,9 +3418,12 @@ class _Watcher:
     def restore(self, symbol, day, figures):
         self.restored.append((symbol, day, figures))
 
-    async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None):
+    async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None,
+                       late=()):
         self.calls.append((list(symbols), day))
+        self.late_calls.append((list(late), day))
         found = {s: f for s, f in self.figures.items() if s in symbols}
+        found.update({s: f for s, f in self.late_figures.items() if s in late})
         for symbol, figures in found.items():
             if on_figures is not None:
                 await on_figures(symbol, figures)
@@ -3700,7 +3707,9 @@ async def test_the_sec_watch_reads_pending_watched_symbols_and_the_next_tick_pus
     assert watcher.calls == [] and sent == [[]], "the FMP tick never runs the SEC watch"
     stats = await els.earnings_filing_tick(now, watched=["INTC", "AAPL"])
     assert watcher.calls == [(["INTC"], REPORT)], "AAPL is complete, TSLA is not watched"
-    assert stats == {"watched": 2, "pending": 1, "filings": 1}
+    assert watcher.late_calls == [(["AAPL"], REPORT)], (
+        "AAPL is complete with no release read: it is read late, for its outlook and link")
+    assert stats == {"watched": 2, "pending": 1, "late": 1, "filings": 1}
     assert sent == [[]], "the filing tick pushes nothing itself"
     # INTC was seen pending by the FMP tick that folded the rows, so the filing is a landing.
     await els.earnings_live_tick(now + timedelta(minutes=1), fmp=fmp, watched=["INTC", "AAPL"],
@@ -3856,7 +3865,11 @@ async def _assert_every_door_reads(svc_obj: ts.TrackingService, at: datetime, mo
     sheet = await svc_obj.get_earnings_live("AVGO")
     assert (sheet.status, sheet.eps.actual, sheet.eps.estimate, sheet.eps.checking) == (
         els.STATUS_REPORTED, eps, estimate, False)
-    assert sheet.poll_seconds is None
+    # In on its own day, it wears the LIVE label to midnight, and the sheet asks once just after
+    # it; on any later day there is neither (THE LIVE LABEL).
+    own_day = at.astimezone(ET).date() == REPORT
+    assert (card.earnings_live_label, sheet.live_label) == (own_day, own_day)
+    assert sheet.poll_seconds == (els.label_end_seconds(at) if own_day else None)
     assert _svc().pending_symbols(REPORT, ["AVGO"]) == []
 
 
@@ -5192,7 +5205,8 @@ def both_loops(monkeypatch, windows):
     # `run_once` imports this inside the function, so it is patched at its source.
     monkeypatch.setattr(signals, "ticker_cik_map", _ciks)
 
-    async def _read_release(self, client, gemini, symbol, cik, report_day, filing, sleep):
+    async def _read_release(self, client, gemini, symbol, cik, report_day, filing, sleep, *,
+                            busy=None):
         for document in (f"{filing.accession}-index.htm", filing.primary_document):
             await client.get_filing_document(cik, filing.accession, document)
         return efs._Read.RELEASE, efs.FilingFigures(
@@ -7599,7 +7613,8 @@ async def test_a_figure_is_pushed_while_the_round_that_read_it_still_runs(monkey
     delivered, release = asyncio.Event(), asyncio.Event()
 
     class _StillReading(_Watcher):
-        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None):
+        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None,
+                           late=()):
             await on_figures("INTC", figures)
             delivered.set()
             await release.wait()
@@ -7675,7 +7690,8 @@ async def test_a_figure_is_stamped_with_the_moment_it_arrived_not_the_rounds_sta
     monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
 
     class _SlowRound(_Watcher):
-        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None):
+        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None,
+                           late=()):
             clock.at += 90
             return await super().run_once(now, symbols, day, on_figures=on_figures)
 
@@ -7705,7 +7721,7 @@ async def test_a_filing_tick_with_nothing_pending_never_wakes_the_watcher(monkey
     watcher = _Watcher()
     monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
     stats = await els.earnings_filing_tick(_et(REPORT, 16, 3), watched=watched)
-    assert stats == {"watched": len(watched), "pending": 0, "filings": 0}
+    assert stats == {"watched": len(watched), "pending": 0, "late": 0, "filings": 0}
     assert watcher.calls == [] and watcher.kept is None
 
 
@@ -8124,16 +8140,23 @@ async def test_a_row_with_no_figure_leaves_fmps_first_figure_a_landing(cache):
 async def test_a_figure_a_guard_holds_still_closes_the_landing(cache):
     """The rule reads the row, not the card: a guard needs the consensus, and whether a feed build
     folded it before the restore is an accident of boot. So any figure on a row closes the
-    landing, in either order, one the card cannot show yet included."""
+    landing, in either order, one the card cannot show yet included. A row with no EPS leaves the
+    EPS landing open (EPS LANDS ON ITS OWN, 2026-11-20): FMP's EPS after it is the first EPS this
+    report shows, and the ledger's key keeps anyone the earlier process told from hearing twice."""
     cache.hold(_kept("INTC", REPORT, revenue=40e9, eps_adjusted=None, guidance=None))
     svc, at = _svc(), _et(REPORT, 17)
     svc.observe_rows(REPORT, [_row("INTC", REPORT)], at)
     await svc.restore_filings(at)
     snap = svc.snapshot("INTC", REPORT, at)
     assert snap.revenue.checking and snap.revenue.actual is None, "the band holds $40B"
+    rec = svc._records[("INTC", REPORT)]
+    assert rec.landed_at == at and rec.landed_from_pending is False, "the first landing is closed"
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, rev=17.2e9)], at + timedelta(minutes=5),
+                     fetched=True)
+    assert svc.landed_snapshots(at + timedelta(minutes=6)) == [], "a revenue lands nothing here"
     svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.46, rev=17.2e9)],
                      at + timedelta(minutes=9), fetched=True)
-    assert svc.landed_snapshots(at + timedelta(minutes=10)) == []
+    assert [s.symbol for s in svc.landed_snapshots(at + timedelta(minutes=10))] == ["INTC"]
 
 
 @pytest.mark.asyncio
@@ -8236,7 +8259,7 @@ async def test_the_filing_tick_takes_its_list_after_the_restore(monkeypatch, cac
     at = _et(REPORT, 16, 30)
     _svc().observe_rows(REPORT, [_row("INTC", REPORT)], at)
     assert await els.earnings_filing_tick(at, watched=["INTC"]) == {
-        "watched": 1, "pending": 0, "filings": 0}
+        "watched": 1, "pending": 0, "late": 0, "filings": 0}
     assert watcher.calls == []
 
 
@@ -8870,7 +8893,8 @@ async def test_the_table_holds_the_moment_the_figure_arrived_not_the_rounds_star
     monkeypatch.setattr(els, "time", SimpleNamespace(monotonic=clock.monotonic))
 
     class _SlowRound(_Watcher):
-        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None):
+        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None,
+                           late=()):
             clock.at += 90
             return await super().run_once(now, symbols, day, on_figures=on_figures)
 
@@ -9049,8 +9073,8 @@ def test_the_fake_table_has_the_real_clients_shape():
     {"revenue": "17.1 billion"}, {"revenue": True}, {"revenue": float("nan")},
     {"eps_adjusted": float("inf")}, {"eps_gaap": []},
     {"revenue_rounding": "half"}, {"eps_rounding": {}},
-    {"revenue": None, "eps_adjusted": None, "guidance": None},
-    {"revenue": None, "eps_adjusted": None, "guidance": "   "},
+    {"revenue": None, "eps_adjusted": None, "guidance": None, "url": None},
+    {"revenue": None, "eps_adjusted": None, "guidance": "   ", "url": "  "},
 ], ids=repr)
 def test_a_row_that_cannot_be_trusted_reads_as_nothing(change):
     """All or nothing. Half a row could show a figure without the rounding that keeps it honest,
@@ -9177,3 +9201,603 @@ async def test_a_stored_time_with_no_offset_is_read_as_utc_and_still_folds(cache
     snap = svc.snapshot("INTC", PREV, at)
     assert snap.filing.accepted_at == datetime(2026, 10, 28, 20, 2, tzinfo=timezone.utc)
     assert snap.checked_at == at, "an own fetch is newer, and the compare did not raise"
+
+
+# ── EPS lands on its own (2026-11-20, BKE) ──────────────────────────────────
+
+
+def _bke(*, eps=None, rev=329.202e6) -> dict:
+    """Buckle's row: its quarter's sales were out two weeks before its results, so FMP's row
+    carried them, and the consensus is that same figure."""
+    return _row("BKE", REPORT, eps=eps, rev=rev, eps_est=0.875, rev_est=329.2e6)
+
+
+def test_a_report_first_seen_with_its_sales_alone_lands_when_its_eps_shows():
+    """2026-11-20: Buckle's record was born at midnight holding its pre-announced sales, so its
+    EPS at 06:51 ET was never a landing and its push never went out."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_bke()], _et(REPORT, 0, 1))
+    assert svc.landed_snapshots(_et(REPORT, 6)) == []
+    assert svc.snapshot("BKE", REPORT, _et(REPORT, 6)).status == els.STATUS_LIVE
+    svc.observe_rows(REPORT, [_bke(eps=0.94)], _et(REPORT, 6, 51), fetched=True)
+    (snap,) = svc.landed_snapshots(_et(REPORT, 6, 52))
+    assert (snap.symbol, snap.eps.actual, snap.eps.estimate) == ("BKE", 0.94, 0.875)
+    svc.observe_rows(REPORT, [_bke(eps=0.94)], _et(REPORT, 6, 54), fetched=True)
+    assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 6, 55))] == ["BKE"], "one landing"
+
+
+def test_a_report_first_seen_with_its_eps_alone_does_not_land_on_its_revenue():
+    """Only EPS lands on its own: a revenue after an EPS already in at first sight is no result."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], _et(REPORT, 9))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 16, 30))
+    assert svc.landed_snapshots(_et(REPORT, 16, 31)) == []
+
+
+def test_an_eps_held_at_first_sight_is_no_landing_once_it_shows():
+    """A held EPS ("checking") is a figure FMP already sent, never a blank: seeing it confirmed
+    later announces nothing, beside a revenue in at first sight."""
+    svc = _svc()
+    pair = [_row("AVGO", REPORT, eps_est=1.65, rev_est=None),
+            _row("AVGO", REPORT, eps=0.169, eps_est=None, rev=1.4e10, rev_est=None)]
+    svc.observe_rows(REPORT, pair, _et(REPORT, 17))
+    assert svc.snapshot("AVGO", REPORT, _et(REPORT, 17)).eps.checking
+    svc.observe_rows(REPORT, [_row("AVGO", REPORT, eps=1.69, eps_est=1.65, rev=1.4e10,
+                                   rev_est=None)], _et(REPORT, 17, 30), fetched=True)
+    assert svc.snapshot("AVGO", REPORT, _et(REPORT, 17, 30)).eps.actual == 1.69
+    assert svc.landed_snapshots(_et(REPORT, 17, 31)) == []
+
+
+def test_a_release_out_before_first_sight_closes_the_eps_landing_too():
+    """The same rule as the first figure's: a release accepted hours before the record was
+    first seen was out at first sight, so FMP's EPS after it announces nothing."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_bke()], _et(REPORT, 15))
+    svc.absorb_filing("BKE", REPORT, _morning_filing(revenue=329.202e6, eps_adjusted=0.94),
+                      _et(REPORT, 15, 1))
+    assert svc.landed_snapshots(_et(REPORT, 15, 2)) == []
+    svc.observe_rows(REPORT, [_bke(eps=0.94)], _et(REPORT, 15, 30), fetched=True)
+    assert svc.landed_snapshots(_et(REPORT, 15, 31)) == []
+
+
+def test_a_release_read_after_first_sight_is_the_eps_landing():
+    """The release brings the EPS first: that is the landing, from the company's own figure."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_bke()], _et(REPORT, 0, 1))
+    svc.absorb_filing("BKE", REPORT,
+                      _morning_filing(revenue=329.202e6, eps_adjusted=0.94,
+                                      accepted_at=_et(REPORT, 6, 50)), _et(REPORT, 6, 52))
+    (snap,) = svc.landed_snapshots(_et(REPORT, 6, 53))
+    assert snap.preliminary and snap.eps.actual == 0.94
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored_eps,lands", [(0.94, False), (None, True)],
+                         ids=["restored_eps_closes_it", "restored_revenue_alone_leaves_it_open"])
+async def test_a_restored_release_closes_the_eps_landing_only_with_an_eps(cache, restored_eps,
+                                                                         lands):
+    """A release an earlier process read carries its EPS back: FMP's after it is no landing.
+    One whose EPS the verifier refused carries none, so FMP's EPS is still the first one, and
+    the ledger's key keeps whoever the earlier process told from hearing twice."""
+    cache.hold(_kept("BKE", REPORT, revenue=329.202e6, eps_adjusted=restored_eps,
+                     accepted_at=_et(REPORT, 6, 50)))
+    svc, at = _svc(), _et(REPORT, 9)
+    svc.observe_rows(REPORT, [_bke()], at)
+    await svc.restore_filings(at + timedelta(seconds=45))
+    svc.observe_rows(REPORT, [_bke(eps=0.94)], at + timedelta(minutes=3), fetched=True)
+    landed = [s.symbol for s in svc.landed_snapshots(at + timedelta(minutes=4))]
+    assert landed == (["BKE"] if lands else [])
+
+
+def test_a_watched_landing_logs_what_fmp_said_and_an_unwatched_one_logs_nothing(caplog):
+    svc = _svc()
+    svc.note_watched(["bke"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_bke(), _row("INTC", REPORT)], _et(REPORT, 0, 1))
+        svc.observe_rows(REPORT, [_bke(eps=0.94), _row("INTC", REPORT, eps=0.44, rev=17.1e9)],
+                         _et(REPORT, 6, 51), fetched=True)
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith("EARNINGS_LIVE_LANDING")]
+    assert len(lines) == 2 and all("sym=BKE" in line for line in lines), lines
+    first, landed = lines
+    assert " first_seen_with_figure via=memo " in first
+    assert "rev=329202000.0 rev_est=329200000.0 rev_src=fmp" in first and " eps=None " in first
+    assert " landed via=own_fetch " in landed
+    assert "eps=0.94 eps_est=0.875 eps_src=fmp" in landed and "filing=no" in landed
+
+
+def test_fmp_changing_a_watched_reports_figures_after_they_showed_is_a_warning(caplog):
+    """2026-11-20, FRO: FMP's first answer went to a phone, and its restatement within two hours
+    left no trace. Before any figure, the consensus moving is ordinary and logs nothing."""
+    svc = _svc()
+    svc.note_watched(["FRO"])
+
+    def fro(**kw):
+        base = dict(eps_est=2.69, rev_est=702.06e6)
+        base.update(kw)
+        return _row("FRO", REPORT, **base)
+
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [fro(eps_est=2.60)], _et(REPORT, 0, 1))
+        svc.observe_rows(REPORT, [fro()], _et(REPORT, 5), fetched=True)
+        svc.observe_rows(REPORT, [fro(eps=2.96, rev=921.26e6)], _et(REPORT, 6), fetched=True)
+        svc.observe_rows(REPORT, [fro(eps=2.96, rev=921.26e6)], _et(REPORT, 6, 3), fetched=True)
+        svc.observe_rows(REPORT, [fro(eps=2.38, rev=703.861e6)], _et(REPORT, 8), fetched=True)
+    changed = [r for r in caplog.records if r.getMessage().startswith("EARNINGS_LIVE_CHANGED")]
+    assert len(changed) == 1 and changed[0].levelno == logging.WARNING
+    line = changed[0].getMessage()
+    assert "eps=2.96->2.38" in line and "rev=921260000.0->703861000.0" in line
+    assert "eps_est" not in line.split("(now")[0], "only what moved"
+
+
+def _log_lines(caplog, marker: str) -> List[Tuple[int, str]]:
+    return [(r.levelno, r.getMessage()) for r in caplog.records
+            if r.getMessage().startswith(marker)]
+
+
+def test_fmp_filling_after_the_release_is_one_info_line_and_no_change(caplog):
+    """The ordinary filing-first path: the release lands the report, and FMP's first figures
+    after it restate nothing FMP said. They are logged once, at INFO, so what FMP first said is on
+    record there too."""
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 6))
+        svc.absorb_filing("INTC", REPORT, _morning_filing(accepted_at=_et(REPORT, 7)),
+                          _et(REPORT, 7, 1))
+        for minute in (20, 23):
+            svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)],
+                             _et(REPORT, 7, minute), fetched=True)
+    assert _log_lines(caplog, "EARNINGS_LIVE_CHANGED") == []
+    ((level, line),) = _log_lines(caplog, "EARNINGS_LIVE_FMP_FIRST")
+    assert level == logging.INFO
+    assert "eps=0.45/0.41 rev=17100000000.0/16600000000.0" in line
+
+
+def test_a_report_landing_over_two_answers_logs_one_landing_and_no_change(caplog):
+    """Revenue first, EPS a minute on: one push, so one `landed` line, and the EPS that follows is
+    named for what it is."""
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 6))
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, rev=17.1e9)], _et(REPORT, 7), fetched=True)
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)], _et(REPORT, 7, 3),
+                         fetched=True)
+    lines = [line for _, line in _log_lines(caplog, "EARNINGS_LIVE_LANDING")]
+    assert len(lines) == 2
+    assert " landed via=own_fetch " in lines[0] and " eps_after_landing via=own_fetch " in lines[1]
+    assert _log_lines(caplog, "EARNINGS_LIVE_CHANGED") == []
+
+
+def test_consensus_moves_before_a_pre_announced_reports_eps_change_nothing(caplog):
+    """BKE: born holding its sales, then FMP's EPS consensus moved twice before the EPS. None of
+    that is FMP changing a figure it had given."""
+    svc = _svc()
+    svc.note_watched(["BKE"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_bke()], _et(REPORT, 0, 1))
+        for minute, est in ((1, 0.88), (2, 0.89)):
+            svc.observe_rows(REPORT, [_row("BKE", REPORT, rev=329.202e6, eps_est=est,
+                                           rev_est=329.2e6)], _et(REPORT, 6, minute), fetched=True)
+        svc.observe_rows(REPORT, [_bke(eps=0.94)], _et(REPORT, 6, 51), fetched=True)
+    assert _log_lines(caplog, "EARNINGS_LIVE_CHANGED") == []
+    assert _log_lines(caplog, "EARNINGS_LIVE_FMP_FIRST") == [], "no release came first"
+    assert [line for _, line in _log_lines(caplog, "EARNINGS_LIVE_LANDING")
+            if " landed " in line], "the EPS landing is still logged"
+
+
+@pytest.mark.asyncio
+async def test_fmps_first_answer_after_a_restore_is_no_change(cache, caplog):
+    """After a deploy the release comes back from the table, and FMP's first answer of the new
+    process fills every field: none of it a restatement."""
+    cache.hold(_kept("INTC", REPORT, accepted_at=_et(REPORT, 6, 50)))
+    svc, at = _svc(), _et(REPORT, 9)
+    svc.note_watched(["INTC"])
+    await svc.restore_filings(at)
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)],
+                         at + timedelta(minutes=1), fetched=True)
+    assert _log_lines(caplog, "EARNINGS_LIVE_CHANGED") == []
+    ((level, _),) = _log_lines(caplog, "EARNINGS_LIVE_FMP_FIRST")
+    assert level == logging.INFO
+
+
+def test_a_consensus_moving_beside_a_figure_fmp_gave_is_a_change(caplog):
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 6))
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)], _et(REPORT, 7),
+                         fetched=True)
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9, eps_est=0.50)],
+                         _et(REPORT, 8), fetched=True)
+    ((level, line),) = _log_lines(caplog, "EARNINGS_LIVE_CHANGED")
+    assert level == logging.WARNING and "eps_est=0.41->0.5" in line and " eps=" not in line.split(
+        "(now")[0]
+
+
+def test_a_release_out_before_first_sight_closes_the_eps_landing_with_no_eps_of_its_own():
+    """The grace's purpose: no process told this release at its time, so FMP's EPS hours later is
+    no news, even when the release printed no EPS of its own."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 15))
+    svc.absorb_filing("INTC", REPORT, _morning_filing(accepted_at=_et(REPORT, 8), eps_adjusted=None),
+                      _et(REPORT, 15, 1))
+    assert svc.landed_snapshots(_et(REPORT, 15, 2)) == []
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)], _et(REPORT, 16),
+                     fetched=True)
+    assert svc.landed_snapshots(_et(REPORT, 16, 1)) == []
+
+
+# ── LATE READS (owner, 2026-11-20: "Yes, read it once") ──────────────────────────
+
+
+def test_late_filing_symbols_name_the_reports_fmp_completed_with_no_release_read():
+    svc = _svc()
+    now = _et(REPORT, 16, 30)
+    svc.observe_rows(REPORT, [
+        _row("INTC", REPORT, eps=0.44, rev=17.1e9),
+        _row("AAPL", REPORT),
+        _row("MSFT", REPORT, eps=3.0, rev=7e10, eps_est=2.9, rev_est=6.9e10),
+    ], now)
+    assert svc.late_filing_symbols(REPORT, ["msft", "AAPL", "INTC", "NONE"]) == ["MSFT", "INTC"]
+    assert svc.pending_symbols(REPORT, ["msft", "AAPL", "INTC"]) == ["AAPL"], "never on both"
+    svc.absorb_filing("INTC", REPORT, _morning_filing(accepted_at=_et(REPORT, 16, 31)),
+                      _et(REPORT, 16, 32), born_pending=False)
+    assert svc.late_filing_symbols(REPORT, ["MSFT", "INTC"]) == ["MSFT"], "a filing held ends it"
+
+
+def test_a_complete_row_the_day_after_a_report_is_never_read_late():
+    """FMP's leftover row (ONE REPORT, TWO DATES): its 8-K was accepted the evening before and
+    never matches this date, so reading for it would cost up to a day of reads for nothing."""
+    svc = _svc()
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], _et(PREV, 17))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 9))
+    assert svc.late_filing_symbols(REPORT, ["INTC"]) == []
+
+
+def test_a_late_release_on_a_landed_report_adds_its_outlook_and_link_and_lands_nothing():
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 16, 5),
+                     fetched=True)
+    rec = svc._records[("INTC", REPORT)]
+    before = (rec.landed_at, rec.landed_from_pending, rec.eps_landed_at, rec.eps_landed_from_pending)
+    svc.absorb_filing("INTC", REPORT,
+                      _morning_filing(accepted_at=_et(REPORT, 16, 18), guidance=_OUTLOOK),
+                      _et(REPORT, 16, 20), born_pending=False)
+    assert (rec.landed_at, rec.landed_from_pending, rec.eps_landed_at,
+            rec.eps_landed_from_pending) == before
+    snap = svc.snapshot("INTC", REPORT, _et(REPORT, 16, 21))
+    assert (snap.eps.actual, snap.eps.source, snap.preliminary) == (0.44, els.SOURCE_FMP, False)
+    assert snap.filing is not None and snap.filing.guidance == _OUTLOOK
+    assert not els.needs_fmp(snap.eps, snap.revenue), "no FMP call for it"
+
+
+def test_a_record_a_late_read_births_is_never_a_landing():
+    svc = _svc()
+    svc.absorb_filing("INTC", REPORT, _morning_filing(accepted_at=_et(REPORT, 16, 18)),
+                      _et(REPORT, 16, 20), born_pending=False)
+    assert svc.landed_snapshots(_et(REPORT, 16, 21)) == []
+
+
+@pytest.mark.asyncio
+async def test_a_tick_with_only_late_reports_still_runs_the_watcher(monkeypatch):
+    watcher = _Watcher()
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    _svc().observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 9))
+    stats = await els.earnings_filing_tick(_et(REPORT, 16, 3), watched=["INTC"])
+    assert stats == {"watched": 1, "pending": 0, "late": 1, "filings": 0}
+    assert watcher.calls == [([], REPORT)] and watcher.late_calls == [(["INTC"], REPORT)]
+    await els.earnings_filing_tick(_et(REPORT, 5, 59), watched=["INTC"])
+    assert len(watcher.calls) == 1, "nothing before 06:00 ET"
+
+
+@pytest.mark.parametrize("day", [date(2026, 11, 11), date(2026, 10, 12)],
+                         ids=["veterans_day", "columbus_day"])
+def test_no_late_reads_on_a_day_edgar_is_shut_while_the_market_trades(day):
+    """EDGAR keeps the federal calendar: on these days it accepts nothing, so every late read would
+    come back empty until 22:00 ET (the 2026-11-20 review measured 101 for one report)."""
+    assert els.is_trading_day(day)
+    svc = _svc()
+    svc.observe_rows(day, [_row("INTC", day, eps=0.44, rev=17.1e9)], _et(day, 9))
+    assert svc.late_filing_symbols(day, ["INTC"]) == []
+
+
+@pytest.mark.asyncio
+async def test_late_reads_switched_off_read_nothing_late(monkeypatch):
+    watcher = _Watcher()
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_LATE_READS_ENABLED", False)
+    _svc().observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 9))
+    stats = await els.earnings_filing_tick(_et(REPORT, 16, 3), watched=["INTC"])
+    assert stats["late"] == 0 and watcher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_late_read_brings_the_outlook_and_link_and_never_a_figure(monkeypatch, cache):
+    """FMP's figures are confirmed and already told. A release figure beside them could move a
+    stated verdict (here a revenue whose consensus is under $100M) and hold the report
+    "preliminary" for good, polling FMP for a day (the 2026-11-20 review)."""
+    release = _morning_filing(accepted_at=_et(REPORT, 16, 18), revenue=41e6, eps_adjusted=0.31,
+                              guidance=_OUTLOOK, url="https://www.sec.gov/Archives/TINY")
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher",
+                        lambda: _Watcher(late_figures={"TINY": release}))
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("TINY", REPORT)], _et(REPORT, 9))
+    svc.observe_rows(REPORT, [_row("TINY", REPORT, eps=0.30, rev=85e6, eps_est=0.25,
+                                   rev_est=40e6)], _et(REPORT, 16, 5), fetched=True)
+    before = svc.snapshot("TINY", REPORT, _et(REPORT, 16, 6))
+    stats = await els.earnings_filing_tick(_et(REPORT, 16, 20), watched=["TINY"])
+    assert stats["late"] == 1
+    after = svc.snapshot("TINY", REPORT, _et(REPORT, 16, 21))
+    assert (after.revenue, after.eps, after.preliminary) == (before.revenue, before.eps, False)
+    assert after.revenue.surprise_pct == before.revenue.surprise_pct == 112.5
+    assert after.filing.guidance == _OUTLOOK and after.filing.url == release.url
+    assert not after.filing.has_figures and not els.needs_fmp(after.eps, after.revenue)
+    (row,) = cache.writes
+    assert (row["revenue"], row["eps_adjusted"], row["guidance"]) == (None, None, _OUTLOOK)
+
+
+# ── THE LIVE LABEL on FMP's leftover row (2026-11-20 review) ─────────────────────
+
+
+def test_a_leftover_row_first_seen_filled_wears_no_label():
+    """Both rows in one answer (a restart, or FMP filling both between two fetches): the leftover
+    never read as the report before, so the service looks at the day before itself. A report
+    with nothing before it keeps its label."""
+    svc = _svc()
+    at = _et(REPORT, 9)
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], at)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9),
+                              _row("AAPL", REPORT, eps=1.0, rev=9e10, eps_est=0.9, rev_est=8.9e10)],
+                     at)
+    snap = svc.snapshot("INTC", REPORT, at)
+    assert snap.status == els.STATUS_REPORTED and snap.reads_as is None
+    assert (snap.live_label, snap.poll_seconds) == (False, None)
+    other = svc.snapshot("AAPL", REPORT, at)
+    assert other.live_label is True and other.poll_seconds == els.label_end_seconds(at)
+
+
+def test_a_leftover_row_filled_after_it_read_as_the_report_before_wears_no_label():
+    svc = _svc()
+    _leftover_beside_a_report(svc, _et(REPORT, 8))
+    assert svc.snapshot("INTC", REPORT, _et(REPORT, 8)).reads_as == PREV
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 8, 10),
+                     fetched=True)
+    snap = svc.snapshot("INTC", REPORT, _et(REPORT, 14))
+    assert snap.reads_as is None and snap.status == els.STATUS_REPORTED
+    assert (snap.live_label, snap.poll_seconds) == (False, None)
+
+
+# ── the second 2026-11-20 review ─────────────────────────────────────────────
+
+
+def test_fmps_revenue_after_an_eps_landing_is_logged(caplog):
+    """A landing is the first figure or the first EPS, never a later revenue, so FMP's revenue a
+    few minutes after its EPS would leave no trace without the INFO line."""
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 6))
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45)], _et(REPORT, 7), fetched=True)
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)], _et(REPORT, 7, 3),
+                         fetched=True)
+    ((level, line),) = _log_lines(caplog, "EARNINGS_LIVE_FMP_FIRST")
+    assert level == logging.INFO
+    assert "rev=17100000000.0/16600000000.0" in line and " eps=" not in line
+    assert _log_lines(caplog, "EARNINGS_LIVE_CHANGED") == []
+
+
+def test_a_release_eps_out_at_first_sight_still_logs_its_landing_line(caplog):
+    """BKE after a restart: first seen holding its sales, then its release, out before first sight,
+    brings the EPS. No landing (nobody was told at its time), but the line still holds the EPS."""
+    svc = _svc()
+    svc.note_watched(["BKE"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_bke()], _et(REPORT, 7, 10))
+        svc.absorb_filing("BKE", REPORT,
+                          _morning_filing(revenue=329.202e6, eps_adjusted=0.94,
+                                          accepted_at=_et(REPORT, 6, 45)), _et(REPORT, 7, 11))
+    lines = [line for _, line in _log_lines(caplog, "EARNINGS_LIVE_LANDING")]
+    assert any(" via=filing " in line and "eps=0.94" in line for line in lines), lines
+    assert svc.landed_snapshots(_et(REPORT, 7, 12)) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart_at", [_et(REPORT, 22, 30), _et(REPORT + timedelta(days=1), 7)],
+                         ids=["the_same_evening", "the_next_morning"])
+async def test_a_late_reads_link_alone_outlives_a_restart(cache, caplog, restart_at):
+    """A late read of a release with no outlook keeps its link alone. Its row is a filing: dropped
+    at restore, the sheet lost "View the filing" for good after 22:00 ET (no read is left that
+    day), and every restart logged it as a row that could not be read."""
+    cache.hold(_kept("INTC", REPORT, revenue=None, eps_adjusted=None, guidance=None,
+                     accepted_at=_et(REPORT, 16, 18)))
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], restart_at)
+    with caplog.at_level(logging.WARNING, logger=els.logger.name):
+        await svc.restore_filings(restart_at)
+    snap = svc.snapshot("INTC", REPORT, restart_at)
+    assert snap.filing is not None and snap.filing.url == "https://www.sec.gov/Archives/INTC"
+    assert not snap.preliminary and not snap.filing.has_figures
+    assert not [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert svc.landed_snapshots(restart_at) == []
+    assert svc.late_filing_symbols(REPORT, ["INTC"]) == [], "held: never read again"
+
+
+@pytest.mark.asyncio
+async def test_a_release_read_while_fmp_completes_its_report_lands_as_a_late_read(monkeypatch,
+                                                                                  cache):
+    """The SEC round runs beside the FMP loop: a report on the waiting list when the round began
+    can be completed, and pushed, before its release is read. Its figures are dropped all the same
+    (the second 2026-11-20 review: the release's 41M took over FMP's pushed 85M)."""
+    release = _morning_filing(accepted_at=_et(REPORT, 16, 18), revenue=41e6, eps_adjusted=0.31,
+                              guidance=_OUTLOOK)
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("TINY", REPORT, eps_est=0.25, rev_est=40e6)], _et(REPORT, 9))
+
+    class _RacingWatcher(_Watcher):
+        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None,
+                           late=()):
+            self.calls.append((list(symbols), day))
+            svc.observe_rows(REPORT, [_row("TINY", REPORT, eps=0.30, rev=85e6, eps_est=0.25,
+                                           rev_est=40e6)], _et(REPORT, 16, 19), fetched=True)
+            await on_figures("TINY", release)
+            return {"TINY": release}
+
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: _RacingWatcher())
+    stats = await els.earnings_filing_tick(_et(REPORT, 16, 19), watched=["TINY"])
+    assert (stats["pending"], stats["late"]) == (1, 0)
+    snap = svc.snapshot("TINY", REPORT, _et(REPORT, 16, 20))
+    assert (snap.revenue.actual, snap.revenue.source, snap.preliminary) == (85e6, els.SOURCE_FMP,
+                                                                            False)
+    assert snap.filing.guidance == _OUTLOOK and not snap.filing.has_figures
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_reports_release_keeps_its_figures(monkeypatch, cache):
+    """The control: no FMP fill during the round, so the release is the first figure."""
+    release = _morning_filing(accepted_at=_et(REPORT, 16, 18), revenue=41e6, eps_adjusted=0.31)
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("TINY", REPORT, eps_est=0.25, rev_est=40e6)], _et(REPORT, 9))
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher",
+                        lambda: _Watcher(figures={"TINY": release}))
+    await els.earnings_filing_tick(_et(REPORT, 16, 19), watched=["TINY"])
+    snap = svc.snapshot("TINY", REPORT, _et(REPORT, 16, 20))
+    assert (snap.revenue.actual, snap.revenue.source, snap.preliminary) == (41e6, els.SOURCE_FILING,
+                                                                            True)
+
+
+@pytest.mark.asyncio
+async def test_a_late_listed_report_fmp_puts_back_on_hold_mid_read_keeps_the_releases_figures(
+        monkeypatch, cache):
+    """The strip is judged when the figure arrives, from the record alone (the third 2026-11-20
+    review): complete when the round began, then back on hold (FMP's revenue slips a unit, which a
+    guard holds), the report takes its release's figures."""
+    release = _morning_filing(accepted_at=_et(REPORT, 16, 18), revenue=17.1e9, eps_adjusted=0.45)
+    svc = _svc()
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 9))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)], _et(REPORT, 16, 10),
+                     fetched=True)
+
+    class _SlipWatcher(_Watcher):
+        async def run_once(self, now, symbols, day, *, sec=None, gemini=None, on_figures=None,
+                           late=()):
+            self.late_calls.append((list(late), day))
+            svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e6)],
+                             _et(REPORT, 16, 19), fetched=True)
+            await on_figures("INTC", release)
+            return {"INTC": release}
+
+    watcher = _SlipWatcher()
+    monkeypatch.setattr(efs, "get_earnings_filing_watcher", lambda: watcher)
+    await els.earnings_filing_tick(_et(REPORT, 16, 19), watched=["INTC"])
+    assert watcher.late_calls == [(["INTC"], REPORT)], "on the late list when the round began"
+    snap = svc.snapshot("INTC", REPORT, _et(REPORT, 16, 20))
+    assert (snap.revenue.actual, snap.revenue.source) == (17.1e9, els.SOURCE_FILING)
+
+
+def test_fmps_eps_after_a_release_closed_its_landing_is_logged(caplog):
+    """A release out before first sight with no EPS of its own closes the EPS landing, so FMP's
+    EPS after it gets no LANDING line: the FMP_FIRST line carries it."""
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 15))
+        svc.absorb_filing("INTC", REPORT,
+                          _morning_filing(accepted_at=_et(REPORT, 8), eps_adjusted=None),
+                          _et(REPORT, 15, 1))
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)], _et(REPORT, 16),
+                         fetched=True)
+    ((_, line),) = _log_lines(caplog, "EARNINGS_LIVE_FMP_FIRST")
+    assert "eps=0.45/0.41" in line
+    assert svc.landed_snapshots(_et(REPORT, 16, 1)) == []
+
+
+def test_a_stale_row_whose_eps_landed_late_is_not_the_report_before():
+    """The third 2026-11-20 review: a stale Friday row first seen holding a revenue (pre-announced
+    sales) lands by its EPS on Monday morning, outside its window, so the push skips it and goes
+    under Monday: Monday is the report, labelled and on the late list."""
+    friday, monday = date(2026, 10, 30), date(2026, 11, 2)
+    svc = _svc()
+    svc.observe_rows(friday, [_row("INTC", friday, rev=17.1e9)], _et(friday, 16))
+    svc.observe_rows(monday, [_row("INTC", monday)], _et(monday, 8))
+    svc.observe_rows(friday, [_row("INTC", friday, eps=0.44, rev=17.1e9)], _et(monday, 9, 5),
+                     fetched=True)
+    svc.observe_rows(monday, [_row("INTC", monday, eps=0.44, rev=17.1e9)], _et(monday, 9, 5),
+                     fetched=True)
+    snap = svc.snapshot("INTC", monday, _et(monday, 9, 6))
+    assert snap.status == els.STATUS_REPORTED and snap.live_label is True
+    assert svc.late_filing_symbols(monday, ["INTC"]) == ["INTC"]
+
+
+def test_a_leftover_beside_a_report_whose_eps_landed_in_its_window_wears_no_label():
+    """The other half of the EPS branch (the fourth 2026-11-20 review): BKE first seen holding its
+    sales, its EPS landing inside its window, so the push goes under that day; the next day's
+    complete row is its leftover: no label, no late read."""
+    svc = _svc()
+    nxt = REPORT + timedelta(days=1)
+    svc.observe_rows(REPORT, [_bke()], _et(REPORT, 3), fetched=True)
+    svc.observe_rows(REPORT, [_bke(eps=0.92)], _et(REPORT, 6, 51), fetched=True)
+    svc.observe_rows(nxt, [_row("BKE", nxt, eps=0.92, rev=329.202e6, eps_est=0.875,
+                                rev_est=329.2e6)], _et(nxt, 3), fetched=True)
+    for hour, minute in ((10, 0), (23, 59)):
+        snap = svc.snapshot("BKE", nxt, _et(nxt, hour, minute))
+        assert (snap.live_label, snap.poll_seconds) == (False, None)
+    assert svc.late_filing_symbols(nxt, ["BKE"]) == []
+
+
+def _no_figure_release(kind: str) -> efs.FilingFigures:
+    """A release out at 06:45 ET that put no figure on its record: its outlook alone, or the link
+    a read that verified nothing keeps (`earnings_filing_service._link_only`)."""
+    if kind == "outlook_only":
+        return _morning_filing(revenue=None, eps_adjusted=None, guidance=_OUTLOOK,
+                               accepted_at=_et(REPORT, 6, 45))
+    return efs.FilingFigures(accession="0000050863-26-000123", accepted_at=_et(REPORT, 6, 45),
+                             url=efs.filing_index_url("50863", "0000050863-26-000123"))
+
+
+@pytest.mark.parametrize("eps_meanwhile", ["blank", "held_slip"])
+@pytest.mark.parametrize("release", ["outlook_only", "link_only"])
+def test_a_release_with_no_figure_out_before_first_sight_leaves_the_eps_landing_open(
+        release, eps_meanwhile):
+    """A release out before first sight closes the EPS landing only when it put a figure on the
+    record: with an outlook (or a link) alone, FMP's EPS is still the first one seen, and lands, as
+    its first figure would (the 2026-11-05 rule; the fourth 2026-11-20 review: a twin served such a
+    row after a restart lost its EPS push). So it does when FMP's first EPS is a slip held while the
+    release comes in (the fifth review: the release cleared the flag a held EPS leaves alone, and
+    FMP's correction an hour later told nobody)."""
+    svc = _svc()
+    svc.observe_rows(REPORT, [_bke()], _et(REPORT, 15))
+    if eps_meanwhile == "held_slip":
+        svc.observe_rows(REPORT, [_bke(eps=9.2)], _et(REPORT, 15, 1), fetched=True)
+        assert svc.snapshot("BKE", REPORT, _et(REPORT, 15, 1)).eps.checking
+    svc.absorb_filing("BKE", REPORT, _no_figure_release(release), _et(REPORT, 15, 2))
+    assert svc.landed_snapshots(_et(REPORT, 15, 3)) == []
+    svc.observe_rows(REPORT, [_bke(eps=0.94)], _et(REPORT, 16, 30), fetched=True)
+    (snap,) = svc.landed_snapshots(_et(REPORT, 16, 31))
+    assert (snap.symbol, snap.eps.actual) == ("BKE", 0.94)
+
+
+@pytest.mark.parametrize("eps_meanwhile", ["blank", "held_slip"])
+@pytest.mark.parametrize("release", ["outlook_only", "link_only"])
+def test_a_release_with_no_figure_lands_alike_read_now_or_restored(release, eps_meanwhile):
+    """The same release read by this process (`absorb_filing`) or by an earlier one
+    (`restore_filing`) leaves the same landing: the fifth 2026-11-20 review found a restart
+    turned a lost push into a sent one."""
+    landed = {}
+    for way in ("read", "restored"):
+        _reset_all()
+        svc = _svc()
+        svc.observe_rows(REPORT, [_bke()], _et(REPORT, 15))
+        if eps_meanwhile == "held_slip":
+            svc.observe_rows(REPORT, [_bke(eps=9.2)], _et(REPORT, 15, 1), fetched=True)
+        figures = _no_figure_release(release)
+        if way == "read":
+            svc.absorb_filing("BKE", REPORT, figures, _et(REPORT, 15, 2))
+        else:
+            svc.restore_filing("BKE", REPORT, figures, _et(REPORT, 15, 2))
+        svc.observe_rows(REPORT, [_bke(eps=0.94)], _et(REPORT, 16, 30), fetched=True)
+        landed[way] = [s.symbol for s in svc.landed_snapshots(_et(REPORT, 16, 31))]
+    assert landed == {"read": ["BKE"], "restored": ["BKE"]}

@@ -72,7 +72,26 @@ What lives here, and why each piece is in the pure layer:
   qualified"), `REJECTION_REASONS` (per-candidate counters, `already_posted` included).
 * **The Money Map seed** (owner decision 2, 2026-10-09) — `MONEY_MAP_SEED`, a reviewable list of
   well-known US companies (no banks, insurers, REITs or real estate) that goes FIRST; the adapter
-  appends the Trillion Club and Emerging Frontiers members through `merge_money_map_pool`.
+  appends the Trillion Club members through `merge_money_map_pool` (news-v23, owner 2026-11-19 "make sure to
+  use big or popular companies only": no longer the Emerging Frontiers members).
+* **Company stakes** (news-v23, owner 2026-11-19 "public only") — `CompanyStakes`: ONE investor's stakes in 1-4
+  PUBLIC companies a post (`STAKES_POST_STAKES`, `PUBLIC_STAKE_KINDS`, rows in `stake_rank_key` order), its ledger
+  key naming every stake (`STAKES_KEY_JOIN`, `stake_ref_ids`).
+* **The spotlight lane's records** (owner decisions 2026-11-15, "Add a second daily post") —
+  `InsiderSpotlight` (owner decisions 2026-11-20, "3-5 companies at once": a LIST of `INSIDER_MIN_ROWS` to
+  `INSIDER_MAX_ROWS` issuers, each an `InsiderSpotlightCompany` — its largest qualifying insider and up to
+  `SPOTLIGHT_MAX_OTHERS` more of the same issuer; the one-issuer record and its revenue line are retired) and `ThirteenFSpotlight` (ONE filer, `THIRTEEN_F_LIST_MIN_MOVES`
+  to `THIRTEEN_F_SPOTLIGHT_MAX_MOVES` holdings in `thirteen_f_spotlight_order` — owner feedback 2026-11-19 — each new,
+  closed out, or a share count changed by at least `THIRTEEN_F_SPOTLIGHT_MIN_CHANGE`), their ledger keys
+  and key readers (`insider_spotlight_key_parts`, `thirteen_f_filer_key`: one 13F post per filer per quarter
+  across both lanes), the spotlight's Form 4 window (`spotlight_window`: from the day after the last window a
+  previous insider spotlight CHECKED (C0, 2026-11-16 — never the previous run's date: a 13F-led Saturday checks no
+  window), ending where the market-wide walk proves the feed has passed — None when there is no new day to check:
+  a quiet skip while the feed is current (`spotlight_feed_current`), ``insider_feed_behind`` when it is not)
+  and the filing's OWN per-share cost (`InsiderPurchase.cost_per_share_min_usd` / `_max_usd`, owner decision
+  2026-11-15 "Captions + picture": the Form 4 lines' own prices, as filed — the one per-share dollar figure a
+  Form 4 record carries, never a market price). `thirteen_f_move_flow` is THE size of a 13F move (the
+  templates' rank and the spotlight's pick read the one definition).
 
 Members of Congress are never named (rules/marketing.md §1, owner decision 2026-10-09): the
 block-list is the whale registry's politicians plus `data/congress_roster.json` (CC0
@@ -106,10 +125,14 @@ from typing import Any, Dict, FrozenSet, Iterable, List, Literal, Mapping, Optio
 
 from app.schemas.trillion_club import STAKE_KINDS, VALUE_BASES
 from app.services.marketing import compliance as _compliance
+# the worker's font measured on the server (stdlib only): the theme tables' name bound (`theme_table_name_fits`)
+from app.services.marketing import text_metrics as _text_metrics
 # `x_link_tokens` is THE definition of "X turns this into a link" (the publisher's URL guard uses
 # it): a company or filer name that reads as a domain ("C3.ai") is refused where names are made.
 from app.services.marketing.post_copy import x_link_tokens as _x_link_tokens
 from app.services.trillion_club import copy_rules as _copy_rules
+# the SEC's federal business-day calendar (pure: stdlib + market_hours) — the spotlight feed's quiet-day check
+from app.services.trillion_club.rules import is_federal_business_day as _is_federal_business_day
 
 logger = logging.getLogger(__name__)
 
@@ -118,17 +141,20 @@ logger = logging.getLogger(__name__)
 #: The fact-sheet / record-dict schema. A stored sheet with any other value is refused.
 FACT_SHEET_SCHEMA = 1
 
-#: Every company-news series id, in `selection.SERIES` order. 2b ids are listed so 2b only adds
-#: collectors and templates: the records below already exist for them.
+#: Every company-news series id, in `selection.SERIES` order (APPEND-ONLY). 2b ids are listed so 2b only
+#: adds collectors and templates: the records below already exist for them. The spotlight pair (2026-11-15)
+#: was listed the same way: its records came before its collectors and templates (shipped in news-v22).
 NEWS_SERIES: Tuple[str, ...] = (
     "ceo_buys", "insider_buys", "thirteen_f", "congress_count",
     "company_stakes", "earnings", "money_map", "theme_explainer",
+    "insider_spotlight", "thirteen_f_spotlight",
 )
 #: Content class per series (C = reportorial filings, F = company fundamentals). Pinned equal to
 #: `selection.SERIES` by `tests/test_marketing_company_news_rules.py`.
 SERIES_CLASS: Dict[str, str] = {
     "ceo_buys": "C", "insider_buys": "C", "thirteen_f": "C", "congress_count": "C",
     "company_stakes": "F", "earnings": "F", "money_map": "F", "theme_explainer": "F",
+    "insider_spotlight": "C", "thirteen_f_spotlight": "C",
 }
 
 #: Every ledger key (`marketing_scripts.source_ref`) of a news post starts with this. Learn pool
@@ -157,7 +183,21 @@ INSIDER_WINDOW_DAYS = 7
 INSIDER_MIN_AMOUNT_USD = 100_000.0
 #: The garbage bound of signals_service (`_CEO_MAX_ROW_DOLLARS`); a real ~$1B buy exists.
 INSIDER_MAX_AMOUNT_USD = 5_000_000_000.0
+#: Owner decisions 2026-11-20 ("for insider trade, i think we discussed that there is no single company already, each
+#: post or each image/video will have more than 2,3, ideally are 3 - 5 companies at once." — then "i pick option 1:
+#: 3-5, but if it's a quite week - if we don't have enough data, then use different topic like posting the theme"):
+#: EVERY Form 4 post — the weekly ceo_buys / insider_buys roundups (`InsiderBuysWeek`) and the spotlight lane's
+#: insider list (`InsiderSpotlight`) — holds at least INSIDER_MIN_ROWS companies; a week or a spotlight window with
+#: fewer is no post (the adapter's ``*_too_few_companies`` skip, the chain falls through to the theme). A record holds
+#: at most INSIDER_MAX_ROWS companies — "at most 5 (the 5 largest purchases when more qualify)", the option the owner
+#: picked (final review of 2026-11-26: the build had kept up to 8, drawing 5 and listing the rest in the captions —
+#: never his choice): the adapter sorts the week / the window by total and keeps the five largest, so every count,
+#: picture, cover and caption covers the SAME companies. INSIDER_PICTURE_ROWS (what the picture and the cover draw)
+#: equals it, so the templates' "+N more companies in the caption" path cannot be reached by a Form 4 record (kept,
+#: guarded, for a record that would ever hold more).
+INSIDER_MIN_ROWS = 3
 INSIDER_MAX_ROWS = 5
+INSIDER_PICTURE_ROWS = 5
 #: A trade may predate its filing by at most this (signals' `_CEO_MAX_FILING_LAG_DAYS`).
 INSIDER_MAX_FILING_LAG_DAYS = 30
 
@@ -166,6 +206,16 @@ THIRTEEN_F_MOVES: Tuple[str, ...] = ("newly_reported", "increased", "decreased",
 THIRTEEN_F_MAX_MOVES = 8
 
 CONGRESS_MIN_MEMBERS = 2
+#: The most members a count may hold (535 seats; a `CongressCount` and a theme member's count alike).
+CONGRESS_MAX_MEMBERS = 535
+#: news-v23 (the restyle, owner 2026-11-19: "for congress disclosed, i want to have 2-3 companies at once"): ONE
+#: congress_count post per disclosure month holds this many companies (`CongressMonth`), each counted from
+#: CONGRESS_MIN_MEMBERS distinct members; a month with fewer qualifying companies posts nothing
+#: (``congress_too_few_companies``, the chain falls through).
+CONGRESS_MONTH_COMPANIES: Tuple[int, int] = (2, 3)
+#: news-v23 (owner 2026-11-19: "combine 2 to 4 companies at once"): ONE earnings post holds this many companies
+#: (`EarningsDay`), the largest first; a day with fewer qualifying reports posts nothing (``earnings_too_few_companies``).
+EARNINGS_DAY_COMPANIES: Tuple[int, int] = (2, 4)
 
 EPS_MIN_ABS_ESTIMATE = 0.10
 #: Owner-delegated decision (2026-10-19, the Batch 1 re-review): a calendar row whose |EPS actual| or |EPS
@@ -272,8 +322,163 @@ THEME_MEMBERS: Tuple[int, int] = (6, 24)
 THEME_SIZE_MAX = 200
 #: A theme is explained only when at least this many of its members carry a segment fact.
 THEME_MIN_FACTS = 4
-#: A theme's ticker list must have been refreshed within this many days of the run.
+#: A REVIEWED theme list (one that carries its own `trending_themes.tickers_as_of`) must be at most this many days old
+#: on the run day — later than the run, unreadable or older is `theme_stale` (fail closed). OWNER DECISION 2026-11-20
+#: ("Trust the app's lists (Recommended)": "Your app already shows these exact lists to users, so when a theme has no
+#: review date, posts treat its list as current … Each company still passes its own checks (still trading, has
+#: data)."): a list with NO `tickers_as_of` (every production row, 2026-11-20) is the app's live list and is never
+#: refused for its age — `company_news_adapter._theme_as_of`; the row's `updated_at` is not read. Setting
+#: `tickers_as_of` on a reviewed list re-enables this 70-day rule for that theme.
 THEME_STALE_DAYS = 70
+
+# ── the weekly theme post (news-v23 phase 3, RESTYLE_SPEC §2 item 7; owner 2026-11-19) ────────────────────────────
+#: The five ANGLES of a theme post, in ROTATION order: a theme's next post takes the angle after its last posted one
+#: ("how they make money" → "who's biggest" (market value) → "growth + profit" → "insider scorecard" → "Congress" →
+#: "how they make money" …). Append-only in meaning: a stored ledger key names one of them for good.
+THEME_ANGLES: Tuple[str, ...] = ("make_money", "biggest", "growth_profit", "insiders", "congress")
+#: The angle of a theme key written before the angles existed (``news:theme_explainer:<slug>:<tickers_as_of>``).
+THEME_LEGACY_ANGLE = "make_money"
+#: The angles whose collector (`company_news_adapter`) and template (`news_templates`) exist — every one since news-v23
+#: phase 3's second half (2026-11-20: "growth_profit", "insiders", "congress"); an angle not listed here would be
+#: skipped by the rotation with `theme_angle_not_built`, never a crash. A record of another angle is refused. Pinned ==
+#: the adapter's and the templates' angle tables by tests/test_marketing_company_news_rules.py.
+THEME_BUILT_ANGLES: Tuple[str, ...] = ("make_money", "biggest", "growth_profit", "insiders", "congress")
+#: The angles whose facts are FILINGS about trades (class C, marketing.md §1: "disclosed purchases / sales", never
+#: "bought" / "sold", the class-C verb table) — offered only while class C is switched on (MARKETING_CONTENT_CLASSES),
+#: checked again at create_posts (`record_content_classes`). Every other angle is the series' own class F.
+THEME_ANGLE_CLASSES: Dict[str, str] = {"insiders": "C", "congress": "C"}
+#: Angle 3 "growth + profit" (theme_growth_profit_silicon.jpg; owner 2026-11-19 combined "Profit check" and "Growth
+#: check"): per member from its two latest ANNUAL income statements. A member is LEFT OUT (never shown on a guess) when
+#: its revenue growth — latest fiscal year's revenue against the year before's — is above THEME_GROWTH_MAX_ABS in size
+#: (5.0 = 500%: a six-fold year among a theme's listed companies is far more often a partial year, a unit change or a
+#: restated feed row than news, and the row would lead with it — fail closed), when its two fiscal years do not end
+#: THEME_GROWTH_YEAR_GAP_DAYS apart (a 52/53-week year ends 364 or 371 days after the last; a changed fiscal year end
+#: is not a year), or when its latest year ended more than THEME_STATEMENT_MAX_AGE_DAYS before the run: a year and
+#: the 120 days a 20-F filer has to file — the picture says "latest fiscal year", which an older row would not be
+#: (stricter than the brief's two years, on purpose). A loss above THEME_LOSS_MAX_RATIO × revenue is a feed error
+#: (a −$1,000 per $100 row would be its headline). Profit = NET INCOME (the mock's note).
+THEME_GROWTH_MAX_ABS = 5.0
+THEME_GROWTH_YEAR_GAP_DAYS: Tuple[int, int] = (357, 378)
+THEME_STATEMENT_MAX_AGE_DAYS = 365 + 120
+THEME_LOSS_MAX_RATIO = 10.0
+#: A "growth + profit" post holds at most this many companies — the picture's 10 rows and 4 more: each company's caption
+#: row ("Synopsys: revenue +15%, $22 profit per $100") is three times a market value's, and the picture's "+N more" must
+#: fit Threads' picture caption (measured 2026-11-20: 16 companies dropped Threads, 14 kept it). The theme's own count
+#: still says "{n} of its {m} companies".
+THEME_GROWTH_MAX_MEMBERS = 14
+#: Angle 4 "insider scorecard" (theme_insiders_cyber.jpg): Form 4 purchases (code P) and sales (code S) of the stock,
+#: in dollars AS FILED (shares × each line's own per-share amount), FILED in the THEME_INSIDER_WINDOW_DAYS days before
+#: the run (run − 90 … run − 1). Company level: any Form 4/A of the issuer filed in the window drops the company (the
+#: Form 4 posts' company-level amendment rule); an unreadable issuer is dropped, never a zero.
+THEME_INSIDER_WINDOW_DAYS = 90
+#: Angle 5 "Congress" (theme_congress_defense.jpg): the picture's rows (4..THEME_TALLY_ROWS; the rest "+N more").
+THEME_TALLY_ROWS = 6
+#: The tables' NAME bound (angles 3-5): a member is listed only when its display name takes at most
+#: THEME_TABLE_NAME_LINES[angle] lines of THEME_TABLE_NAME_W[angle] px at THEME_TABLE_NAME_FLOOR_PX — the narrowest name
+#: column (a Congress card on the six-row cover holds its chip and ONE line of name; a growth or insider row two)
+#: the worker's row leaves (the cover's, with the widest ticker chip and figures the server can send), measured with
+#: the worker's own font (`text_metrics`, an upper bound) and pinned equal to marketing/cards.py by
+#: tests/test_marketing_news_layouts.py, which lays the widest out. The adapter leaves a longer name out
+#: (``company_name_unusable``) and the template refuses it, so a record the picture cannot draw is never built — and a
+#: theme is never stuck on an angle its template keeps refusing.
+THEME_TABLE_NAME_W: Dict[str, int] = {"growth_profit": 250, "insiders": 275, "congress": 600}
+THEME_TABLE_NAME_FLOOR_PX = 22
+THEME_TABLE_NAME_LINES: Dict[str, int] = {"growth_profit": 2, "insiders": 2, "congress": 1}
+
+
+def theme_table_name_fits(angle: str, name: Any) -> bool:
+    """Can a theme TABLE of `angle` (growth_profit / insiders / congress) draw this display name? True for any other
+    angle (its own bounds apply). Pure."""
+    width = THEME_TABLE_NAME_W.get(angle)
+    if width is None:
+        return True
+    if not isinstance(name, str) or not name:
+        return False
+    return _text_metrics.line_count(name, THEME_TABLE_NAME_FLOOR_PX, width) <= THEME_TABLE_NAME_LINES[angle]
+#: An angle is posted only with at least this many companies carrying its data (owner 2026-11-19: "≥ 4 companies with
+#: data, else the next angle").
+THEME_ANGLE_MIN_COMPANIES = 4
+#: Never the same theme twice within this many days, whatever the angle (owner 2026-11-19: "if they are the same,
+#: after at least 4 weeks already, so it's fine"): a theme last posted ``d`` days before the run may post again only
+#: when ``d >= THEME_REPEAT_DAYS``.
+THEME_REPEAT_DAYS = 28
+#: How far back the theme rotation reads the ledger (`script_service`'s own bounded read, and the adapter's view of
+#: it): twelve weeks — eight active themes posted weekly come round every eight weeks, so every theme's last post is
+#: inside the window in steady state, and a theme last seen before it sorts with the never-posted ones (it is at
+#: least as old as anything seen).
+THEME_HISTORY_DAYS = 84
+#: The OLDEST fiscal year a theme member's segment fact may be, as years before the run's (news-v23 phase 3, owner
+#: 2026-11-19: "for AI CHIPS, i don't see ARM, Intel and SNPS? add for me"): a fact older than the fiscal year(s) the
+#: picture's sub line states is drawn only with its OWN "FY2022" tag (`news_templates`), never implied current — and
+#: never older than four years: a mix more than four fiscal years old is too far from the company's business today to
+#: print even dated. Phase 4 (2026-11-20): Intel's NEWEST breakdown is GROSS (its segments include intersegment sales
+#: since the Intel Foundry reorganisation, so no share of revenue can be stated from it) — the adapter walks back year
+#: by year to the newest fiscal year whose stack is not, within this bound (`company_news_adapter._walked_back_fact`),
+#: and the record says so (`ThemeMember.latest_fiscal_year`: the template always tags such a fact).
+THEME_TAGGED_FACT_MAX_AGE_YEARS = 4
+#: A theme member's market value above this is a unit error, not a company (the largest companies are ~$5T).
+THEME_MARKET_VALUE_MAX_USD = 50e12
+#: The market values of a "biggest" post are dated; at most this many days before the run (the batch read is
+#: current; an older date is a stale feed, never shown as "as of" a week-old day).
+THEME_MARKET_VALUE_MAX_AGE_DAYS = 7
+#: The prefix of every theme ledger key.
+THEME_KEY_PREFIX = "news:theme_explainer:"
+#: The longest theme ledger key `theme_ref_items` reads (a 63-char slug, the longest angle, a day: ~110).
+THEME_REF_MAX_CHARS = 160
+_THEME_SLUG_KEY_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+
+
+def next_theme_angle(last: Optional[str]) -> str:
+    """The angle a theme takes next: the one after `last` in THEME_ANGLES (wrapping round), or the first —
+    "make_money" — for a theme never posted (`last` None) or one whose last angle is not known."""
+    if last not in THEME_ANGLES:
+        return THEME_ANGLES[0]
+    return THEME_ANGLES[(THEME_ANGLES.index(last) + 1) % len(THEME_ANGLES)]
+
+
+def theme_ref_items(ref: Any) -> Optional[Tuple[str, str, date]]:
+    """``(slug, angle, day)`` of a theme ledger key, or None for any other ref or a malformed one. STRICT both ways —
+    what `ledger_key` writes reads back exactly:
+
+    * ``news:theme_explainer:<slug>:<angle>:<run day>`` (news-v23 phase 3): the angle one of THEME_ANGLES, the day the
+      post's run date;
+    * ``news:theme_explainer:<slug>:<tickers_as_of>`` (every theme key before the angles): read as THEME_LEGACY_ANGLE
+      ("how they make money", the only angle there was) on that date — the member list's date, at most the run's.
+
+    A slug outside the lower-case slug grammar, an unknown angle, a day that is not one, more or fewer parts, or a key
+    over THEME_REF_MAX_CHARS is None. Pure; never raises."""
+    if not isinstance(ref, str) or len(ref) > THEME_REF_MAX_CHARS or not ref.startswith(THEME_KEY_PREFIX):
+        return None
+    parts = ref[len(THEME_KEY_PREFIX):].split(":")
+    if len(parts) == 3:
+        slug, angle, day = parts
+        if angle not in THEME_ANGLES:
+            return None
+    elif len(parts) == 2:
+        (slug, day), angle = parts, THEME_LEGACY_ANGLE
+    else:
+        return None
+    if not _THEME_SLUG_KEY_RE.fullmatch(slug) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day):
+        return None
+    try:
+        return slug, angle, date.fromisoformat(day)
+    except ValueError:                        # "2027-02-30": shaped like a day, not one
+        return None
+
+
+#: Earnings (news-v23 phase 3, owner 2026-11-19: a theme post LEADS every Wednesday): the report days an earnings post
+#: covers are ``[run_date − n, run_date − 1]`` — n = EARNINGS_WINDOW_DAYS, or EARNINGS_THURSDAY_WINDOW_DAYS on a
+#: THURSDAY. Wednesday's own window was ``[W − 7, W − 1]``; Thursday's eighth day (W − 7) makes Thursday's window
+#: ``[W − 7, W]`` hold all of it, so no report day a Wednesday earnings post used to cover is left to no post now that
+#: Wednesday posts the theme (`selection.plan_for`: a Thursday also leads with earnings the day after a season that
+#: ended on its Wednesday). Pinned by tests/test_marketing_selection.py over two years of calendars.
+EARNINGS_WINDOW_DAYS = 7
+EARNINGS_THURSDAY_WINDOW_DAYS = 8
+
+
+def earnings_window_days(run_date: date) -> int:
+    """How many report days before `run_date` an earnings post on it covers (8 on a Thursday, else 7). Pure."""
+    return EARNINGS_THURSDAY_WINDOW_DAYS if run_date.weekday() == 3 else EARNINGS_WINDOW_DAYS
 
 #: A stake whose row was created on/after this date is "new" (2b company_stakes).
 COMPANY_WEEKLY_LAUNCH = date(2026, 11, 16)
@@ -287,6 +492,23 @@ STAKE_STALE_DAYS = 120
 STAKE_MAX_AGE_DAYS = 3 * 365
 #: A disclosed stake value above this is a unit error (thousands typed as dollars …), not a stake.
 STAKE_MAX_VALUE_USD = 1e12
+#: news-v23 (the restyle, owner 2026-11-19: "filter for companies that public only. no private" + "add 1-3 more companies
+#: for the NVIDIA (or the other trillion companies)"): ONE company_stakes post holds this many of ONE investor's stakes
+#: (`CompanyStakes`), each in a PUBLIC company — a listed U.S. symbol whose profile says it is actively trading (the
+#: adapter's check, fail closed). A private, unlisted or not-trading investee never appears anywhere. Review
+#: 2026-11-20 (confirmed): RESTYLE_SPEC §2.5 binds "one investor per post, 1-4 PUBLIC investees" (stakes_nvidia.jpg
+#: draws 4, no "+N more") — at most what the PICTURE draws (`news_templates.STAKES_PICTURE_ROWS`, pinned equal), so
+#: every stake a post holds is drawn on it (an investor's 5th and later stakes wait for a later post, where they are
+#: drawn) and no caption owes the picture a "+N more" (8 used to cost X and Bluesky the post at 6+ stakes).
+STAKES_POST_STAKES: Tuple[int, int] = (1, 4)
+#: The most stake ids `stake_ref_ids` reads from ONE ledger key — wider than `STAKES_POST_STAKES` on purpose (review
+#: 2026-11-20): a reader narrower than any key ever written would read that key as no stake at all and post its stakes
+#: again; reading more ids than a post holds costs nothing.
+STAKES_REF_MAX_IDS = 8
+#: The stake kinds a PUBLIC investee may carry (`schemas.trillion_club.STAKE_KINDS`): a U.S.-listed company off or on
+#: the investor's 13F, or a commitment to one. A ``private`` or ``non_us_listed`` row is never public, whatever symbol
+#: it carries (fail closed).
+PUBLIC_STAKE_KINDS: Tuple[str, ...] = ("us_listed_off_13f", "on_13f_note", "commitment")
 
 COMPANY_NAME_CHARS: Tuple[int, int] = (2, 32)
 #: The longest WORD a company's display name may hold (the review of 2026-10-16): every series draws the name
@@ -307,6 +529,61 @@ COMPANY_NAME_WORD_MAX_CHARS = 20
 PERSON_NAME_MAX = 40
 FILER_NAME_CHARS: Tuple[int, int] = (2, 60)
 
+# ── the spotlight lane (owner decisions 2026-11-15, "Add a second daily post") ─
+#
+# Code constants, never settings: `news_templates.revalidate` re-composes a stored output from its record, so
+# a constant that changes copy needs a TEMPLATE_VERSION bump. The adapter (`company_news_adapter`) and the
+# templates read them from here, the one definition.
+
+#: An `InsiderSpotlightCompany` (one row of the insider list) names its lead and at most this many OTHER qualifying
+#: insiders of the same issuer (the row's "CEO + at least N other insiders"). The adapter's cluster read sizes its own
+#: cap from it.
+SPOTLIGHT_MAX_OTHERS = 4
+#: The spotlight's Form 4 window spans at most this many days, inclusive (`spotlight_window`: never earlier
+#: than ``run_date − 7``); a record's window must span 1..this.
+SPOTLIGHT_MAX_WINDOW_DAYS = 7
+#: C0 (2026-11-16): the market-wide Form 4 feed is CURRENT when its newest filing on or before the run date is at most
+#: this many federal business days old ((newest, run_date] counted, `spotlight_feed_current`). A spotlight with no new
+#: day to check (`spotlight_window` None) is then a quiet content skip (``insider_spotlight_no_new_window``: the
+#: Tuesday after Presidents' Day at 10:00, with no Tuesday filing yet) — never ``insider_feed_behind``, which is kept
+#: for a feed older than this (an outage the digest alerts on).
+SPOTLIGHT_FEED_CURRENT_BUSINESS_DAYS = 2
+#: An issuer spotlighted on a run is not spotlighted again for this many days (the adapter keys it on the
+#: issuer's ROOT symbol — share-class twins are one issuer — and on its casefolded display name, from the
+#: lane's recent ledger keys and fact sheets: ``spotlight_cooldown``). Overlapping windows are harmless
+#: because of it.
+SPOTLIGHT_ISSUER_COOLDOWN_DAYS = 14
+#: A 13F spotlight shows a "more shares" / "fewer shares" holding only when its share count changed by at
+#: least this share of the PREVIOUS quarter's count — exact at the boundary (`thirteen_f_change_clear`: 25%
+#: kept, 24.99% refused ``spotlight_change_too_small``). A new holding or an exit has no such floor.
+THIRTEEN_F_SPOTLIGHT_MIN_CHANGE = 0.25
+#: A 13F spotlight RECORD holds at most this many of one filing's eligible holdings, the largest dollar size first
+#: (`thirteen_f_spotlight_order`) — the same cap as the roundup's record (`THIRTEEN_F_MAX_MOVES`). The restyle
+#: (news-v23, owner 2026-11-19: "i need more companies, similar with Berkshire hathaway latest 13F" / "the range
+#: from 2 to 6 are okay") draws ONE list design for both 13F series: at most `THIRTEEN_F_LIST_ROWS` rows on the
+#: picture, the rest in the caption ("+2 more changes in the caption").
+THIRTEEN_F_SPOTLIGHT_MAX_MOVES = 8
+#: The fewest holdings a 13F post shows (owner 2026-11-19: "the range from 2 to 6 are okay" — NO single-holding 13F
+#: post anywhere): a filing with fewer eligible holdings yields no record (``too_few_holdings``), in both lanes.
+THIRTEEN_F_LIST_MIN_MOVES = 2
+#: The most rows the 13F list PICTURE draws (f13_list_berkshire.jpg / f13_list_pershing.jpg: 2-6 ranked rows); a
+#: record holding more says "+N more changes in the caption" under them, and every caption carrying the picture lists
+#: those changes (`news_templates`).
+THIRTEEN_F_LIST_ROWS = 6
+#: The most rows the 13F video COVER draws, then "+N more changes in the caption" (cover_13f_berkshire.jpg's idea).
+#: Review 2026-11-20 (confirmed): the mock draws FOUR 184 px rows down into the burned-caption band (1170-1310 on the
+#: 9:16 frame) — which the video keeps for the hook's captions under a template's opening card, and which card text
+#: never enters (marketing.md §5) — so four rows above the band were ~110 px each with the chip squeezed beside the
+#: name. THREE rows keep the mock's tall row (~150 px, the chip above the name) above the band; the owner may instead
+#: choose four rows at the mock's size with the hook's captions left out under the list (an open decision).
+THIRTEEN_F_COVER_ROWS = 3
+#: The "🚨 BREAKING:" first-line prefix (owner decision 2026-11-15, "Loosen caption hype words") needs its
+#: source filed / reported at most this many business days before the run date (and, for a Form 4, trades that
+#: are not late). The templates own the check (`news_templates._breaking_fresh`): a Form 4 on the SEC's FEDERAL
+#: business-day calendar, an earnings report on the EXCHANGE's (C0, 2026-11-16: a day counts unless both close —
+#: never looser than the federal count); this is the one constant both freshness checks read.
+BREAKING_MAX_BUSINESS_DAYS = 1
+
 # ── reason codes (adapter design §6, with the contract's renames) ─────────────
 
 #: `MarketingNewsUnavailable(series, reason)`: an upstream failure — never a "nothing qualified".
@@ -320,6 +597,12 @@ UNAVAILABLE_REASONS: FrozenSet[str] = frozenset({
     # limited, an answer no row could be read from) and no report was held — the source is down, which an
     # honest "nothing qualified" would hide (as `profiles_unavailable` does for the profiles)
     "earnings_statements_unavailable",
+    # the spotlight lane (2026-11-15): the market-wide Form 4 walk has not yet reached the day after the window
+    # would start (`spotlight_window` is None) — the feed is behind, so a filing late in the window may be
+    # missing from it and a total would be understated; an infrastructure outcome the digest alerts on, never
+    # an honest "nothing qualified". Since C0 (2026-11-16) only while the feed is NOT current
+    # (`spotlight_feed_current`); a current feed with no new day is the quiet ``insider_spotlight_no_new_window``
+    "insider_feed_behind",
 })
 #: `Candidates.skip_reason`: an honest "nothing qualified". `already_posted` is NOT one: excluded
 #: refs are dropped silently and counted in `rejections`.
@@ -331,6 +614,23 @@ SKIP_REASONS: FrozenSet[str] = frozenset({
     "thirteen_f_off_season", "thirteen_f_none_qualified",
     "congress_not_due", "congress_none_qualified",
     "money_map_none_qualified", "theme_none_qualified",
+    # the spotlight lane (2026-11-15; append-only): no issuer / no filer's holding passed the gates
+    "insider_spotlight_none_qualified", "thirteen_f_spotlight_none_qualified",
+    # C0 (2026-11-16; append-only): the insider spotlight has no new day to check — the last window a spotlight
+    # checked already reaches the day before the feed's newest filing, and that filing is recent
+    # (`spotlight_feed_current`): a quiet content skip, never an outage
+    "insider_spotlight_no_new_window",
+    # news-v23 (the restyle, owner 2026-11-19; append-only): ONE post of several companies — exactly one company
+    # qualified after every gate, fewer than the post's minimum (`EARNINGS_DAY_COMPANIES` /
+    # `CONGRESS_MONTH_COMPANIES`): nothing is posted and the chain falls through (none at all stays `*_none_qualified`)
+    "earnings_too_few_companies", "congress_too_few_companies",
+    # owner decisions 2026-11-20 ("3-5 companies at once"; append-only): one or two companies qualified after every
+    # Form 4 gate, fewer than INSIDER_MIN_ROWS — no insider post (never a one- or two-company post), the chain falls
+    # through to the theme (none at all stays `*_none_qualified`)
+    "ceo_too_few_companies", "insider_too_few_companies", "insider_spotlight_too_few_companies",
+    # news-v23 (company stakes, owner 2026-11-19 "public only"; append-only): stakes passed every row gate, but none of
+    # them is in a public company (a listed U.S. symbol, actively trading) — nothing is posted, the chain falls through
+    "stakes_none_public",
 })
 #: Per-candidate counters (`Candidates.rejections`, stored in the fact sheet).
 REJECTION_REASONS: FrozenSet[str] = frozenset({
@@ -399,6 +699,28 @@ REJECTION_REASONS: FrozenSet[str] = frozenset({
     # themes
     "theme_stale", "theme_title_unusable", "theme_too_large", "theme_members_thin",
     "theme_facts_thin",
+    # the weekly theme post's angles (news-v23 phase 3, 2026-11-20; append-only), each an ANGLE skipped — the theme
+    # tries its next angle, and a theme with no angle left is the next theme: `theme_angle_not_built` — an angle whose
+    # collector and template do not exist yet (no read made); `theme_angle_unsupported` — the worker holding the run
+    # cannot draw the angle's picture (it did not declare WORKER_CAPABILITY_THEME_ANGLES; no read made);
+    # `theme_values_thin` — fewer than THEME_ANGLE_MIN_COMPANIES members with a usable market value (the "biggest"
+    # angle); `market_value_unusable` — one member's market value is missing, not a positive finite number, implausible,
+    # undated or on another day than the post's (the member is left out of a "biggest" post, never ranked on a guess)
+    "theme_angle_not_built", "theme_angle_unsupported", "theme_values_thin", "market_value_unusable",
+    # the theme post's last three angles (news-v23 phase 3, 2026-11-20; append-only), each an ANGLE skipped (fewer than
+    # THEME_ANGLE_MIN_COMPANIES members with its data) or a MEMBER left out of it: `theme_angle_class_off` — an angle of
+    # filings (THEME_ANGLE_CLASSES "C") while class C is not in MARKETING_CONTENT_CLASSES (no read made);
+    # `theme_growth_thin` — "growth + profit" thin; `growth_unusable` — a member's two annual statements do not give a
+    # certain growth and profit (THEME_GROWTH_* gates: a missing / non-positive revenue, the years not a year apart, a
+    # stale latest year, growth above THEME_GROWTH_MAX_ABS, net income missing or implausible, two currencies);
+    # `statements_unreadable` — a member's annual statement read failed (left out, never a zero);
+    # `theme_insiders_thin` — fewer than THEME_ANGLE_MIN_COMPANIES members with a disclosed (code P) purchase or
+    # sale; `insider_feed_unusable` — a member's Form 4 read failed, ran past its page bound, held another issuer's
+    # rows or a P / S line whose dollars cannot be computed (left out, never a zero); `theme_congress_thin` — fewer
+    # than THEME_ANGLE_MIN_COMPANIES members with purchases disclosed by at least CONGRESS_MIN_MEMBERS distinct members
+    # of Congress in the disclosure month; `theme_congress_not_due` — that month's reports are not due yet
+    "theme_angle_class_off", "theme_growth_thin", "growth_unusable", "statements_unreadable", "theme_insiders_thin",
+    "insider_feed_unusable", "theme_congress_thin", "theme_congress_not_due",
     # review round 9: `partial_person` — a Form 4 person some of whose in-window purchases of the
     # issuer the row would not hold (a line dropped one by one, skipped by the extractor, under
     # another class or no symbol): refused, never re-summed; `move_has_options` — a 13F move whose
@@ -467,6 +789,30 @@ REJECTION_REASONS: FrozenSet[str] = frozenset({
     # `company_news_adapter.remember_template_refusal`), a template-only gate the read cannot apply (a segment
     # named like a web address, any future gate)
     "money_map_loss_above_revenue", "template_refused",
+    # the spotlight lane (owner decisions 2026-11-15; append-only): `spotlight_cooldown` — the issuer (its root
+    # symbol or its display name) was spotlighted within `SPOTLIGHT_ISSUER_COOLDOWN_DAYS`;
+    # `spotlight_change_too_small` — a 13F more / fewer holding whose share count moved by less than
+    # `THIRTEEN_F_SPOTLIGHT_MIN_CHANGE` of the quarter before; `lead_filer_reserved` — a `THIRTEEN_F_LEAD_FILERS`
+    # filer (Berkshire), whose quarter belongs to the main lane's 13F roundup; `split_restated` — a 13F more /
+    # fewer holding whose CUSIP had a stock split in the quarter: the build restated the previous count (the
+    # previous book × the split ratio), a number the previous 13F never reported, which the spotlight's
+    # "down from Y the quarter before" would print as filed (the flag travels out-of-band, never as a field)
+    "spotlight_cooldown", "spotlight_change_too_small", "lead_filer_reserved", "split_restated",
+    # the 13F list (news-v23, owner 2026-11-19; append-only): `too_few_holdings` — a filing with fewer than
+    # `THIRTEEN_F_LIST_MIN_MOVES` eligible holdings (no single-holding 13F post); the BUY-OUT CHECK on a closed-out
+    # holding (owner chose "Closed out + buy-out check": a holding whose company stopped trading during or after the
+    # quarter — acquired, delisted, merged — is DROPPED, never called closed out): `closed_out_not_trading` — its
+    # profile does not say it is actively trading (False, absent or unreadable: fail closed);
+    # `closed_out_delisted` — FMP's delisted-companies list has it on or after the quarter's first day;
+    # `closed_out_unchecked` — that list could not be read far enough back (fail closed: the row is dropped)
+    "too_few_holdings", "closed_out_not_trading", "closed_out_delisted", "closed_out_unchecked",
+    # company stakes (news-v23, owner 2026-11-19 "filter for companies that public only. no private"; append-only),
+    # each a stake DROPPED — never shown, its investee never named: `stake_not_public` — no listed U.S. symbol, or a
+    # kind that is never public (`PUBLIC_STAKE_KINDS`: a private or non-U.S.-listed investee); `stake_not_trading`
+    # — the investee's profile does not say it is actively trading (False, absent or unreadable: fail closed);
+    # `stake_listing_unverified` — its profile is missing or refused (`company_from_profile`, purpose "common"), names
+    # another company, or is the investor itself: the symbol cannot be trusted to be this investee
+    "stake_not_public", "stake_not_trading", "stake_listing_unverified",
 })
 _REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
@@ -482,8 +828,26 @@ SOURCE_LABELS: Dict[str, str] = {
     # review round 14: a theme's facts come from each company's revenue breakdown (product or business
     # lines), which is not always its reportable segments (Apple's iPhone is not one) — never "segment"
     "theme_explainer": "company revenue breakdowns; grouping by Caydex",
+    # the spotlight lane (2026-11-15): the same filings as the main lane's Form 4 and 13F series (an amended
+    # 13F reads THIRTEEN_F_AMENDED_LABEL, as the roundup's does)
+    "insider_spotlight": "SEC Form 4 filings",
+    "thirteen_f_spotlight": "SEC Form 13F",
+    # news-v23 (one investor's stakes in several public companies): each row names its own source on the picture
+    # ("As of … · Intel 8-K (Dec 29, 2025)") and in the captions; the post's own label is the family's
+    "company_stakes": "company filings and official releases",
 }
 THIRTEEN_F_AMENDED_LABEL = "SEC Form 13F-HR/A"
+#: news-v23 phase 3 (the weekly theme post): an angle whose figures are not the revenue breakdowns says its own source
+#: — the market-value angle ("biggest") reads each member's dated market value (filings for the share count, market
+#: data for the value), the words its picture footer burns ("Source: company filings and market data"). An angle not
+#: listed here keeps the series label.
+THEME_ANGLE_SOURCE_LABELS: Dict[str, str] = {
+    "biggest": "company filings and market data; grouping by Caydex",
+    # news-v23 phase 3 (2026-11-20): the last three angles' figures are each family's own source
+    "growth_profit": "company financial statements; grouping by Caydex",
+    "insiders": "SEC Form 4 filings; grouping by Caydex",
+    "congress": "congressional periodic transaction reports; grouping by Caydex",
+}
 
 # ── the Money Map pool (owner decision 2, 2026-10-09) ─────────────────────────
 
@@ -518,8 +882,8 @@ MONEY_MAP_EXCLUDED_SYMBOLS: FrozenSet[str] = frozenset({
 
 def merge_money_map_pool(*sources: Iterable[Any]) -> Tuple[str, ...]:
     """The Money Map candidate order: `MONEY_MAP_SEED` first, then each source in the order given
-    (the adapter passes the US-listed Trillion Club members, then the Emerging Frontiers theme
-    tickers). Canonicalised, de-duplicated in order, excluded symbols and unusable tickers
+    (the adapter passes the US-listed Trillion Club members — news-v23, owner 2026-11-19 "make sure to use big
+    or popular companies only": no longer the Emerging Frontiers theme tickers after them). Canonicalised, de-duplicated in order, excluded symbols and unusable tickers
     (warrants, units, bad grammar) dropped. Pure; never raises on junk entries."""
     out: List[str] = []
     seen = set()
@@ -559,6 +923,31 @@ def canonical_symbol(raw: Any) -> Optional[str]:
     if symbol_problem(raw) is not None:
         return None
     return raw.strip().upper().replace(".", "-")
+
+
+#: The fifth letters of an OTC FOREIGN line — F (a foreign ordinary share), Y (an ADR): such a line is often ANOTHER
+#: company entirely (CMPRF is Gentera beside Cimpress' CMPR), so it is never folded into a four-letter root. Pinned
+#: equal to `company_news_adapter.EARNINGS_FOREIGN_LETTERS` (that module may not be imported here).
+ISSUER_ROOT_FOREIGN_LETTERS: FrozenSet[str] = frozenset("FY")
+
+
+def issuer_root(symbol: Any) -> Optional[str]:
+    """A listing's ISSUER key — share-class twins are one issuer: the part before a class suffix ("BF-B" → "BF",
+    "BRK-A" → "BRK"), and a five-letter Nasdaq line's first four ("GOOGL" → "GOOG", "LBRDA" → "LBRD", "WAFDP" →
+    "WAFD") — except an OTC foreign line (`ISSUER_ROOT_FOREIGN_LETTERS`). Stripped and upper-cased first ("brk.b" →
+    "BRK"); None for anything that is not a non-empty string. An over-match keeps two lanes apart on one more company
+    (the safe side); a twin it misses is caught by the display name. Pure, never raises.
+
+    The insider spotlight's cooldown (`company_news_adapter._issuer_root`) and the cross-lane rule (b)
+    (`script_service.lead_keys`: GOOGL drawn by one lane, GOOG by the other — one company) both fold through it."""
+    if not isinstance(symbol, str):
+        return None
+    base = symbol.strip().upper().replace(".", "-").split("-", 1)[0]
+    if not base:
+        return None
+    if len(base) == 5 and base.isalpha() and base[-1] not in ISSUER_ROOT_FOREIGN_LETTERS:
+        return base[:4]
+    return base
 
 
 #: NASDAQ reserves a fifth letter P / O / N / M for an issuer's first to fourth PREFERRED series (WAFDP, HBANP,
@@ -644,6 +1033,69 @@ def insider_window(run_date: date) -> Tuple[date, date]:
     if not isinstance(run_date, date) or isinstance(run_date, datetime):
         raise ValueError("run_date must be a date")
     return run_date - timedelta(days=INSIDER_WINDOW_DAYS), run_date - timedelta(days=1)
+
+
+def spotlight_window(run_date: date, checked_through: Optional[date],
+                     newest_filed: Optional[date]) -> Optional[Tuple[date, date]]:
+    """The insider spotlight's Form 4 filing window, both ends inclusive — or None when there is no new day to check
+    (the adapter then asks `spotlight_feed_current`: a current feed is a quiet skip, ``insider_spotlight_no_new_window``;
+    an old one ``insider_feed_behind``, an infrastructure outcome — never "nothing qualified").
+
+    * **start** = ``max(run_date − SPOTLIGHT_MAX_WINDOW_DAYS, checked_through + 1 day)``. ``checked_through`` is the
+      END of the window the newest earlier insider spotlight CHECKED (C0, 2026-11-16: recorded on that spotlight's
+      selection trail, read from the ledger by the script flow — chosen, refused or nothing qualified, never a run
+      whose feed was behind, and — review of 2026-11-26 — never a window whose list fell below INSIDER_MIN_ROWS
+      companies or whose lead the other lane drew: those days stay in reach, so a company filed a day later can make
+      their one or two companies a list), or None (none within the cooldown: ``run_date − 7``). The day after it — never the
+      previous RUN's date: a 13F-led Saturday checks no Form 4 window, so a Thursday filing would be lost between a
+      Thursday spotlight and the next Tuesday's. A window the clamp cuts loses its oldest days (older than a week).
+    * **end** = ``min(run_date − 1, newest_filed − 1 day)``: ``newest_filed`` is the newest filing date the
+      market-wide Form 4 walk holds ON OR BEFORE the run date (the adapter leaves out any later, impossible
+      date). A filing dated D proves the feed has passed every day before D, never D itself — a Saturday run
+      (no Saturday filings) ends on Thursday, and Friday rolls into the next window.
+    * None when ``end < start`` (no day past the last checked window is proven yet), when ``newest_filed`` is None
+      (nothing proves the feed reached any day) or when it is AFTER the run date (a future filing date is junk,
+      no proof — fail closed).
+
+    Every returned window spans 1..`SPOTLIGHT_MAX_WINDOW_DAYS` days. Pure. ValueError for a caller bug: a
+    datetime or a non-date anywhere, or a ``checked_through`` that is not before ``run_date``."""
+    for name, value, optional in (("run_date", run_date, False), ("checked_through", checked_through, True),
+                                  ("newest_filed", newest_filed, True)):
+        if value is None and optional:
+            continue
+        if not isinstance(value, date) or isinstance(value, datetime):
+            raise ValueError(f"{name} must be a date, got {value!r}")
+    if checked_through is not None and checked_through >= run_date:
+        raise ValueError(f"checked_through {checked_through} is not before run_date {run_date}")
+    if newest_filed is None or newest_filed > run_date:
+        return None
+    start = run_date - timedelta(days=SPOTLIGHT_MAX_WINDOW_DAYS)
+    if checked_through is not None:
+        start = max(start, checked_through + timedelta(days=1))
+    end = min(run_date - timedelta(days=1), newest_filed - timedelta(days=1))
+    if end < start:
+        return None
+    return start, end
+
+
+def spotlight_feed_current(newest_filed: Optional[date], run_date: date) -> bool:
+    """Is the market-wide Form 4 feed CURRENT for ``run_date`` (C0, 2026-11-16)? True when its newest filing on or
+    before the run date is at most `SPOTLIGHT_FEED_CURRENT_BUSINESS_DAYS` federal business days old — (newest_filed,
+    run_date] counted on the SEC's calendar, weekends and federal holidays excluded. False for None or a future date
+    (no proof). A spotlight with no new day to check is then a quiet skip, not an outage: the Tuesday after Presidents'
+    Day at 10:00 (newest filing Friday; Monday is no business day) is current; a feed whose newest filing is three
+    business days old is behind. Pure; ValueError for a non-date (a caller bug)."""
+    for name, value in (("newest_filed", newest_filed), ("run_date", run_date)):
+        if value is not None and (not isinstance(value, date) or isinstance(value, datetime)):
+            raise ValueError(f"{name} must be a date, got {value!r}")
+    if newest_filed is None or run_date is None or newest_filed > run_date:
+        return False
+    count, probe = 0, newest_filed
+    while probe < run_date and count <= SPOTLIGHT_FEED_CURRENT_BUSINESS_DAYS:
+        probe += timedelta(days=1)
+        if _is_federal_business_day(probe):
+            count += 1
+    return count <= SPOTLIGHT_FEED_CURRENT_BUSINESS_DAYS
 
 
 # ── the members-elect window (owner decision 4, 2026-10-15) ───────────────────
@@ -2385,6 +2837,10 @@ class _Check:
 
 # ── records ───────────────────────────────────────────────────────────────────
 
+#: The float slack of `InsiderPurchase`'s filed-cost check: ``amount_usd`` is a sum of shares × cost over the
+#: lines, so its average sits within the lines' lowest and highest cost up to rounding (relative).
+COST_PER_SHARE_REL_TOLERANCE = 1e-9
+
 Role = Literal["ceo", "cfo", "director"]
 Holding = Literal["direct", "mixed", "indirect"]
 Move = Literal["newly_reported", "increased", "decreased", "no_longer_reported"]
@@ -2409,7 +2865,19 @@ class CompanyRef:
 
 @dataclass(frozen=True, slots=True)
 class InsiderPurchase:
-    """One person's open-market buys of one company over the window."""
+    """One person's open-market buys of one company over the window.
+
+    ``cost_per_share_min_usd`` / ``cost_per_share_max_usd`` (owner decision 2026-11-15, "Captions + picture";
+    ADDITIVE and defaulted, so every fact sheet stored before them still reads, as None): the lowest and highest
+    per-share cost the contributing Form 4 LINES report — each line's own price, as filed, never the profile's
+    price (that is only the adapter's plausibility reference). marketing.md §1 allows "insider (Form 4) … as
+    filed (the filing's own amounts and prices)" and bars "a market price (current, delayed, end-of-day or
+    intraday), % price moves, price charts": a filed cost is the first, never the second. Placement: a caption
+    or the post picture's facts only, always labelled "as filed", never the word "price" — never narrated,
+    burned into a caption, drawn on a video card, the opening card or a data card, never in the hook, the
+    YouTube title or the alt text (the templates enforce it). Both or neither; each > 0; min ≤ max; and the
+    row's own average (``amount_usd / shares``) lies between them (within 1e-9, relative) — the proof the pair
+    is the lines' own figures, not an outside one."""
 
     company: CompanyRef
     role: Role
@@ -2425,6 +2893,8 @@ class InsiderPurchase:
     holding: Holding
     amended: bool                          # a Form 4/A contributed (never, since review round 7:
                                            # the adapter refuses any amended person)
+    cost_per_share_min_usd: Optional[float] = None   # the contributing lines' lowest own cost, as filed
+    cost_per_share_max_usd: Optional[float] = None   # ... and their highest
 
     def __post_init__(self) -> None:
         c = _Check(self)
@@ -2456,6 +2926,18 @@ class InsiderPurchase:
             c.fail("earliest_trade_date", "older than the filing-lag bound")
         c.choice("holding", ("direct", "mixed", "indirect"))
         c.flag("amended")
+        c.number("cost_per_share_min_usd", gt=0, optional=True)
+        c.number("cost_per_share_max_usd", gt=0, optional=True)
+        lo, hi = self.cost_per_share_min_usd, self.cost_per_share_max_usd
+        if (lo is None) != (hi is None):
+            c.fail("cost_per_share_min_usd", "the lowest and highest cost per share come together")
+        if lo is not None:
+            if lo > hi:
+                c.fail("cost_per_share_min_usd", f"{lo!r} above cost_per_share_max_usd {hi!r}")
+            average = self.amount_usd / self.shares
+            if not (lo * (1 - COST_PER_SHARE_REL_TOLERANCE) <= average <= hi * (1 + COST_PER_SHARE_REL_TOLERANCE)):
+                c.fail("cost_per_share_min_usd", f"the row's average {average!r} a share is outside "
+                                                 f"{lo!r}..{hi!r}: not the lines' own costs")
 
 
 def _insider_order(row: InsiderPurchase) -> Tuple[float, str, str]:
@@ -2467,7 +2949,9 @@ class InsiderBuysWeek:
     series: InsiderSeries
     window_start: date
     window_end: date
-    rows: Tuple[InsiderPurchase, ...]   # 1..5, unique symbol, amount desc, then company name
+    #: INSIDER_MIN_ROWS..INSIDER_MAX_ROWS (owner decisions 2026-11-20: "3 - 5 companies at once" — never one or two),
+    #: unique symbol and company, amount desc, then company name
+    rows: Tuple[InsiderPurchase, ...]
 
     def __post_init__(self) -> None:
         c = _Check(self)
@@ -2476,9 +2960,11 @@ class InsiderBuysWeek:
         c.day("window_end")
         if not (0 <= (self.window_end - self.window_start).days <= 13):
             c.fail("window_end", "window must run forward and span at most 14 days")
-        rows = c.items("rows", InsiderPurchase, 1, INSIDER_MAX_ROWS)
+        rows = c.items("rows", InsiderPurchase, INSIDER_MIN_ROWS, INSIDER_MAX_ROWS)
         if len({r.company.symbol for r in rows}) != len(rows):
             c.fail("rows", "duplicate symbol")
+        if len({r.company.name.casefold() for r in rows}) != len(rows):
+            c.fail("rows", "one company twice (two listings of one issuer are one row)")
         if list(rows) != sorted(rows, key=_insider_order):
             c.fail("rows", "not ordered by amount desc, then company name")
         roles = {"ceo"} if self.series == "ceo_buys" else {"cfo", "director"}
@@ -2487,6 +2973,136 @@ class InsiderBuysWeek:
         for r in rows:
             if r.filing_dates[0] < self.window_start or r.filing_dates[-1] > self.window_end:
                 c.fail("rows", f"{r.company.symbol} has a filing outside the window")
+
+
+def spotlight_person_order(row: InsiderPurchase) -> Tuple[float, str, str]:
+    """THE order of an `InsiderSpotlight`'s people (the adapter sorts its group with it, the record checks it):
+    the largest amount first, then the rendered name (casefolded; an unnamed row's is "", so it sorts first),
+    then the role. Equal keys may come in either order."""
+    return (-row.amount_usd, (row.person_name or "").casefold(), row.role)
+
+
+#: The roles one issuer has ONE sitting holder of: two people of an `InsiderSpotlight` holding one of them
+#: would be a co-officer (the adapter refuses the role) or a misread title, and "the CEO" would name neither.
+#: Directors may repeat ("a director … and another director").
+SPOTLIGHT_SINGLE_HOLDER_ROLES: FrozenSet[str] = frozenset({"ceo", "cfo"})
+
+
+@dataclass(frozen=True, slots=True)
+class InsiderSpotlightCompany:
+    """ONE row of the insider list (owner decisions 2026-11-20): one issuer's qualifying insiders over the spotlight's
+    window — its largest qualifying person (``lead``: CEO, CFO or director) and up to `SPOTLIGHT_MAX_OTHERS` more of the
+    SAME issuer (``others``: a lower bound, the adapter's gates drop people — so the row says "CEO + at least 2 other
+    insiders", never a complete count). The row's total is every person's amount (`total_usd`), its shares every
+    person's shares, its cost per share the lowest and highest filed price over every person's lines (each person
+    carries the filing's own cost: `InsiderPurchase.cost_per_share_min_usd`). A person is named only in caption body
+    text (`InsiderPurchase.person_name`'s placement), never inside the members-elect window."""
+
+    lead: InsiderPurchase
+    others: Tuple[InsiderPurchase, ...]          # 0..SPOTLIGHT_MAX_OTHERS, same company as the lead
+
+    def __post_init__(self) -> None:
+        c = _Check(self)
+        if not isinstance(self.lead, InsiderPurchase):
+            c.fail("lead", "expected InsiderPurchase")
+        others = c.items("others", InsiderPurchase, 0, SPOTLIGHT_MAX_OTHERS)
+        people = (self.lead, *others)
+        if any(p.company != self.lead.company for p in others):
+            c.fail("others", "every person must be of the lead's company (one issuer)")
+        if list(people) != sorted(people, key=spotlight_person_order):
+            c.fail("others", "the lead first, then by amount desc, name, role (`spotlight_person_order`)")
+        named = [_compliance.fold(p.person_name) for p in people if p.person_name is not None]
+        if len(set(named)) != len(named):
+            c.fail("others", "the same person twice")
+        for role in sorted(SPOTLIGHT_SINGLE_HOLDER_ROLES):
+            if sum(1 for p in people if p.role == role) > 1:
+                c.fail("others", f"two people hold the role {role!r}")
+        for p in people:
+            if p.cost_per_share_min_usd is None:
+                c.fail("others" if p is not self.lead else "lead",
+                       "every person carries the filing's own cost per share")
+        if self.total_usd > INSIDER_MAX_AMOUNT_USD:
+            c.fail("others", "the row's total is above the garbage bound")
+
+    @property
+    def company(self) -> CompanyRef:
+        return self.lead.company
+
+    @property
+    def people(self) -> Tuple[InsiderPurchase, ...]:
+        return (self.lead, *self.others)
+
+    @property
+    def total_usd(self) -> float:
+        """Every person's amount, summed (``math.fsum``): the row's GREEN figure under "Total purchases"."""
+        return math.fsum(p.amount_usd for p in self.people)
+
+    @property
+    def shares(self) -> float:
+        return math.fsum(p.shares for p in self.people)
+
+    @property
+    def cost_per_share_min_usd(self) -> float:
+        return min(p.cost_per_share_min_usd for p in self.people)      # each set: checked above
+
+    @property
+    def cost_per_share_max_usd(self) -> float:
+        return max(p.cost_per_share_max_usd for p in self.people)
+
+    @property
+    def filing_dates(self) -> Tuple[date, ...]:
+        return tuple(sorted({d for p in self.people for d in p.filing_dates}))
+
+
+def spotlight_company_order(row: InsiderSpotlightCompany) -> Tuple[float, str, str]:
+    """THE order of an `InsiderSpotlight`'s companies (the adapter sorts with it, the record checks it): the largest
+    TOTAL first, then the company name (casefolded), then the symbol."""
+    return (-row.total_usd, row.company.name.casefold(), row.company.symbol)
+
+
+@dataclass(frozen=True, slots=True)
+class InsiderSpotlight:
+    """The spotlight lane's insider LIST (owner decisions 2026-11-20, "3 - 5 companies at once"; it replaces the
+    one-issuer record of 2026-11-15): INSIDER_MIN_ROWS..INSIDER_MAX_ROWS issuers whose insiders filed open-market
+    purchases over the spotlight's window, each an `InsiderSpotlightCompany`, the largest total first
+    (`spotlight_company_order`) — one row per issuer (unique symbol, unique company name, unique issuer root: two
+    share classes of one company are one row), every person's filings inside the window. The picture draws the first
+    INSIDER_PICTURE_ROWS rows, the captions every one."""
+
+    series: Literal["insider_spotlight"]
+    window_start: date
+    window_end: date
+    companies: Tuple[InsiderSpotlightCompany, ...]   # INSIDER_MIN_ROWS..INSIDER_MAX_ROWS, total desc
+
+    def __post_init__(self) -> None:
+        c = _Check(self)
+        c.choice("series", ("insider_spotlight",))
+        c.day("window_start")
+        c.day("window_end")
+        if not (1 <= (self.window_end - self.window_start).days + 1 <= SPOTLIGHT_MAX_WINDOW_DAYS):
+            c.fail("window_end", f"the window must run forward and span 1..{SPOTLIGHT_MAX_WINDOW_DAYS} days")
+        rows = c.items("companies", InsiderSpotlightCompany, INSIDER_MIN_ROWS, INSIDER_MAX_ROWS)
+        if len({r.company.symbol for r in rows}) != len(rows):
+            c.fail("companies", "the same company symbol twice")
+        if len({r.company.name.casefold() for r in rows}) != len(rows):
+            c.fail("companies", "the same company name twice (two listings of one issuer are one row)")
+        if len({issuer_root(r.company.symbol) or r.company.symbol for r in rows}) != len(rows):
+            c.fail("companies", "two listings of one issuer (one issuer root twice)")
+        if list(rows) != sorted(rows, key=spotlight_company_order):
+            c.fail("companies", "not ordered by total desc, then company name (`spotlight_company_order`)")
+        named = [_compliance.fold(p.person_name) for r in rows for p in r.people if p.person_name is not None]
+        if len(set(named)) != len(named):
+            c.fail("companies", "the same person in two rows")
+        for r in rows:
+            for p in r.people:
+                if p.filing_dates[0] < self.window_start or p.filing_dates[-1] > self.window_end:
+                    c.fail("companies", f"{r.company.symbol} has a filing outside the window "
+                                        f"{self.window_start}..{self.window_end}")
+
+    @property
+    def lead(self) -> InsiderPurchase:
+        """The largest company's lead person — the post's LEAD (cross-lane rule (b) compares its company)."""
+        return self.companies[0].lead
 
 
 @dataclass(frozen=True, slots=True)
@@ -2542,48 +3158,22 @@ class ThirteenFFiling:
     amended_on: Optional[date]
     total_value_usd: float
     position_count: int
-    moves: Tuple[ThirteenFMove, ...]  # 1..8, unique symbols
+    moves: Tuple[ThirteenFMove, ...]  # THIRTEEN_F_LIST_MIN_MOVES..8, unique symbols
     counts: Tuple[Tuple[str, int], ...]
 
     def __post_init__(self) -> None:
         c = _Check(self)
         c.choice("series", ("thirteen_f",))
-        if filer_name_problem(self.filer_name) is not None:
-            c.fail("filer_name", filer_name_problem(self.filer_name) or "")
-        if not isinstance(self.filer_cik, str) or cik10(self.filer_cik) != self.filer_cik:
-            c.fail("filer_cik", "expected a 10-digit zero-padded CIK")
-        if self.filer_symbol is not None and (
-            not isinstance(self.filer_symbol, str) or canonical_symbol(self.filer_symbol) != self.filer_symbol
-        ):
-            c.fail("filer_symbol", "not a canonical symbol")
-        try:
-            quarter_end = period_end_of(self.period)
-        except ValueError as e:
-            c.fail("period", str(e))
-        c.day("period_end")
-        c.day("filed_on")
-        c.day("amended_on", optional=True)
-        if self.period_end != quarter_end:
-            c.fail("period_end", f"{self.period_end} is not the end of {self.period}")
-        if self.filed_on <= self.period_end:
-            c.fail("filed_on", "a 13F is filed after its quarter ends")
-        if self.amended_on is not None and self.amended_on < self.filed_on:
-            c.fail("amended_on", "before the original filing")
+        _check_13f_filer(c, self)
         c.number("total_value_usd", gt=0)
         c.integer("position_count", ge=1)
-        moves = c.items("moves", ThirteenFMove, 1, THIRTEEN_F_MAX_MOVES)
+        # news-v23 (owner 2026-11-19, "the range from 2 to 6 are okay"): no single-holding 13F post anywhere
+        moves = c.items("moves", ThirteenFMove, THIRTEEN_F_LIST_MIN_MOVES, THIRTEEN_F_MAX_MOVES)
         if len({m.company.symbol for m in moves}) != len(moves):
             c.fail("moves", "duplicate symbol")
         if any(m.value_usd is not None and m.value_usd > self.total_value_usd for m in moves):
             c.fail("moves", "a move's value exceeds the filer total")
-        # "X first appears in this filing; it was listed in <month>" is true only for a listing
-        # AFTER the previous quarter's end (the diff is adjacent-quarter only) and no later than
-        # this quarter's end (a holding at quarter end was listed by then).
-        prev_end = previous_period_end_of(self.period)
-        for m in moves:
-            if m.listed_on is not None and not (prev_end < m.listed_on <= self.period_end):
-                c.fail("moves", f"{m.company.symbol} listed_on {m.listed_on} is outside "
-                                f"{prev_end} (exclusive) .. {self.period_end}")
+        _check_13f_listing(c, "moves", self.period, self.period_end, moves)
         counts = self.counts
         if not isinstance(counts, tuple) or any(
             not isinstance(p, tuple) or len(p) != 2 or not isinstance(p[0], str)
@@ -2599,6 +3189,173 @@ class ThirteenFFiling:
             shown = sum(1 for m in moves if m.move == kind)
             if shown and totals.get(kind, 0) < shown:
                 c.fail("counts", f"{kind} count below the {shown} moves shown")
+
+
+def _check_13f_filer(c: _Check, rec: Any) -> None:
+    """The filer fields every 13F record carries (`ThirteenFFiling`, `ThirteenFSpotlight`): the filing ENTITY's
+    name (`filer_name_problem`), its 10-digit CIK, an optional canonical symbol, the "YYYY-Qn" period and its
+    quarter end, a filing date after that end and an amendment no earlier than the filing."""
+    if filer_name_problem(rec.filer_name) is not None:
+        c.fail("filer_name", filer_name_problem(rec.filer_name) or "")
+    if not isinstance(rec.filer_cik, str) or cik10(rec.filer_cik) != rec.filer_cik:
+        c.fail("filer_cik", "expected a 10-digit zero-padded CIK")
+    if rec.filer_symbol is not None and (
+        not isinstance(rec.filer_symbol, str) or canonical_symbol(rec.filer_symbol) != rec.filer_symbol
+    ):
+        c.fail("filer_symbol", "not a canonical symbol")
+    try:
+        quarter_end = period_end_of(rec.period)
+    except ValueError as e:
+        c.fail("period", str(e))
+    c.day("period_end")
+    c.day("filed_on")
+    c.day("amended_on", optional=True)
+    if rec.period_end != quarter_end:
+        c.fail("period_end", f"{rec.period_end} is not the end of {rec.period}")
+    if rec.filed_on <= rec.period_end:
+        c.fail("filed_on", "a 13F is filed after its quarter ends")
+    if rec.amended_on is not None and rec.amended_on < rec.filed_on:
+        c.fail("amended_on", "before the original filing")
+
+
+def _check_13f_listing(c: _Check, name: str, period: str, period_end: date,
+                       moves: Sequence[ThirteenFMove]) -> None:
+    """"X first appears in this filing; it was listed in <month>" is true only for a listing AFTER the previous
+    quarter's end (the diff is adjacent-quarter only) and no later than this quarter's end (a holding at quarter
+    end was listed by then). ``period`` was checked by `_check_13f_filer`."""
+    prev_end = previous_period_end_of(period)
+    for m in moves:
+        if m.listed_on is not None and not (prev_end < m.listed_on <= period_end):
+            c.fail(name, f"{m.company.symbol} listed_on {m.listed_on} is outside "
+                         f"{prev_end} (exclusive) .. {period_end}")
+
+
+def thirteen_f_move_flow(mv: ThirteenFMove) -> Optional[float]:
+    """THE dollar size of one 13F move at the filing's own quarter-end values: what the templates' lead kind and
+    row order rank by (`news_templates._f13_move_value` IS this function) and what the 13F spotlight picks its
+    holding by. Never drawn or said — a 13F value is the POSITION's, and beside "Reported more shares" it would
+    read as the size of the increase.
+
+    * newly reported: the position's value (all of it is new);
+    * more / fewer shares: the shares that changed, at the value per share the filing gives
+      (``value_usd × |shares − prev_shares| / shares``) — the adapter's own ``flow`` order;
+    * no longer reported: ``prev_value_usd``, the position's value on the PREVIOUS quarter's book (review round 8,
+      the shared record contract; the adapter values every exit for its floor). Never ``value_usd``: a position
+      no longer reported has no quarter-end value of its own.
+
+    None when the record carries no value: it ranks after every known one."""
+    if mv.move == "no_longer_reported":
+        return mv.prev_value_usd
+    v = mv.value_usd
+    if v is None:
+        return None
+    if mv.move in ("increased", "decreased"):
+        if not mv.shares or mv.prev_shares is None:
+            return None
+        return v * abs(mv.shares - mv.prev_shares) / mv.shares
+    return v
+
+
+def thirteen_f_change_clear(shares: Any, prev_shares: Any) -> bool:
+    """Did a holding's share count change by at least `THIRTEEN_F_SPOTLIGHT_MIN_CHANGE` of the PREVIOUS quarter's
+    count — ``|shares − prev_shares| ≥ 0.25 × prev_shares``, exact on the figures as written (`_figure`: 75 of 100
+    is kept, 76 of 100 is not; 125 of 100 is kept, 124 of 100 is not)? False for a missing, non-finite, bool or
+    non-positive count (no change can be judged). Computed in `EPS_DECIMAL_PRECISION` digits: never raises."""
+    if not (_is_num(shares) and _is_num(prev_shares)) or shares <= 0 or prev_shares <= 0:
+        return False
+    with localcontext() as ctx:
+        ctx.prec = EPS_DECIMAL_PRECISION
+        s, p = _figure(shares), _figure(prev_shares)
+        return abs(s - p) >= _figure(THIRTEEN_F_SPOTLIGHT_MIN_CHANGE) * p
+
+
+#: The record's kind order on a tie of size: new, then no longer reported, then more, then fewer shares — the 13F
+#: roundup's record order (`company_news_adapter._KIND_RANK`, pinned equal).
+_THIRTEEN_F_KIND_ORDER: Dict[str, int] = {"newly_reported": 0, "no_longer_reported": 1, "increased": 2, "decreased": 3}
+
+
+def thirteen_f_spotlight_order(mv: ThirteenFMove) -> Tuple[Any, ...]:
+    """THE order of a `ThirteenFSpotlight`'s holdings (the adapter picks with it, the record checks it, the templates
+    draw and say the rows in it): the largest dollar size first (`thirteen_f_move_flow`; a move without one after
+    every sized move), then the kind order (`_THIRTEEN_F_KIND_ORDER`), then the symbol."""
+    flow = thirteen_f_move_flow(mv)
+    return (flow is None, -(flow or 0.0), _THIRTEEN_F_KIND_ORDER[mv.move], mv.company.symbol)
+
+
+@dataclass(frozen=True, slots=True)
+class ThirteenFSpotlight:
+    """ONE filer's latest 13F, `THIRTEEN_F_LIST_MIN_MOVES` to `THIRTEEN_F_SPOTLIGHT_MAX_MOVES` of its holdings (owner
+    decisions 2026-11-15; a LIST since the owner's feedback of 2026-11-19, "not just one", and never a single holding
+    since the restyle — "the range from 2 to 6 are okay"): each a newly reported holding, a holding CLOSED OUT (no
+    longer reported, and its company still trading: the adapter's buy-out check), or one whose share count moved by at
+    least `THIRTEEN_F_SPOTLIGHT_MIN_CHANGE` (`thirteen_f_change_clear`), the largest dollar size first
+    (`thirteen_f_spotlight_order`). The 13F roundup's ONE list design draws them (news-v23): at most
+    `THIRTEEN_F_LIST_ROWS` rows on the picture, the rest in the caption. The copy states SHARE COUNTS only, the
+    direction first ("Northwind (NWT): reduced to 41.9 million shares, from 60 million the quarter before") — no %,
+    no "sold", no dollar figure. The subject is the filing ENTITY, never a person; a list carries no art. The adapter
+    offers no more / fewer holding whose CUSIP had a split in the quarter (``split_restated``) and never a
+    `THIRTEEN_F_LEAD_FILERS` filer (``lead_filer_reserved``); neither flag is a field here.
+
+    * ``eligible_moves`` — how many of the filing's holdings the adapter checked passed every gate (≥ the holdings
+      shown; more only when `THIRTEEN_F_SPOTLIGHT_MAX_MOVES` are shown): the fact sheet's record of the cut. The
+      adapter profiles only the largest moves that pass the pure gates, so it is at most `THIRTEEN_F_MAX_MOVES` —
+      never a count the copy states.
+    * ``filing_moves`` — every holding change the filing's own counts report (new + more + fewer + no longer
+      reported, `ThirteenFFiling.counts`), or None when a kind's count was withheld or the counts may leave a change
+      out (a ``corporate_action`` row, option / note rows, a club build's excluded rows: the adapter's
+      ``counts_partial``, review 2026-11-19). The list says its counts AS the filing's ("it reduced 2 holdings") only
+      when this equals the holdings shown (`thirteen_f_spotlight_lists_every_change`); otherwise "5 of its holding
+      changes" — never a count that reads as the whole filing when it is not."""
+
+    series: Literal["thirteen_f_spotlight"]
+    filer_name: str                  # the ENTITY, never a person
+    filer_cik: str                   # 10 digits, zero-padded
+    filer_symbol: Optional[str]
+    period: str                      # "YYYY-Qn"
+    period_end: date
+    filed_on: date
+    amended_on: Optional[date]
+    moves: Tuple[ThirteenFMove, ...]  # THIRTEEN_F_LIST_MIN_MOVES..THIRTEEN_F_SPOTLIGHT_MAX_MOVES, spotlight order
+    eligible_moves: int
+    filing_moves: Optional[int]
+
+    def __post_init__(self) -> None:
+        c = _Check(self)
+        c.choice("series", ("thirteen_f_spotlight",))
+        _check_13f_filer(c, self)
+        # news-v23 (owner 2026-11-19): a list of at least two holdings — the single-holding post is gone
+        moves = c.items("moves", ThirteenFMove, THIRTEEN_F_LIST_MIN_MOVES, THIRTEEN_F_SPOTLIGHT_MAX_MOVES)
+        _check_13f_listing(c, "moves", self.period, self.period_end, moves)
+        for mv in moves:
+            sym = mv.company.symbol
+            if mv.move == "newly_reported" and not (mv.shares is not None and mv.shares > 0):
+                c.fail("moves", f"{sym}: a newly reported holding needs its share count (> 0)")
+            if mv.move == "no_longer_reported" and not (mv.prev_shares is not None and mv.prev_shares > 0):
+                c.fail("moves", f"{sym}: a holding no longer reported needs the quarter before's share count (> 0)")
+            if mv.move in ("increased", "decreased") and not thirteen_f_change_clear(mv.shares, mv.prev_shares):
+                c.fail("moves", f"{sym}: a share count change below {THIRTEEN_F_SPOTLIGHT_MIN_CHANGE:.0%} of the "
+                                "quarter before")
+        if len({m.company.symbol for m in moves}) != len(moves):
+            c.fail("moves", "duplicate symbol")
+        if len({issuer_root(m.company.symbol) for m in moves}) != len(moves):
+            c.fail("moves", "two listings of one issuer (`issuer_root`)")
+        if len({m.company.name.casefold() for m in moves}) != len(moves):
+            c.fail("moves", "two holdings under one display name")
+        if list(moves) != sorted(moves, key=thirteen_f_spotlight_order):
+            c.fail("moves", "the largest dollar size first, then kind, then symbol (`thirteen_f_spotlight_order`)")
+        c.integer("eligible_moves", ge=len(moves))
+        if self.eligible_moves > len(moves) and len(moves) != THIRTEEN_F_SPOTLIGHT_MAX_MOVES:
+            c.fail("eligible_moves", f"an eligible holding left out while fewer than "
+                                     f"{THIRTEEN_F_SPOTLIGHT_MAX_MOVES} are shown")
+        if self.filing_moves is not None:
+            c.integer("filing_moves", ge=self.eligible_moves)
+
+
+def thirteen_f_spotlight_lists_every_change(rec: ThirteenFSpotlight) -> bool:
+    """Are a 13F spotlight's holdings EVERY change its filing reports — the filing's own counts known for all four
+    kinds and summing to exactly the holdings shown? Only then may the list state its counts as the filing's ("its
+    latest 13F: it reduced 2 holdings, increased 1"); otherwise the copy says "N of the holding changes". Pure."""
+    return rec.filing_moves is not None and rec.filing_moves == len(rec.moves)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2622,6 +3379,45 @@ class CongressCount:
         c.day("fetched_on")
         if self.fetched_on <= end:
             c.fail("fetched_on", "the month must be over before it is counted")
+
+
+def _distinct_companies(c: "_Check", name: str, companies: Sequence["CompanyRef"]) -> None:
+    """A several-company record's companies are distinct ISSUERS: no symbol, display name (case-folded) or issuer
+    root (`issuer_root`: BRK-A beside BRK-B, GOOGL beside GOOG) twice — one company is never two rows."""
+    for what, keys in (("symbol", [co.symbol for co in companies]),
+                       ("name", [co.name.casefold() for co in companies]),
+                       ("issuer", [issuer_root(co.symbol) for co in companies])):
+        if len(set(keys)) != len(keys):
+            c.fail(name, f"two rows of one company (the same {what})")
+
+
+@dataclass(frozen=True, slots=True)
+class CongressMonth:
+    """news-v23 (the restyle, owner 2026-11-19: "for congress disclosed, i want to have 2-3 companies at once"): the
+    ONE congress_count post of a disclosure month — `CONGRESS_MONTH_COMPANIES` companies, each a `CongressCount` of the
+    same month and read (≥ CONGRESS_MIN_MEMBERS distinct members, purchases only), the most members first. NO
+    member-identity field exists at any level. Its ledger key is the month's (`ledger_key`): one post per month, so
+    every company it draws is posted exactly once for that month."""
+    series: Literal["congress_count"]
+    month: str          # "YYYY-MM", the DISCLOSURE month (every count's)
+    fetched_on: date    # every count's read day
+    counts: Tuple[CongressCount, ...]
+
+    def __post_init__(self) -> None:
+        c = _Check(self)
+        c.choice("series", ("congress_count",))
+        try:
+            month_end_of(self.month)
+        except ValueError as e:
+            c.fail("month", str(e))
+        c.day("fetched_on")
+        lo, hi = CONGRESS_MONTH_COMPANIES
+        counts = c.items("counts", CongressCount, lo, hi)
+        if any(n.month != self.month or n.fetched_on != self.fetched_on for n in counts):
+            c.fail("counts", "every count is of the record's month, read on its day")
+        if any(a.members < b.members for a, b in zip(counts, counts[1:])):
+            c.fail("counts", "not ranked by members (most first)")
+        _distinct_companies(c, "counts", [n.company for n in counts])
 
 
 @dataclass(frozen=True, slots=True)
@@ -2679,6 +3475,51 @@ class CompanyStake:
         c.flag("is_new")
 
 
+def stake_rank_key(stake: "CompanyStake") -> Tuple[float, int, str]:
+    """The order of a `CompanyStakes` post's rows (stakes_nvidia.jpg: the largest disclosed figure first — and, on an
+    equal figure, the EARLIER ``as_of`` first, as the approved mock draws Synopsys' Dec 1, 2025 before Coherent's Mar 2,
+    2026), then the stake id — total and deterministic. Pure."""
+    return (-float(stake.value_usd or 0.0), stake.as_of.toordinal(), stake.stake_id)
+
+
+@dataclass(frozen=True, slots=True)
+class CompanyStakes:
+    """news-v23 (the restyle, owner 2026-11-19: "filter for companies that public only. no private" + "add 1-3 more
+    companies for the NVIDIA (or the other trillion companies)"; stakes_nvidia.jpg / stakes_nvidia3.jpg): the ONE
+    company_stakes post of a run — ONE Trillion Club member's (`investor`) stakes in PUBLIC companies,
+    `STAKES_POST_STAKES` of them, each a `CompanyStake` row of that investor that passed every row gate, with a
+    verified listing (`investee`, a CompanyRef: a listed U.S. symbol whose profile says it is actively trading — the
+    adapter's check), a kind that can be public (`PUBLIC_STAKE_KINDS`) and its disclosed dollar figure and basis —
+    ranked by `stake_rank_key` (the largest figure first). A private, unlisted or not-trading investee is never a row.
+    Its ledger key names EVERY stake it holds (`ledger_key`, `stake_ref_ids`), so each one is posted exactly once."""
+    series: Literal["company_stakes"]
+    investor: CompanyRef
+    stakes: Tuple[CompanyStake, ...]
+
+    def __post_init__(self) -> None:
+        c = _Check(self)
+        c.choice("series", ("company_stakes",))
+        if not isinstance(self.investor, CompanyRef):
+            c.fail("investor", "expected CompanyRef")
+        lo, hi = STAKES_POST_STAKES
+        stakes = c.items("stakes", CompanyStake, lo, hi)
+        if any(s.investor != self.investor for s in stakes):
+            c.fail("stakes", "every stake is the record's investor's")
+        if any(not isinstance(s.investee, CompanyRef) for s in stakes):
+            c.fail("stakes", "a stake in a company with no verified U.S. listing is never posted (public only)")
+        if any(s.kind not in PUBLIC_STAKE_KINDS for s in stakes):
+            c.fail("stakes", f"a stake kind that is never public (allowed: {PUBLIC_STAKE_KINDS})")
+        if any(s.value_usd is None or s.value_basis is None for s in stakes):
+            c.fail("stakes", "a stake is posted only with its disclosed figure and its basis")
+        if any(s.investee.symbol == self.investor.symbol for s in stakes if isinstance(s.investee, CompanyRef)):
+            c.fail("stakes", "a company's stake in itself")
+        if len({s.stake_id for s in stakes}) != len(stakes):
+            c.fail("stakes", "one stake twice")
+        _distinct_companies(c, "stakes", [s.investee for s in stakes if isinstance(s.investee, CompanyRef)])
+        if [stake_rank_key(s) for s in stakes] != sorted(stake_rank_key(s) for s in stakes):
+            c.fail("stakes", "not ranked by stake_rank_key (the largest figure first)")
+
+
 @dataclass(frozen=True, slots=True)
 class EarningsReport:
     series: Literal["earnings"]
@@ -2715,6 +3556,24 @@ class EarningsReport:
             lo, hi = REVENUE_RATIO_BAND
             if not (lo <= self.revenue_actual / self.revenue_estimate <= hi):
                 c.fail("revenue_actual", f"revenue ratio outside {REVENUE_RATIO_BAND}")
+
+
+@dataclass(frozen=True, slots=True)
+class EarningsDay:
+    """news-v23 (the restyle, owner 2026-11-19: "combine 2 to 4 companies at once"): the ONE earnings post of a run —
+    `EARNINGS_DAY_COMPANIES` reports of the window, each an `EarningsReport` that passed every per-company gate, the
+    largest company first (the adapter's market-cap rank). A report refused by any gate is DROPPED before the record
+    is built — never the post — unless too few are left (``earnings_too_few_companies``). Its ledger key holds every
+    company's own key (`ledger_key`, `earnings_ref_items`), so each company it draws is posted exactly once."""
+    series: Literal["earnings"]
+    reports: Tuple[EarningsReport, ...]
+
+    def __post_init__(self) -> None:
+        c = _Check(self)
+        c.choice("series", ("earnings",))
+        lo, hi = EARNINGS_DAY_COMPANIES
+        reports = c.items("reports", EarningsReport, lo, hi)
+        _distinct_companies(c, "reports", [r.company for r in reports])
 
 
 # ── earnings gates (pure; Batch 1, 2026-10-15) ────────────────────────────────
@@ -3013,11 +3872,55 @@ class ThemeMember:
     top_segment: Optional[str]
     top_segment_share: Optional[float]   # 0..1
     fiscal_year: Optional[str]
+    # news-v23 phase 3 (the "biggest" angle, an ADDITIVE field — an older fact sheet without it reads back as None):
+    # the company's market value in USD from the market-capitalization batch read (owner 2026-09-28: market cap is
+    # allowed on a public post; never a price, never a % move). Dated by the record's `values_as_of`.
+    market_value_usd: Optional[float] = None
+    # news-v23 phase 3, the last three angles (2026-11-20), ADDITIVE fields (an older fact sheet reads them back None):
+    # * "growth + profit": the latest fiscal year's (`fiscal_year`) revenue and net income and the year before's
+    #   revenue, in the company's reporting currency (the post states only ratios: growth and profit per $100);
+    # * the "insider scorecard": the Form 4 purchases (code P) and sales (code S) of the stock filed in the record's
+    #   window, in dollars as filed (0.0 = none filed — every listed member has at least one of them);
+    # * "Congress": the distinct members of Congress who disclosed purchases of the stock in the record's month.
+    revenue_usd: Optional[float] = None
+    prior_revenue_usd: Optional[float] = None
+    net_income_usd: Optional[float] = None
+    purchases_usd: Optional[float] = None
+    sales_usd: Optional[float] = None
+    congress_members: Optional[int] = None
+    # news-v23 phase 4 (2026-11-20, "how they make money"), ADDITIVE (an older fact sheet reads it back None): the
+    # company's NEWEST fiscal year when its segment fact is from an OLDER one — the newest year's segments included
+    # intersegment sales, so the adapter walked back to the newest year whose stack did not (INTC: newest gross,
+    # "Client Computing, FY2022"). Such a fact is never the company's latest year, so the template ALWAYS draws its
+    # own year tag on it, whatever the sub line's fiscal years.
+    latest_fiscal_year: Optional[str] = None
 
     def __post_init__(self) -> None:
         c = _Check(self)
         if not isinstance(self.company, CompanyRef):
             c.fail("company", "expected CompanyRef")
+        latest = self.latest_fiscal_year
+        if latest is not None and (
+            not isinstance(latest, str) or not re.fullmatch(r"[0-9]{4}", latest) or self.top_segment is None
+            or not isinstance(self.fiscal_year, str) or not re.fullmatch(r"[0-9]{4}", self.fiscal_year)
+            or not int(self.fiscal_year) < int(latest)
+        ):
+            c.fail("latest_fiscal_year", "a walked-back segment fact names a newer fiscal year than its own")
+        c.number("revenue_usd", gt=0, optional=True)
+        c.number("prior_revenue_usd", gt=0, optional=True)
+        c.number("net_income_usd", optional=True)
+        trio = (self.revenue_usd, self.prior_revenue_usd, self.net_income_usd)
+        if any(v is not None for v in trio) and (any(v is None for v in trio) or self.fiscal_year is None):
+            c.fail("revenue_usd", "growth and profit need both years' revenue, the net income and the fiscal year")
+        c.number("purchases_usd", ge=0, optional=True)
+        c.number("sales_usd", ge=0, optional=True)
+        pair = (self.purchases_usd, self.sales_usd)
+        if any(v is not None for v in pair) and (any(v is None for v in pair) or not max(pair) > 0):
+            c.fail("purchases_usd", "an insider row carries both totals, at least one of them above zero")
+        n = self.congress_members
+        if n is not None and (not isinstance(n, int) or isinstance(n, bool)
+                              or not CONGRESS_MIN_MEMBERS <= n <= CONGRESS_MAX_MEMBERS):
+            c.fail("congress_members", f"not a count of {CONGRESS_MIN_MEMBERS}..{CONGRESS_MAX_MEMBERS} members")
         c.text("top_segment", 1, 40, optional=True)
         if self.top_segment is not None and (
             _copy_rules.contains_banned_copy(self.top_segment)
@@ -3031,6 +3934,7 @@ class ThemeMember:
             not isinstance(self.fiscal_year, str) or not re.fullmatch(r"[0-9]{4}", self.fiscal_year)
         ):
             c.fail("fiscal_year", "expected YYYY")
+        c.number("market_value_usd", gt=0, le=THEME_MARKET_VALUE_MAX_USD, optional=True)
 
 
 def theme_company_count(tickers: Any, profiles: Any = None) -> Optional[int]:
@@ -3090,10 +3994,38 @@ class ThemeExplainer:
     # the gates dropped companies, and the copy must say "{n} of its {m} companies" — never claim
     # the list is complete.
     theme_size: Optional[int] = None
+    # news-v23 phase 3 (the weekly theme post, owner 2026-11-19), ADDITIVE fields (an older fact sheet reads back as a
+    # "how they make money" post keyed on `tickers_as_of`, exactly as it was written):
+    # * `angle` — one of THEME_ANGLES (only the angles whose collector and template exist validate: THEME_BUILT_ANGLES);
+    # * `posted_on` — the run date the record was built for: the ledger key names the theme, the angle and this day
+    #   (`ledger_key`), so the rotation reads which theme and which angle were posted when. Required for every angle
+    #   but the legacy one;
+    # * `values_as_of` — the "biggest" angle's market-value date (every member's value is of that day).
+    angle: str = THEME_LEGACY_ANGLE
+    posted_on: Optional[date] = None
+    values_as_of: Optional[date] = None
+    # news-v23 phase 3, the last three angles (2026-11-20), ADDITIVE fields:
+    # * the "insider scorecard": the Form 4 FILING window (`window_start` .. `window_end`, both inclusive:
+    #   THEME_INSIDER_WINDOW_DAYS days ending the day before the run) and `companies_checked` — how many of the theme's
+    #   companies had their filings read whole (>= the members listed: a member with no code P / S trade is checked
+    #   and not listed; one whose read failed or that had a Form 4/A is not checked);
+    # * "Congress": the disclosure `month` ("YYYY-MM") the counts are of.
+    window_start: Optional[date] = None
+    window_end: Optional[date] = None
+    companies_checked: Optional[int] = None
+    month: Optional[str] = None
+    # Fix round 2026-11-20, ADDITIVE (an older fact sheet reads back False — its `tickers_as_of` was the list's own
+    # date): True when the theme row has NO `tickers_as_of` of its own. Owner decision 2026-11-20 ("Trust the app's
+    # lists"): that list is the app's live list and counts as current, so `tickers_as_of` is then the RUN day (the
+    # adapter's `_theme_as_of`) — a day that is not the list's own date, so the post never prints it ("Members as
+    # of …").
+    tickers_as_of_from_row: bool = False
 
     def __post_init__(self) -> None:
         c = _Check(self)
         c.choice("series", ("theme_explainer",))
+        if not isinstance(self.tickers_as_of_from_row, bool):
+            c.fail("tickers_as_of_from_row", "expected a bool")
         if not isinstance(self.slug, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", self.slug):
             c.fail("slug", "expected a lower-case slug")
         c.text("title", 2, 60)
@@ -3103,64 +4035,324 @@ class ThemeExplainer:
             or _NAME_EXTRA_BANNED_RE.search(self.title)
         ):
             c.fail("title", "banned or forecast wording")
-        lo, hi = THEME_MEMBERS
+        c.choice("angle", THEME_BUILT_ANGLES)
+        lo, hi = THEME_MEMBERS if self.angle == "make_money" else (THEME_ANGLE_MIN_COMPANIES, THEME_MEMBERS[1])
         members = c.items("members", ThemeMember, lo, hi)
         if len({m.company.symbol for m in members}) != len(members):
             c.fail("members", "duplicate symbol")
         c.day("tickers_as_of")
         if self.theme_size is not None:
             c.integer("theme_size", ge=len(members), le=THEME_SIZE_MAX)
+        c.day("posted_on", optional=True)
+        c.day("values_as_of", optional=True)
+        if self.posted_on is None and self.angle != THEME_LEGACY_ANGLE:
+            c.fail("posted_on", "an angle's key names its run date")
+        if self.posted_on is not None and self.tickers_as_of > self.posted_on:
+            c.fail("tickers_as_of", "after the run date")
+        valued = [m.market_value_usd for m in members if m.market_value_usd is not None]
+        if self.angle == "biggest":
+            # every member ranked by its dated market value, the largest first (ties: the symbol) — never a member
+            # without one, never two dates
+            if len(valued) != len(members) or self.values_as_of is None:
+                c.fail("members", "a market-value post ranks members that each carry a dated market value")
+            if [m.company.symbol for m in members] != [m.company.symbol for m in sorted(
+                    members, key=lambda m: (-float(m.market_value_usd or 0.0), m.company.symbol))]:
+                c.fail("members", "not ranked by market value, the largest first")
+            if self.posted_on is not None and self.values_as_of is not None and not (
+                    0 <= (self.posted_on - self.values_as_of).days <= THEME_MARKET_VALUE_MAX_AGE_DAYS):
+                c.fail("values_as_of", "not within the week before the run")
+        elif valued or self.values_as_of is not None:
+            c.fail("values_as_of", "market values travel only on a market-value post")
+        _theme_angle_fields(self, c, members)
+
+
+def theme_growth(member: Any) -> Optional[float]:
+    """A theme member's revenue growth — (latest fiscal year's revenue − the year before's) / the year before's, as a
+    fraction (1.14 = +114%) — or None when it carries no growth fact. Pure."""
+    rev, prior = getattr(member, "revenue_usd", None), getattr(member, "prior_revenue_usd", None)
+    if not _is_num(rev) or not _is_num(prior) or not prior > 0:
+        return None
+    return (float(rev) - float(prior)) / float(prior)
+
+
+def theme_profit_per_100(member: Any) -> Optional[float]:
+    """A theme member's net income for every $100 of revenue (−17.0 = a loss of $17 per $100), or None. Pure."""
+    rev, net = getattr(member, "revenue_usd", None), getattr(member, "net_income_usd", None)
+    if not _is_num(rev) or not _is_num(net) or not rev > 0:
+        return None
+    return 100.0 * float(net) / float(rev)
+
+
+def theme_insider_order_key(member: Any) -> Tuple[int, float, float, str]:
+    """The insider scorecard's row order (theme_insiders_cyber.jpg — a fact, no ranking word): the members with
+    disclosed purchases first, the largest purchase first; then the rest by the size of their disclosed sales; ties by
+    the symbol."""
+    buys, sells = float(member.purchases_usd or 0.0), float(member.sales_usd or 0.0)
+    return (0 if buys > 0 else 1, -buys, -sells, member.company.symbol)
+
+
+def theme_congress_order_key(member: Any) -> Tuple[int, str, str]:
+    """The Congress angle's row order (theme_congress_defense.jpg): the most members first, then the name, then the
+    symbol."""
+    return (-int(member.congress_members or 0), member.company.name.casefold(), member.company.symbol)
+
+
+#: The per-member fields each angle carries (every other angle's must be absent: a fact never rides a post that does
+#: not state it).
+_THEME_ANGLE_MEMBER_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "make_money": ("latest_fiscal_year",), "biggest": ("market_value_usd",),
+    "growth_profit": ("revenue_usd", "prior_revenue_usd", "net_income_usd"),
+    "insiders": ("purchases_usd", "sales_usd"), "congress": ("congress_members",),
+}
+_THEME_ANGLE_RECORD_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "make_money": (), "biggest": ("values_as_of",), "growth_profit": (),
+    "insiders": ("window_start", "window_end", "companies_checked"), "congress": ("month",),
+}
+
+
+def _theme_angle_fields(rec: "ThemeExplainer", c: "_Check", members: Sequence["ThemeMember"]) -> None:
+    """The last three angles' record rules (news-v23 phase 3, 2026-11-20) and, for every angle, that no other angle's
+    fields ride it."""
+    angle = rec.angle
+    own_m = set(_THEME_ANGLE_MEMBER_FIELDS.get(angle, ()))
+    for name in {f for fs in _THEME_ANGLE_MEMBER_FIELDS.values() for f in fs} - own_m:
+        if any(getattr(m, name) is not None for m in members):
+            c.fail("members", f"{name} travels only on its own angle's post")
+    own_r = set(_THEME_ANGLE_RECORD_FIELDS.get(angle, ()))
+    for name in {f for fs in _THEME_ANGLE_RECORD_FIELDS.values() for f in fs} - own_r:
+        if getattr(rec, name) is not None:
+            c.fail(name, "travels only on its own angle's post")
+    if angle == "growth_profit":
+        if len(members) > THEME_GROWTH_MAX_MEMBERS:
+            c.fail("members", f"a growth + profit post holds at most {THEME_GROWTH_MAX_MEMBERS} companies")
+        for m in members:
+            g, p = theme_growth(m), theme_profit_per_100(m)
+            if g is None or p is None or m.fiscal_year is None:
+                c.fail("members", "a growth + profit post's members each carry both years' revenue and net income")
+            if abs(g) > THEME_GROWTH_MAX_ABS:
+                c.fail("members", f"growth of {m.company.symbol} is past the plausibility bound")
+            if not -100.0 * THEME_LOSS_MAX_RATIO <= p <= 100.0:
+                c.fail("members", f"net income of {m.company.symbol} is above revenue or an implausible loss")
+    elif angle == "insiders":
+        c.day("window_start")
+        c.day("window_end")
+        if (rec.window_end - rec.window_start).days != THEME_INSIDER_WINDOW_DAYS - 1:
+            c.fail("window_start", f"not a {THEME_INSIDER_WINDOW_DAYS}-day filing window")
+        if rec.posted_on is None or rec.window_end != rec.posted_on - timedelta(days=1):
+            c.fail("window_end", "the window ends the day before the run")
+        checked = rec.companies_checked
+        if not isinstance(checked, int) or isinstance(checked, bool) or checked < len(members) or (
+                rec.theme_size is not None and checked > rec.theme_size):
+            c.fail("companies_checked", "not a count of at least the listed members and at most the theme's")
+        if any(m.purchases_usd is None or m.sales_usd is None for m in members):
+            c.fail("members", "an insider scorecard's members each carry their purchases and sales")
+        if list(members) != sorted(members, key=theme_insider_order_key):
+            c.fail("members", "not in the scorecard's order (purchases first, then sales, largest first)")
+    elif angle == "congress":
+        if not isinstance(rec.month, str) or not re.fullmatch(r"[0-9]{4}-(?:0[1-9]|1[0-2])", rec.month):
+            c.fail("month", "expected YYYY-MM")
+        if rec.posted_on is not None and month_end_of(rec.month) >= rec.posted_on:
+            c.fail("month", "the disclosure month has not ended before the run")
+        if any(m.congress_members is None for m in members):
+            c.fail("members", "a Congress post's members each carry their count")
+        if list(members) != sorted(members, key=theme_congress_order_key):
+            c.fail("members", "not in the Congress post's order (the most members first)")
+
+
+def record_content_classes(rec: Any) -> FrozenSet[str]:
+    """The content classes a record's FACTS need switched on (MARKETING_CONTENT_CLASSES): its series' class, and — a
+    theme post of filings (`THEME_ANGLE_CLASSES`: the insider scorecard, Congress) — class C too. Pure."""
+    series = getattr(rec, "series", None)
+    out = {SERIES_CLASS[series]} if series in SERIES_CLASS else set()
+    if isinstance(rec, ThemeExplainer) and rec.angle in THEME_ANGLE_CLASSES:
+        out.add(THEME_ANGLE_CLASSES[rec.angle])
+    return frozenset(out)
 
 
 NewsRecord = Union[
-    InsiderBuysWeek, ThirteenFFiling, CongressCount, CompanyStake, EarningsReport, MoneyMap,
-    ThemeExplainer,
+    InsiderBuysWeek, ThirteenFFiling, CongressMonth, CompanyStakes, EarningsDay, MoneyMap,
+    ThemeExplainer, InsiderSpotlight, ThirteenFSpotlight,
 ]
 #: The top-level record types (one per series family). The leak test walks these and
-#: `NESTED_RECORD_TYPES`.
+#: `NESTED_RECORD_TYPES`. news-v23 (the restyle, owner 2026-11-19): a Congress Count and an earnings post are ONE
+#: post of several companies — `CongressMonth` / `EarningsDay` are the records; `CongressCount` / `EarningsReport`
+#: (one company each) are their rows. So is a company_stakes post (one investor's stakes in 1-4 PUBLIC companies):
+#: `CompanyStakes` is the record, `CompanyStake` its row.
 RECORD_TYPES: Tuple[type, ...] = (
-    InsiderBuysWeek, ThirteenFFiling, CongressCount, CompanyStake, EarningsReport, MoneyMap,
-    ThemeExplainer,
+    InsiderBuysWeek, ThirteenFFiling, CongressMonth, CompanyStakes, EarningsDay, MoneyMap,
+    ThemeExplainer, InsiderSpotlight, ThirteenFSpotlight,
 )
-NESTED_RECORD_TYPES: Tuple[type, ...] = (CompanyRef, InsiderPurchase, ThirteenFMove, Segment, ThemeMember)
+NESTED_RECORD_TYPES: Tuple[type, ...] = (CompanyRef, InsiderPurchase, ThirteenFMove, Segment, ThemeMember,
+                                         CongressCount, EarningsReport, CompanyStake, InsiderSpotlightCompany)
 ALL_RECORD_TYPES: Tuple[type, ...] = RECORD_TYPES + NESTED_RECORD_TYPES
 RECORD_TYPE_BY_SERIES: Dict[str, type] = {
     "ceo_buys": InsiderBuysWeek, "insider_buys": InsiderBuysWeek, "thirteen_f": ThirteenFFiling,
-    "congress_count": CongressCount, "company_stakes": CompanyStake, "earnings": EarningsReport,
+    "congress_count": CongressMonth, "company_stakes": CompanyStakes, "earnings": EarningsDay,
     "money_map": MoneyMap, "theme_explainer": ThemeExplainer,
+    "insider_spotlight": InsiderSpotlight, "thirteen_f_spotlight": ThirteenFSpotlight,
 }
 
 
 # ── ledger keys and source labels ─────────────────────────────────────────────
 
 def ledger_key(rec: NewsRecord) -> str:
-    """The `marketing_scripts.source_ref` of a record (pinned format, contract D4.2)."""
+    """The `marketing_scripts.source_ref` of a record (pinned format, contract D4.2). The spotlight keys
+    (2026-11-15): ``news:insider_spotlight:<SYM>+<SYM>+…:<window_start>`` — since the insider LIST (owner decisions
+    2026-11-20) EVERY company of the record, in row order, joined by INSIDER_SPOTLIGHT_KEY_JOIN, each exactly once (a
+    one-company key reads as before: `insider_spotlight_key_parts` reads both) — and
+    ``news:thirteen_f_spotlight:<filer CIK>:<period>:<holding's SYM>`` — a list's LEAD holding (its first, the
+    largest: owner feedback 2026-11-19), so a filer's quarter keys the same whichever of its lists is posted."""
     if isinstance(rec, InsiderBuysWeek):
         return f"news:{rec.series}:{rec.window_start.isoformat()}"
+    if isinstance(rec, InsiderSpotlight):
+        syms = INSIDER_SPOTLIGHT_KEY_JOIN.join(r.company.symbol for r in rec.companies)
+        return f"news:insider_spotlight:{syms}:{rec.window_start.isoformat()}"
+    if isinstance(rec, ThirteenFSpotlight):
+        return f"news:thirteen_f_spotlight:{rec.filer_cik}:{rec.period}:{rec.moves[0].company.symbol}"
     if isinstance(rec, ThirteenFFiling):
         return f"news:thirteen_f:{rec.filer_cik}:{rec.period}"
-    if isinstance(rec, CongressCount):
+    if isinstance(rec, CongressMonth):
+        # news-v23: one post per disclosure month (2-3 companies) — the month's key, unchanged from one company a month
         return f"news:congress_count:{rec.month}"
-    if isinstance(rec, CompanyStake):
-        return f"news:company_stakes:{rec.stake_id}"
-    if isinstance(rec, EarningsReport):
-        return f"news:earnings:{rec.company.symbol}:{rec.report_date.isoformat()}"
+    if isinstance(rec, CompanyStakes):
+        # news-v23: EVERY stake the post holds (picture and captions), in row order, joined by STAKES_KEY_JOIN — a
+        # one-stake post's key is the one-stake key of every post before news-v23 (`stake_ref_ids` reads both)
+        return "news:company_stakes:" + STAKES_KEY_JOIN.join(s.stake_id for s in rec.stakes)
+    if isinstance(rec, EarningsDay):
+        # news-v23: EVERY company's own ``<SYM>:<report day>`` (the one-company key's tail), in draw order, joined by
+        # EARNINGS_KEY_JOIN — the adapter's posted-in-window rule reads each one (`earnings_ref_items`)
+        return f"news:earnings:" + EARNINGS_KEY_JOIN.join(
+            f"{r.company.symbol}:{r.report_date.isoformat()}" for r in rec.reports)
     if isinstance(rec, MoneyMap):
         return f"news:money_map:{rec.company.symbol}:{rec.fiscal_year}"
     if isinstance(rec, ThemeExplainer):
-        return f"news:theme_explainer:{rec.slug}:{rec.tickers_as_of.isoformat()}"
+        # news-v23 phase 3: the theme, the ANGLE and the run date (`theme_ref_items` reads it back strictly); a record
+        # rebuilt from a fact sheet written before the angles keeps its old key (the member list's date)
+        if rec.posted_on is not None:
+            return f"{THEME_KEY_PREFIX}{rec.slug}:{rec.angle}:{rec.posted_on.isoformat()}"
+        return f"{THEME_KEY_PREFIX}{rec.slug}:{rec.tickers_as_of.isoformat()}"
     raise ValueError(f"not a news record: {type(rec).__name__}")
 
 
 def source_label(rec: NewsRecord) -> str:
     """The public "Source:" label of a record (pinned; never the data vendor)."""
-    if isinstance(rec, CompanyStake):
-        return rec.source_title
-    if isinstance(rec, ThirteenFFiling):
-        return THIRTEEN_F_AMENDED_LABEL if rec.amended_on is not None else SOURCE_LABELS["thirteen_f"]
+    if isinstance(rec, (ThirteenFFiling, ThirteenFSpotlight)):
+        return THIRTEEN_F_AMENDED_LABEL if rec.amended_on is not None else SOURCE_LABELS[rec.series]
     if not isinstance(rec, RECORD_TYPES):
         raise ValueError(f"not a news record: {type(rec).__name__}")
+    if isinstance(rec, ThemeExplainer) and rec.angle in THEME_ANGLE_SOURCE_LABELS:
+        return THEME_ANGLE_SOURCE_LABELS[rec.angle]
     return SOURCE_LABELS[rec.series]
+
+
+_ISO_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_CIK_KEY_RE = re.compile(r"[0-9]{10}")
+#: news-v23: the separator between the companies of an `EarningsDay` ledger key
+#: (``news:earnings:COST:2026-11-18+NKE:2026-11-17``) — never in a canonical symbol or an ISO day.
+EARNINGS_KEY_JOIN = "+"
+#: The longest earnings ledger key `earnings_ref_items` reads (four companies of ``<SYM-C>:<day>`` fit in ~90).
+EARNINGS_REF_MAX_CHARS = 160
+
+
+def earnings_ref_items(ref: Any) -> Optional[List[Tuple[str, date]]]:
+    """The ``(symbol, report day)`` of EVERY company an earnings ledger key names — a one-company key
+    (``news:earnings:<SYM>:<day>``, every post before news-v23) or an `EarningsDay`'s
+    (``news:earnings:<SYM>:<day>+<SYM>:<day>…``) — or None for any other ref, or a malformed one (a non-canonical
+    symbol, a day that is not one, an empty item, too long). Strict both ways: what `ledger_key` writes reads back
+    exactly. Pure; never raises."""
+    prefix = f"{LEDGER_PREFIX}earnings:"
+    if not isinstance(ref, str) or len(ref) > EARNINGS_REF_MAX_CHARS or not ref.startswith(prefix):
+        return None
+    out: List[Tuple[str, date]] = []
+    for item in ref[len(prefix):].split(EARNINGS_KEY_JOIN):
+        sym, sep, day = item.rpartition(":")
+        if not sep or canonical_symbol(sym) != sym or not _ISO_DAY_RE.fullmatch(day):
+            return None
+        try:
+            out.append((sym, date.fromisoformat(day)))
+        except ValueError:                    # "2027-02-30": shaped like a day, not one
+            return None
+    return out
+
+
+#: news-v23: the separator between the stakes of a `CompanyStakes` ledger key
+#: (``news:company_stakes:<uuid>+<uuid>…``) — never in a canonical UUID.
+STAKES_KEY_JOIN = "+"
+_STAKE_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+#: The longest company_stakes ledger key `stake_ref_ids` reads: `STAKES_REF_MAX_IDS` stakes (36 characters and a
+#: separator each) after the 20-character prefix.
+STAKES_REF_MAX_CHARS = 20 + 37 * STAKES_REF_MAX_IDS
+
+
+def stake_ref_ids(ref: Any) -> Optional[List[str]]:
+    """The stake id of EVERY stake a company_stakes ledger key names — a one-stake key (``news:company_stakes:<id>``,
+    every post before news-v23) or a `CompanyStakes` key (``news:company_stakes:<id>+<id>…``) — or None for any other
+    ref, or a malformed one (a non-canonical id, an empty item, the same id twice, more than `STAKES_REF_MAX_IDS`,
+    too long). Strict both ways: what `ledger_key` writes reads back exactly. Pure; never raises."""
+    prefix = f"{LEDGER_PREFIX}company_stakes:"
+    if not isinstance(ref, str) or len(ref) > STAKES_REF_MAX_CHARS or not ref.startswith(prefix):
+        return None
+    ids = ref[len(prefix):].split(STAKES_KEY_JOIN)
+    if (not 1 <= len(ids) <= STAKES_REF_MAX_IDS or len(set(ids)) != len(ids)
+            or not all(_STAKE_ID_RE.fullmatch(i) for i in ids)):
+        return None
+    return ids
+
+
+#: The separator between the companies of an insider list's ledger key (owner decisions 2026-11-20:
+#: ``news:insider_spotlight:UBER+CMG+STZ:2026-11-16``) — never in a canonical symbol.
+INSIDER_SPOTLIGHT_KEY_JOIN = "+"
+#: The most symbols an insider list ledger key may hold for `insider_spotlight_key_parts`: a FIXED reader bound, never
+#: narrower than any key that could have been written (the writer holds at most INSIDER_MAX_ROWS — 5 since the final
+#: review of 2026-11-26; this branch's build briefly allowed 8, never deployed). A reader narrower than a stored key
+#: would read it as "nothing posted" and lift that list's already-posted rule and issuer cooldown.
+INSIDER_SPOTLIGHT_KEY_MAX_SYMBOLS = 8
+#: The longest insider list ledger key `insider_spotlight_key_parts` reads: INSIDER_SPOTLIGHT_KEY_MAX_SYMBOLS symbols
+#: of at most 10 characters and a separator each, the 23-character prefix and the window's ISO day.
+INSIDER_SPOTLIGHT_REF_MAX_CHARS = 23 + 11 * INSIDER_SPOTLIGHT_KEY_MAX_SYMBOLS + 11
+
+
+def insider_spotlight_key_parts(ref: Any) -> Optional[Tuple[Tuple[str, ...], date]]:
+    """``(every symbol, window_start)`` of an insider spotlight ledger key (``news:insider_spotlight:<SYM>+<SYM>…:<date>``,
+    `ledger_key`; a one-company key of the retired one-issuer record reads as one symbol) — what the adapter's
+    already-posted rule and issuer cooldown read — or None for any other ref, a malformed one included (canonical
+    symbols, each once, at most INSIDER_SPOTLIGHT_KEY_MAX_SYMBOLS — wider than the writer's INSIDER_MAX_ROWS on
+    purpose —, and an ISO date, nothing else). Strict both ways: what `ledger_key` writes reads back exactly. Pure;
+    never raises."""
+    if not isinstance(ref, str) or len(ref) > INSIDER_SPOTLIGHT_REF_MAX_CHARS:
+        return None
+    parts = ref.split(":")
+    if len(parts) != 4 or parts[0] + ":" != LEDGER_PREFIX or parts[1] != "insider_spotlight":
+        return None
+    syms, day = tuple(parts[2].split(INSIDER_SPOTLIGHT_KEY_JOIN)), parts[3]
+    if (not 1 <= len(syms) <= INSIDER_SPOTLIGHT_KEY_MAX_SYMBOLS or len(set(syms)) != len(syms)
+            or any(canonical_symbol(sym) != sym for sym in syms) or not _ISO_DAY_RE.fullmatch(day)):
+        return None
+    try:
+        return syms, date.fromisoformat(day)
+    except ValueError:
+        return None
+
+
+def thirteen_f_filer_key(ref: Any) -> Optional[str]:
+    """The main lane's per-filer, per-quarter key ``news:thirteen_f:<CIK>:<period>`` of a 13F ledger key of
+    EITHER lane — the roundup's own key, or a spotlight's ``news:thirteen_f_spotlight:<CIK>:<period>:<SYM>`` —
+    or None for any other (or malformed) ref. One 13F post per filer per quarter across both lanes: a filer
+    whose key is among a lane's recent refs is skipped by the other. Pure; never raises."""
+    if not isinstance(ref, str) or len(ref) > 80:
+        return None
+    parts = ref.split(":")
+    if parts[0] + ":" != LEDGER_PREFIX or len(parts) < 4:
+        return None
+    if parts[1] == "thirteen_f" and len(parts) == 4:
+        cik, period = parts[2], parts[3]
+    elif parts[1] == "thirteen_f_spotlight" and len(parts) == 5 and canonical_symbol(parts[4]) == parts[4]:
+        cik, period = parts[2], parts[3]
+    else:
+        return None
+    if not _CIK_KEY_RE.fullmatch(cik) or cik10(cik) != cik or not _PERIOD_RE.fullmatch(period):
+        return None
+    return f"news:thirteen_f:{cik}:{period}"
 
 
 # ── (de)serialisation ─────────────────────────────────────────────────────────
@@ -3365,16 +4557,26 @@ def record_from_fact_sheet(sheet: Any) -> NewsRecord:
 __all__ = [
     "FACT_SHEET_SCHEMA", "NEWS_SERIES", "SERIES_CLASS", "LEDGER_PREFIX", "MAJOR_US_EXCHANGES",
     "INSIDER_MIN_MARKET_CAP", "EARNINGS_MIN_MARKET_CAP", "PROFILE_PURPOSES", "INSIDER_WINDOW_DAYS",
-    "INSIDER_MIN_AMOUNT_USD", "INSIDER_MAX_AMOUNT_USD", "INSIDER_MAX_ROWS",
+    "INSIDER_MIN_AMOUNT_USD", "INSIDER_MAX_AMOUNT_USD", "INSIDER_MAX_ROWS", "INSIDER_MIN_ROWS", "INSIDER_PICTURE_ROWS",
     "INSIDER_MAX_FILING_LAG_DAYS", "THIRTEEN_F_MOVES", "THIRTEEN_F_MAX_MOVES",
     "CONGRESS_MIN_MEMBERS", "EPS_MIN_ABS_ESTIMATE", "REVENUE_RATIO_BAND", "MONEY_MAP_SEGMENTS",
     "MONEY_MAP_SUM_TOLERANCE", "MONEY_MAP_EXCLUDED_SECTORS", "THEME_MEMBERS", "THEME_MIN_FACTS",
-    "THEME_STALE_DAYS", "THEME_SIZE_MAX", "theme_company_count", "STAKES_INCLUDE_CATALOGUE", "STAKE_STALE_DAYS", "STAKE_MAX_AGE_DAYS",
+    "THEME_STALE_DAYS", "THEME_SIZE_MAX", "theme_company_count",
+    # news-v23 phase 3: the weekly theme post — its angles, rotation, keys and the widened Thursday earnings window
+    "THEME_ANGLES", "THEME_BUILT_ANGLES", "THEME_LEGACY_ANGLE", "THEME_ANGLE_MIN_COMPANIES", "THEME_REPEAT_DAYS",
+    "THEME_HISTORY_DAYS", "THEME_TAGGED_FACT_MAX_AGE_YEARS", "THEME_MARKET_VALUE_MAX_USD",
+    "THEME_MARKET_VALUE_MAX_AGE_DAYS", "THEME_KEY_PREFIX", "THEME_REF_MAX_CHARS", "next_theme_angle", "theme_ref_items",
+    # news-v23 phase 3, the last three angles (2026-11-20)
+    "THEME_ANGLE_CLASSES", "THEME_GROWTH_MAX_ABS", "THEME_GROWTH_YEAR_GAP_DAYS", "THEME_STATEMENT_MAX_AGE_DAYS",
+    "THEME_LOSS_MAX_RATIO", "THEME_GROWTH_MAX_MEMBERS", "THEME_INSIDER_WINDOW_DAYS", "THEME_TABLE_NAME_W",
+    "THEME_TABLE_NAME_FLOOR_PX", "THEME_TABLE_NAME_LINES", "theme_table_name_fits", "THEME_TALLY_ROWS", "CONGRESS_MAX_MEMBERS", "theme_growth",
+    "theme_profit_per_100", "theme_insider_order_key", "theme_congress_order_key", "record_content_classes",
+    "EARNINGS_WINDOW_DAYS", "EARNINGS_THURSDAY_WINDOW_DAYS", "earnings_window_days", "STAKES_INCLUDE_CATALOGUE", "STAKE_STALE_DAYS", "STAKE_MAX_AGE_DAYS",
     "STAKE_MAX_VALUE_USD",
     "STAKE_SOURCE_TITLE_MAX", "STAKE_BACKGROUND_MAX", "STAKE_LOCAL_LISTING_MAX", "non_common_name",
     "free_text_ok", "theme_title_problem",
     "COMPANY_WEEKLY_LAUNCH", "STAKE_KINDS", "VALUE_BASES", "ROSTER_MIN_MEMBERS", "UNAVAILABLE_REASONS", "SKIP_REASONS", "REJECTION_REASONS",
-    "SOURCE_LABELS", "THIRTEEN_F_AMENDED_LABEL", "MONEY_MAP_SEED", "MONEY_MAP_EXCLUDED_SYMBOLS",
+    "SOURCE_LABELS", "THIRTEEN_F_AMENDED_LABEL", "THEME_ANGLE_SOURCE_LABELS", "MONEY_MAP_SEED", "MONEY_MAP_EXCLUDED_SYMBOLS",
     "merge_money_map_pool", "symbol_problem", "canonical_symbol", "cik10", "period_label",
     "period_end_of", "previous_period_end_of", "month_end_of", "insider_window", "DISPLAY_OVERRIDES",
     "SEGMENT_DISPLAY_OVERRIDES", "segment_display_name",
@@ -3389,6 +4591,13 @@ __all__ = [
     "ThemeExplainer", "NewsRecord", "RECORD_TYPES", "NESTED_RECORD_TYPES", "ALL_RECORD_TYPES",
     "RECORD_TYPE_BY_SERIES", "ledger_key", "source_label", "record_to_dict", "record_from_dict",
     "fact_sheet", "record_from_fact_sheet",
+    # news-v23 (the restyle, owner 2026-11-19): ONE post of several companies — earnings and Congress Count
+    "CongressMonth", "EarningsDay", "CONGRESS_MONTH_COMPANIES", "EARNINGS_DAY_COMPANIES", "EARNINGS_KEY_JOIN",
+    "EARNINGS_REF_MAX_CHARS", "earnings_ref_items",
+    # news-v23 (company stakes, owner 2026-11-19): ONE investor's stakes in 1-4 PUBLIC companies a post
+    "CompanyStakes", "STAKES_POST_STAKES", "STAKES_REF_MAX_IDS", "PUBLIC_STAKE_KINDS", "STAKES_KEY_JOIN",
+    "STAKES_REF_MAX_CHARS",
+    "stake_ref_ids", "stake_rank_key",
     # Batch 1 (2026-10-15): the earnings gates and the members-elect window
     "EARNINGS_CLEAR_SURPRISE", "EARNINGS_PERIOD_WINDOW_DAYS", "EARNINGS_PERIOD_MAX_LAG_DAYS",
     "EARNINGS_PERIOD_REVENUE_TOLERANCE", "EARNINGS_ALLOW_SCALE_CHECK", "EARNINGS_SCALE_BAND",
@@ -3413,4 +4622,18 @@ __all__ = [
     "STAKE_SOURCE_PERSON_SURNAMES", "stake_person_surname_hits",
     # the round-3 review of 2026-10-20 (RR3-STAKES-TEMPLATE-WALL): what the stake template can draw, at the read
     "STAKE_SOURCE_DRAW_MAX_CHARS", "STAKE_TEXT_WORD_MAX_CHARS", "STAKE_PAIR_NAME_WORD_MAX_CHARS", "longest_word",
+    # the spotlight lane (owner decisions 2026-11-15): its records, window, keys, the filed cost per share and
+    # the one 13F move size
+    "SPOTLIGHT_MAX_OTHERS", "SPOTLIGHT_MAX_WINDOW_DAYS", "SPOTLIGHT_ISSUER_COOLDOWN_DAYS",
+    "THIRTEEN_F_SPOTLIGHT_MIN_CHANGE", "BREAKING_MAX_BUSINESS_DAYS", "COST_PER_SHARE_REL_TOLERANCE",
+    "SPOTLIGHT_SINGLE_HOLDER_ROLES", "spotlight_window", "issuer_root", "ISSUER_ROOT_FOREIGN_LETTERS",
+    "spotlight_feed_current", "SPOTLIGHT_FEED_CURRENT_BUSINESS_DAYS", "spotlight_person_order", "InsiderSpotlight",
+    "ThirteenFSpotlight", "thirteen_f_move_flow", "thirteen_f_change_clear", "insider_spotlight_key_parts",
+    "thirteen_f_filer_key",
+    # owner decisions 2026-11-20 ("3 - 5 companies at once"): the insider LIST and its key
+    "InsiderSpotlightCompany", "spotlight_company_order", "INSIDER_SPOTLIGHT_KEY_JOIN",
+    "INSIDER_SPOTLIGHT_REF_MAX_CHARS", "INSIDER_SPOTLIGHT_KEY_MAX_SYMBOLS",
+    # owner feedback 2026-11-19: the 13F spotlight lists up to five holdings
+    "THIRTEEN_F_SPOTLIGHT_MAX_MOVES", "THIRTEEN_F_LIST_MIN_MOVES", "THIRTEEN_F_LIST_ROWS", "THIRTEEN_F_COVER_ROWS",
+    "thirteen_f_spotlight_order", "thirteen_f_spotlight_lists_every_change",
 ]

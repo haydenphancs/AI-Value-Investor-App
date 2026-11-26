@@ -18,14 +18,23 @@ question is answered by a row here, never by inference from the boot time (the l
 migration 147).
 
 Idempotency shapes, all enforced by the database, not by check-then-act:
-* `marketing_runs.run_date` UNIQUE — the worker's daily claim is the INSERT; a second
-  worker (or the same one after a Railway-skipped slot) gets 23505 and reads the row.
+* `marketing_runs (run_date, lane)` UNIQUE (migration 210; `run_date` alone before it) — the
+  worker's claim of a day's run in one LANE is the INSERT; a second worker (or the same one
+  after a Railway-skipped slot) gets 23505 and reads the row. A day holds at most one MAIN run
+  (claimed through `/runs/claim`, whose INSERT never sends `lane`) and one SPOTLIGHT run (the
+  second, morning post on MARKETING_SPOTLIGHT_WEEKDAYS, claimed through `/lanes/spotlight/claim`).
 * `marketing_assets.storage_path` UNIQUE — content-addressed, so re-registering the same
-  bytes on a resumed run returns the existing row instead of a second object.
+  bytes on a resumed run returns the existing row instead of a second object. A spotlight run's
+  objects live under `<run_date>/spotlight/`, so the two runs of one day never meet on a path,
+  and an existing row of ANOTHER run is refused, never adopted.
 * `marketing_posts (run_id, platform, format)` UNIQUE and `idempotency_key` UNIQUE — one
-  ledger row per outlet, and the key the outlets themselves see.
+  ledger row per outlet, and the key the outlets themselves see
+  (`<run_date>:<platform>:<format>`; a spotlight post's is `<run_date>:spotlight:<platform>:<format>`).
 * `claim_post`: `UPDATE … WHERE status = 'approved'` returning the row — atomic, so two
   publisher ticks cannot both take the same post.
+* Per-post art (workstream C, 2026-11-16): `art/<sha256[:32]>.jpg` objects (`store_art`) are content-addressed
+  with NO asset row, like `logos/` — stat first, never overwritten, never deleted; the record and its spend live in
+  `marketing_scripts.output.art` (no migration), read back by `art_usage_between` / `art_spend_between`.
 
 Supabase is reached through `sb_exec` (never a bare `.execute()` on the loop —
 `app/utils/supabase_async.py` explains why that matters on one uvicorn worker).
@@ -42,7 +51,7 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Collection, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from app.config import settings
 from app.database import get_supabase
@@ -50,6 +59,8 @@ from app.schemas.marketing import (
     ASSET_EXTENSIONS,
     ASSET_KIND_EXTENSIONS,
     ASSET_KINDS,
+    ASSET_METADATA_ART_SHA,
+    ASSET_METADATA_OPENING_ART_SHA,
     EXTRA_FORMATS_KEY,
     EXTRA_POST_FORMATS_BY_PLATFORM,
     EXTRA_VIDEO_PLATFORMS,
@@ -65,12 +76,16 @@ from app.schemas.marketing import (
     POST_IMAGE_EXT,
     POST_IMAGE_MAX_BYTES,
     POST_MEDIA_KINDS,
+    POST_METADATA_ART,
     POST_METADATA_FIRST_COMMENT,
     POST_METADATA_IMAGE_FALLBACK,
     POST_METADATA_VIDEO_FEATURES,
     POST_METADATA_WRITTEN_BY,
     POST_PLATFORMS,
     POST_STATUSES,
+    RUN_LANE_MAIN,
+    RUN_LANE_SPOTLIGHT,
+    RUN_LANES,
     RUN_STAGES,
     RUN_STATUSES,
     RUN_WORKER_CAPABILITIES_KEY,
@@ -78,6 +93,8 @@ from app.schemas.marketing import (
     TEMPLATE_AUTHORSHIP,
     TEMPLATE_VIDEO_FEATURES,
     THREADS_VIDEO_CAPTION_MAX_BYTES,
+    LESSON_BRAND_TEXT,
+    PICTURE_BRAND_TEXT,
     VIDEO_BRAND_TEXT,
     VIDEO_END_CARD_CTA,
     VIDEO_FEATURE_DATA_CARD,
@@ -85,8 +102,12 @@ from app.schemas.marketing import (
     VIDEO_FEATURES_KEY,
     VIDEO_POSTS_KEY,
     WORKER_CAPABILITIES,
+    WORKER_CAPABILITY_LAYOUT_FEATURE,
+    WORKER_CAPABILITY_THEME_ANGLES,
+    WORKER_LAYOUTS_FEATURE,
     WORKER_RUN_STATUSES,
     is_extra_format,
+    layout_capabilities,
     normalize_image_post,
     parse_content_classes,
 )
@@ -95,6 +116,10 @@ from app.schemas.marketing import (
 # Batch 2: the hook card's stand-alone compliance scan (`hook_card_problem`).
 # All pure and FMP-free (tests/test_marketing_import_boundary.py PURE_MODULES).
 from app.services.marketing import compliance, news_templates, post_copy, selection, template_onscreen
+from app.services.marketing import company_news_rules as news_rules
+# Per-post art (workstream C, 2026-11-16): the stored record's validation (`drawable_art`), its pricing
+# (`estimated_micros`) and the storage constants. FMP-free and model-free at import (its clients load lazily).
+from app.services.marketing import post_art
 from app.services.marketing.logo_check import LogoInfo, logo_path
 from app.utils.market_hours import ET
 from app.utils.postgrest_paging import PAGE_SIZE as POSTGREST_MAX_ROWS
@@ -118,6 +143,11 @@ IN_PROGRESS = "in_progress"
 MEDIA_READY = "media_ready"
 ATTEMPTS_EXHAUSTED = "attempts_exhausted"
 NO_RUN = "no_run"
+#: The spotlight lane's claim only (migration 210, 2026-11-15): the lane is closed for that run date —
+#: `selection.is_spotlight_day` is False (MARKETING_SPOTLIGHT_ENABLED off, the weekday not listed, the lane's
+#: hours failing their rule, no news class enabled, or — C0, 2026-11-16 — no spotlight series left once the main
+#: lane's series that day are dropped). Answered before any read or write.
+NOT_SCHEDULED = "not_scheduled"
 
 _TERMINAL_RUN_STATUSES = frozenset({"published", "skipped"})
 
@@ -214,11 +244,14 @@ class MarketingJudgeNotEnforced(MarketingRunError):
 class MarketingTemplateRefused(MarketingRunError):
     """`create_posts` for a Company Weekly TEMPLATE script (class C or F, drop 2) whose output no longer
     passes `news_templates.revalidate` against its stored fact sheet (a deploy changed the template
-    version, a hand edit), whose class MARKETING_CONTENT_CLASSES no longer lists, or whose series the
-    per-series switch no longer leaves on (MARKETING_NEWS_SERIES ∩ the shipped series). 409
+    version, a hand edit), whose class MARKETING_CONTENT_CLASSES no longer lists, whose series the
+    per-series switch no longer leaves on (MARKETING_NEWS_SERIES ∩ the shipped series), or — a spotlight
+    run (migration 210) — whose lane MARKETING_SPOTLIGHT_ENABLED no longer leaves on. 409
     MARKETING_TEMPLATE_REFUSED: deterministic for the run, so the worker closes the day `skipped`
     (skip_reason template_refused) instead of retrying it six times. Raised before any asset read or
-    INSERT: nothing is recorded."""
+    INSERT: nothing is recorded. Also raised by `register_asset` for a picture or video of a template output another
+    TEMPLATE_VERSION composed (`stale_template_problem`, final review 2026-11-20) — before its on-screen checks, so
+    the day ends the same 409 skip instead of six failed 422 attempts; nothing is registered."""
 
 
 class MarketingAssetMismatch(MarketingRunError):
@@ -242,9 +275,10 @@ def run_date_et(now: Optional[datetime] = None) -> date:
 
 def claim_window_ok(run_date: date, today: date) -> bool:
     """A worker may claim only TODAY (ET) or YESTERDAY (the out-of-window resume). A future
-    date would claim the real day before it arrives (`run_date` is UNIQUE, so that day would
-    later be skipped as already done); an older one is unbounded writer spend on demand. The
-    same window bounds which runs a kick may start writer spend for (`held_problem`)."""
+    date would claim the real day before it arrives (the claim is UNIQUE (run_date, lane), so
+    that day's run in that lane would later be skipped as already done); an older one is
+    unbounded writer spend on demand. The same window bounds which runs a kick may start writer
+    spend for (`held_problem`), in either lane."""
     return today - timedelta(days=1) <= run_date <= today
 
 
@@ -284,9 +318,12 @@ class CallerClaim:
     """The claim a worker call says it holds: the run's `attempts` at its claim and the nonce it
     minted for that claim (`X-Marketing-Claim: <attempts>.<nonce>`, SYSTEM_DESIGN_GUIDELINES
     §12.2). Every successful claim yields a distinct `attempts` (a re-claim increments it with a
-    compare-and-swap; nonce recovery returns the same row), and the nonce is per process — so
-    the PAIR identifies the holder even across runs (attempts alone is 1-6 per run) and after a
-    manual reset brings an old attempts value back."""
+    compare-and-swap; nonce recovery returns the same row), and the nonce is minted per CLAIM —
+    since the spotlight lane (2026-11-15) the worker mints a fresh one for every candidate claim
+    it makes in a tick (an older image minted one per process) — so the PAIR identifies the
+    holder even across runs (attempts alone is 1-6 per run, and the two lanes of one day are two
+    runs) and after a manual reset brings an old attempts value back. That matters most where a
+    call names no run (`/assets/{id}/complete`)."""
     attempts: int
     nonce: str
 
@@ -353,12 +390,18 @@ def next_stage(stage: str) -> Optional[str]:
     return RUN_STAGES[i + 1] if i + 1 < len(RUN_STAGES) else None
 
 
-def storage_path_for(run_date: date, kind: str, sha256: str, ext: str) -> str:
-    """Content-addressed object key: `<run_date>/<kind>-<sha256[:16]>.<ext>`.
+def storage_path_for(run_date: date, kind: str, sha256: str, ext: str, *, lane: str = RUN_LANE_MAIN) -> str:
+    """Content-addressed object key: `<run_date>/<kind>-<sha256[:16]>.<ext>` for the MAIN lane (unchanged since
+    migration 170), `<run_date>/spotlight/<kind>-<sha256[:16]>.<ext>` for the SPOTLIGHT lane (migration 210).
 
     Immutable by construction — the same bytes always land on the same key, different bytes
     never collide with it, and nothing is ever overwritten in place (podcast directories
-    and Meta both cache by URL)."""
+    and Meta both cache by URL). The lane is part of the key because the worker's deterministic
+    objects (the preflight manifest) can be byte-identical in the two runs of one day: on one key
+    they would meet the UNIQUE `storage_path` and one run would be handed the other's row.
+    ValueError for an unknown lane, kind or extension."""
+    if lane not in RUN_LANES:
+        raise ValueError(f"unknown lane {str(lane)[:40]!r}")
     if kind not in ASSET_KINDS:
         raise ValueError(f"unknown asset kind {kind!r}")
     ext = ext.lower().lstrip(".")
@@ -368,7 +411,96 @@ def storage_path_for(run_date: date, kind: str, sha256: str, ext: str) -> str:
         raise ValueError(f"a {kind!r} asset cannot be a .{ext}")
     if len(sha256) != 64:
         raise ValueError("sha256 must be 64 hex chars")
-    return f"{run_date.isoformat()}/{kind}-{sha256[:16].lower()}.{ext}"
+    folder = run_date.isoformat() if lane == RUN_LANE_MAIN else f"{run_date.isoformat()}/{lane}"
+    return f"{folder}/{kind}-{sha256[:16].lower()}.{ext}"
+
+
+# ── lanes (migration 210, 2026-11-15) ─────────────────────────────────────────
+
+
+def run_lane(run: Any) -> str:
+    """The lane of a run row (RUN_LANES). A row that carries no `lane` — one read before migration 210 was
+    applied, or a hand-built dict — is the MAIN lane, the column's own default. Pure. ValueError for anything
+    else (not a dict, a lane the code does not know): a lane is never guessed, since keys, paths and the claim
+    all depend on it."""
+    if not isinstance(run, dict):
+        raise ValueError(f"a run row is a dict, not {type(run).__name__}")
+    raw = run.get("lane")
+    if raw is None:
+        return RUN_LANE_MAIN
+    if not isinstance(raw, str) or raw not in RUN_LANES:
+        raise ValueError(f"unknown lane {str(raw)[:40]!r}")
+    return raw
+
+
+def _lane_of(run: Dict[str, Any], *, op: str) -> str:
+    """`run_lane` for a service method: an unreadable lane is a 422 (MarketingRequestInvalid — deterministic for
+    the run, never retried as a 5xx), logged at ERROR with the run id."""
+    try:
+        return run_lane(run)
+    except ValueError as e:
+        logger.error("marketing %s REFUSED run_id=%s: %s — nothing written", op, run.get("id"), e)
+        raise MarketingRequestInvalid(f"{op}: run {run.get('id')}: {e}") from e
+
+
+def _check_lane(lane: Any, *, op: str) -> str:
+    """A lane ARGUMENT: one of RUN_LANES, else MarketingRequestInvalid (a caller's bug, never a guessed lane)."""
+    if not isinstance(lane, str) or lane not in RUN_LANES:
+        raise MarketingRequestInvalid(f"{op}: unknown lane {str(lane)[:40]!r} (lanes: {', '.join(RUN_LANES)})")
+    return lane
+
+
+def lane_label(day: str, lane: Optional[str]) -> str:
+    """How a run is named to the owner: the day alone for the MAIN lane (byte for byte what every message said
+    before the spotlight lane), `<day> · spotlight` for the SPOTLIGHT lane. Pure."""
+    return f"{day} · {RUN_LANE_SPOTLIGHT}" if lane == RUN_LANE_SPOTLIGHT else day
+
+
+def run_label(run: Any) -> str:
+    """`lane_label` of a run row: its `run_date` (first 10 characters; '?' when it has none) and its lane. A lane
+    that does not read back is named '?', never guessed as main. Pure, never raises."""
+    day = str(run.get("run_date"))[:10] if isinstance(run, dict) and run.get("run_date") else "?"
+    try:
+        lane: Optional[str] = run_lane(run)
+    except ValueError:
+        return f"{day} · ?"
+    return lane_label(day, lane)
+
+
+def post_lane(post: Any) -> Optional[str]:
+    """The lane of a post, from its idempotency key: `<run_date>:<platform>:<format>` → main,
+    `<run_date>:spotlight:<platform>:<format>` → spotlight (`idempotency_key_for`), anything else → None (a
+    malformed key, an unknown platform or format). Pure."""
+    key = str(post.get("idempotency_key") or "") if isinstance(post, dict) else ""
+    parts = key.split(":")
+    try:
+        date.fromisoformat(parts[0])
+    except ValueError:
+        return None
+    if len(parts) == 3:
+        lane, platform, fmt = RUN_LANE_MAIN, parts[1], parts[2]
+    elif len(parts) == 4 and parts[1] == RUN_LANE_SPOTLIGHT:
+        lane, platform, fmt = RUN_LANE_SPOTLIGHT, parts[2], parts[3]
+    else:
+        return None
+    return lane if platform in POST_PLATFORMS and fmt in POST_FORMATS else None
+
+
+def _lane_rank(row: Any) -> int:
+    """A row's position in RUN_LANES order (a row with no lane is main); a lane that does not read back sorts after
+    every known lane. For a stable within-day order only — never a guess at the lane."""
+    try:
+        return RUN_LANES.index(run_lane(row))
+    except ValueError:
+        return len(RUN_LANES)
+
+
+def post_run_label(post: Any) -> str:
+    """`lane_label` of a post's run, from its idempotency key: the key's first 10 characters (the run date — the
+    rendering every alert used before the spotlight lane, kept byte for byte for a main or malformed key), plus
+    ` · spotlight` for a spotlight key. Pure, never raises."""
+    key = str(post.get("idempotency_key") or "") if isinstance(post, dict) else ""
+    return lane_label(key[:10], post_lane(post))
 
 
 def frozen_post_formats(output: Any) -> Optional[Dict[str, str]]:
@@ -529,9 +661,11 @@ def data_card_strings(output: Any) -> Optional[List[str]]:
 
     None when the run's script read-back cannot carry that picture to the worker, so no data card can be
     drawn from it: the frozen post formats do not read back (`script_service.worker_script` then sends no
-    `image_footer`), there is no footer, or the spec does not validate against the run's own logos and that
-    footer. `freeze_video_features` freezes `data_card` only when this is not None, and the on-screen check
-    allows these strings only then. Pure; never raises."""
+    `image_footer`), there is no footer, the spec does not validate against the run's own logos and that
+    footer, or its layout is never a data card (outside `template_onscreen.DATA_CARD_LAYOUTS`: the
+    `feature` picture, whose facts carry the filing's cost per share — owner decision 5 of 2026-11-15 keeps
+    that off every video surface). `freeze_video_features` freezes `data_card` only when this is not None,
+    and the on-screen check allows these strings only then. Pure; never raises."""
     if not isinstance(output, dict):
         return None
     try:
@@ -544,6 +678,8 @@ def data_card_strings(output: Any) -> Optional[List[str]]:
         return None
     spec, logos = output.get("image_spec"), output.get("logos")
     if template_onscreen.validate_image_spec(spec, template_onscreen.logo_keys(logos), footer=footer) is not None:
+        return None
+    if spec.get("layout") not in template_onscreen.DATA_CARD_LAYOUTS:      # a dict: the spec validated
         return None
     return template_onscreen.image_strings(spec, logos) or None
 
@@ -655,6 +791,134 @@ def video_features_note(output: Any, *, template: bool, run_id: Any = None) -> O
     return list(features)
 
 
+# ── per-post art (workstream C, owner decisions 2026-11-15) ────────────────────
+#
+# The art itself is made by `script_service._attach_art` (post_art.make_post_art) and stored here (`store_art`);
+# the accepted output's `art` record is the ONE source of truth: what the worker may draw (`post_art.worker_art`),
+# what a drawn surface may declare (`art_declared_problem` below: the post image's `art_sha256`, the video's
+# `opening_art_sha256`), what the posts note (`art_note`) and what the month has spent (`art_spend_of`).
+
+#: The art note's subject cap (model text: shown only to the owner, inside Telegram — the review line caps it again).
+ART_NOTE_SUBJECT_MAX_CHARS = 300
+#: The art note's statuses: the record's own two, or `unreadable` (a record that is not an object).
+_ART_NOTE_STATUSES = (post_art.STATUS_OK, post_art.STATUS_FAILED)
+
+
+def _fold_note(text: Any, cap: int) -> Optional[str]:
+    """Model text as a note may carry it: one line, whitespace collapsed, printable only, capped; None when empty."""
+    if not isinstance(text, str):
+        return None
+    folded = "".join(ch for ch in " ".join(text[: cap * 4].split()) if ch.isprintable())[:cap]
+    return folded or None
+
+
+def art_surfaces(output: Any) -> Tuple[str, ...]:
+    """Where the accepted output's art may be DRAWN (decision 4, recorded at art time and narrowed to the surfaces the
+    day's frozen formats carry, `script_service._on_the_day`): ("picture", "cover") for a spotlight series —
+    ("cover",) on a spotlight day frozen without a picture post —, ("cover",) for the main lane's single-company
+    records — and () when the output
+    has no DRAWABLE art (`post_art.drawable_art`: none, a failed record, a lesson, a record that does not
+    validate). Owner decisions 2026-11-20 ("Drop it from insider posts (Recommended)"): the PICTURE surface is allowed
+    only for a series of `post_art.PICTURE_SERIES` (none today — the Money Map's art is its cover alone), whatever a
+    hand-edited record lists. Pure but for drawable_art's ERROR on a broken ok record."""
+    if not isinstance(output, Mapping) or post_art.drawable_art(output) is None:
+        return ()
+    raw = output["art"].get("surfaces")
+    allowed = {post_art.SURFACE_COVER} | (
+        {post_art.SURFACE_PICTURE} if output.get("series") in post_art.PICTURE_SERIES else set())
+    return tuple(s for s in post_art.SURFACES if isinstance(raw, list) and s in raw and s in allowed)
+
+
+def art_declared_problem(output: Any, declared: Any, drawn: Any, *, surface: str, template: bool) -> Optional[str]:
+    """Why ONE drawn surface's art declaration is refused, or None — `template_onscreen.art_declaration_problem`
+    against the accepted output's drawable art (`post_art.drawable_art`; None for a lesson, a failed record or no
+    art — any declaration there is `art_not_accepted`, the label alone `art_label_without_art`), plus the surface
+    rule of decision 4: a declaration on a surface the record does not allow (`art_surfaces`: the main lane's
+    picture never carries art) is `art_surface_not_allowed`. Art is never REQUIRED: no declaration and no label is
+    None whatever the output carries. Pure but for drawable_art's ERROR on a broken ok record."""
+    accepted = (post_art.drawable_art(output) or {}).get("sha256") if template else None
+    problem = template_onscreen.art_declaration_problem(declared, accepted, drawn)
+    if problem is None and declared is not None and surface not in art_surfaces(output):
+        return "art_surface_not_allowed"
+    return problem
+
+
+def art_note(output: Any, *, picture: bool, cover: bool, run_id: Any = None) -> Optional[Dict[str, Any]]:
+    """`metadata[POST_METADATA_ART]` for every post of a run whose accepted output carries an `art` record — None
+    (nothing stamped: switch-off rows stay byte-identical) when it carries none. A NOTE for the review message and
+    the digest, never a gate: {status ok|failed|unreadable, reason (post_art.ART_REASONS or None), subject (folded,
+    ≤ ART_NOTE_SUBJECT_MAX_CHARS, model text), treatment (post_art.MARKETING_TREATMENTS or None), redrawn (a
+    second draw was made), flags (every check flag raised, distinct, in order), surfaces (where the record allows
+    it), drawn {picture, cover} (what the run's VERIFIED post image / video declared drawing — the caller's
+    reading)}. An `ok` record that does not validate reads `failed` / internal_error (drawable_art logs the ERROR).
+    Never a model name, a url or the usage. Pure but for logging."""
+    if not isinstance(output, Mapping) or output.get("art") is None:
+        return None
+    art = output.get("art")
+    drawn = {"picture": picture is True, "cover": cover is True}
+    if not isinstance(art, Mapping):
+        logger.error("marketing create_posts run_id=%s: the accepted output's art record is not an object (%s) — "
+                     "noted as unreadable", run_id, type(art).__name__)
+        return {"status": "unreadable", "reason": None, "subject": None, "treatment": None, "redrawn": False,
+                "flags": [], "surfaces": [], "drawn": drawn}
+    status = art.get("status") if art.get("status") in _ART_NOTE_STATUSES else post_art.STATUS_FAILED
+    reason = art.get("reason") if art.get("reason") in post_art.ART_REASONS else None
+    if status == post_art.STATUS_OK and post_art.drawable_art(output) is None:
+        status, reason = post_art.STATUS_FAILED, "internal_error"
+    if status == post_art.STATUS_FAILED and reason is None:
+        reason = "internal_error"
+    if status == post_art.STATUS_OK:
+        reason = None
+    known_flags = (*post_art.CHECK_FLAGS, post_art.NOT_RECOGNISABLE)
+    flags: List[str] = []
+    for check in art.get("checks") if isinstance(art.get("checks"), list) else ():
+        for flag in (check.get("flags") if isinstance(check, Mapping) and isinstance(check.get("flags"), list)
+                     else ()):
+            if flag in known_flags and flag not in flags:
+                flags.append(flag)
+    attempts = art.get("attempts")
+    surfaces = art.get("surfaces")
+    return {
+        "status": status,
+        "reason": reason,
+        "subject": _fold_note(art.get("subject"), ART_NOTE_SUBJECT_MAX_CHARS),
+        "treatment": art.get("treatment") if art.get("treatment") in post_art.MARKETING_TREATMENTS else None,
+        "redrawn": isinstance(attempts, int) and not isinstance(attempts, bool) and attempts >= 2,
+        "flags": flags,
+        "surfaces": [s for s in post_art.SURFACES if isinstance(surfaces, list) and s in surfaces],
+        "drawn": drawn,
+    }
+
+
+def art_spend_of(rows: Any) -> Optional[Dict[str, int]]:
+    """{micros, images, images_uncertain, runs} that the art records of `rows` (`art_usage_between`: one per
+    script, ANY number a day) stand for — or None when ANY record's spend cannot be read: a record that is not an
+    object, a usage that is not one, a stored `estimated_micros` that is not a plain non-negative int (a minimal
+    record whose Claude spend was lost), or a usage `post_art.estimated_micros` cannot price. Each record counts
+    the LARGER of its stored estimate and today's re-pricing (fail closed: the cap never reads less than was
+    recorded). A row without art (None) counts nothing. Pure."""
+    micros = images = uncertain = runs = 0
+    for row in rows if isinstance(rows, (list, tuple)) else [object()]:
+        art = row.get("art") if isinstance(row, Mapping) else object()
+        if art is None:
+            continue
+        usage = art.get("usage") if isinstance(art, Mapping) else None
+        if not isinstance(usage, Mapping):
+            return None
+        stored = usage.get("estimated_micros")
+        again = post_art.estimated_micros(usage)
+        n_images, n_uncertain = usage.get("images", 0), usage.get("images_uncertain", 0)
+        plain = [v for v in (stored, n_images, n_uncertain)
+                 if isinstance(v, int) and not isinstance(v, bool) and v >= 0]
+        if again is None or len(plain) != 3:
+            return None
+        micros += max(stored, again)
+        images += n_images
+        uncertain += n_uncertain
+        runs += 1
+    return {"micros": micros, "images": images, "images_uncertain": uncertain, "runs": runs}
+
+
 def _template_script(run_id: str, script: Dict[str, Any], output: Dict[str, Any], *, what: str) -> bool:
     """Is the accepted script a Company Weekly TEMPLATE (drop 2)? Decided by the SCRIPT's frozen
     `template_id` (`selection.content_class_of`: a news series → C/F), never by the run's mirror or the
@@ -673,6 +937,46 @@ def _template_script(run_id: str, script: Dict[str, Any], output: Dict[str, Any]
             f"run {run_id}: the accepted output claims template authorship under the non-template id "
             f"{str(script.get('template_id'))[:40]!r}; no {what} is checked against it")
     return False
+
+
+def stale_template_problem(output: Any) -> Optional[str]:
+    """Why an accepted TEMPLATE output can never become a post under this code, or None: it was composed by another
+    `news_templates.TEMPLATE_VERSION` (absent included) — the `template_changed` refusal `news_templates.revalidate`
+    gives it at create_posts. Read at media registration too (final review 2026-11-20): a news-v21 day accepted before
+    a deploy and resumed after it draws its stored LONG footer, which today's on-screen checks refuse with a 422 — a
+    failed attempt, retried up to MARKETING_MAX_RUN_ATTEMPTS times, re-rendering each time — when the day can only
+    end in create_posts' 409 skip anyway. Asked first, the day is skipped `template_refused` at once. Pure; never
+    raises."""
+    version = output.get("template_version") if isinstance(output, dict) else None
+    if isinstance(version, str) and version == news_templates.TEMPLATE_VERSION:
+        return None
+    return f"composed by {str(version)[:20]!r}, this code is {news_templates.TEMPLATE_VERSION}"
+
+
+def _refuse_stale_template(run_id: str, output: Dict[str, Any], *, what: str) -> None:
+    """MarketingTemplateRefused (409: the worker skips the day `template_refused`) for a template output another
+    TEMPLATE_VERSION composed (`stale_template_problem`), before any on-screen check of its `what` — logged ERROR."""
+    problem = stale_template_problem(output)
+    if problem is None:
+        return
+    logger.error("marketing %s TEMPLATE REFUSED run_id=%s: the accepted template was %s — it can never post "
+                 "(create_posts' template_changed); nothing registered, the day is skipped", what, run_id, problem)
+    raise MarketingTemplateRefused(
+        f"run {run_id}: the accepted template was {problem}; no {what} is registered for it")
+
+
+def picture_footer_problem(output: Any, *, template: bool) -> Optional[str]:
+    """Why the accepted output's `image_footer` is not a short footer today's code writes (news-v23, the restyle of
+    2026-11-19 — owner: "if we can't remove, then say it shortly"), or None. A lesson's is exactly
+    `post_copy.IMAGE_FOOTER_HEAD`; a template's is a family form (`post_copy.image_footer_problem`: the closed source
+    table, each source's date shape). Which family a series takes is `news_templates.validate_package`'s check (it
+    runs at compose and again at create_posts' `revalidate`); this one fences what a picture may be registered
+    under. The long footer of news-v22 and before ("Educational only · … · Caydex …") is refused: an output accepted
+    before the restyle registers no picture (its template is refused at create_posts anyway — another
+    TEMPLATE_VERSION), and a picture drawing it is not drawing today's footer. Pure; never raises."""
+    footer = output.get("image_footer") if isinstance(output, dict) else None
+    authorship = post_copy.AUTHORSHIP_TEMPLATE if template else post_copy.AUTHORSHIP_AI
+    return post_copy.image_footer_problem(footer, authorship)
 
 
 def _series_trail(script: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -697,6 +1001,36 @@ def _series_trail(script: Dict[str, Any]) -> List[Dict[str, str]]:
 #: How many fallback steps a run's / a post's `series_trail` keeps (the longest plan has 6 steps).
 SERIES_TRAIL_MAX = 8
 
+#: The trail-entry key a script records a CHECKED Form 4 window under (C0, 2026-11-16: ``{"start", "end"}`` ISO dates;
+#: `script_service.TRAIL_WINDOW_KEY` is pinned equal). The run / post `series_trail` mirrors never carry it.
+TRAIL_WINDOW_KEY = "window"
+#: `_recorded_window`'s answer for a recorded window that does not read back (distinct from "none recorded").
+_UNREADABLE_WINDOW: Any = object()
+
+
+def _recorded_window(fact_sheet: Any, series: str, run_date: date) -> Any:
+    """The checked window `(start, end)` a script's fact sheet records for `series` (its trail entry's
+    TRAIL_WINDOW_KEY), None when it records none, or `_UNREADABLE_WINDOW` when one is there but is not a window of a run
+    on `run_date`: two ISO dates, start ≤ end < run_date, at most `SPOTLIGHT_MAX_WINDOW_DAYS` days long. The LAST entry
+    of `series` carrying the key wins. Pure, never raises."""
+    sheet = fact_sheet if isinstance(fact_sheet, dict) else {}
+    block = sheet.get("selection") if isinstance(sheet.get("selection"), dict) else {}
+    found: Any = None
+    for entry in block.get("trail") if isinstance(block.get("trail"), list) else []:
+        if isinstance(entry, dict) and entry.get("series") == series and TRAIL_WINDOW_KEY in entry:
+            found = entry[TRAIL_WINDOW_KEY]
+    if found is None:
+        return None
+    try:
+        start = date.fromisoformat(found["start"]) if isinstance(found.get("start"), str) else None
+        end = date.fromisoformat(found["end"]) if isinstance(found.get("end"), str) else None
+    except (AttributeError, ValueError, TypeError):
+        return _UNREADABLE_WINDOW
+    if (start is None or end is None or not start <= end < run_date
+            or (end - start).days >= news_rules.SPOTLIGHT_MAX_WINDOW_DAYS):
+        return _UNREADABLE_WINDOW
+    return start, end
+
 
 def run_worker_capabilities(run: Any) -> frozenset:
     """What the worker that HOLDS `run` declared it can render — `metadata.worker_capabilities`, written
@@ -709,12 +1043,21 @@ def run_worker_capabilities(run: Any) -> frozenset:
     return frozenset(c for c in raw if isinstance(c, str) and c in WORKER_CAPABILITIES)
 
 
-def idempotency_key_for(run_date: date, platform: str, fmt: str) -> str:
+def idempotency_key_for(run_date: date, platform: str, fmt: str, *, lane: str = RUN_LANE_MAIN) -> str:
+    """The post's ledger key, which the outlets see too (Upload-Post's request id, Bluesky's record key):
+    `<run_date>:<platform>:<format>` for the MAIN lane (unchanged since migration 170) and
+    `<run_date>:spotlight:<platform>:<format>` for the SPOTLIGHT lane (migration 210) — so the two runs of one day
+    never share a key, and `key[:10]` is still the run date everywhere it is read (`post_run_date`, `is_fresh`,
+    the publish feed, the review bot, Bluesky's record key). ValueError for an unknown lane, platform or format."""
+    if lane not in RUN_LANES:
+        raise ValueError(f"unknown lane {str(lane)[:40]!r}")
     if platform not in POST_PLATFORMS:
         raise ValueError(f"unknown platform {platform!r}")
     if fmt not in POST_FORMATS:
         raise ValueError(f"unknown format {fmt!r}")
-    return f"{run_date.isoformat()}:{platform}:{fmt}"
+    if lane == RUN_LANE_MAIN:
+        return f"{run_date.isoformat()}:{platform}:{fmt}"
+    return f"{run_date.isoformat()}:{lane}:{platform}:{fmt}"
 
 
 #: Post statuses that are not yet final — a run is never closed while one remains.
@@ -722,8 +1065,9 @@ _OPEN_POST_STATUSES = frozenset({"pending_review", "approved", "queued"})
 
 
 def post_run_date(post: Dict[str, Any]) -> Optional[date]:
-    """The run day a post belongs to, from its idempotency key (`<run_date>:<platform>:<format>`,
-    written by `create_posts`). None when the key is malformed — such a post is never fresh."""
+    """The run day a post belongs to, from its idempotency key (`<run_date>:<platform>:<format>`, or
+    `<run_date>:spotlight:<platform>:<format>` for a spotlight post — both written by `create_posts`; the date
+    is the first 10 characters of either). None when the key is malformed — such a post is never fresh."""
     key = str(post.get("idempotency_key") or "")
     try:
         return date.fromisoformat(key[:10])
@@ -1045,8 +1389,9 @@ def decide_claim(
     max_attempts: int = 0,
     claim_nonce: Optional[str] = None,
 ) -> str:
-    """Given the row already holding today's `run_date` (or None), decide what the worker
-    may do. Pure, so the whole matrix is unit-tested.
+    """Given the row already holding the claimed (`run_date`, lane) (or None), decide what the worker
+    may do. Pure, so the whole matrix is unit-tested — and lane-blind: each lane's run is judged on
+    its own row, by the same rules.
 
     * no row → CLAIMED (insert)
     * published / skipped → ALREADY_DONE
@@ -1235,11 +1580,15 @@ class MarketingRunService:
             )
         )
 
-    async def get_run_by_date(self, run_date: date) -> Optional[Dict[str, Any]]:
+    async def get_run_by_date(self, run_date: date, lane: str = RUN_LANE_MAIN) -> Optional[Dict[str, Any]]:
+        """The run of one (ET day, lane) — UNIQUE (run_date, lane), migration 210 — or None. Filtered on the lane
+        IN the query: without the filter a day holding both runs would answer whichever PostgREST returned first.
+        Needs 210 applied (42703 without the column — the documented deploy order)."""
+        lane = _check_lane(lane, op="get_run_by_date")
         return _one(
             await _exec(
-                self.sb.table(RUNS).select("*").eq("run_date", run_date.isoformat()).limit(1),
-                op="get_run_by_date", run_date=run_date,
+                self.sb.table(RUNS).select("*").eq("run_date", run_date.isoformat()).eq("lane", lane).limit(1),
+                op="get_run_by_date", run_date=run_date, lane=lane,
             )
         )
 
@@ -1253,8 +1602,19 @@ class MarketingRunService:
         claim_nonce: Optional[str] = None,
         resume_only: bool = False,
         capabilities: Tuple[str, ...] = (),
+        lane: str = RUN_LANE_MAIN,
     ) -> Tuple[Optional[Dict[str, Any]], str]:
-        """INSERT the day's row, or decide against the one that exists. Returns (row, reason).
+        """INSERT the (day, lane)'s row, or decide against the one that exists. Returns (row, reason).
+
+        `lane` (migration 210, 2026-11-15): the MAIN lane's INSERT never sends the column (it defaults to
+        'main'), so its body is byte for byte what it was before the lanes; a SPOTLIGHT claim sends
+        `lane: spotlight`. Every read of the existing row is the lane's own (`get_run_by_date(run_date, lane)`),
+        and a row of another lane is never handed back as this one's (MarketingRunError, logged). The SPOTLIGHT
+        lane first asks `selection.spotlight_day_problem(run_date)` — read now: the lane's switch, its weekdays, its
+        hours rule, a news class and a spotlight series left once the main lane's are dropped (C0) — and answers
+        (None, NOT_SCHEDULED) when it is not one, BEFORE the sweep or any
+        other read or write, `resume_only` included (a resume of yesterday's spotlight run is allowed exactly
+        while yesterday is still a spotlight day; one closed under it is swept later like any abandoned run).
 
         `capabilities` (drop 1) is what the CLAIMING worker declared it can render
         (WORKER_CAPABILITIES). A claim that takes the run records it as the server-owned
@@ -1272,9 +1632,19 @@ class MarketingRunService:
         `resume_only` never inserts: it is the out-of-window tick finishing a run that was
         killed after the last in-window tick, and (None, NO_RUN) means there is nothing.
 
-        Every claim — of any date, resume or not — first sweeps runs abandoned OUTSIDE the claim
-        window (`_sweep_abandoned`): nothing else could ever close them.
+        Every claim — of any date and lane, resume or not — first sweeps runs abandoned OUTSIDE the claim
+        window (`_sweep_abandoned`, every lane): nothing else could ever close them. A NOT_SCHEDULED
+        spotlight claim sweeps nothing (it reads and writes nothing at all).
         """
+        lane = _check_lane(lane, op="claim_run")
+        problem = selection.spotlight_day_problem(run_date) if lane == RUN_LANE_SPOTLIGHT else None
+        if problem is not None:
+            # The lane is closed for this date (its switch, its weekdays, its hours, no news class — the
+            # predicate logs a misconfiguration itself, once — or no spotlight series left once the main lane's
+            # are dropped: C0). Nothing read, nothing written.
+            logger.info("marketing run NOT claimed run_date=%s lane=%s reason=%s (the spotlight lane is not "
+                        "scheduled for that day: %s)", run_date, lane, NOT_SCHEDULED, problem)
+            return None, NOT_SCHEDULED
         now = now or datetime.now(timezone.utc)
         stamp = now.isoformat()
         claim_meta: Dict[str, Any] = {"claim_nonce": claim_nonce} if claim_nonce else {}
@@ -1295,24 +1665,31 @@ class MarketingRunService:
                 "updated_at": stamp,
                 "metadata": claim_meta,
             }
+            if lane != RUN_LANE_MAIN:
+                # Only a non-main claim names its lane: the main INSERT stays byte for byte today's (the column
+                # defaults to 'main', migration 210).
+                fresh["lane"] = lane
             try:
-                inserted = _one(await _exec(self.sb.table(RUNS).insert(fresh), op="claim_run.insert", run_date=run_date))
+                inserted = _one(await _exec(self.sb.table(RUNS).insert(fresh), op="claim_run.insert",
+                                            run_date=run_date, lane=lane))
                 if inserted:
+                    self._own_lane(inserted, lane, op="claim_run.insert")
                     logger.info(
-                        "marketing run CLAIMED (new) run_date=%s run_id=%s worker=%s dry_run=%s",
-                        run_date, inserted.get("id"), worker_version, dry_run,
+                        "marketing run CLAIMED (new) run_date=%s lane=%s run_id=%s worker=%s dry_run=%s",
+                        run_date, lane, inserted.get("id"), worker_version, dry_run,
                     )
                     return inserted, CLAIMED
             except Exception as e:
                 if not is_unique_violation(e):
                     raise
 
-        existing = await self.get_run_by_date(run_date)
+        existing = await self.get_run_by_date(run_date, lane)
         if existing is None:
             if resume_only:
                 return None, NO_RUN
             # the row vanished between the 23505 and the read — treat as busy
-            raise MarketingRunError(f"claim_run: run for {run_date} raced away")
+            raise MarketingRunError(f"claim_run: run for {run_date} (lane {lane}) raced away")
+        self._own_lane(existing, lane, op="claim_run.read")
 
         reason = decide_claim(
             existing,
@@ -1327,8 +1704,8 @@ class MarketingRunService:
             existing = await self._close_exhausted(existing, now=now)
         if reason != CLAIMED:
             logger.info(
-                "marketing run NOT claimed run_date=%s run_id=%s status=%s attempts=%s reason=%s",
-                run_date, existing.get("id"), existing.get("status"), existing.get("attempts"),
+                "marketing run NOT claimed run_date=%s lane=%s run_id=%s status=%s attempts=%s reason=%s",
+                run_date, lane, existing.get("id"), existing.get("status"), existing.get("attempts"),
                 reason,
             )
             return existing, reason
@@ -1338,8 +1715,8 @@ class MarketingRunService:
                 and existing.get("status") == "in_progress":
             # Our own claim; the response was lost. Nothing to re-claim.
             logger.info(
-                "marketing run claim RECOVERED by nonce run_date=%s run_id=%s",
-                run_date, existing.get("id"),
+                "marketing run claim RECOVERED by nonce run_date=%s lane=%s run_id=%s",
+                run_date, lane, existing.get("id"),
             )
             return existing, CLAIMED
 
@@ -1372,16 +1749,30 @@ class MarketingRunService:
             # Lost the race: someone else re-claimed between our read and our write.
             current = await self.get_run(existing["id"]) or existing
             logger.info(
-                "marketing run re-claim LOST race run_date=%s run_id=%s now status=%s",
-                run_date, existing["id"], current.get("status"),
+                "marketing run re-claim LOST race run_date=%s lane=%s run_id=%s now status=%s",
+                run_date, lane, existing["id"], current.get("status"),
             )
             return current, IN_PROGRESS
         logger.info(
-            "marketing run RE-CLAIMED run_date=%s run_id=%s from status=%s attempt=%s stage=%s",
-            run_date, updated.get("id"), observed_status, updated.get("attempts"),
+            "marketing run RE-CLAIMED run_date=%s lane=%s run_id=%s from status=%s attempt=%s stage=%s",
+            run_date, lane, updated.get("id"), observed_status, updated.get("attempts"),
             updated.get("stage"),
         )
         return updated, CLAIMED
+
+    @staticmethod
+    def _own_lane(row: Dict[str, Any], lane: str, *, op: str) -> None:
+        """A claim hands back only a row of the lane it claims. A row of another lane (a read that lost its lane
+        filter, a hand edit) would let one lane's worker run — and post — the other lane's day: logged at ERROR
+        and refused as a ledger error (MarketingRunError → 503), never returned."""
+        try:
+            got: Optional[str] = run_lane(row)
+        except ValueError:
+            got = None
+        if got != lane:
+            logger.error("marketing %s REFUSED run_id=%s: the row's lane is %r, the claim is for %r — not handed back",
+                         op, row.get("id"), str(row.get("lane"))[:40], lane)
+            raise MarketingRunError(f"{op}: run {row.get('id')} is lane {str(row.get('lane'))[:40]!r}, not {lane!r}")
 
     async def _close_failed_cas(
         self, existing: Dict[str, Any], *, now: datetime, last_error: str, op: str
@@ -1415,8 +1806,8 @@ class MarketingRunService:
         ever logging it. Every claim (the hourly cron claims one date or another on every tick)
         sweeps them: an `in_progress`/`planned` run dated STRICTLY before yesterday ET — never
         yesterday, which is still resumable until the run hour — whose liveness is older than
-        MARKETING_RUN_STALE_SECONDS. Each close is the same fenced CAS as the attempts-cap close;
-        only the transition logs WARNING. Bounded (`_SWEEP_LIMIT`, on the (status, run_date)
+        MARKETING_RUN_STALE_SECONDS, in EITHER lane (the window and the liveness are the same for both).
+        Each close is the same fenced CAS as the attempts-cap close; only the transition logs WARNING. Bounded (`_SWEEP_LIMIT`, on the (status, run_date)
         index) and best effort: a failure here never fails the claim. Returns how many closed."""
         today = run_date_et(now)
         cutoff = today - timedelta(days=1)
@@ -1441,13 +1832,16 @@ class MarketingRunService:
         # that would each hide the other's regression); liveness is decided here.
         for row in list(getattr(res, "data", None) or []):
             run_id, run_date = row.get("id"), row.get("run_date")
+            lane = str(row.get("lane") or RUN_LANE_MAIN)[:40]
             touched = _touched(row)
             if touched is not None and now - touched < stale:
                 continue  # something touched it recently: not provably abandoned yet
+            # The lane is named only off the main lane: a main run's `last_error` stays what it was.
+            lane_note = "" if lane == RUN_LANE_MAIN else f" lane {lane}"
             try:
                 done = await self._close_failed_cas(
                     row, now=now, op="sweep_abandoned.close",
-                    last_error=(f"abandoned outside the claim window: run_date {run_date} (today "
+                    last_error=(f"abandoned outside the claim window: run_date {run_date}{lane_note} (today "
                                 f"{today} ET) was last touched "
                                 f"{touched.isoformat() if touched else 'never'} at "
                                 f"stage={row.get('stage')} status={row.get('status')} "
@@ -1455,20 +1849,20 @@ class MarketingRunService:
                 )
             except Exception as e:
                 (logger.warning if isinstance(e, MarketingRunError) else logger.error)(
-                    "marketing run: sweep could not close run_id=%s run_date=%s (%s: %s) — the next "
-                    "claim retries", run_id, run_date, type(e).__name__, e,
+                    "marketing run: sweep could not close run_id=%s run_date=%s lane=%s (%s: %s) — the next "
+                    "claim retries", run_id, run_date, lane, type(e).__name__, e,
                     exc_info=not isinstance(e, MarketingRunError),
                 )
                 continue
             if done is None:
-                logger.info("marketing run: sweep of run_id=%s run_date=%s lost to a concurrent write "
-                            "— left as it is now", run_id, run_date)
+                logger.info("marketing run: sweep of run_id=%s run_date=%s lane=%s lost to a concurrent write "
+                            "— left as it is now", run_id, run_date, lane)
                 continue
             closed += 1
             logger.warning(
-                "marketing run ABANDONED outside the claim window run_date=%s run_id=%s attempts=%s "
+                "marketing run ABANDONED outside the claim window run_date=%s lane=%s run_id=%s attempts=%s "
                 "stage=%s was=%s last_touched=%s — closed failed; the day needs a human",
-                run_date, run_id, row.get("attempts"), row.get("stage"), row.get("status"),
+                run_date, lane, run_id, row.get("attempts"), row.get("stage"), row.get("status"),
                 touched.isoformat() if touched else None,
             )
         return closed
@@ -1488,8 +1882,9 @@ class MarketingRunService:
             )
         except MarketingRunError as e:
             logger.warning(
-                "marketing run: could not close an exhausted run run_id=%s run_date=%s (%s: %s) — "
-                "the next tick retries", run_id, existing.get("run_date"), type(e).__name__, e,
+                "marketing run: could not close an exhausted run run_id=%s run_date=%s lane=%s (%s: %s) — "
+                "the next tick retries", run_id, existing.get("run_date"), existing.get("lane") or RUN_LANE_MAIN,
+                type(e).__name__, e,
             )
             return existing
         if closed is None:
@@ -1501,9 +1896,9 @@ class MarketingRunService:
                                run_id, type(e).__name__, e)
                 return existing
         logger.warning(
-            "marketing run ABANDONED at the attempts cap run_date=%s run_id=%s attempts=%s "
+            "marketing run ABANDONED at the attempts cap run_date=%s lane=%s run_id=%s attempts=%s "
             "stage=%s was=%s — closed failed; the day needs a human", existing.get("run_date"),
-            run_id, observed_attempts, existing.get("stage"), observed_status,
+            existing.get("lane") or RUN_LANE_MAIN, run_id, observed_attempts, existing.get("stage"), observed_status,
         )
         return closed
 
@@ -1667,6 +2062,11 @@ class MarketingRunService:
         Returns (row, upload) where `upload` is None if the row already exists and is
         `ready` — a resumed run re-registering identical bytes must NOT re-upload (the
         object is immutable and Spotify/Meta cache it by URL).
+
+        The path carries the run's lane (`storage_path_for`: a spotlight run's objects live under
+        `<run_date>/spotlight/`), and an existing row on the path is adopted ONLY when it belongs to
+        THIS run: another run's row is refused (MarketingRequestInvalid, logged at ERROR) — never handed
+        over, so one run can never verify, point at or post another run's media.
         """
         run = await self.get_run(run_id)
         if run is None:
@@ -1682,6 +2082,7 @@ class MarketingRunService:
         if problem is not None:
             raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
         run_date = date.fromisoformat(str(run["run_date"]))
+        lane = _lane_of(run, op="register_asset")
         if kind == "audio" and isinstance(metadata, dict) and metadata.get("words"):
             await self._check_timed_words(run_id, metadata["words"])
         if kind == "video":
@@ -1690,7 +2091,7 @@ class MarketingRunService:
                 "image_role" in metadata or "onscreen_text" in metadata):
             await self._check_post_image_text(run, metadata, ext=ext, size_bytes=size_bytes)
         try:
-            path = storage_path_for(run_date, kind, sha256, ext)
+            path = storage_path_for(run_date, kind, sha256, ext, lane=lane)
         except ValueError as e:
             # The request schema checks the same things first; a ValueError here must still be a
             # 422, not the classifier's generic 502 (which the worker would retry).
@@ -1723,6 +2124,13 @@ class MarketingRunService:
             )
         if asset is None:
             raise MarketingRunError(f"register_asset: no row for {path}")
+        if str(asset.get("run_id")) != str(run_id):
+            # No cross-run adoption: the path is content-addressed per (day, lane), so another run's row here
+            # is a hand edit or a bug — handing it over would let this run verify and post the other's media.
+            logger.error("marketing register_asset REFUSED run_id=%s kind=%s path=%s: the existing row %s "
+                         "belongs to run %s — not adopted", run_id, kind, path, asset.get("id"), asset.get("run_id"))
+            raise MarketingRequestInvalid(
+                f"register_asset run {run_id}: {path} is already registered by another run; not adopted")
         if asset.get("status") == "ready":
             logger.info(
                 "marketing asset already READY, no re-upload run_id=%s kind=%s path=%s",
@@ -1829,8 +2237,19 @@ class MarketingRunService:
         if not isinstance(drawn, list) or not drawn:   # the request schema requires it; defence in depth
             raise MarketingRequestInvalid(f"run {run_id}: a video must declare metadata.onscreen_text")
         template = _template_script(run_id, script, output, what="video")
+        if template:
+            _refuse_stale_template(run_id, output, what="video")       # 409 before any 422 (final review 2026-11-20)
         features = frozen_video_features(output, template=template, run_id=run_id)
         allowed = set(VIDEO_BRAND_TEXT)
+        # news-v23 (restyle 2026-11-19): every video card may carry the brand row ("Caydex", already in
+        # VIDEO_BRAND_TEXT), its kicker pill and the picture's short footer line — exact strings, never required. A
+        # lesson: LESSON_KICKER and the lesson footer; a template: its opening card's kicker (allowed with the
+        # opening card below) and its own image_footer, only while that is today's short footer for its series.
+        if not template:
+            allowed.update(LESSON_BRAND_TEXT)
+            allowed.add(post_copy.IMAGE_FOOTER_HEAD)            # = post_copy.image_footer(<any day>) of a lesson
+        elif picture_footer_problem(output, template=True) is None:
+            allowed.add(output["image_footer"])
         for card in output.get("cards") or []:
             if isinstance(card, dict):
                 allowed.update(str(card.get(k)) for k in ("title", "body") if card.get(k))
@@ -1872,6 +2291,20 @@ class MarketingRunService:
                     f"run {run_id}: the accepted template's opening_card does not validate "
                     f"({str(problem)[:120]}); no template video can be checked against it")
             allowed.update(template_onscreen.opening_strings(opening, output.get("logos")))
+        # Per-post art (workstream C): the opening card's art is DECLARED (`opening_art_sha256`) — it must be the
+        # accepted output's checked art, on a template whose record allows the cover, with the burned ART_LABEL; the
+        # label is allowed only beside that declaration. A lesson never draws art. Never required (no declaration).
+        declared_art = metadata.get(ASSET_METADATA_OPENING_ART_SHA)
+        art_refused = art_declared_problem(output, declared_art, drawn, surface=post_art.SURFACE_COVER,
+                                           template=template)
+        if art_refused is not None:
+            logger.error("marketing video REFUSED run_id=%s: its art declaration is refused (%s; declared %s)",
+                         run_id, art_refused, str(declared_art)[:16] if declared_art is not None else "none")
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the video's opening-card art is refused ({art_refused}); a video may draw only the "
+                "accepted output's checked art, declared as metadata.opening_art_sha256 with its label")
+        if template:
+            allowed.update(template_onscreen.art_allowed(declared_art))
         extra = [t for t in drawn if t not in allowed]
         if extra:
             sources = "".join(f", {s}" for s in (["its opening card"] if template else []) + feature_sources)
@@ -1937,37 +2370,82 @@ class MarketingRunService:
         if not isinstance(drawn, list) or not drawn:
             raise MarketingRequestInvalid(f"run {run_id}: a post image must declare metadata.onscreen_text")
         if _template_script(run_id, script, output, what="post image"):
-            self._check_template_image_text(run_id, output, drawn)
+            _refuse_stale_template(run_id, output, what="post image")  # 409 before any 422 (final review 2026-11-20)
+            self._check_template_image_text(run_id, output, drawn,
+                                            capabilities=run_worker_capabilities(run),
+                                            declared_art=metadata.get(ASSET_METADATA_ART_SHA))
             return
+        # A LESSON's picture never draws per-post art (workstream C): a declaration, or the label alone, is refused
+        # by name before the allow-list below would refuse the label as foreign text.
+        art_refused = art_declared_problem(output, metadata.get(ASSET_METADATA_ART_SHA), drawn,
+                                           surface=post_art.SURFACE_PICTURE, template=False)
+        if art_refused is not None:
+            logger.error("marketing post image REFUSED run_id=%s: a lesson picture declares art (%s)", run_id,
+                         art_refused)
+            raise MarketingRequestInvalid(
+                f"run {run_id}: a lesson's post image never draws art ({art_refused})")
         image_post = normalize_image_post(output.get("image_post"))
         footer = output.get("image_footer")
         if image_post is None or not isinstance(footer, str) or not footer.strip():
             raise MarketingRequestInvalid(
                 f"run {run_id}: the accepted script carries no image post (image_post + image_footer) "
                 "to check the post image against")
-        allowed = {image_post["title"], *image_post["paragraphs"], footer}
+        # news-v23 (restyle 2026-11-19): a lesson picture's footer is the CODE-OWNED constant IMAGE_FOOTER_HEAD, not
+        # the stored copy — the read-back sends it (`script_service.worker_script`), so a lesson accepted before the
+        # restyle (its stored footer the long one) that resumes after the deploy re-renders with today's footer and
+        # registers, instead of failing every retry and losing the day's media.
+        if picture_footer_problem(output, template=False) is not None:
+            logger.warning("marketing post image run_id=%s: the accepted lesson stores a footer from before the "
+                           "news-v23 restyle — checked against today's short lesson footer", run_id)
+        footer = post_copy.IMAGE_FOOTER_HEAD
+        # news-v23 (restyle 2026-11-19): the brand row ("Caydex") and the lesson's kicker pill may be drawn too —
+        # exact strings, never required (LESSON_BRAND_TEXT)
+        allowed = {image_post["title"], *image_post["paragraphs"], footer, *LESSON_BRAND_TEXT}
         extra = [t for t in drawn if not isinstance(t, str) or t not in allowed]
         if extra:
             raise MarketingRequestInvalid(
                 f"run {run_id}: the post image declares {len(extra)} on-screen string(s) that are not the "
-                f"accepted image post's title, paragraphs or footer (first: {str(extra[0])[:80]!r})")
+                f"accepted image post's title, paragraphs or footer, or the brand row "
+                f"(first: {str(extra[0])[:80]!r})")
         if footer not in drawn:
             raise MarketingRequestInvalid(f"run {run_id}: the post image does not draw its footer")
 
     @staticmethod
-    def _check_template_image_text(run_id: str, output: Dict[str, Any], drawn: List[Any]) -> None:
+    def _check_template_image_text(run_id: str, output: Dict[str, Any], drawn: List[Any], *,
+                                   capabilities: Collection[str] = (), declared_art: Any = None) -> None:
         """The template branch of `_check_post_image_text` (drop 2, contract D12). A template post image
         draws its closed `image_spec` (`template_onscreen`): the allowed strings are exactly that spec's
         drawable strings — each referenced logo's company name included, for its wordmark tile — plus
         the code-owned `image_footer`, which MUST be drawn. Never `image_post`: on a template that is the
         name-free ALT TEXT, which may describe more than the picture shows, so a Drop-1-shaped image
         (alt title + paragraphs drawn) is refused. A spec that does not validate against the run's own
-        logos and footer allows nothing (422)."""
+        logos and footer allows nothing (422).
+
+        `capabilities`: what the worker HOLDING the run declared on its claim (`run_worker_capabilities`,
+        read with the run at registration). A `feature` picture (2026-11-15) is accepted only from a holder
+        that declared WORKER_CAPABILITY_LAYOUT_FEATURE: `script_service` never freezes an image post for any
+        other holder, so a feature picture registered by one is contract drift — 422, logged at ERROR, never
+        accepted on its word. The default () accepts no feature picture (fail closed). Every other layout is
+        checked exactly as before — the drop-2b `pair` / `grid` included: they predate this check, and the
+        main lane's registrations stay byte for byte what they were.
+
+        `declared_art` (workstream C, owner decisions 2026-11-15): the sha256 of the per-post art the picture says
+        it drew (`metadata.art_sha256`, None = no art). It must be the accepted output's checked art on a record
+        whose surfaces include the picture (the spotlight series' `feature` band — a main-lane picture never
+        carries art), drawn WITH the code-owned ART_LABEL (`art_declared_problem`, 422 otherwise); only then is the
+        label allowed. Art is never required: no declaration is checked exactly as before."""
         footer = output.get("image_footer")
         if not isinstance(footer, str) or not footer.strip():
             raise MarketingRequestInvalid(
                 f"run {run_id}: the accepted template script carries no image_footer to check the post "
                 "image against")
+        footer_problem = picture_footer_problem(output, template=True)
+        if footer_problem is not None:
+            logger.error("marketing post image REFUSED run_id=%s: the accepted template's image_footer is not its "
+                         "series' short footer (%s)", run_id, footer_problem)
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the accepted template's image_footer is not its series' short footer "
+                f"({footer_problem}); no post image is checked against it")
         spec, logos = output.get("image_spec"), output.get("logos")
         problem = template_onscreen.validate_image_spec(spec, template_onscreen.logo_keys(logos), footer=footer)
         if problem is not None:
@@ -1976,12 +2454,37 @@ class MarketingRunService:
             raise MarketingRequestInvalid(
                 f"run {run_id}: the accepted template's image_spec does not validate ({str(problem)[:120]}); "
                 "no post image can be checked against it")
-        allowed = set(template_onscreen.image_strings(spec, logos)) | {footer}
+        layout = spec.get("layout")                                         # a dict: the spec validated
+        # the `feature` picture (WORKER_LAYOUTS_FEATURE) and, news-v23 phase 3, the theme's `ranked` picture
+        # (WORKER_LAYOUTS_THEME): only a holder that declared the layout's own capability registers one
+        missing = [c for c in layout_capabilities(layout)
+                   if c in (WORKER_CAPABILITY_LAYOUT_FEATURE, WORKER_CAPABILITY_THEME_ANGLES) and c not in capabilities]
+        if missing:
+            logger.error("marketing post image REFUSED run_id=%s: a %r picture registered by a worker that did "
+                         "not declare %r on its claim (declared %s)", run_id, layout,
+                         missing[0], sorted(capabilities) or "nothing")
+            raise MarketingRequestInvalid(
+                f"run {run_id}: a {layout!r} post image needs a worker that declared "
+                f"{missing[0]!r} on its claim; the worker holding the run did not")
+        art_refused = art_declared_problem(output, declared_art, drawn, surface=post_art.SURFACE_PICTURE,
+                                           template=True)
+        if art_refused is not None:
+            logger.error("marketing post image REFUSED run_id=%s: its art declaration is refused (%s; declared %s, "
+                         "layout %r)", run_id, art_refused,
+                         str(declared_art)[:16] if declared_art is not None else "none", layout)
+            raise MarketingRequestInvalid(
+                f"run {run_id}: the post image's art is refused ({art_refused}); a picture may draw only the "
+                "accepted output's checked art, declared as metadata.art_sha256 with its label")
+        # news-v23 (restyle 2026-11-19): the brand row's word may be drawn too (PICTURE_BRAND_TEXT, exact, never
+        # required); the kicker pill is the spec's own `kicker`, already among its strings
+        allowed = (set(template_onscreen.image_strings(spec, logos)) | {footer}
+                   | set(template_onscreen.art_allowed(declared_art)) | set(PICTURE_BRAND_TEXT))
         extra = [t for t in drawn if not isinstance(t, str) or t not in allowed]
         if extra:
             raise MarketingRequestInvalid(
                 f"run {run_id}: the template post image declares {len(extra)} on-screen string(s) that are "
-                f"not its image_spec's strings, its logos' names or its footer (first: {str(extra[0])[:80]!r})")
+                f"not its image_spec's strings, its logos' names, its footer or the brand row "
+                f"(first: {str(extra[0])[:80]!r})")
         if footer not in drawn:
             raise MarketingRequestInvalid(f"run {run_id}: the template post image does not draw its footer")
 
@@ -2004,17 +2507,20 @@ class MarketingRunService:
         return None
 
     async def read_back(self, run_id: str, *, claim: CallerClaim) -> Dict[str, Any]:
-        """`{voice_asset_id, video_asset_id, image_asset_id, assets}` for the run's HOLDER — the
+        """`{voice_asset_id, video_asset_id, image_asset_id, assets, lane}` for the run's HOLDER — the
         read-back a resumed or re-claimed stage derives its media from (rules marketing.md §2). Each
         pointer comes from the run's metadata and is returned only if it names a `ready` asset of the
         right kind of THIS run (the image: a `card` whose image_role is the post image); anything
-        else is logged and returned as None. `assets` are the run's ready rows with their public URL."""
+        else is logged and returned as None. `assets` are the run's ready rows with their public URL.
+        `lane` (migration 210) is the run's lane — an additive echo a stage may check its own lane against
+        (an unreadable lane is a 422, never guessed)."""
         run = await self.get_run(run_id)
         if run is None:
             raise MarketingRunNotFound(f"run {run_id} not found")
         problem = claim_problem(run, claim)
         if problem is not None:
             raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
+        lane = _lane_of(run, op="read_back")
         ready = [a for a in await self.list_assets(run_id) if a.get("status") == "ready"]
         for a in ready:
             a["public_url"] = self.public_url(str(a.get("storage_path")))
@@ -2022,7 +2528,7 @@ class MarketingRunService:
                 "video_asset_id": self._verified_pointer(run, ready, "video_asset_id", "video"),
                 "image_asset_id": self._verified_pointer(run, ready, "image_asset_id", "card",
                                                          role=IMAGE_ROLE_POST),
-                "assets": ready}
+                "assets": ready, "lane": lane}
 
     async def list_ready_assets(self, run_id: str, *, claim: CallerClaim) -> Tuple[Optional[str], List[Dict[str, Any]]]:
         """(voice_asset_id, ready assets with their public URL) — `read_back` without the video
@@ -2132,6 +2638,101 @@ class MarketingRunService:
             logger.warning("marketing logo: Storage could not be read for %s (%s) — wordmark", path, e)
             return None
         logger.info("marketing logo: stored %s (%d bytes, %dx%d)", path, len(data), entry["width"], entry["height"])
+        return entry
+
+    async def store_art(self, data: bytes, *, width: int, height: int) -> Optional[Dict[str, Any]]:
+        """Store one per-post ART picture that PASSED its check (workstream C, owner decisions 2026-11-15 —
+        `post_art.make_post_art` calls it last, and only for a passed picture): `{path, url, sha256, bytes, width,
+        height}` of exactly these bytes, or None — no art this run, the day goes on with today's drawing. Never
+        raises (cancellation aside).
+
+        `store_logo`'s protocol exactly (marketing.md §4): content-addressed at `art/<sha256[:32]>.jpg`
+        (`post_art.art_path`) in the PUBLIC media bucket, `image/jpeg`, a one-year cache, `x-upsert: false`, and NO
+        `marketing_assets` row — an object any run with the same bytes reuses, never under a run's own folder (two
+        lanes cannot adopt each other's object: the key is the content). So it is NEVER overwritten and NEVER
+        deleted (a published post may reference it). Stat first: the same size and content type → reuse it;
+        anything else at that key → None + ERROR (left in place). Absent → upload; a conflict (a concurrent writer
+        won the race) is stat'ed again under the same rule. Refused before any I/O, logged: not bytes or empty,
+        over `post_art.ART_MAX_BYTES`, not a JPEG (its FF D8 FF magic), or an entry `post_art.art_problem` would
+        refuse (size bounds, 16:9) — a picture the worker could never draw is never stored. The bytes are stored
+        exactly as given; the url is `public_url(path)`, which `post_art.expected_art_url` mirrors."""
+        try:
+            if not isinstance(data, (bytes, bytearray)) or not data:
+                logger.error("marketing art: nothing storable (%s) — no art", type(data).__name__)
+                return None
+            data = bytes(data)
+            if len(data) > post_art.ART_MAX_BYTES:
+                logger.error("marketing art: %d bytes is over the %d-byte cap — not stored, no art", len(data),
+                             post_art.ART_MAX_BYTES)
+                return None
+            if data[:3] != b"\xff\xd8\xff":
+                logger.error("marketing art: the bytes are not a JPEG (magic %s) — not stored, no art", data[:3].hex())
+                return None
+            digest = hashlib.sha256(data).hexdigest()
+            path = post_art.art_path(digest)
+            entry = {"path": path, "url": self.public_url(path), "sha256": digest, "bytes": len(data),
+                     "width": width, "height": height}
+            problem = post_art.art_problem({**entry, "status": post_art.STATUS_OK, "version": post_art.ART_VERSION})
+            if problem is not None:
+                logger.error("marketing art: sha256 %s… cannot be a drawable art entry (%s) — not stored, no art",
+                             digest[:12], problem)
+                return None
+        except Exception as e:  # noqa: BLE001 — a malformed input is no art, never a 500
+            logger.error("marketing art: the picture could not be checked before storing (%s: %s) — no art",
+                         type(e).__name__, e, exc_info=True)
+            return None
+        content_type = post_art.ART_CONTENT_TYPE
+
+        async def _existing() -> Optional[bool]:
+            """True: the object at `path` is these bytes (size + type); False: something else is there (ERROR);
+            None: absent. Raises MarketingRunError when Storage cannot be read."""
+            stat = await self._object_stat(path)
+            if stat is None:
+                return None
+            size, mimetype = stat.get("size"), stat.get("mimetype")
+            got_type = str(mimetype or "").split(";", 1)[0].strip().lower()
+            try:
+                same_size = size is not None and int(size) == len(data)
+            except (TypeError, ValueError):
+                same_size = False
+            if same_size and got_type == content_type:
+                return True
+            logger.error("marketing art: %s already holds another object (size %r, type %r; want %d bytes of %s) — "
+                         "left in place (shared, maybe published), no art", path, size, mimetype, len(data),
+                         content_type)
+            return False
+
+        bucket = settings.MARKETING_MEDIA_BUCKET
+        try:
+            there = await _existing()
+            if there is True:
+                logger.info("marketing art: reusing %s (%d bytes)", path, len(data))
+                return entry
+            if there is False:
+                return None
+            try:
+                await sb_exec_storage(lambda: self.sb.storage.from_(bucket).upload(
+                    path, data, {"content-type": content_type, "cache-control": "31536000", "upsert": "false"}))
+            except Exception as e:
+                if not _is_storage_conflict(e):
+                    logger.warning("marketing art: upload of %s failed (%s: %s) — no art", path, type(e).__name__,
+                                   str(e)[:200])
+                    return None
+                logger.info("marketing art: %s was stored by a concurrent writer — checking it", path)
+                there = await _existing()
+                if there is not True:
+                    if there is None:
+                        logger.warning("marketing art: %s answered a conflict but is not listed — no art", path)
+                    return None
+                return entry
+        except MarketingRunError as e:
+            logger.warning("marketing art: Storage could not be read for %s (%s) — no art", path, e)
+            return None
+        except Exception as e:  # noqa: BLE001 — never raises: art is optional, and the caller logs the outcome too
+            logger.error("marketing art: storing %s failed unexpectedly (%s: %s) — no art", path, type(e).__name__,
+                         e, exc_info=True)
+            return None
+        logger.info("marketing art: stored %s (%d bytes, %dx%d)", path, len(data), width, height)
         return entry
 
     async def _verify_object(self, asset: Dict[str, Any], stat: Dict[str, Any]) -> None:
@@ -2319,7 +2920,24 @@ class MarketingRunService:
         conflicting ledger row, extras that do not read back — is skipped with an ERROR (WARNING for a missing
         video) and never costs the day's other posts. The ledger's other-format check subtracts the frozen
         extra format, so a retry adopts both of a platform's rows. An output without the keys records exactly
-        the posts it did, with the same reads."""
+        the posts it did, with the same reads.
+
+        The spotlight lane (migration 210, 2026-11-15): a SPOTLIGHT run's keys are
+        `<run_date>:spotlight:<platform>:<format>` (`idempotency_key_for`), so the two runs of one day never
+        share a ledger row; a key that already holds ANOTHER run's post is refused (MarketingRequestInvalid),
+        never adopted. A spotlight run posts only a TEMPLATE (class C/F — a class-A script there is a 422: the
+        lane never writes a lesson), only while MARKETING_SPOTLIGHT_ENABLED is on — read now: a lane switched
+        off after its day was built records nothing (409 MarketingTemplateRefused, the worker skips the day
+        `template_refused`) — and through the SAME gates as the main lane: the class switch, the per-series
+        kill switch MARKETING_NEWS_SERIES ∩ the shipped series, the authorship and `news_templates.revalidate`.
+        A main run is unchanged.
+
+        Per-post art (workstream C, owner decisions 2026-11-15) — never a gate: when a TEMPLATE output carries an
+        `art` record, every post of the run gets the art note (`art_note`, `metadata[POST_METADATA_ART]`), and an
+        image post's `made_with_ai` is True when the run's VERIFIED post image declared drawing the accepted art
+        (`post_copy.made_with_ai(..., ai_art=)`: owner decision 2026-11-15, reversing 2026-10-09's "False on
+        template image posts" for such a picture). The run's assets are read for that even when no spec names
+        one. An output without `art` (the switch off) records exactly what it did, with the same reads."""
         run = await self.get_run(run_id)
         if run is None:
             raise MarketingRunNotFound(f"run {run_id} not found")
@@ -2332,6 +2950,7 @@ class MarketingRunService:
         if problem is not None:
             raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
         run_date = date.fromisoformat(str(run["run_date"]))
+        lane = _lane_of(run, op="create_posts")
         script = await self.get_script(run_id)
         output = (script or {}).get("output")
         if not script or script.get("status") != "accepted" or not isinstance(output, dict):
@@ -2361,6 +2980,22 @@ class MarketingRunService:
             logger.warning("marketing create_posts run_id=%s: the run mirrors content_class %r but its script "
                            "is class %r (template %r) — the script decides", run_id,
                            str(run.get("content_class"))[:20], klass, str(template_id)[:40])
+        if lane == RUN_LANE_SPOTLIGHT:
+            # The spotlight lane's own gates, before the class gates both lanes share (below). It never writes a
+            # lesson (its chain ends in a skip), so a class-A script on it is a contract breach, never a post.
+            if klass not in NEWS_CLASSES:
+                logger.error("marketing create_posts REFUSED run_id=%s lane=%s: a class-%s script (template %r) on "
+                             "the spotlight lane, which posts templates only — nothing recorded", run_id, lane,
+                             klass, str(template_id)[:40])
+                raise MarketingRequestInvalid(
+                    f"run {run_id}: a class-{klass} script on the spotlight lane (templates only); nothing recorded")
+            # The lane's master switch, read NOW like the class and series switches.
+            if not selection.spotlight_on():
+                logger.error("marketing create_posts TEMPLATE REFUSED run_id=%s lane=%s series=%s: "
+                             "MARKETING_SPOTLIGHT_ENABLED is off — nothing recorded", run_id, lane,
+                             str(template_id)[:40])
+                raise MarketingTemplateRefused(
+                    f"run {run_id}: the spotlight lane is switched off (MARKETING_SPOTLIGHT_ENABLED); nothing recorded")
         authorship = post_copy.AUTHORSHIP_AI
         series = selection.LESSON
         if klass == "A":
@@ -2394,6 +3029,20 @@ class MarketingRunService:
                 raise MarketingTemplateRefused(
                     f"run {run_id}: content class {klass} is switched off (MARKETING_CONTENT_CLASSES); "
                     "nothing recorded")
+            # news-v23 phase 3 (2026-11-20): a theme post of FILINGS (the insider scorecard, Congress —
+            # `company_news_rules.THEME_ANGLE_CLASSES`) states class-C facts under the class-F series: class C must be
+            # on NOW too (read like the class switch above). An unreadable fact sheet is refused by the re-check below.
+            try:
+                needed = news_rules.record_content_classes(news_rules.record_from_fact_sheet(script.get("fact_sheet")))
+            except ValueError:
+                needed = frozenset()
+            if not needed <= enabled:
+                logger.error("marketing create_posts TEMPLATE REFUSED run_id=%s series=%s: its facts need class(es) "
+                             "%s and MARKETING_CONTENT_CLASSES is %s — nothing recorded", run_id,
+                             str(template_id)[:40], ",".join(sorted(needed - enabled)), ",".join(sorted(enabled)))
+                raise MarketingTemplateRefused(
+                    f"run {run_id}: its facts need content class(es) {','.join(sorted(needed - enabled))}, switched "
+                    "off (MARKETING_CONTENT_CLASSES); nothing recorded")
             # The per-series switch (drop 2b), read NOW like the class switch: the series must still be
             # listed in MARKETING_NEWS_SERIES AND shipped (`selection.parse_news_series` is that
             # intersection). A series switched off after its day was built — or one this deploy no longer
@@ -2451,11 +3100,19 @@ class MarketingRunService:
             logger.error("marketing create_posts run_id=%s: the accepted script's extra formats do not read back "
                          "(%s) — no extra video post (the day's other posts are recorded)", run_id, e)
             extras = {}
+        # Per-post art (workstream C): the run's art record — a TEMPLATE output's only (the build never gives a
+        # lesson one; a lesson row carrying one is a hand edit, ignored loudly). None on every day the switch was
+        # off: the reads and the rows below are then exactly what they were.
+        art_record = output.get("art") if klass in NEWS_CLASSES else None
+        if klass == "A" and output.get("art") is not None:
+            logger.error("marketing create_posts run_id=%s: a LESSON output carries an art record — ignored (a lesson "
+                         "never draws art; no art note, no AI-art flag)", run_id)
         wants_assets = any(spec.get("asset_ids") for spec in specs)
         wants_image = any(spec.get("format") == "image" for spec in specs)
         wants_video = any(spec.get("format") == "video" for spec in specs)
         asset_rows = (await self.list_assets(run_id)
-                      if (wants_assets or wants_image or (wants_video and formats is not None) or extras) else [])
+                      if (wants_assets or wants_image or (wants_video and formats is not None) or extras
+                          or art_record is not None) else [])
         assets = {a.get("id"): a for a in asset_rows}
         ready_rows = [a for a in asset_rows if a.get("status") == "ready"]
         # The ONE image every image post of the run carries: the run's verified post-image pointer
@@ -2472,6 +3129,24 @@ class MarketingRunService:
         # EXTRA posts (Batch 3) carry the same one video.
         video_id = (self._verified_pointer(run, ready_rows, "video_asset_id", "video")
                     if (wants_video or extras) and formats is not None else None)
+        # What the run's VERIFIED picture and video say they drew (their registration checked each declaration
+        # against the accepted art): the picture's decides the image posts' AI flag (owner decision 2026-11-15:
+        # `made_with_ai` True on a template image post whose picture drew the art), both feed the art note.
+        drew_picture = drew_cover = False
+        if art_record is not None:
+            accepted_art = (post_art.drawable_art(output) or {}).get("sha256")
+            art_image = image_id if image_id is not None else self._verified_pointer(
+                run, ready_rows, "image_asset_id", "card", role=IMAGE_ROLE_POST)
+            art_video = video_id if video_id is not None else self._verified_pointer(
+                run, ready_rows, "video_asset_id", "video")
+
+            def _declared(asset_id: Optional[str], key: str) -> Any:
+                md = (assets.get(asset_id) or {}).get("metadata") if asset_id is not None else None
+                return md.get(key) if isinstance(md, dict) else None
+
+            drew_picture = accepted_art is not None and _declared(art_image, ASSET_METADATA_ART_SHA) == accepted_art
+            drew_cover = (accepted_art is not None
+                          and _declared(art_video, ASSET_METADATA_OPENING_ART_SHA) == accepted_art)
         video_lists: set = set()
         # At most ONE post per (run, platform): the ledger's UNIQUE is (run, platform, format), so
         # a platform already recorded in another format would otherwise take a second post.
@@ -2508,7 +3183,8 @@ class MarketingRunService:
                 # template only as a narrated video. Decided here, before any INSERT, so a format no
                 # template post takes is a refusal of the whole request — never a guessed flag.
                 try:
-                    ai_flags[(platform, fmt)] = post_copy.made_with_ai(authorship, fmt)
+                    # `ai_art`: the run's verified picture drew the accepted per-post art (an image post only)
+                    ai_flags[(platform, fmt)] = post_copy.made_with_ai(authorship, fmt, ai_art=drew_picture)
                 except ValueError as e:
                     bad_pairs.append(f"{platform}/{fmt} ({e})")
             asset_ids = list(dict.fromkeys(spec.get("asset_ids") or []))
@@ -2619,6 +3295,10 @@ class MarketingRunService:
         # so the measure step and the digest can tell a first-seconds video from an older one (never a gate).
         video_note = video_features_note(output, template=klass in NEWS_CLASSES, run_id=run_id)
         written_by = written_by_note(output)
+        # Per-post art (workstream C): the art note on EVERY post of the run, only when the output carries an art
+        # record (switch off: no key, byte-identical rows) — what the record says and what was drawn.
+        art_stamp = (json.dumps(art_note(output, picture=drew_picture, cover=drew_cover, run_id=run_id))
+                     if art_record is not None else None)
         out: List[Dict[str, Any]] = []
         for platform, fmt, copy, asset_ids in [*planned, *extra_planned]:
             # Only a media-less TEXT post of a class-A (judged) script is born approved: the server
@@ -2628,7 +3308,7 @@ class MarketingRunService:
             initial = ("approved" if (auto and fmt == "text" and not asset_ids and klass == "A"
                                       and (platform, fmt) not in extra_pairs)
                        else "pending_review")
-            key = idempotency_key_for(run_date, platform, fmt)
+            key = idempotency_key_for(run_date, platform, fmt, lane=lane)
             metadata: Dict[str, Any] = {
                 "dry_run": run_dry,
                 "generation_id": script.get("generation_id"),
@@ -2650,6 +3330,8 @@ class MarketingRunService:
                 metadata[POST_METADATA_VIDEO_FEATURES] = list(video_note)
             if written_by is not None:
                 metadata[POST_METADATA_WRITTEN_BY] = dict(written_by)
+            if art_stamp is not None:
+                metadata[POST_METADATA_ART] = json.loads(art_stamp)      # one fresh copy per post
             row = {
                 "run_id": run_id,
                 "platform": platform,
@@ -2677,19 +3359,29 @@ class MarketingRunService:
                 )
             if created is None:
                 raise MarketingRunError(f"create_posts: no row for {key}")
+            if str(created.get("run_id")) != str(run_id):
+                # No cross-run adoption: keys are per (day, lane), so another run's post on this key is a hand
+                # edit or a bug — handing it back would record (and let the review bot offer) the other's post.
+                logger.error("marketing create_posts REFUSED run_id=%s lane=%s: key %s already holds post %s of run "
+                             "%s — not adopted", run_id, lane, key, created.get("id"), created.get("run_id"))
+                raise MarketingRequestInvalid(
+                    f"run {run_id}: post key {key} already belongs to another run; not adopted")
             out.append(created)
         # What the recorded rows carry (an adopted existing row keeps its own notes, whatever this call
         # would have stamped).
         notes = [(r.get("platform"), r["metadata"]) for r in out if isinstance(r.get("metadata"), dict)]
         logger.info(
-            "marketing posts recorded run_id=%s n=%d auto_publish=%s class=%s series=%s authorship=%s "
-            "first_comment=%s image_fallback=%s video_features=%s extras=%s",
-            run_id, len(out), auto, klass, series, authorship,
+            "marketing posts recorded run_id=%s lane=%s n=%d auto_publish=%s class=%s series=%s authorship=%s "
+            "first_comment=%s image_fallback=%s video_features=%s extras=%s art=%s",
+            run_id, lane, len(out), auto, klass, series, authorship,
             ",".join(str(p) for p, m in notes if m.get(POST_METADATA_FIRST_COMMENT)) or "-",
             ",".join(f"{p}:{m[POST_METADATA_IMAGE_FALLBACK]}" for p, m in notes
                      if m.get(POST_METADATA_IMAGE_FALLBACK)) or "-",
             ",".join(sorted({str(p) for p, m in notes if m.get(POST_METADATA_VIDEO_FEATURES)})) or "-",
             ",".join(p for p, _f, _copy, _ids in extra_planned) or "-",
+            "-" if art_record is None else (
+                f"{(str(art_record.get('status'))[:20] if isinstance(art_record, Mapping) else 'unreadable')}"
+                f" picture={drew_picture} cover={drew_cover}"),
         )
         return out
 
@@ -3182,8 +3874,10 @@ class MarketingRunService:
                 why = why or "publishing was off, dry-run, capped or not wired"
                 patch_meta.update({
                     "alert_kind": "expired",
+                    # The run is named by its key: the date (the text every main post's alert always had) plus
+                    # " · spotlight" for a spotlight post (`post_run_label`).
                     "alert_text": (f"⏰ {str(row.get('platform')).upper()} post expired UNPUBLISHED (run "
-                                   f"{str(row.get('idempotency_key') or '')[:10]}) — it was approved but never "
+                                   f"{post_run_label(row)}) — it was approved but never "
                                    f"went out ({str(why)[:200]})."),
                     "alert_at": _now_iso(),
                 })
@@ -3399,9 +4093,9 @@ class MarketingRunService:
                      else query.is_("updated_at", "null"))
             if _one(await _exec(query, op="close_finished_runs.update", run_id=run["id"])) is not None:
                 closed += 1
-                logger.info("marketing run CLOSED run_id=%s run_date=%s status=%s reason=%s posts=%s "
-                            "skip_reasons=%s", run["id"], run.get("run_date"), final, summary["reason"],
-                            summary["posts"], summary["skip_reasons"])
+                logger.info("marketing run CLOSED run_id=%s run_date=%s lane=%s status=%s reason=%s posts=%s "
+                            "skip_reasons=%s", run["id"], run.get("run_date"), run.get("lane") or RUN_LANE_MAIN,
+                            final, summary["reason"], summary["posts"], summary["skip_reasons"])
         return closed
 
     # measurement + digest (2026-10-01) ------------------------------------------------------------
@@ -3489,24 +4183,87 @@ class MarketingRunService:
                            "newest may be missing", len(rows), _ts_filter(start_at), _ts_filter(end_at))
         return rows
 
-    async def get_run_for_date(self, run_date: Any) -> Optional[Dict[str, Any]]:
-        """The run of one ET day (`run_date` UNIQUE), or None — `get_run_by_date` with its argument
-        checked (a `date` or an ISO date string; never a datetime)."""
-        return await self.get_run_by_date(_as_date(run_date, "run_date"))
+    async def last_checked_window(self, lane: str, series: str, *, before: Any,
+                                  within_days: int) -> Optional[Tuple[date, date]]:
+        """The Form 4 window ``(start, end)`` the newest script of `lane` dated in [before − within_days, before)
+        recorded as CHECKED for `series` — or None when no such script recorded one (C0, 2026-11-16: the insider
+        spotlight's next window starts the day after its end, never at the previous RUN's date — a 13F-led Saturday
+        checks no Form 4 window, and a Thursday filing fell between two spotlights). The script flow records it on the
+        series' trail entry of `fact_sheet.selection.trail` (`script_service.TRAIL_WINDOW_KEY`: ``{"start", "end"}``
+        ISO dates) whenever the collector checked a window — chosen, refused or nothing qualified.
+
+        Newest script first; one with no recorded window (a 13F-led day, a rest day, a failed feed, a row written
+        before C0) is passed over for the next older one. A recorded window that does not read back as a window of
+        that run (start ≤ end < its run date, at most `SPOTLIGHT_MAX_WINDOW_DAYS` long) is passed over with a WARNING —
+        an older one, or none (the caller's window then starts a week back: an overlap, harmless under the issuer
+        cooldown), never a guessed later start that could skip filings. One bounded read (one script per run, one run
+        per (day, lane): at most `within_days` rows); a failed read, a row past that bound or a run date that does not
+        read back RAISES (MarketingRunError, with the lane and the day). A lane outside RUN_LANES is
+        MarketingRequestInvalid, a bad `series` / `within_days` a ValueError — both before any read."""
+        lane = _check_lane(lane, op="last_checked_window")
+        if not isinstance(series, str) or series not in selection.SERIES_BY_ID:
+            raise ValueError(f"series must be a news series id, not {str(series)[:40]!r}")
+        day = _as_date(before, "before")
+        if type(within_days) is not int or within_days < 1:
+            raise ValueError(f"within_days must be a positive int, not {within_days!r}")
+        start = day - timedelta(days=within_days)
+        res = await _exec(
+            self.sb.table(SCRIPTS).select("run_id,run_date,fact_sheet")
+            .eq("lane", lane).gte("run_date", start.isoformat()).lt("run_date", day.isoformat())
+            .order("run_date", desc=True).limit(within_days + 1),
+            op="last_checked_window", lane=lane, before=day,
+        )
+        rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        if len(rows) > within_days:
+            raise MarketingRunError(f"last_checked_window: lane {lane} before {day}: more than {within_days} scripts in "
+                                    f"{within_days} days — one run per (day, lane) cannot hold that many")
+        dated: List[Tuple[date, Dict[str, Any]]] = []
+        for r in rows:
+            raw = r.get("run_date")
+            try:
+                row_day = _as_date(str(raw)[:10] if raw is not None else None, "run_date")
+            except ValueError as e:
+                raise MarketingRunError(f"last_checked_window: lane {lane} before {day}: the run_date {raw!r:.40} "
+                                        f"does not read back as a day ({e})") from e
+            if not (start <= row_day < day):
+                raise MarketingRunError(f"last_checked_window: lane {lane} before {day}: the read answered {row_day}, "
+                                        f"outside [{start}, {day})")
+            dated.append((row_day, r))
+        dated.sort(key=lambda t: t[0], reverse=True)
+        for row_day, r in dated:
+            window = _recorded_window(r.get("fact_sheet"), series, row_day)
+            if window is _UNREADABLE_WINDOW:
+                logger.warning("marketing last_checked_window: lane %s run_date %s run_id %s recorded a %s window that "
+                               "does not read back — passed over for an older one", lane, row_day,
+                               str(r.get("run_id"))[:40], series)
+                continue
+            if window is not None:
+                return window
+        return None
+
+    async def get_run_for_date(self, run_date: Any, *, lane: str = RUN_LANE_MAIN) -> Optional[Dict[str, Any]]:
+        """The run of one (ET day, lane) — UNIQUE (run_date, lane), migration 210 — or None:
+        `get_run_by_date` with its argument checked (a `date` or an ISO date string; never a datetime).
+        The MAIN lane unless told otherwise."""
+        return await self.get_run_by_date(_as_date(run_date, "run_date"), lane)
 
     async def list_runs_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
-        """Runs dated `start_date`..`end_date` INCLUSIVE (ET days), oldest first. `run_date` is
-        UNIQUE, so the window's day count bounds the read exactly; an inverted window reads nothing."""
+        """Runs of EVERY lane dated `start_date`..`end_date` INCLUSIVE (ET days), oldest day first and, within a
+        day, in RUN_LANES order (main, then spotlight). (run_date, lane) is UNIQUE (migration 210), so the
+        window's day count × the lanes bounds the read exactly; an inverted window reads nothing."""
         start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
         if start > end:
             return []
         res = await _exec(
             self.sb.table(RUNS).select("*")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
-            .order("run_date").limit((end - start).days + 1),
+            .order("run_date").limit(((end - start).days + 1) * len(RUN_LANES)),
             op="list_runs_between", start=start, end=end,
         )
-        return [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        # Within a day, main before spotlight (a lane that does not read back sorts last, never dropped).
+        rows.sort(key=lambda r: (str(r.get("run_date") or ""), _lane_rank(r)))
+        return rows
 
     async def spend_by_op_since(self, platform: str, since: Any) -> Dict[str, int]:
         """`spend_since` broken down by journal op ({op: micro-dollars}): the same read (rows of
@@ -3658,9 +4415,35 @@ class MarketingRunService:
             )
         )
 
-    async def insert_script(self, row: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
-        """First write wins: (row, True) if ours, (existing row, False) on a 23505."""
+    async def insert_script(self, row: Dict[str, Any], *,
+                            run: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], bool]:
+        """First write wins: (row, True) if ours, (existing row, False) on a 23505.
+
+        The script's `lane` (migration 210) is derived HERE, and only here, from its RUN row — `run` when the
+        caller holds it (it must be the script's own run), else one read of it — never from a caller's literal:
+        nothing in the schema ties `marketing_scripts.lane` to `marketing_runs.lane`, so this is the one writer
+        that keeps them equal. A row that already names a lane must name the run's (MarketingRunError
+        otherwise). A MAIN script's INSERT never sends the column (it defaults to 'main'), so its body is byte
+        for byte what it was before the lanes; a SPOTLIGHT script's carries `lane: spotlight`. A run that cannot
+        be found raises MarketingRunNotFound (the FK would refuse the INSERT anyway)."""
         run_id = row["run_id"]
+        if run is None:
+            run = await self.get_run(str(run_id))
+            if run is None:
+                raise MarketingRunNotFound(f"insert_script: run {run_id} not found")
+        elif str(run.get("id")) != str(run_id):
+            logger.error("marketing insert_script REFUSED: the run passed (%s) is not the script's run (%s)",
+                         run.get("id"), run_id)
+            raise MarketingRunError(f"insert_script: the run passed ({run.get('id')}) is not run {run_id}")
+        lane = _lane_of(run, op="insert_script")
+        if "lane" in row and row["lane"] != lane:
+            logger.error("marketing insert_script REFUSED run_id=%s: the row names lane %r, its run is %r",
+                         run_id, str(row["lane"])[:40], lane)
+            raise MarketingRunError(f"insert_script: run {run_id} is lane {lane!r}, the row says "
+                                    f"{str(row['lane'])[:40]!r}")
+        row = {k: v for k, v in row.items() if k != "lane"}
+        if lane != RUN_LANE_MAIN:
+            row["lane"] = lane
         try:
             created = _one(await _exec(self.sb.table(SCRIPTS).insert(row), op="insert_script",
                                        run_id=run_id))
@@ -3685,55 +4468,188 @@ class MarketingRunService:
         return _one(await _exec(query, op="update_script", run_id=run_id,
                                 expect=",".join(sorted(expect))))
 
-    async def recent_source_refs(self, before: date, limit: int) -> List[str]:
+    async def recent_source_refs(self, before: date, limit: int, *, lane: Optional[str] = None) -> List[str]:
         """`source_ref` of the days before `before`, newest first — what selection must not
         repeat. Read from `marketing_scripts` ITSELF (its `run_date` is written in the same
         first-write-wins INSERT as the selection), never from the best-effort mirror on
         `marketing_runs`: one lost mirror write used to drop that day's pick out of the window,
         and with the window at pool-1 the rotation then picked it again on the very next posting
-        day. Rejected days still count (the pick was made); rest days (NULL) never do."""
+        day. Rejected days still count (the pick was made); rest days (NULL) never do. Both lanes'
+        scripts are read (migration 210): a day may hold two picks, ordered newest first by
+        (run_date, created_at) so the order of a day's two picks is deterministic.
+
+        `lane` (the CALLER's lane, migration 210): when given, the SAME day's picks of the OTHER lane come
+        first — the spotlight's 10:00 pick must not be the main lane's 16:00 pick, nor the other way round —
+        read by a second, bounded query (one row per lane at most); the caller's own lane on that day is never
+        read (its pick is the one being made). A same-day row whose lane does not read back counts as the other
+        lane's (excluding more is the safe side). None (the digest's runway, and every caller before the lanes)
+        reads exactly what it always did: strictly before `before`."""
         if limit <= 0:
             return []
+        if lane is not None:
+            lane = _check_lane(lane, op="recent_source_refs")
         res = await _exec(
-            self.sb.table(SCRIPTS).select("run_date,source_ref")
+            self.sb.table(SCRIPTS).select("run_date,source_ref,created_at")
             .lt("run_date", before.isoformat())
             .not_.is_("source_ref", "null")
             .order("run_date", desc=True)
             .limit(limit),
             op="recent_source_refs", before=before,
         )
-        rows = [r for r in (getattr(res, "data", None) or []) if r.get("source_ref")]
-        rows.sort(key=lambda r: str(r.get("run_date") or ""), reverse=True)
-        return [str(r["source_ref"]) for r in rows][:limit]
+        rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict) and r.get("source_ref")]
+        rows.sort(key=lambda r: (str(r.get("run_date") or ""), str(r.get("created_at") or "")), reverse=True)
+        refs = [str(r["source_ref"]) for r in rows]
+        if lane is not None:
+            same = await _exec(
+                self.sb.table(SCRIPTS).select("run_date,source_ref,lane,created_at")
+                .eq("run_date", before.isoformat())
+                .not_.is_("source_ref", "null")
+                .limit(len(RUN_LANES)),
+                op="recent_source_refs.same_day", before=before, lane=lane,
+            )
+            others = [r for r in (getattr(same, "data", None) or [])
+                      if isinstance(r, dict) and r.get("source_ref") and _lane_rank(r) != RUN_LANES.index(lane)]
+            others.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+            refs = [str(r["source_ref"]) for r in others] + refs
+        return refs[:limit]
 
     async def script_tokens_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
-        """`{run_date, tokens_used, claude_usage}` of the scripts dated `start_date`..`end_date`
-        INCLUSIVE (ET days), oldest first — the weekly cost line's Gemini and Claude read (Claude's
-        tokens are inside `tokens_used`; `claude_usage` is NULL unless Claude billed — migration 206,
-        which must be applied before this read is deployed). Raw values: the caller validates them. One
-        script per run (PK run_id) and one run per day (UNIQUE run_date) bound the read by the day
-        count; more rows than days, or two rows on one day (a hand edit — possible in a sparse window
-        too), cannot be told apart from a double count, so it RAISES instead of returning a sum that
-        might count one twice. An inverted window reads nothing."""
+        """`{run_date, lane, tokens_used, claude_usage}` of the scripts dated `start_date`..`end_date`
+        INCLUSIVE (ET days), oldest first (main before spotlight within a day) — the weekly cost line's Gemini
+        and Claude read (Claude's tokens are inside `tokens_used`; `claude_usage` is NULL unless Claude billed —
+        migration 206, which must be applied before this read is deployed; `lane` is migration 210's, the same
+        for 210). Raw values: the caller validates them. One script per run (PK run_id) and one run per (day,
+        lane) (UNIQUE (run_date, lane)) bound the read by the day count × the lanes; more rows than that, or
+        two rows on one (day, lane) (a hand edit — possible in a sparse window too), cannot be told apart from a
+        double count, so it RAISES instead of returning a sum that might count one twice. A row with no lane is
+        the main lane's (the column default). An inverted window reads nothing."""
         start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
         if start > end:
             return []
         days = (end - start).days + 1
+        bound = days * len(RUN_LANES)
         res = await _exec(
-            self.sb.table(SCRIPTS).select("run_date,tokens_used,claude_usage")
+            self.sb.table(SCRIPTS).select("run_date,lane,tokens_used,claude_usage")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
-            .order("run_date").limit(days + 1),
+            .order("run_date").limit(bound + 1),
             op="script_tokens_between", start=start, end=end,
         )
-        rows = [{"run_date": r.get("run_date"), "tokens_used": r.get("tokens_used"),
-                 "claude_usage": r.get("claude_usage")}
+        rows = [{"run_date": r.get("run_date"), "lane": r.get("lane") or RUN_LANE_MAIN,
+                 "tokens_used": r.get("tokens_used"), "claude_usage": r.get("claude_usage")}
                 for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
-        days_seen = [str(r["run_date"]) for r in rows]
-        if len(rows) > days or len(set(days_seen)) != len(days_seen):
+        slots = [(str(r["run_date"]), str(r["lane"])) for r in rows]
+        if len(rows) > bound or len(set(slots)) != len(slots):
             raise MarketingRunError(
-                f"script_tokens_between: {len(rows)} scripts for the {days} days {start}..{end} and a day "
+                f"script_tokens_between: {len(rows)} scripts for the {days} days {start}..{end} and a (day, lane) "
                 "holds two — the cost line refuses to sum them")
+        rows.sort(key=lambda r: (str(r["run_date"]), _lane_rank(r)))
         return rows
+
+    async def lane_scripts_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
+        """The ACCEPTED scripts of EVERY lane dated `start_date`..`end_date` INCLUSIVE (ET days) — `{run_id,
+        run_date, lane, source_ref, template_id, output}`, oldest day first and main before spotlight within a
+        day — what the cross-lane exclusion reads (migration 210): the series another lane posted that day, and
+        the lead company it drew in the last days. A row with no lane is the main lane's. Bounded by the day
+        count × the lanes (one script per run, one run per (day, lane)): one row past that bound (a hand edit or
+        a double count) RAISES (MarketingRunError) rather than return a list a caller could mistake for the
+        whole window; so does a failed read — never a silent empty. An inverted window reads nothing."""
+        start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
+        if start > end:
+            return []
+        bound = ((end - start).days + 1) * len(RUN_LANES)
+        res = await _exec(
+            self.sb.table(SCRIPTS).select("run_id,run_date,lane,source_ref,template_id,output")
+            .eq("status", "accepted")
+            .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
+            .order("run_date").limit(bound + 1),
+            op="lane_scripts_between", start=start, end=end,
+        )
+        rows = [{"run_id": r.get("run_id"), "run_date": r.get("run_date"), "lane": r.get("lane") or RUN_LANE_MAIN,
+                 "source_ref": r.get("source_ref"), "template_id": r.get("template_id"), "output": r.get("output")}
+                for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        if len(rows) > bound:
+            raise MarketingRunError(
+                f"lane_scripts_between: more than {bound} accepted scripts for {start}..{end} — one run per (day, "
+                "lane) cannot hold that many; refusing a list that may not be the whole window")
+        rows.sort(key=lambda r: (str(r["run_date"]), _lane_rank(r)))
+        return rows
+
+    async def theme_refs_between(self, start_date: Any, end_date: Any) -> List[str]:
+        """The `source_ref` of every THEME script (`template_id` = theme_explainer, any status: a pick is a pick, as in
+        `recent_source_refs`) dated `start_date`..`end_date` INCLUSIVE (ET days), oldest first — the weekly theme
+        post's rotation read (news-v23 phase 3: which theme, which angle, when — `company_news_rules.theme_ref_items`),
+        `company_news_rules.THEME_HISTORY_DAYS` back. Its own bounded read, so the rotation sees its whole window
+        whatever the other series post and however the posting days changed: at most one script per (day, lane) — the
+        bound; one row past it (a hand edit) RAISES (MarketingRunError), as does a failed read — never a silent
+        empty. An inverted window reads nothing."""
+        start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
+        if start > end:
+            return []
+        bound = ((end - start).days + 1) * len(RUN_LANES)
+        res = await _exec(
+            self.sb.table(SCRIPTS).select("run_date,source_ref")
+            .eq("template_id", "theme_explainer")
+            .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
+            .not_.is_("source_ref", "null")
+            .order("run_date").limit(bound + 1),
+            op="theme_refs_between", start=start, end=end,
+        )
+        rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        if len(rows) > bound:
+            raise MarketingRunError(
+                f"theme_refs_between: more than {bound} theme scripts for {start}..{end} — one run per (day, lane) "
+                "cannot hold that many; refusing a list that may not be the whole window")
+        rows.sort(key=lambda r: str(r.get("run_date") or ""))
+        return [str(r["source_ref"]) for r in rows if isinstance(r.get("source_ref"), str) and r["source_ref"]]
+
+    async def art_usage_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
+        """`{run_date, lane, art}` of EVERY script dated `start_date`..`end_date` INCLUSIVE (ET days), whatever its
+        status, oldest day first and main before spotlight within a day — the per-post art's spend read (workstream
+        C: the monthly cap, `art_spend_between`; the weekly digest's art part). `art` is the raw `output.art` (None
+        when the output is NULL or carries no art; an output that is not an object is passed through as `art`, so
+        `art_spend_of` reads it as unreadable). The record and its usage ride in `marketing_scripts.output.art` (no
+        migration), so this selects `run_date,lane,output` and extracts in Python — no PostgREST JSON-path alias
+        (which the in-memory fakes could not model). NO one-row-per-day assumption: two lanes post on one day.
+        Bounded by the day count × the lanes (one script per run, one run per (day, lane)): one row past that bound
+        RAISES (MarketingRunError) rather than return a sum that may miss rows — as does a failed read; never a
+        silent empty. An inverted window reads nothing."""
+        start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
+        if start > end:
+            return []
+        bound = ((end - start).days + 1) * len(RUN_LANES)
+        res = await _exec(
+            self.sb.table(SCRIPTS).select("run_date,lane,output")
+            .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
+            .order("run_date").limit(bound + 1),
+            op="art_usage_between", start=start, end=end,
+        )
+        rows: List[Dict[str, Any]] = []
+        for r in getattr(res, "data", None) or []:
+            if not isinstance(r, dict):
+                rows.append({"run_date": None, "lane": RUN_LANE_MAIN, "art": r})     # unreadable, never skipped
+                continue
+            output = r.get("output")
+            art = output.get("art") if isinstance(output, dict) else output
+            rows.append({"run_date": r.get("run_date"), "lane": r.get("lane") or RUN_LANE_MAIN, "art": art})
+        if len(rows) > bound:
+            raise MarketingRunError(
+                f"art_usage_between: more than {bound} scripts for {start}..{end} — one run per (day, lane) cannot "
+                "hold that many; refusing a sum that may not be the whole window")
+        rows.sort(key=lambda r: (str(r["run_date"] or ""), _lane_rank(r)))
+        return rows
+
+    async def art_spend_between(self, start_date: Any, end_date: Any) -> Dict[str, int]:
+        """{micros, images, images_uncertain, runs} the per-post art of the scripts dated `start_date`..`end_date`
+        INCLUSIVE spent (`art_usage_between` → `art_spend_of`) — the monthly cap's read (`script_service`).
+        RAISES MarketingRunError on a failed or truncated read AND on any record whose spend cannot be read (a cap
+        must never sum a guess: the caller makes no art, `budget_unreadable`). Two runs a day both count."""
+        rows = await self.art_usage_between(start_date, end_date)
+        spent = art_spend_of(rows)
+        if spent is None:
+            raise MarketingRunError(
+                f"art_spend_between: an art record dated {start_date}..{end_date} has a spend that cannot be read — "
+                "the month's art spend is unknown")
+        return spent
 
 
 def _is_storage_conflict(exc: BaseException) -> bool:

@@ -26,6 +26,14 @@ cost line can price them at Claude's rates instead of Gemini's.
 
 Settings are read at CALL time, so flipping a role needs no code — but `script_service` sizes the
 marketing lease at import, so a marketing switch takes effect with the deploy that sets it.
+
+The one other way to Claude is `ClaudeOnly`: Claude with NO Gemini fallback. It serves the
+measurement scripts and — owner decision 2026-11-15, "Google draws, Claude checks" — the marketing
+per-post ART brief and check (`services/marketing/post_art.py`), which pass `images` (vision: the
+drawn picture), `max_tokens` (Opus 5.5 always thinks, and its thinking counts against it), a client
+`deadline_seconds` that fits the art step's budget, an explicit `effort`, and the opt-in breaker
+policy BREAKER_ACCOUNT. The art is NOT a role: ROLES, MARKETING_SETTINGS and
+`any_marketing_role_on_claude()` — and so the script lease — are untouched by it.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from app.config import settings
 from app.integrations import anthropic_client as ac
@@ -79,6 +87,16 @@ CLAUDE_TOKENS_ATTR = "claude_tokens_used"
 #: line prices per model (Claude's writer and judge are different models with different prices).
 #: Absent on a plain Gemini result and whenever Claude billed nothing.
 CLAUDE_USAGE_KEY = "claude_usage"
+
+#: ClaudeOnly's opt-in breaker policy (2026-11-16). The default, None, is the measurement scripts'
+#: behaviour: the shared breaker is neither read nor opened (a calibration must measure Claude, not
+#: skip it). BREAKER_ACCOUNT — the marketing art brief and check — reads it (an open breaker raises
+#: ClaudeBreakerOpenException with no call) and opens it ONLY on a failure of the account itself
+#: (`anthropic_client.ACCOUNT_BREAKER_EXCEPTIONS`: used-up credits, a revoked key), never on a 429,
+#: an overload or a timeout — those only cost that call. The four roles (ProviderRouter) keep the
+#: wider `anthropic_client.BREAKER_EXCEPTIONS`.
+BREAKER_ACCOUNT = "account"
+BREAKER_POLICIES = (None, BREAKER_ACCOUNT)
 
 _breaker_until: float = 0.0
 _breaker_reason: str = ""
@@ -229,7 +247,16 @@ def effective_effort() -> str:
     return _effort()
 
 
-def _effort() -> str:
+def _effort(override: Optional[str] = None) -> str:
+    """CAYDEX_CLAUDE_EFFORT, or a ClaudeOnly caller's explicit `effort` (the art: "low" whatever the
+    roles use). Unknown → "low", with ONE ERROR per bad value."""
+    if override is not None:
+        raw = str(override).strip().lower()
+        if raw not in EFFORTS:
+            _error_once(f"effort_arg:{raw}", "llm_provider: effort=%s is not one of %s — using low",
+                        _shown(override), EFFORTS)
+            return "low"
+        return raw
     raw = str(settings.CAYDEX_CLAUDE_EFFORT or "").strip().lower()
     if raw not in EFFORTS:
         _error_once(f"effort:{raw}", "llm_provider: CAYDEX_CLAUDE_EFFORT=%s is not one of %s — using low",
@@ -262,11 +289,17 @@ def route_for(usage_tag: Optional[str]) -> Optional[Tuple[str, str]]:
     return setting, model
 
 
-async def _ask_claude(claude: Any, model: str, prompt: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+async def _ask_claude(claude: Any, model: str, prompt: str, kwargs: Dict[str, Any], *,
+                      effort: Optional[str] = None,
+                      claude_kwargs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The Gemini call's arguments → the Claude call: the same prompt, system instruction and
     schema (translated); temperature, cache and service_tier have no Claude equivalent and are
-    dropped; thinking_budget=0 becomes Sonnet's between_tools where the model takes it."""
-    effort = _effort()
+    dropped; thinking_budget=0 becomes Sonnet's between_tools where the model takes it.
+
+    `effort` (ClaudeOnly only) replaces CAYDEX_CLAUDE_EFFORT; `claude_kwargs` (ClaudeOnly only:
+    images, max_tokens, deadline_seconds — each present only when its caller set it) are Claude-only
+    keywords added to the call as they are. The router passes neither, so its call is unchanged."""
+    effort = _effort(effort)
     schema = kwargs.get("response_schema")
     return await claude.generate_json(
         prompt,
@@ -276,6 +309,7 @@ async def _ask_claude(claude: Any, model: str, prompt: str, kwargs: Dict[str, An
         thinking=_thinking(model, kwargs.get("thinking_budget"), effort),
         effort=effort,
         usage_tag=kwargs.get("usage_tag"),
+        **(claude_kwargs or {}),
     )
 
 
@@ -285,35 +319,83 @@ _MEASURE_RETRYABLE = (ac.ClaudeRateLimitException, ac.ClaudeUnavailableException
 
 
 class ClaudeOnly:
-    """Claude with NO fallback, for measurement scripts (judge calibration, the writer preview): a
-    fallback would mix Gemini answers into a Claude measurement. Raises ClaudeException.
+    """Claude with NO fallback. Raises ClaudeException. Two users:
+
+      * measurement scripts (judge calibration, the writer preview): a fallback would mix Gemini
+        answers into a Claude measurement;
+      * the marketing per-post art brief and check (owner decision 2026-11-15, "Google draws, Claude
+        checks": no Gemini fallback by decision — a Gemini check would be Google grading Google's own
+        picture, and art is optional), with `breaker=BREAKER_ACCOUNT` and, per call, `images`,
+        `max_tokens`, `deadline_seconds` and `effort`.
 
     `retries` (default 0) re-asks after a 429 / 5xx / overload / timeout with a 2-4-8 s back-off, so
-    one transport blip among hundreds of calibration calls is not scored as an unusable answer. The
-    tokens of a failed attempt ride on the final exception's `tokens_used`."""
+    one transport blip among hundreds of calibration calls is not scored as an unusable answer. Every
+    attempt's billed tokens are kept, on success AND on failure: a failed call's ride on the final
+    exception's `tokens_used` and, by model and kind, its CLAUDE_USAGE_KEY attribute; a success
+    carries CLAUDE_USAGE_KEY in its result. The final exception's `billing_unknown` is True when ANY
+    attempt may have billed without an answer (a timeout, a dropped connection); a success does not
+    report an earlier such attempt, so a caller that caps its spend (the art) uses retries=0.
+
+    `breaker` (BREAKER_POLICIES): None (the default) neither reads nor opens the shared breaker;
+    BREAKER_ACCOUNT raises ClaudeBreakerOpenException with no call while it is open, and opens it
+    only on ACCOUNT_BREAKER_EXCEPTIONS. An unknown policy is a ValueError at construction."""
 
     def __init__(self, model: str, claude: Any = None, *, retries: int = 0,
-                 sleep: Any = None):
+                 sleep: Any = None, breaker: Optional[str] = None):
+        if breaker not in BREAKER_POLICIES:
+            raise ValueError(f"ClaudeOnly: unknown breaker policy {breaker!r} — one of {BREAKER_POLICIES}")
         self.model = model
         self._claude = claude
         self.retries = max(int(retries), 0)
         self._sleep = sleep
+        self.breaker = breaker
 
-    async def generate_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+    async def generate_json(self, prompt: str, *, images: Sequence[Tuple[bytes, str]] = (),
+                            max_tokens: Optional[int] = None, deadline_seconds: Optional[float] = None,
+                            effort: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
+        """The Gemini-shaped call (`kwargs`: system_instruction, response_schema, usage_tag, …), plus
+        the Claude-only keywords. Each is sent only when set, so a call without them is exactly
+        today's: `images` — (bytes, media type) pairs, sent before the prompt (the client refuses a
+        bad one, typed, before any I/O); `max_tokens` — the answer's cap, thinking included (else
+        CAYDEX_CLAUDE_MAX_TOKENS); `deadline_seconds` — a SHORTER total deadline for EACH attempt,
+        ending in ClaudeTimeoutException; `effort` — replaces CAYDEX_CLAUDE_EFFORT."""
         import asyncio
 
         claude = self._claude or ac.get_claude_client()
         sleep = self._sleep or asyncio.sleep
+        claude_kwargs: Dict[str, Any] = {}
+        no_images = images is None or (isinstance(images, (list, tuple)) and len(images) == 0)
+        if not no_images:
+            claude_kwargs["images"] = images
+        if max_tokens is not None:
+            claude_kwargs["max_tokens"] = max_tokens
+        if deadline_seconds is not None:
+            claude_kwargs["deadline_seconds"] = deadline_seconds
+        tag = kwargs.get("usage_tag")
         spent = 0
         spent_usage: Dict[str, Dict[str, int]] = {}
+        billing_unknown = False   # an earlier attempt may have billed without an answer
         for attempt in range(self.retries + 1):
+            if self.breaker == BREAKER_ACCOUNT and breaker_open():
+                skipped = ac.ClaudeBreakerOpenException(
+                    f"the shared Claude breaker is open ({_breaker_reason}) — not called "
+                    f"(model={self.model}, tag={tag})", tokens_used=spent)
+                skipped.billing_unknown = billing_unknown
+                if spent_usage:
+                    setattr(skipped, CLAUDE_USAGE_KEY, spent_usage)
+                logger.warning("CLAUDE_SKIP tag=%s model=%s reason=breaker_open(%s) — no call, no fallback",
+                               tag, self.model, _breaker_reason)
+                raise skipped
             try:
-                result = await _ask_claude(claude, self.model, prompt, kwargs)
+                result = await _ask_claude(claude, self.model, prompt, kwargs, effort=effort,
+                                           claude_kwargs=claude_kwargs)
             except _MEASURE_RETRYABLE as e:
                 spent += int(getattr(e, "tokens_used", 0) or 0)
                 spent_usage = merge_claude_usage(spent_usage, _exception_usage(e))
+                billing_unknown = billing_unknown or bool(getattr(e, "billing_unknown", False))
                 if attempt >= self.retries:
                     e.tokens_used = spent
+                    e.billing_unknown = billing_unknown
                     if spent_usage:
                         setattr(e, CLAUDE_USAGE_KEY, spent_usage)
                     raise
@@ -322,7 +404,10 @@ class ClaudeOnly:
                 await sleep(2.0 * (2 ** attempt))
                 continue
             except ac.ClaudeException as e:
+                if self.breaker == BREAKER_ACCOUNT and isinstance(e, ac.ACCOUNT_BREAKER_EXCEPTIONS):
+                    _open_breaker(f"{type(e).__name__} (tag={tag})")
                 e.tokens_used = int(getattr(e, "tokens_used", 0) or 0) + spent
+                e.billing_unknown = billing_unknown or bool(getattr(e, "billing_unknown", False))
                 usage = merge_claude_usage(spent_usage, _exception_usage(e))
                 if usage:
                     setattr(e, CLAUDE_USAGE_KEY, usage)

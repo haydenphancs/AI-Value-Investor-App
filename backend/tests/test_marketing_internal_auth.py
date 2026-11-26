@@ -68,18 +68,24 @@ class _FakeService:
     def __init__(self):
         self.calls = []
         self.claim_capabilities = []
+        #: The lane each claim reached the ledger with (migration 210): the route decides it, never the body.
+        self.claim_lanes = []
 
     async def claim_run(self, run_date, *, worker_version, dry_run, now=None, claim_nonce=None, resume_only=False,
-                        capabilities=()):
+                        capabilities=(), lane="main"):
         self.calls.append(("claim", run_date, worker_version, dry_run))
         self.claim_capabilities.append(capabilities)
+        self.claim_lanes.append(lane)
         if resume_only:
             return None, "no_run"
-        return {
+        row = {
             "id": "11111111-1111-1111-1111-111111111111", "run_date": run_date.isoformat(),
             "status": "in_progress", "stage": "planned", "content_class": "A", "dry_run": dry_run,
             "attempts": 1, "timings": {}, "metadata": {}, "an_extra_column": 1,
-        }, "claimed"
+        }
+        if lane != "main":
+            row["lane"] = lane
+        return row, "claimed"
 
     async def update_run(self, run_id, **fields):
         self.calls.append(("update", run_id, fields))
@@ -184,8 +190,9 @@ def test_every_route_in_the_module_is_gated(client, token, fake_service):
         path = re.sub(r"\{[^}]+\}", "p1", route.path)
         for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
             probes.append((method, f"{_BASE}{path}"))
-    assert len(probes) >= 6, probes  # anti-vacuity: claim, patch, assets, complete, script, posts
+    assert len(probes) >= 7, probes  # anti-vacuity: 2 claims, patch, assets, complete, script, posts
     assert ("POST", f"{_BASE}/runs/p1/script") in probes
+    assert ("POST", f"{_BASE}/lanes/spotlight/claim") in probes   # the spotlight lane's claim (migration 210)
     for method, path in probes:
         r = client.request(method, path, json={})
         assert r.status_code == 401, (method, path, r.status_code, r.text)
@@ -233,9 +240,10 @@ def test_a_claim_declaring_an_unknown_capability_keeps_the_claim_without_crediti
     assert fake_service.claim_capabilities == [expected]
 
 
-@pytest.mark.parametrize("bad", [[42], "post_image", ["post_image"] * 9, None])
+@pytest.mark.parametrize("bad", [[42], "post_image", ["post_image"] * 17, None])
 def test_a_claim_with_a_malformed_capability_list_is_refused_before_the_ledger(client, token, fake_service, bad):
-    """Typed and bounded: a non-list, a non-string value, None or more than 8 entries is a 422."""
+    """Typed and bounded: a non-list, a non-string value, None or more than 16 entries (8 before news-v23 phase 3)
+    is a 422."""
     r = client.post(f"{_BASE}/runs/claim",
                     json={"run_date": _TODAY.isoformat(), "worker_version": "t", "claim_nonce": _NONCE,
                           "capabilities": bad},
@@ -393,8 +401,19 @@ def test_the_module_touches_no_fmp_client():
 # ── the caller-claim header (rules marketing.md §2) ───────────────────────────
 
 
+#: The two routes a caller reaches before it holds a claim: the main lane's and, since migration 210, the spotlight
+#: lane's. A LITERAL here, compared to the module's tuple below, so a widened exemption cannot pass unseen.
+_CLAIM_PATHS = ("/runs/claim", "/lanes/spotlight/claim")
+
+
 def _worker_routes():
-    return [r for r in mod.router.routes if not r.path.endswith("/runs/claim")]
+    return [r for r in mod.router.routes if not r.path.endswith(_CLAIM_PATHS)]
+
+
+def test_the_claim_exemption_lists_exactly_the_two_claim_routes():
+    assert mod._CLAIM_ROUTE_PATHS == _CLAIM_PATHS
+    claim_routes = sorted((r.path, sorted(r.methods)) for r in mod.router.routes if r.path.endswith(_CLAIM_PATHS))
+    assert claim_routes == [("/lanes/spotlight/claim", ["POST"]), ("/runs/claim", ["POST"])]
 
 
 def test_every_route_but_the_claim_needs_the_claim_header_and_the_claim_route_does_not(client, token, fake_service):
@@ -457,9 +476,146 @@ def test_the_exemption_itself_is_the_matched_post_claim_route():
                         "query_string": b"", "route": route})
 
     assert mod.require_caller_claim(req("POST", f"{_BASE}/runs/claim", f"{_BASE}/runs/claim"), None) is None
+    # the spotlight lane's claim route (migration 210): exempt the same way, by its matched POST template only
+    lane = f"{_BASE}/lanes/spotlight/claim"
+    assert mod.require_caller_claim(req("POST", lane, lane), None) is None
     for method, path, template in (("PATCH", f"{_BASE}/runs/claim", f"{_BASE}/runs/{{run_id}}"),
                                    ("POST", f"{_BASE}/runs/claim/assets", f"{_BASE}/runs/{{run_id}}/assets"),
-                                   ("GET", f"{_BASE}/runs/claim", f"{_BASE}/runs/claim")):
+                                   ("GET", f"{_BASE}/runs/claim", f"{_BASE}/runs/claim"),
+                                   ("GET", lane, lane), ("PATCH", lane, lane),
+                                   # a request PATH ending in the lane route is not the route: the TEMPLATE decides
+                                   ("POST", f"{_BASE}/runs/lanes/spotlight/claim",
+                                    f"{_BASE}/runs/{{run_id}}/assets")):
         with _pytest.raises(HTTPException) as err:
             mod.require_caller_claim(req(method, path, template), None)
         assert err.value.status_code == 422, (method, path)
+
+
+# ── the spotlight lane's claim route (migration 210, 2026-11-15) ──────────────────────────────────────────────
+# A literal route, never a `lane` field on /runs/claim (RunClaimRequest ignores unknown fields, so an older web would
+# claim MAIN): the same body and answer, the lane decided by the ROUTE, the claim header not required.
+
+_LANE = f"{_BASE}/lanes/spotlight/claim"
+
+
+def test_the_spotlight_claim_route_is_gated_like_the_main_one(client, token, fake_service):
+    body = {"run_date": _TODAY.isoformat(), "worker_version": "t", "claim_nonce": _NONCE}
+    r = client.post(_LANE, json=body)
+    assert r.status_code == 401 and r.json()["error_code"] == "AUTH_REQUIRED", r.text
+    r = client.post(_LANE, json=body, headers={"X-Marketing-Worker-Token": "nope"})
+    assert r.status_code == 403 and r.json()["error_code"] == "AUTH_FORBIDDEN", r.text
+    assert fake_service.calls == []
+
+
+def test_the_spotlight_claim_needs_no_claim_header_and_reaches_the_ledger_as_the_spotlight_lane(
+        client, token, fake_service):
+    h = {"X-Marketing-Worker-Token": token}
+    base = {"run_date": _TODAY.isoformat(), "worker_version": "lane", "dry_run": False, "claim_nonce": _NONCE}
+    r = client.post(_LANE, json={**base, "capabilities": ["post_image"]}, headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["claimed"] is True and body["reason"] == "claimed"
+    assert body["run"]["lane"] == "spotlight" and "an_extra_column" not in body["run"]
+    # the main route, same body: the main lane, and the echo says so (a row with no lane column is main)
+    r = client.post(f"{_BASE}/runs/claim", json=base, headers=h)
+    assert r.status_code == 200 and r.json()["run"]["lane"] == "main", r.text
+    # a `lane` FIELD on the main route is ignored (extra=ignore) — it can never claim another lane
+    r = client.post(f"{_BASE}/runs/claim", json={**base, "lane": "spotlight"}, headers=h)
+    assert r.status_code == 200 and r.json()["run"]["lane"] == "main", r.text
+    assert fake_service.claim_lanes == ["spotlight", "main", "main"]
+    assert fake_service.claim_capabilities[0] == ("post_image",)
+    assert fake_service.calls[0] == ("claim", _TODAY, "lane", False)
+
+
+def test_the_spotlight_claim_window_and_body_checks_match_the_main_routes(client, token, fake_service):
+    h = {"X-Marketing-Worker-Token": token}
+    for ok in (_TODAY, _YESTERDAY):
+        r = client.post(_LANE, json={"run_date": ok.isoformat(), "worker_version": "t", "claim_nonce": _NONCE},
+                        headers=h)
+        assert r.status_code == 200, (ok, r.text)
+    for bad in (_TODAY + timedelta(days=1), _TODAY - timedelta(days=2)):
+        r = client.post(_LANE, json={"run_date": bad.isoformat(), "worker_version": "t", "claim_nonce": _NONCE},
+                        headers=h)
+        assert r.status_code == 422 and r.json()["error_code"] == "INVALID_INPUT", bad
+    for body in ({"run_date": "2026/09/17", "worker_version": "t", "claim_nonce": _NONCE},
+                 {"run_date": _TODAY.isoformat(), "worker_version": "t"},                     # no nonce
+                 {"run_date": _TODAY.isoformat(), "worker_version": "t", "claim_nonce": _NONCE,
+                  "capabilities": "post_image"}):
+        assert client.post(_LANE, json=body, headers=h).status_code == 422, body
+    assert len(fake_service.calls) == 2            # only the two in-window claims reached the ledger
+    r = client.post(_LANE, json={"run_date": _YESTERDAY.isoformat(), "worker_version": "t", "resume_only": True,
+                                 "claim_nonce": _NONCE}, headers=h)
+    assert r.status_code == 200 and r.json() == {"claimed": False, "reason": "no_run", "run": None}
+
+
+def _real_ledger(monkeypatch):
+    """The REAL run service on the in-memory PostgREST fake, behind the route."""
+    from app.services.marketing import run_service as mrs
+    from test_marketing_run_service import FakeSupabase
+
+    svc = mrs.MarketingRunService(supabase=FakeSupabase())
+    monkeypatch.setattr(mod, "get_marketing_run_service", lambda: svc)
+    return svc
+
+
+def _open_lane(monkeypatch, *, on=True, days="tue,thu,sat", classes="A,C,F",
+               series="ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"):
+    """The spotlight lane's settings (the hours rule holds: 10 + 6 <= 16). _TODAY (2026-09-17) is a Thursday. The
+    per-series switch lists the insider spotlight: C0 (2026-11-16) — that Thursday the main lane's chain holds Money
+    Map, so with the 2a default alone the spotlight would hold no series and not be scheduled."""
+    assert _TODAY.weekday() == 3
+    for name, value in (("MARKETING_SPOTLIGHT_ENABLED", on), ("MARKETING_SPOTLIGHT_WEEKDAYS", days),
+                        ("MARKETING_SPOTLIGHT_HOUR_ET", 10), ("MARKETING_MAX_RUN_ATTEMPTS", 6),
+                        ("MARKETING_RUN_HOUR_ET", 16), ("MARKETING_CONTENT_CLASSES", classes),
+                        ("MARKETING_NEWS_SERIES", series)):
+        monkeypatch.setattr(settings, name, value)
+
+
+@pytest.mark.parametrize("why", ["switch_off", "not_a_spotlight_weekday", "no_news_class", "hours_overlap",
+                                 "only_the_main_lanes_series"])
+def test_a_closed_spotlight_lane_answers_not_scheduled_and_touches_nothing(client, token, monkeypatch, why):
+    svc = _real_ledger(monkeypatch)
+    _open_lane(monkeypatch, on=why != "switch_off", days="mon,wed" if why == "not_a_spotlight_weekday" else "tue,thu,sat",
+               classes="A" if why == "no_news_class" else "A,C,F",
+               series=("ceo_buys,insider_buys,thirteen_f,money_map" if why == "only_the_main_lanes_series"
+                       else "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"))
+    if why == "hours_overlap":
+        monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_HOUR_ET", 11)         # 11 + 6 > 16
+    h = {"X-Marketing-Worker-Token": token}
+    for body in ({"run_date": _TODAY.isoformat(), "worker_version": "t", "claim_nonce": _NONCE},
+                 {"run_date": _YESTERDAY.isoformat(), "worker_version": "t", "claim_nonce": _NONCE,
+                  "resume_only": True}):
+        if why == "not_a_spotlight_weekday" and body.get("resume_only"):
+            continue          # yesterday (a Wednesday) IS one of "mon,wed", so its resume may proceed
+        r = client.post(_LANE, json=body, headers=h)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"claimed": False, "reason": "not_scheduled", "run": None}
+    assert all(t.rows == [] for t in svc.sb.tables.values())                   # nothing read into, nothing written
+
+
+def test_an_open_spotlight_lane_claims_its_own_row_beside_the_days_main_run(client, token, monkeypatch):
+    svc = _real_ledger(monkeypatch)
+    _open_lane(monkeypatch)
+    from app.services.marketing import run_service as mrs
+
+    h = {"X-Marketing-Worker-Token": token}
+    main = client.post(f"{_BASE}/runs/claim", json={"run_date": _TODAY.isoformat(), "worker_version": "t",
+                                                    "claim_nonce": _NONCE}, headers=h).json()
+    spot = client.post(_LANE, json={"run_date": _TODAY.isoformat(), "worker_version": "t",
+                                    "claim_nonce": "f" * 32}, headers=h).json()
+    assert main["claimed"] and spot["claimed"], (main, spot)
+    assert (main["run"]["lane"], spot["run"]["lane"]) == ("main", "spotlight")
+    assert main["run"]["id"] != spot["run"]["id"] and main["run"]["run_date"] == spot["run"]["run_date"]
+    rows = svc.sb.tables[mrs.RUNS].rows
+    assert len(rows) == 2
+    # the main INSERT never sent `lane` (the column defaults); the spotlight's did
+    assert [("lane" in r, r.get("lane")) for r in rows] == [(False, None), (True, "spotlight")]
+    # a second claim of each lane meets its OWN row
+    again = client.post(_LANE, json={"run_date": _TODAY.isoformat(), "worker_version": "t",
+                                     "claim_nonce": "e" * 32}, headers=h).json()
+    assert (again["claimed"], again["reason"], again["run"]["id"]) == (False, "in_progress", spot["run"]["id"])
+    # switched off now: the lane answers not_scheduled again, even with its row there
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+    off = client.post(_LANE, json={"run_date": _TODAY.isoformat(), "worker_version": "t",
+                                   "claim_nonce": "e" * 32}, headers=h).json()
+    assert off == {"claimed": False, "reason": "not_scheduled", "run": None}

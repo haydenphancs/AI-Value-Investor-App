@@ -122,6 +122,8 @@ _CATEGORY_TAG: Dict[str, str] = {
     "news:thirteen_f": "#secfilings", "news:congress_count": "#congress",
     "news:company_stakes": "#businessnews", "news:earnings": "#earnings",
     "news:money_map": "#businessmodel", "news:theme_explainer": "#industrytrends",
+    # the spotlight lane's single-company series (news-v22, 2026-11-15): filings, like the Form 4 / 13F roundups
+    "news:insider_spotlight": "#secfilings", "news:thirteen_f_spotlight": "#secfilings",
 }
 _BASE_TAGS = ("#investing", "#financialliteracy")
 _TAGS_PER_PLATFORM: Dict[str, int] = {
@@ -142,7 +144,8 @@ AUTHORSHIP_AI = "ai"
 AUTHORSHIP_TEMPLATE = "template"
 AUTHORSHIPS: Tuple[str, ...] = (AUTHORSHIP_AI, AUTHORSHIP_TEMPLATE)
 #: Template copy carries it ALWAYS (deterministic, and true for a company too): the disclaimer
-#: of every caption, the video's disclaimer card and the image footer (without its full stop).
+#: of every caption and the video's disclaimer card. Since the restyle (news-v23, owner 2026-11-19) it
+#: is no longer on the picture's footer — a picture never names a person; the caption still says it.
 NON_AFFILIATION = "Not affiliated with anyone named."
 #: What a template disclaimer says instead of an AI line (owner wording, 2026-10-09): the text
 #: note on text/image captions, the video note wherever a narrated video is described.
@@ -203,48 +206,136 @@ def disclaimer_card(run_date: date, authorship: str = AUTHORSHIP_AI) -> str:
 
 
 #: Who wrote an image's words: "ai" — the class-A writer's lesson (drop 1). "template" — the
-#: code-owned news templates (drop 2), whose footer names its source and its as-of label instead of AI.
+#: code-owned news templates (drop 2), whose footer names its source (and, per family, its filing or
+#: fiscal date) instead of an AI line.
 IMAGE_AUTHORSHIPS: Tuple[str, ...] = AUTHORSHIPS
-#: A template footer's `source` / `as_of` slot: one line, no padding, no link, never the data
-#: vendor's name (rules §1: never name or credit FMP on a public asset).
-FOOTER_SLOT_MAX_CHARS = 160
-_FOOTER_SLOT_BANNED_RE = re.compile(
-    r"\bfmp\b|financial\s*modeling\s*prep|://|\bwww\.", re.IGNORECASE)
-_SLOT_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")
 
+# ── the picture footer: ONE short line (restyle, owner-approved 2026-11-19) ────────────────────────
+#
+# Owner, 2026-11-19: "if we can't remove, then say it shortly". Until news-v22 every picture burned the long
+# footer ("Educational only · not investment advice · <AI line or Source: … · as-of> · Caydex · Not affiliated
+# with anyone named"). Since the restyle a picture burns ONE short grey line per family (RESTYLE_SPEC §1):
+# "Educational only" and the brand leave the picture (the brand is now its top row: `schemas.marketing.
+# BRAND_ROW_WORD`), and so do the AI line and "Not affiliated with anyone named" (a picture never names a
+# person). The CAPTION is unchanged: every caption still carries the full disclaimer, the AI line (or the
+# template note) and NON_AFFILIATION, and the platform AI flags are unchanged (`made_with_ai`).
 
-def _footer_slot(value: Any, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"image_footer: the template footer needs a non-blank {name}")
-    if value != value.strip() or "  " in value or _SLOT_CONTROL_RE.search(value):
-        raise ValueError(f"image_footer: {name} must be one plain line with no padding")
-    if len(value) > FOOTER_SLOT_MAX_CHARS:
-        raise ValueError(f"image_footer: {name} is {len(value)} chars (max {FOOTER_SLOT_MAX_CHARS})")
-    if _FOOTER_SLOT_BANNED_RE.search(value):
-        raise ValueError(f"image_footer: {name} names the data vendor or carries a link")
-    return value
+#: Every picture footer opens with it; a LESSON picture's footer is exactly this.
+IMAGE_FOOTER_HEAD = "Not investment advice"
+#: The template families' source words (RESTYLE_SPEC §1), verbatim — the only `source` a template footer takes.
+#: Never the data vendor (rules §1: never name or credit FMP on a public asset): the table is closed.
+FOOTER_SOURCE_FORM4 = "SEC Form 4"
+FOOTER_SOURCE_13F = "SEC Form 13F"
+FOOTER_SOURCE_STATEMENTS = "company financial statements"
+FOOTER_SOURCE_EARNINGS = "company results and analyst consensus"
+FOOTER_SOURCE_CONGRESS = "congressional disclosures"
+FOOTER_SOURCE_FILINGS = "company filings"
+#: The theme angle "who's biggest" (market value — market cap is allowed, owner 2026-09-28; never a price).
+FOOTER_SOURCE_FILINGS_MARKET = "company filings and market data"
+
+_FOOTER_MON = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+_FOOTER_MONTH = (r"(?:January|February|March|April|May|June|July|August|September|October|November"
+                 r"|December)")
+_FOOTER_DAY = rf"{_FOOTER_MON} [1-9][0-9]?"
+_FOOTER_DATE = rf"{_FOOTER_DAY}, [0-9]{{4}}"
+#: `news_templates.window_image`: "Oct 5, 2026", "Oct 5–9, 2026", "Sep 28–Oct 2, 2026", "Dec 29, 2025–Jan 4, 2026"
+#: (an EN DASH, never a hyphen).
+_FOOTER_WINDOW = (rf"(?:{_FOOTER_DATE}–{_FOOTER_DATE}"
+                  rf"|{_FOOTER_DAY}(?:–(?:{_FOOTER_MON} )?[1-9][0-9]?)?, [0-9]{{4}})")
+#: Per source, the shape of what may follow it (the `when` slot), or None when the family's footer ends at its
+#: source. Form 4: the filing dates; 13F: the filing's date, or its amendment's ("amended", never both — the owner
+#: dropped "quarter ended"); Money Map: the fiscal year (a theme's "growth + profit": its rows' years); Congress: the
+#: disclosure month. The earnings, stakes and
+#: themes footers end at their source (RESTYLE_SPEC §1): their dates are drawn elsewhere on the picture (a stake's
+#: "As of" line) or said in the caption and the alt text.
+FOOTER_WHEN_PATTERNS: Dict[str, Optional[str]] = {
+    FOOTER_SOURCE_FORM4: rf"filed {_FOOTER_WINDOW}",
+    FOOTER_SOURCE_13F: rf"(?:filed|amended) {_FOOTER_DATE}",
+    # news-v23 phase 3 (2026-11-20): the theme's "growth + profit" picture states each company's LATEST fiscal year, so
+    # its footer names the years its rows are of — one ("fiscal 2025"), two ("fiscal 2025 or 2026", the theme sub
+    # line's own wording) or a span ("fiscal 2024 to 2026"); a Money Map's is still its one year
+    FOOTER_SOURCE_STATEMENTS: r"fiscal [0-9]{4}(?: (?:or|to) [0-9]{4})?",
+    FOOTER_SOURCE_EARNINGS: None,
+    FOOTER_SOURCE_CONGRESS: rf"{_FOOTER_MONTH} [0-9]{{4}}",
+    FOOTER_SOURCE_FILINGS: None,
+    FOOTER_SOURCE_FILINGS_MARKET: None,
+}
+_FOOTER_WHEN_RES: Dict[str, Optional["re.Pattern[str]"]] = {
+    s: (re.compile(p) if p is not None else None) for s, p in FOOTER_WHEN_PATTERNS.items()}
+#: Every source a template footer may name, in the order `image_footer_problem` tries them (the LONGEST first:
+#: "company filings" is a prefix of "company filings and market data").
+IMAGE_FOOTER_SOURCES: Tuple[str, ...] = tuple(sorted(FOOTER_WHEN_PATTERNS, key=len, reverse=True))
+#: A stored footer longer than this is refused before it is parsed (the longest a family writes is ~80).
+IMAGE_FOOTER_MAX_CHARS = 120
+_FOOTER_SOURCE_LEAD = f"{IMAGE_FOOTER_HEAD} · Source: "
 
 
 def image_footer(run_date: date, authorship: str = AUTHORSHIP_AI, *, source: Optional[str] = None,
-                 as_of: Optional[str] = None) -> str:
-    """The footer the worker burns into every post image (drop 1, 2026-10-09) — code-owned copy the
-    server then requires among the image's declared on-screen text. Pinned verbatim and run through
-    the public-copy scan in tests/test_marketing_post_copy.py (nothing scans it at runtime).
+                 when: Optional[str] = None) -> str:
+    """The ONE short line the worker burns into every post picture (restyle 2026-11-19; drop 1 2026-10-09 for the
+    first footer) — code-owned copy the server then requires among the picture's declared on-screen text. Pinned
+    verbatim per family and run through the public-copy scan in tests/test_marketing_post_copy.py (nothing scans it
+    at runtime).
 
-    "ai" (a lesson image): the AI line and the run date; `source` / `as_of` are refused there.
-    "template" (a news image, drop 2): no AI line — the image's words are a template's — but its
-    `source` (a `company_news_rules.source_label`, never the data vendor) and its `as_of` label,
-    both REQUIRED, and NON_AFFILIATION. ValueError for an unknown authorship or a bad slot: a
-    template image must never carry an AI line it does not need, nor an AI image lose it."""
+    "ai" (a lesson picture): exactly IMAGE_FOOTER_HEAD ("Not investment advice"); `source` / `when` are refused.
+    `run_date` is no longer drawn (the owner's short line carries no date) and is kept for the callers.
+    "template" (a news picture): "Not investment advice · Source: <source>" (+ " · <when>"), where `source` is one of
+    FOOTER_WHEN_PATTERNS EXACTLY (a family's words, never a free slot) and `when` is required, in its family's shape,
+    exactly when the family takes one (None otherwise). ValueError for an unknown authorship, a source outside the
+    table, or a `when` that is missing, extra or of the wrong shape — never a footer worded for a guess."""
     if _authorship(authorship, "image_footer") == AUTHORSHIP_AI:
-        if source is not None or as_of is not None:
-            raise ValueError("image_footer: source / as_of belong to the 'template' footer only")
-        return (f"Educational only · not investment advice · Written with AI assistance · "
-                f"{_date_label(run_date)} · {PUBLISHER}")
-    src = _footer_slot(source, "source")
-    when = _footer_slot(as_of, "as_of")
-    return (f"Educational only · not investment advice · Source: {src} · {when} · {PUBLISHER} · "
-            f"{NON_AFFILIATION.rstrip('.')}")
+        if source is not None or when is not None:
+            raise ValueError("image_footer: source / when belong to the 'template' footer only")
+        return IMAGE_FOOTER_HEAD
+    if not isinstance(source, str) or source not in FOOTER_WHEN_PATTERNS:
+        raise ValueError(f"image_footer: the template footer's source {str(source)[:60]!r} is not one of "
+                         f"{IMAGE_FOOTER_SOURCES}")
+    pattern = _FOOTER_WHEN_RES[source]
+    if pattern is None:
+        if when is not None:
+            raise ValueError(f"image_footer: a {source!r} footer carries no date")
+        return f"{_FOOTER_SOURCE_LEAD}{source}"
+    if not isinstance(when, str) or len(when) > IMAGE_FOOTER_MAX_CHARS or pattern.fullmatch(when) is None:
+        raise ValueError(f"image_footer: a {source!r} footer needs its date in the shape "
+                         f"{FOOTER_WHEN_PATTERNS[source]!r} (got {str(when)[:60]!r})")
+    return f"{_FOOTER_SOURCE_LEAD}{source} · {when}"
+
+
+def image_footer_problem(footer: Any, authorship: Any, *, source: Optional[str] = None) -> Optional[str]:
+    """Why a STORED picture footer is not one `image_footer` writes today, or None. The server's check (run_service's
+    post-image registration, `news_templates.validate_package`): a footer of an older version — the long news-v22
+    one ("Educational only · … · Caydex · Not affiliated with anyone named") included — or a hand-edited one is
+    refused, never drawn. `authorship`: "ai" (exactly IMAGE_FOOTER_HEAD) or "template" (the family form, its source
+    from the closed table, its `when` in that source's shape). `source`: when given, the template footer must name
+    exactly that family source (a series' own). Bounded (IMAGE_FOOTER_MAX_CHARS before any parse); pure; never
+    raises."""
+    if not isinstance(footer, str):
+        return f"not a string ({type(footer).__name__})"
+    if len(footer) > IMAGE_FOOTER_MAX_CHARS:
+        return f"{len(footer)} chars (max {IMAGE_FOOTER_MAX_CHARS}): not a short footer"
+    if authorship == AUTHORSHIP_AI:
+        return None if footer == IMAGE_FOOTER_HEAD else "not the lesson footer"
+    if authorship != AUTHORSHIP_TEMPLATE:
+        return f"unknown authorship {str(authorship)[:20]!r}"
+    if not footer.startswith(_FOOTER_SOURCE_LEAD):
+        return "not a template footer (it must open with the short head and its source)"
+    rest = footer[len(_FOOTER_SOURCE_LEAD):]
+    for src in IMAGE_FOOTER_SOURCES:
+        if rest == src:
+            when: Optional[str] = None
+        elif rest.startswith(f"{src} · "):
+            when = rest[len(src) + 3:]
+        else:
+            continue
+        if source is not None and src != source:
+            return f"names the source {src!r}, not {source!r}"
+        pattern = _FOOTER_WHEN_RES[src]
+        if pattern is None:
+            return None if when is None else f"a {src!r} footer carries no date"
+        if when is None or pattern.fullmatch(when) is None:
+            return f"a {src!r} footer's date is missing or not in its shape"
+        return None
+    return "names no source of the closed family table"
 
 
 #: Every `marketing_posts.format` (mirrors `schemas.marketing.POST_FORMATS`; a test pins them equal)
@@ -253,21 +344,29 @@ _POST_FORMATS: Tuple[str, ...] = ("video", "carousel", "image", "text", "podcast
 _TEMPLATE_FORMATS: Tuple[str, ...] = ("video", "image", "text")
 
 
-def made_with_ai(authorship: str, fmt: str) -> bool:
+def made_with_ai(authorship: str, fmt: str, *, ai_art: bool = False) -> bool:
     """The platform "made with AI" flag a post of this authorship and format carries
     (`marketing_posts.metadata.made_with_ai`, stamped by create_posts; the X outlet ANDs it with
-    MARKETING_X_MADE_WITH_AI). "ai" → always True (an AI wrote the words). "template" → True only
-    for a video (its narration is voiced with AI); a template image or text post was written by a
-    fixed template from public data (owner decision 4, 2026-10-09). ValueError for an unknown
-    authorship or format, and for a format no template post takes — never a guessed flag."""
+    MARKETING_X_MADE_WITH_AI). "ai" → always True (an AI wrote the words). "template" → True for a
+    video (its narration is voiced with AI); a template text post was written by a fixed template from
+    public data (owner decision 4, 2026-10-09), and so was a template IMAGE post — UNLESS its picture
+    drew the per-post AI art: `ai_art=True` (create_posts passes it only when the run's verified post image
+    declared the accepted art's sha256) makes a template image post True. That reverses the 2026-10-09 rule
+    "made_with_ai is False on template image posts" for such a picture only — owner decision 2026-11-15
+    (workstream C, "Google draws, Claude checks": the burned "AI illustration" label plus this flag are the
+    disclosure; no caption sentence). `ai_art` never changes a text post (it has no picture) or a video
+    (already True). ValueError for an unknown authorship or format, for a format no template post takes,
+    and for an `ai_art` that is not a bool — never a guessed flag."""
     who = _authorship(authorship, "made_with_ai")
     if not isinstance(fmt, str) or fmt not in _POST_FORMATS:
         raise ValueError(f"made_with_ai: unknown format {str(fmt)[:40]!r}")
+    if not isinstance(ai_art, bool):
+        raise ValueError(f"made_with_ai: ai_art must be a bool, not {type(ai_art).__name__}")
     if who == AUTHORSHIP_AI:
         return True
     if fmt not in _TEMPLATE_FORMATS:
         raise ValueError(f"made_with_ai: a template post is never a {fmt!r} post")
-    return fmt == "video"
+    return fmt == "video" or (fmt == "image" and ai_art)
 
 
 #: The caption fields whose every post is a narrated video (the PRIMARY format map's video platforms):

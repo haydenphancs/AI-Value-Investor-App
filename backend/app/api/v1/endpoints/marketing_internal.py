@@ -19,6 +19,14 @@ tomorrow is gated by default (the same reason the market-data routers gate at ro
 `AUTH_FORBIDDEN`. Unset-on-server is fail-CLOSED and logged at ERROR, so a forgotten Railway
 variable is loud on the first cron tick rather than silently open.
 
+Lanes (migration 210, 2026-11-15): a day holds one MAIN run, claimed through `POST /runs/claim`
+exactly as before, and — on MARKETING_SPOTLIGHT_WEEKDAYS — one SPOTLIGHT run, claimed through its own
+literal route `POST /lanes/spotlight/claim` (same body, same answer). Never a `lane` field on
+`/runs/claim`: `RunClaimRequest` ignores unknown fields (pydantic's default), so an older web would
+silently claim the MAIN run for a spotlight request, while an older web answers the literal route 404,
+which the worker reads as "this web does not serve the lane yet". Both claim routes are exempt from the
+caller-claim header (a claim is how one is obtained); every other route needs it.
+
 This is deliberately NOT one of the iOS-facing auth dependencies: `tests/test_ios_auth_policy_parity.py`
 classifies routes by `get_current_user*` / `get_identity_only_user`, and this router takes
 neither, so it is invisible to the iOS `authPolicy` contract — correctly, since iOS never
@@ -45,6 +53,8 @@ from app.api.error_response import (
 )
 from app.config import settings
 from app.schemas.marketing import (
+    RUN_LANE_MAIN,
+    RUN_LANE_SPOTLIGHT,
     AssetCompleteResponse,
     AssetRegisterRequest,
     AssetRegisterResponse,
@@ -114,23 +124,24 @@ def require_marketing_worker(
 
 
 _CLAIM_HEADER = "X-Marketing-Claim"
-#: The one route a caller reaches BEFORE it holds a claim (POST only).
-_CLAIM_ROUTE_PATH = "/runs/claim"
+#: The routes a caller reaches BEFORE it holds a claim (POST only): the main lane's claim and, since migration 210,
+#: the spotlight lane's. Matched against the MATCHED route's path TEMPLATE, never the request path.
+_CLAIM_ROUTE_PATHS = ("/runs/claim", "/lanes/spotlight/claim")
 
 
 def require_caller_claim(
     request: Request,
     x_marketing_claim: Optional[str] = Header(default=None, alias=_CLAIM_HEADER),
 ) -> None:
-    """Router-level, after the token gate: every route except the claim itself must present
-    the claim it holds (`<attempts>.<nonce>`), parsed onto `request.state.marketing_claim`
-    for the ledger to fence its writes on (rules marketing.md §2). Declared on the ROUTER so a
-    route added tomorrow cannot forget it. A missing or malformed claim is a contract breach,
-    never retried: 422 MARKETING_REQUEST_INVALID."""
+    """Router-level, after the token gate: every route except the two claim routes (`_CLAIM_ROUTE_PATHS`:
+    the main lane's and the spotlight lane's) must present the claim it holds (`<attempts>.<nonce>`), parsed
+    onto `request.state.marketing_claim` for the ledger to fence its writes on (rules marketing.md §2).
+    Declared on the ROUTER so a route added tomorrow cannot forget it. A missing or malformed claim is a
+    contract breach, never retried: 422 MARKETING_REQUEST_INVALID."""
     route = request.scope.get("route")
     # The route's path TEMPLATE (prefix included once mounted): the update route's template is
     # `…/runs/{run_id}`, so a run_id of "claim" can never match this.
-    if request.method == "POST" and str(getattr(route, "path", "")).endswith(_CLAIM_ROUTE_PATH):
+    if request.method == "POST" and str(getattr(route, "path", "")).endswith(_CLAIM_ROUTE_PATHS):
         # Exempt by the MATCHED route and method, never by a path suffix: `PATCH /runs/claim`
         # is the update route with run_id="claim" and must present a claim like any other.
         return
@@ -180,15 +191,15 @@ def _log_ledger_failure(op: str, exc: BaseException, **ids: object) -> None:
 # and a kick that would start writer spend for such a run is refused there.
 
 
-@router.post("/runs/claim", response_model=RunClaimResponse)
-async def claim_run(body: RunClaimRequest):
-    """Claim (or re-claim) the run for one ET day. Never 409s: a run that cannot be claimed
-    comes back with `claimed=false` and a `reason` the worker exits 0 on."""
+async def _claim_for_lane(body: RunClaimRequest, lane: str):
+    """The one claim implementation behind both claim routes: the claim window (422 outside today/yesterday
+    ET), then `run_service.claim_run` for `lane`. Never 409s: a run that cannot be claimed comes back with
+    `claimed=false` and a `reason` the worker exits 0 on (`not_scheduled` for a spotlight day that is not one)."""
     requested = date.fromisoformat(body.run_date)
     today = run_date_et()
     if not claim_window_ok(requested, today):
-        logger.warning("marketing claim REFUSED outside the window run_date=%s today_et=%s",
-                       requested, today)
+        logger.warning("marketing claim REFUSED outside the window run_date=%s lane=%s today_et=%s",
+                       requested, lane, today)
         return make_error_response(
             ErrorCode.INVALID_INPUT, status_code=422,
             message=f"run_date {requested} is outside the claim window ({today - timedelta(days=1)}..{today} ET)",
@@ -197,7 +208,7 @@ async def claim_run(body: RunClaimRequest):
     svc = get_marketing_run_service()
     try:
         row, reason = await svc.claim_run(
-            date.fromisoformat(body.run_date),
+            requested,
             worker_version=body.worker_version,
             dry_run=body.dry_run,
             claim_nonce=body.claim_nonce,
@@ -205,15 +216,34 @@ async def claim_run(body: RunClaimRequest):
             # What this worker image can render, recorded on the run (server-owned) by the claim
             # that takes it — `script_service` freezes image formats only for such a run.
             capabilities=tuple(body.capabilities),
+            lane=lane,
         )
     except Exception as e:
-        _log_ledger_failure("claim_run", e, run_date=body.run_date)
+        _log_ledger_failure("claim_run", e, run_date=body.run_date, lane=lane)
         return error_response_from_exception(e, step="marketing_claim_run")
     return RunClaimResponse(
         claimed=(reason == "claimed"),
         reason=reason,
         run=MarketingRun.model_validate(row) if row is not None else None,
     )
+
+
+@router.post("/runs/claim", response_model=RunClaimResponse)
+async def claim_run(body: RunClaimRequest):
+    """Claim (or re-claim) the MAIN run for one ET day — the request and the answer exactly as before the
+    lanes."""
+    return await _claim_for_lane(body, RUN_LANE_MAIN)
+
+
+@router.post("/lanes/spotlight/claim", response_model=RunClaimResponse)
+async def claim_spotlight_run(body: RunClaimRequest):
+    """Claim (or re-claim) the SPOTLIGHT run for one ET day (migration 210, 2026-11-15) — the same body and
+    answer as `/runs/claim`, for the lane's own row. `claimed=false, reason=not_scheduled, run=null` when the
+    lane is closed for that day (`selection.is_spotlight_day`: MARKETING_SPOTLIGHT_ENABLED off, the weekday not
+    in MARKETING_SPOTLIGHT_WEEKDAYS, the lane's hours failing their rule, no news class, or — C0, 2026-11-16 — no
+    spotlight series left once the main lane's series that day are dropped), before any ledger read or write. A
+    literal route, never a field on `/runs/claim` (module docstring)."""
+    return await _claim_for_lane(body, RUN_LANE_SPOTLIGHT)
 
 
 #: Fields the worker may NOT set, though the request schema still accepts them (wire
@@ -335,4 +365,5 @@ async def list_run_assets(run_id: str, claim: CallerClaim = Depends(_claim)):
     return RunAssetsResponse(voice_asset_id=back["voice_asset_id"],
                              video_asset_id=back["video_asset_id"],
                              image_asset_id=back.get("image_asset_id"),
-                             assets=[MarketingAssetView.model_validate(r) for r in back["assets"]])
+                             assets=[MarketingAssetView.model_validate(r) for r in back["assets"]],
+                             lane=back.get("lane") or RUN_LANE_MAIN)

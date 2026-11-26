@@ -2282,9 +2282,11 @@ def tgi(monkeypatch):
 
 
 def _nested_col(row: Dict[str, Any], col: str) -> Any:
-    """The fake's `_col` with PostgREST's nested JSON path (`a->b->>c`), as the bundle fence filters on."""
+    """The fake's `_col` with PostgREST's nested JSON path (`a->b->>c`), as the bundle fence filters on. A plain column
+    is the fake's own read (`_col`, bound at import before any fixture swaps it), so its read defaults hold here too
+    (migration 210: a row with no `lane` reads as 'main', the column default — as review_bundles' twin does)."""
     if "->>" not in col:
-        return row.get(col)
+        return _col(row, col)
     path, key = col.rsplit("->>", 1)
     parts = path.split("->")
     doc: Any = row.get(parts[0])
@@ -2300,6 +2302,7 @@ def _nested_col(row: Dict[str, Any], col: str) -> Any:
 def bundle_ledger(monkeypatch, ledger):
     import sys
     import test_marketing_run_service as fake_db
+    assert _col is not _nested_col and fake_db._col is _col      # the plain read is the fake's own, never ours
     monkeypatch.setattr(fake_db, "_col", _nested_col)
     monkeypatch.setattr(settings, "MARKETING_REVIEW_BUNDLES", True)
     # created_at's minutes wrap every 3,600 posts of the session-wide counter; member order follows it.
@@ -2668,3 +2671,48 @@ async def test_batch3_an_extra_video_arrives_as_its_own_facebook_video_message_w
         meta = _post(ledger, pid)["metadata"]
         assert meta["review_notified_at"] and meta["review_message_id"] and "review_bundle" not in meta
     assert len({_post(ledger, pid)["metadata"]["review_message_id"] for pid in (tiktok, fb_text, fb_video)}) == 3
+
+
+# ── the spotlight lane (migration 210, 2026-11-15) ────────────────────────────
+
+
+@pytest.mark.parametrize("run, key, label", [
+    ({"run_date": "2026-11-17"}, "2026-11-17:x:text", "2026-11-17"),
+    ({"run_date": "2026-11-17", "lane": "main"}, "2026-11-17:x:text", "2026-11-17"),
+    ({"run_date": "2026-11-17", "lane": "spotlight"}, "2026-11-17:spotlight:x:text", "2026-11-17 · spotlight"),
+    # the run row decides when it has a date — a key is only the fallback
+    ({"run_date": "2026-11-17", "lane": "spotlight"}, "garbage", "2026-11-17 · spotlight"),
+    ({"run_date": "2026-11-17", "lane": "junk"}, "2026-11-17:x:text", "2026-11-17 · ?"),    # never guessed
+    (None, "2026-11-17:spotlight:x:text", "2026-11-17 · spotlight"),
+    (None, "2026-11-17:x:text", "2026-11-17"),
+    ({}, "2026-11-17:spotlight:nope:text", "2026-11-17"),     # a key that does not read back: its date alone
+    (None, "garbage", "?"),
+    (None, None, "?"),
+])
+def test_spotlight_the_review_run_label_names_the_spotlight_lane(run, key, label):
+    """Every review message names its run "… · run <label>": a main run's label is its date, as always; a spotlight
+    run's adds " · spotlight" — so the owner tells the day's two bundles apart."""
+    assert rs._run_date(run, {"idempotency_key": key}) == label
+
+
+@pytest.mark.asyncio
+async def test_spotlight_the_per_post_flow_labels_a_spotlight_runs_video_and_posts(ledger, tg):
+    _seed_run(ledger, RUN_A)
+    _seed_run(ledger, RUN_B, "2026-09-28", video_id=None)
+    next(r for r in _rows(ledger, mrs.RUNS) if r["id"] == RUN_B)["lane"] = "spotlight"
+    _seed_post(ledger, RUN_A, "tiktok", "video", asset_ids=[VIDEO])
+    _seed_post(ledger, RUN_B, "x", "text", title=None, caption="Spotlight words")
+    counters = await rs.review_cycle()
+    assert counters["sent"] == 2 and counters["failed"] == 0
+    assert tg.of("sendVideo")[0]["caption"].startswith("VIDEO · run 2026-09-28\n")          # main: as before
+    texts = [m["text"] for m in tg.of("sendMessage")]
+    assert texts[0].startswith("TIKTOK · video · run 2026-09-28\n\n")
+    assert texts[1] == "X · text · run 2026-09-28 · spotlight\n\nSpotlight words"
+
+
+def test_the_bundle_fake_reads_a_missing_lane_as_main_like_the_ledger(bundle_ledger):
+    """The review bot's nested-column fake keeps the plain read's defaults (the second review's optional fix): a run
+    seeded without a `lane` column is the main lane's for a lane-filtered read, as in the real table."""
+    assert _nested_col({"run_date": "2026-09-28"}, "lane") == "main"
+    assert _nested_col({"lane": "spotlight"}, "lane") == "spotlight"
+    assert _nested_col({"metadata": {"review_bundle": {"id": "b"}}}, "metadata->review_bundle->>id") == "b"

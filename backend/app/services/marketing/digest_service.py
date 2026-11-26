@@ -43,6 +43,19 @@ read-only look at the records `_final_owed` takes, once per process, on a day af
     but its nightly check succeeded for it, or its run row shows a posting day's work, the final word is
     still due (`_final_owed`: one read-only look at those two records, once per process on a day after a
     rest day; under an unchanged calendar they always say no, so nothing is claimed or sent).
+  - The SPOTLIGHT lane (migration 210, 2026-11-15: a second run on MARKETING_SPOTLIGHT_WEEKDAYS from
+    MARKETING_SPOTLIGHT_HOUR_ET, the web's mirror of the worker's variable) is judged by the SAME two jobs — never
+    a third: each reads the day's run of BOTH lanes and sends at most ONE message, the main lane's text first and
+    the spotlight lane's after a blank line. A spotlight text names its run "<day> · spotlight"
+    (`run_service.lane_label`) and its own hours; the main lane's texts are byte for byte what they were. The
+    spotlight lane's day is a spotlight day by the calendar in force NOW (`selection.is_spotlight_day`: its switch,
+    weekdays, hours and the content classes) or by its own run row, which exists only on a day it was one. A
+    spotlight day where nothing qualified (`nothing_qualified`) is quiet there like a rest day when its own trail
+    shows a quiet day — it alerts, naming the trail, when a series' data source failed (OBS-1); the digest lists it
+    either way. Both jobs are due on a main posting day OR a spotlight day, at the LATEST hour over the enabled lanes
+    (`health_hour_et`, `final_hour_et`) — the main lane's whenever the spotlight lane is open, because its hour
+    rule (`selection.spotlight_hours_problem`: spotlight hour + attempts ≤ run hour) ends the spotlight's attempts
+    and resumes before the main lane's begin.
 * `digest_cycle()` — job `marketing_digest_weekly` (MARKETING_DIGEST_ENABLED, checked here as well as
   in the tick), Monday at/after 09:00 ET with a Tuesday catch-up
   when Monday's never succeeded (`owed_since` = this week's Monday). It covers the previous
@@ -53,8 +66,10 @@ read-only look at the records `_final_owed` takes, once per process, on a day af
   integer micro-dollars: X exact to our charges journal (each entry by its own time, so a metrics read
   on an old post lands in the week it was billed), Gemini / the worker / the Upload-Post plan fee as
   labelled estimates (≈) — and Claude (≈, at its own list prices) only in a week a writer or judge call
-  went to Claude —, the week before beside it, and a ⚠️ line when last week's usage (X + Gemini +
-  [Claude +] worker) passed MARKETING_WEEKLY_COST_WARN_USD. Each part degrades alone to "unreadable" and
+  went to Claude, and the per-post ART ("art ≈ $x (n images)", workstream C: the images and the brief / check
+  calls its records priced, `run_service.art_usage_between` → `art_spend_of`) only in a week that spent on
+  art —, the week before beside it, and a ⚠️ line when last week's usage (X + Gemini +
+  [Claude +] [art +] worker) passed MARKETING_WEEKLY_COST_WARN_USD. Each part degrades alone to "unreadable" and
   the total then reads "≥" — never a wrong number, never a silent 0. In place of the old this-week engagement
   block sits the follows-first 4-WEEK SCORECARD (`scorecard`, 2026-10-15): one row per (platform,
   format) over the published posts of the 4 ET weeks ending that Sunday — posts; followers and their
@@ -67,7 +82,11 @@ read-only look at the records `_final_owed` takes, once per process, on a day af
   MD-7) so the newest posts are never the ones a limit cuts; a read that still stops early is said under
   the scorecard with the count it took in. The posts section also names the days whose posts were made
   as text where the picture should have gone (`metadata.image_fallback`), each reason in the owner's
-  words.
+  words. Since the spotlight lane (migration 210) the Runs section lists each lane of a day — the main run first,
+  then the spotlight run as "spotlight: …" (a spotlight day with no row: "spotlight: no run (a spotlight day)"; one
+  where nothing qualified: "spotlight: skipped — nothing qualified") — and every post row, picture fallback and the
+  memory peak name a spotlight run "<day> · spotlight"; the cost line sums both lanes' runs and scripts. With no
+  spotlight row and the lane closed, the digest is the one of before.
 
 Delivery follows `publish_feed.feed_cycle`: the review bot configured + its review chat, the shared
 Telegram flood back-off (`review_service._rate_limited_until` — while it is open no claim is taken, and
@@ -98,7 +117,7 @@ import statistics
 import time
 from collections import Counter
 from datetime import date, datetime, time as dtime, timedelta, timezone
-from typing import Any, Awaitable, Dict, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Any, Awaitable, Dict, FrozenSet, Iterable, List, NamedTuple, Optional, Tuple
 
 from app.config import settings
 from app.integrations import telegram
@@ -107,6 +126,9 @@ from app.schemas.marketing import (
     IMAGE_FALLBACK_REASONS,
     POST_FORMATS,
     POST_METADATA_IMAGE_FALLBACK,
+    RUN_LANE_MAIN,
+    RUN_LANE_SPOTLIGHT,
+    RUN_LANES,
     RUN_STAGES,
     parse_content_classes,
 )
@@ -125,11 +147,15 @@ from app.services.marketing.run_service import (
     _exec,
     _parse_ts,
     _touched,
+    art_spend_of,
     charges_between,
     expired_unreviewed,
     get_marketing_run_service,
+    lane_label,
     month_start_utc,
+    post_lane,
     post_run_date,
+    run_lane,
 )
 from app.services.notification_jobs import JobStateUnreadable
 from app.utils.market_hours import ET
@@ -196,11 +222,13 @@ WEEK_POST_LIMIT = 500
 #: latest week. 8 platforms × 4 posting days × 5 weeks ≈ 160 today; at Batch 3's seven days with its three
 #: extra videos (Facebook, LinkedIn, Threads) ~11 posts a day × 7 × 5 weeks ≈ 385 — more than one page.
 MEASURED_POST_LIMIT = 300
-#: At most this many pages: 37 days of runs × 16 (platform, format) pairs (the 13 of POST_FORMATS_BY_PLATFORM
-#: plus Batch 3's 3 of EXTRA_POST_FORMATS_BY_PLATFORM) = 592 published posts at the most (one run a day, one
-#: post per pair, published on its run day or the next), against 1,200 — a test derives the bound from the
-#: two maps. Past it the scorecard says the newest may be missing (never silent).
-MEASURED_POST_PAGES = 4
+#: At most this many pages: 42 days of runs (the 35-day read plus a week of slack for a late reconcile) × 16
+#: (platform, format) pairs (the 13 of POST_FORMATS_BY_PLATFORM plus Batch 3's 3 of EXTRA_POST_FORMATS_BY_PLATFORM)
+#: × 2 lanes (one run per (day, lane) since migration 210 — the spotlight lane — one post per pair, published on
+#: its run day or the next) = 1,344 published posts at the most, against 1,500 (4 → 5 pages with the spotlight
+#: lane) — a test derives the bound from the two maps and RUN_LANES. Past it the scorecard says the newest may be
+#: missing (never silent).
+MEASURED_POST_PAGES = 5
 #: The most published posts the 35-day read takes in.
 MEASURED_POST_MAX = MEASURED_POST_LIMIT * MEASURED_POST_PAGES
 ESCALATED_LIMIT = 20
@@ -285,6 +313,11 @@ _SKIP_HINTS: Dict[str, str] = {
     "judge_not_enforced": "the judge was not enforcing — set MARKETING_JUDGE_MODE=enforce on the web service",
     "empty_pool": "the content pool is empty — check the Learn bundle and content_pool's exclusions",
     "source_ineligible": "the selected lesson left the content pool — check content_pool's eligibility",
+    # 2026-11-15 (migration 210): a spotlight day whose series chain found no record — the day skips, never
+    # the lesson. Usually just a quiet day; the selection trail says which series fell through and why.
+    "nothing_qualified": "no spotlight series had a record to post that day — read the selection trail in "
+                         "marketing_scripts.fact_sheet for this run, and check MARKETING_NEWS_SERIES lists the "
+                         "spotlight series",
     "empty_narration": "the video stage had nothing to narrate — check the voice stage in the worker logs",
     "narration_too_long": "the narration ran past MARKETING_MAX_VIDEO_SECONDS — check the voice stage",
     "unrenderable_text": "the render stage could not draw the script or the post image (a glyph Inter lacks, "
@@ -294,10 +327,23 @@ _SKIP_HINTS: Dict[str, str] = {
                        "stage in the worker logs",
     # Drop 2: create_posts answered 409 MARKETING_TEMPLATE_REFUSED (marketing/render.py stage_posts). Every
     # switch a `MarketingTemplateRefused` raise names is named here too (pinned by test_marketing_metrics.py):
-    # the class switch (drop 2a) and the per-series switch (drop 2b).
+    # the class switch (drop 2a) and the per-series switch (drop 2b). The spotlight lane's own switch is named only
+    # in that lane's text (`_LANE_SKIP_HINTS`), so the main lane's alert stays byte for byte what it was.
     "template_refused": "the day's company post failed the template re-check, or MARKETING_CONTENT_CLASSES / "
                         "MARKETING_NEWS_SERIES no longer lists its class or series (or this deploy no longer "
                         "ships the series) — read the web log 'create_posts TEMPLATE REFUSED' for this run",
+}
+
+#: A lane's own wording of a skip hint, over `_SKIP_HINTS` (migration 210). The spotlight lane adds the one switch
+#: create_posts refuses ONLY a spotlight run on (MARKETING_SPOTLIGHT_ENABLED); every other hint, and every main-lane
+#: hint, is `_SKIP_HINTS`' own — a key here must be one there (`_skip_hint`).
+_LANE_SKIP_HINTS: Dict[str, Dict[str, str]] = {
+    RUN_LANE_SPOTLIGHT: {
+        "template_refused": "the spotlight post failed the template re-check, or MARKETING_CONTENT_CLASSES / "
+                            "MARKETING_NEWS_SERIES no longer lists its class or series (or this deploy no longer "
+                            "ships the series), or MARKETING_SPOTLIGHT_ENABLED is off — read the web log "
+                            "'create_posts TEMPLATE REFUSED' for this run",
+    },
 }
 
 #: A fallback step's outcome (`script_service.SERIES_OUTCOMES`) → the words the owner reads in
@@ -310,12 +356,20 @@ _SERIES_OUTCOME_WORDS: Dict[str, str] = {
     "timeout": "its data source timed out",
     "error": "an error",
     "budget": "out of time",
+    # the spotlight lane (2026-11-15): the other lane used the series that day, or drew every candidate's company
+    "other_lane": "the other lane posted it or its company",
 }
 #: The fallback outcomes that are about the data source or the machinery, not about the week's content
 #: (OBS-1, 2026-10-15): `_series_note` never lets one hide behind a content outcome ("nothing qualified").
 _INFRA_OUTCOMES = frozenset({"unavailable", "timeout", "error", "budget"})
 #: At most this many fallback steps are named in a series note; the rest are counted ("and N more").
 _SERIES_NOTE_STEPS = 3
+#: What a series note calls a day that reached the SKIP terminal (a spotlight day where nothing qualified).
+_SKIP_SERIES_NOTE = "nothing posted"
+#: The trail outcomes that make a spotlight `nothing_qualified` skip a QUIET day: every step fell through on the
+#: week's content. Any other outcome — `_INFRA_OUTCOMES` (a data source unavailable or timed out, an error, the time
+#: budget), or one this code does not know — makes the skip an alert (`_quiet_nothing_qualified`).
+_CONTENT_OUTCOMES = frozenset(_SERIES_OUTCOME_WORDS) - _INFRA_OUTCOMES
 
 _STATUS_ORDER = ("published", "retracted", "rejected", "failed", "skipped", "queued", "approved",
                  "pending_review")
@@ -425,10 +479,14 @@ def _series_note(run: Any) -> str:
     (_INFRA_OUTCOMES: a data source unavailable or timed out, an error, the time budget) are kept ahead of
     the content ones (OBS-1, 2026-10-15): naming only the first step hid a later series' outage behind
     "CEO Buys: nothing qualified", and a series that never heads a chain (Insider Buys) could fail every
-    week with nothing in Telegram."""
+    week with nothing in Telegram.
+
+    A SPOTLIGHT day where nothing qualified (migration 210) mirrors `series` = `selection.SKIP`: it reads "nothing
+    posted (fell back from Money Map: its data source timed out)" — the same step words, so a data source that
+    failed is named, never hidden behind the skip — and "" when its trail names no series (the bare skip says it)."""
     meta = run.get("metadata") if isinstance(run, dict) and isinstance(run.get("metadata"), dict) else {}
     series = meta.get("series")
-    name = _series_name(series)
+    name = _SKIP_SERIES_NOTE if series == selection.SKIP else _series_name(series)
     if name is None:
         return ""
     trail = meta.get("series_trail") if isinstance(meta.get("series_trail"), list) else []
@@ -443,7 +501,7 @@ def _series_note(run: Any) -> str:
         seen.add(step_name)
         steps.append(t)
     if not steps:
-        return name
+        return "" if series == selection.SKIP else name
     # isinstance first: a hand-edited outcome may be a list, and a list in a frozenset raises TypeError.
     infra = [i for i, t in enumerate(steps) if isinstance(t.get("outcome"), str) and t["outcome"] in _INFRA_OUTCOMES]
     content = [i for i in range(len(steps)) if i not in infra]
@@ -568,6 +626,39 @@ def run_hour_et() -> int:
     return default
 
 
+def spotlight_hour_et() -> int:
+    """The spotlight lane's hour (ET): MARKETING_SPOTLIGHT_HOUR_ET, the web's MIRROR of the worker's variable of the
+    same name (a test pins the two defaults equal), read at call time — as `run_hour_et`, a value that is not an
+    hour 0-23 (only a test's monkeypatch: Settings refuses it at boot) is the declared default, logged."""
+    hour = settings.MARKETING_SPOTLIGHT_HOUR_ET
+    if type(hour) is int and 0 <= hour <= LAST_HOUR_ET:
+        return hour
+    default = type(settings).model_fields["MARKETING_SPOTLIGHT_HOUR_ET"].default
+    logger.warning("marketing run health: MARKETING_SPOTLIGHT_HOUR_ET=%r is not an hour 0-23 — using the default %s",
+                   hour, default)
+    return default
+
+
+def lane_hour_et(lane: str) -> int:
+    """A lane's run hour (ET): the main lane's `run_hour_et`, the spotlight lane's `spotlight_hour_et`. The worker
+    claims a lane's day hourly from :15 of this hour and resumes it on the next day's ticks before it. ValueError
+    for a lane the code does not know (a caller's bug — never a guessed hour)."""
+    if lane == RUN_LANE_MAIN:
+        return run_hour_et()
+    if lane == RUN_LANE_SPOTLIGHT:
+        return spotlight_hour_et()
+    raise ValueError(f"unknown lane {str(lane)[:40]!r}")
+
+
+def _enabled_lane_hours() -> Tuple[int, ...]:
+    """The run hours of the lanes enabled NOW: the main lane's always, the spotlight lane's while that lane is open
+    (`selection.spotlight_lane_open` — its switch, a weekday, the hour rule, a news class). The run-health hours are
+    the latest over these. With the lane open its hour rule (spotlight hour + attempts ≤ run hour) makes the main
+    lane's the latest anyway; a closed lane never moves them."""
+    hours = (run_hour_et(),)
+    return hours + (spotlight_hour_et(),) if selection.spotlight_lane_open() else hours
+
+
 def _usd_setting_micros(name: str, value: Any) -> Optional[int]:
     """A USD setting (0-10,000) in micro-dollars, or None when it is not one. Settings refuses anything
     else at boot (Field ge/le/allow_inf_nan), so None is reachable only through a test's monkeypatch —
@@ -603,36 +694,49 @@ def health_hour_et() -> int:
     (MARKETING_MAX_RUN_ATTEMPTS). The worker's first attempt starts at :15 of its run hour and a failed or
     abandoned one is retried at the next hourly tick, so with no missed tick the last allowed attempt
     starts at run hour + cap − 1. Capped at LAST_HOUR_ET; no cap at all (a value that is not a positive
-    int — `decide_claim` applies none then) is LAST_HOUR_ET too. The defaults 16 and 6 → 22:00 ET."""
+    int — `decide_claim` applies none then) is LAST_HOUR_ET too. The defaults 16 and 6 → 22:00 ET.
+
+    With two lanes (migration 210) the one nightly check judges both, so it waits for the LATEST lane: the
+    maximum of that sum over the enabled lanes (`_enabled_lane_hours`) — the main lane's while the spotlight
+    lane's hour rule holds (spotlight hour + attempts ≤ run hour), and a closed spotlight lane is not counted."""
     attempts = settings.MARKETING_MAX_RUN_ATTEMPTS
     if type(attempts) is not int or attempts <= 0:
         return LAST_HOUR_ET
-    return min(run_hour_et() + attempts, LAST_HOUR_ET)
+    return max(min(hour + attempts, LAST_HOUR_ET) for hour in _enabled_lane_hours())
 
 
 def final_hour_et() -> int:
     """The hour (ET) the next day's final word is due from: the run hour. The worker resumes yesterday's
     failed or abandoned run only on its ticks BEFORE that hour (marketing/main.py `resume_only`), so the
-    last tick that may touch it starts at (run hour − 1):15 ET. The default 16 → 16:00 ET."""
-    return run_hour_et()
+    last tick that may touch it starts at (run hour − 1):15 ET. The default 16 → 16:00 ET.
+
+    With two lanes it is the LATEST enabled lane's hour (each lane resumes yesterday's run only before its own):
+    the main lane's while the spotlight lane is open (its hour comes first), never moved by a closed lane."""
+    return max(_enabled_lane_hours())
+
+
+def _a_lane_day(d: date) -> bool:
+    """`d` is a day of either lane on the calendars in force NOW: a main posting day (`selection.is_posting_day`) or
+    a spotlight day (`selection.is_spotlight_day` — the lane open and its weekday listed)."""
+    return selection.is_posting_day(d) or selection.is_spotlight_day(d)
 
 
 def health_due(now: datetime) -> bool:
-    """A posting day (ET), at/after `health_hour_et()` — and never when that hour is not AFTER the run
-    hour (run hour 23): the check would then come before the worker's first tick of the day (23:15) and
-    could only report a run that cannot exist yet. The next day's final word, which sees that the check
-    never succeeded, reports that day alone."""
+    """A posting day or a spotlight day (ET), at/after `health_hour_et()` — and never when that hour is not
+    AFTER the run hour (run hour 23): the check would then come before the worker's first tick of the day
+    (23:15) and could only report a run that cannot exist yet. The next day's final word, which sees that the
+    check never succeeded, reports that day alone."""
     et = _aware(now).astimezone(ET)
     hour = health_hour_et()
-    return hour > run_hour_et() and et.hour >= hour and selection.is_posting_day(et.date())
+    return hour > run_hour_et() and et.hour >= hour and _a_lane_day(et.date())
 
 
 def final_due(now: datetime) -> bool:
-    """The day after a posting day (ET), at/after `final_hour_et()` — a posting day on the posting days in
-    force NOW. Pure (it runs before any I/O). The day after one they no longer list, but whose own record says
-    it was one, is `_final_owed`'s (B3PD-2)."""
+    """The day after a posting day or a spotlight day (ET), at/after `final_hour_et()` — on the calendars in force
+    NOW. Pure (it runs before any I/O). The day after one they no longer list, but whose own record says it was
+    one, is `_final_owed`'s (B3PD-2)."""
     et = _aware(now).astimezone(ET)
-    return et.hour >= final_hour_et() and selection.is_posting_day(et.date() - timedelta(days=1))
+    return et.hour >= final_hour_et() and _a_lane_day(et.date() - timedelta(days=1))
 
 
 def health_opens_at(run_date: date) -> datetime:
@@ -694,28 +798,94 @@ def _memory_line(run: Dict[str, Any], day: str) -> Optional[str]:
             f"OOM-killed.")
 
 
-def _no_retry() -> str:
-    """The worker resumes a day's failed or abandoned run only on the next day's ticks BEFORE its run hour
-    (marketing/main.py `resume_only`; 16:00 ET by default) — after that, nothing retries that day."""
-    return f"no retry is left (the worker resumes a day only until {final_hour_et():02d}:00 ET the next day)"
+class _LaneWords(NamedTuple):
+    """How the run-health texts speak of a lane's day. The MAIN lane's are the words every message used before
+    the spotlight lane, byte for byte; the SPOTLIGHT lane's never say "this day's posts" or "the day is lost" —
+    the main lane's run of that day may well have posted."""
+    day_kind: str       # "<day>, a posting day"
+    posts: str          # "<posts> will not go out"
+    nothing: str        # the no-run alert's last words
+    nothing_was: str    # the final word's no-run line
+    lost: str           # an abandoned run, judged final
+
+
+_LANE_WORDS: Dict[str, _LaneWords] = {
+    RUN_LANE_MAIN: _LaneWords("a posting day", "this day's posts", "nothing will be posted for this day",
+                              "nothing was posted for this day", "the day is lost"),
+    RUN_LANE_SPOTLIGHT: _LaneWords("a spotlight day", "this spotlight run's posts",
+                                   "the spotlight lane posts nothing for this day",
+                                   "the spotlight lane posted nothing for this day", "the spotlight run is lost"),
+}
+
+#: The skip reasons a lane's health texts keep quiet about (the digest still lists every one but the rest day):
+#: a rest day on either lane, and on the spotlight lane a day where no spotlight series had a record
+#: (`nothing_qualified`, migration 210 — an ordinary quiet day there, never a failure). That one is quiet ONLY when
+#: the run's own trail shows every series fell through on content (`_quiet_nothing_qualified`); a data source that
+#: failed, or a trail that never reached the run, alerts (OBS-1). Owner question open: to hear about every quiet
+#: spotlight day too, drop it here.
+_QUIET_SKIPS: Dict[str, FrozenSet[str]] = {
+    RUN_LANE_MAIN: frozenset({"rest_day"}),
+    RUN_LANE_SPOTLIGHT: frozenset({"rest_day", "nothing_qualified"}),
+}
+
+
+def _lane_words(lane: str) -> _LaneWords:
+    """`_LANE_WORDS[lane]`; ValueError for a lane the code does not know (a caller's bug, never guessed)."""
+    words = _LANE_WORDS.get(lane) if isinstance(lane, str) else None
+    if words is None:
+        raise ValueError(f"unknown lane {str(lane)[:40]!r}")
+    return words
+
+
+def _day_label(run_date: date, lane: str) -> str:
+    """A run's day as the health texts name it: "Tue 2026-11-17" for the main lane (byte for byte what every
+    message said before the spotlight lane), "Tue 2026-11-17 · spotlight" for the spotlight lane
+    (`run_service.lane_label`)."""
+    _lane_words(lane)
+    return lane_label(run_date.strftime("%a %Y-%m-%d"), lane)
+
+
+def _no_retry(lane: str = RUN_LANE_MAIN) -> str:
+    """The worker resumes a day's failed or abandoned run only on the next day's ticks BEFORE its lane's hour
+    (marketing/main.py `resume_only`; 16:00 ET by default, the spotlight lane's 10:00 ET) — after that, nothing
+    retries that day."""
+    return f"no retry is left (the worker resumes a day only until {lane_hour_et(lane):02d}:00 ET the next day)"
 
 
 def _final_word() -> str:
-    """What the nightly check promises whenever its verdict is not final (`evaluate_run_final` keeps it)."""
+    """What the nightly check promises whenever its verdict is not final (`evaluate_run_final` keeps it). One
+    final word judges both lanes, so its hour is the one job's (`final_hour_et`)."""
     return f"a final word comes tomorrow after {final_hour_et():02d}:00 ET"
 
 
-def _retries() -> str:
-    """What the worker still does with a failed run below the attempts cap. With run hour 0 every tick of
+def _retries(lane: str = RUN_LANE_MAIN) -> str:
+    """What the worker still does with a failed run below the attempts cap. With its lane's hour 0 every tick of
     the day is in its window, so there is no early tick of tomorrow to resume it on."""
-    if final_hour_et() == 0:
+    if lane_hour_et(lane) == 0:
         return "the worker retries hourly until midnight ET"
     return "the worker retries hourly until midnight ET and resumes it on tomorrow's early ticks"
 
 
-def _no_run_hint() -> str:
-    return (f"Check the marketing-worker cron on Railway (hourly from {run_hour_et():02d}:15 ET) and its last "
+def _no_run_hint(lane: str = RUN_LANE_MAIN) -> str:
+    return (f"Check the marketing-worker cron on Railway (hourly from {lane_hour_et(lane):02d}:15 ET) and its last "
             f"logs")
+
+
+#: C0 (2026-11-16, the second review): what a SPOTLIGHT run's texts say instead of a retry outlook or a cron hint once
+#: the lane is closed for the run's date NOW (`selection.is_spotlight_day` False: the claim gate then refuses every
+#: claim of that date, resumes included) — never "the worker retries hourly", never "check the cron", which sent the
+#: owner to debug a healthy cron. Names every switch that can close it (`selection.spotlight_day_problem`).
+_LANE_CLOSED = ("the spotlight lane is closed for that day now (MARKETING_SPOTLIGHT_ENABLED, "
+                "MARKETING_SPOTLIGHT_WEEKDAYS, the hour rule MARKETING_SPOTLIGHT_HOUR_ET + MARKETING_MAX_RUN_ATTEMPTS "
+                "≤ MARKETING_RUN_HOUR_ET, MARKETING_CONTENT_CLASSES or MARKETING_NEWS_SERIES), so the worker cannot "
+                "claim it again")
+
+
+def _lane_closed(lane: str, lane_open: bool) -> bool:
+    """True when a run of `lane` can no longer be retried because its lane is closed for its date (`lane_open` False —
+    the caller's `selection.is_spotlight_day(run_date)`, read when the text is judged). Only the spotlight lane has
+    such a gate; the main lane's claim has none, so its texts never change."""
+    return lane == RUN_LANE_SPOTLIGHT and not lane_open
 
 
 #: A finish time this far past `now` is a clock error or a hand edit, never a time to report.
@@ -761,20 +931,57 @@ def _run_facts(run: Dict[str, Any], *, now: datetime, max_attempts: Any, stale_s
     }
 
 
-def _skip_text(run: Dict[str, Any], facts: Dict[str, Any], day: str) -> Optional[str]:
-    """The SKIPPED line, or None for a `rest_day` skip (never an alert)."""
+def _skip_hint(reason: str, lane: str) -> str:
+    """`reason`'s hint in `lane`'s words: the lane's own wording when it has one (`_LANE_SKIP_HINTS`), else
+    `_SKIP_HINTS`' — so every main-lane hint is byte for byte what it was before the spotlight lane."""
+    return _LANE_SKIP_HINTS.get(lane, {}).get(reason) or _SKIP_HINTS[reason]
+
+
+def _quiet_nothing_qualified(run: Dict[str, Any]) -> bool:
+    """True when a `nothing_qualified` skip is an ordinary quiet day, proven by the run's OWN selection mirror
+    (`series` = `selection.SKIP` and its `series_trail`, written by the script kick — script_service
+    `_heal_skip_mirror`): a readable, non-empty trail every step of which fell through on content
+    (`_CONTENT_OUTCOMES`: nothing qualified, everything already posted, every candidate refused, the other lane).
+
+    False — the skip ALERTS, with the trail's words — when a step's outcome is about the data source or the
+    machinery (`_INFRA_OUTCOMES`: unavailable, timed out, an error, out of time) or is not one this code knows,
+    and when the run carries no readable mirror at all (a lost mirror write: why nothing posted is then unknown).
+    OBS-1 (2026-10-15) on the spotlight lane: a data-source outage must never read as a quiet day."""
+    meta = _meta(run)
+    trail = meta.get("series_trail")
+    if meta.get("series") != selection.SKIP or not isinstance(trail, list) or not trail:
+        return False
+    for step in trail:
+        if not isinstance(step, dict):
+            return False
+        outcome = step.get("outcome")
+        if not isinstance(outcome, str) or outcome not in _CONTENT_OUTCOMES:
+            return False
+    return True
+
+
+def _skip_text(run: Dict[str, Any], facts: Dict[str, Any], day: str, *,
+               lane: str = RUN_LANE_MAIN) -> Optional[str]:
+    """The SKIPPED line, or None for a skip the lane keeps quiet (`_QUIET_SKIPS`, never an alert): a `rest_day`
+    skip on either lane, and on the spotlight lane a `nothing_qualified` one whose own trail shows a quiet day
+    (`_quiet_nothing_qualified`) — a `nothing_qualified` skip behind a data-source or machinery failure, or with
+    no readable trail, is an alert that names the trail (`_series_note`). The hint is the lane's (`_skip_hint`)."""
     raw_reason = _meta(run).get("skip_reason")
     reason = _key(raw_reason)
-    if reason == "rest_day":
-        return None
+    if reason is not None and reason in _QUIET_SKIPS[lane]:
+        if reason != "nothing_qualified" or _quiet_nothing_qualified(run):
+            return None
     if reason is None and raw_reason in (None, ""):
         text = (f"⚠️ Marketing run {day} was SKIPPED with no reason recorded — {facts['where']}, "
                 f"{facts['attempt']}.")
     elif reason in _SKIP_HINTS:
-        text = f"⚠️ Marketing run {day} was SKIPPED ({reason}): {_SKIP_HINTS[reason]}."
+        text = f"⚠️ Marketing run {day} was SKIPPED ({reason}): {_skip_hint(reason, lane)}."
         run_id = review_service.canonical_post_id(run.get("id"))   # any uuid, canonical form
         if reason == "content_rejected" and run_id:
             text = text[:-1] + f" (run_id {run_id})."
+        note = _series_note(run) if reason == "nothing_qualified" else ""
+        if note:
+            text += f" Selection: {note}."
     else:
         shown = reason or _clean(raw_reason, _REASON_CAP) or "?"
         text = (f"⚠️ Marketing run {day} was SKIPPED for an unrecognised reason: {shown} — {facts['where']}, "
@@ -834,7 +1041,7 @@ def _with_memory(text: Optional[str], memory: Optional[str]) -> Optional[str]:
 
 def evaluate_run_health(
     run: Optional[Dict[str, Any]], *, run_date: date, posting_day: bool, now: datetime, max_attempts: Any,
-    stale_seconds: Any,
+    stale_seconds: Any, lane: str = RUN_LANE_MAIN, lane_open: bool = True,
 ) -> Optional[str]:
     """What is wrong with the run of `run_date`, as one Telegram message — or None when nothing is.
     Pure. Called from `health_hour_et()` (22:00 ET by default) with `max_attempts` =
@@ -855,13 +1062,27 @@ def evaluate_run_health(
     once stale, abandoned — with no retries left at the cap (the day will close failed), else retried
     hourly. An unreadable attempt count is "?" and promises neither. `media_ready` / `published` →
     None, except one line when a stage's cgroup memory peak passed MEMORY_ALERT_MB (added to every
-    other message too). Every server string is scrubbed and length-capped."""
+    other message too). Every server string is scrubbed and length-capped.
+
+    `lane` (migration 210): the MAIN lane's texts are the ones above, byte for byte; a SPOTLIGHT run is named
+    "<day> · spotlight", its day "a spotlight day", its own hours (`_no_run_hint`, `_retries`), its posts "this
+    spotlight run's posts", its skip hints the lane's (`_skip_hint`), and its `nothing_qualified` skip is quiet like
+    a rest day when its own trail shows a quiet day — an alert naming the trail when a data source failed
+    (`_skip_text`). ValueError for an unknown lane.
+
+    `lane_open` (C0, 2026-11-16): whether the run's date is still a day of its lane NOW (`selection.is_spotlight_day`,
+    passed by `_health_work`). A SPOTLIGHT run below the attempts cap whose lane has closed since (its switch, its
+    weekdays, the hour rule, the classes or the per-series switch) can never be retried — the claim gate refuses every
+    claim of that date — so its failed / abandoned line says so (`_LANE_CLOSED`) instead of promising hourly retries.
+    The main lane ignores it."""
+    words = _lane_words(lane)
     if not posting_day:
         return None
-    day = run_date.strftime("%a %Y-%m-%d")
+    closed = _lane_closed(lane, lane_open)
+    day = _day_label(run_date, lane)
     if not isinstance(run, dict):
-        return (f"⚠️ Marketing: no run for {day}, a posting day — the worker never claimed it. "
-                f"{_no_run_hint()}; nothing will be posted for this day.")
+        return (f"⚠️ Marketing: no run for {day}, {words.day_kind} — the worker never claimed it. "
+                f"{_no_run_hint(lane)}; {words.nothing}.")
     facts = _run_facts(run, now=_aware(now), max_attempts=max_attempts, stale_seconds=stale_seconds)
     status, where, attempt, last_error = facts["status"], facts["where"], facts["attempt"], facts["last_error"]
     memory = _memory_line(run, day)
@@ -874,23 +1095,29 @@ def evaluate_run_health(
         if facts["exhausted"]:
             outlook = f"all {_n(facts['cap'])} attempts used"
             if not recorded:
-                outlook += "; this day's posts will not go out"
+                outlook += f"; {words.posts} will not go out"
+        elif closed:
+            outlook = f"{attempt}; no retry: {_LANE_CLOSED}"
+            if not recorded:
+                outlook += f"; {words.posts} will not go out"
         elif facts["unknown"]:
             outlook = (f"{attempt} — the attempt count is unreadable, so whether the worker retries is unknown; "
                        f"{final_word}")
         else:
-            outlook = f"{attempt}; {_retries()} — {final_word}"
+            outlook = f"{attempt}; {_retries(lane)} — {final_word}"
         posts = f" {_POSTS_RECORDED}" if recorded else ""
         text: Optional[str] = (f"⚠️ Marketing run {day} FAILED {where}: {outlook}.{posts} Last error: "
                                f"{last_error or '(none recorded)'}. Check the marketing-worker logs.")
     elif status == "skipped":
-        text = _skip_text(run, facts, day)
+        text = _skip_text(run, facts, day, lane=lane)
     elif status in ("planned", "in_progress"):
         if facts["fresh"]:
             mark, outlook = "⏳", f"still running ({attempt})"
         elif facts["exhausted"]:
-            mark, outlook = "⚠️", ("the last allowed attempt was abandoned; no retries remain — the day will "
-                                   "close failed")
+            mark, outlook = "⚠️", ("the last allowed attempt was abandoned; no retries remain — "
+                                   f"{'the day' if lane == RUN_LANE_MAIN else 'the run'} will close failed")
+        elif closed:
+            mark, outlook = "⚠️", f"{attempt} was abandoned; no retry: {_LANE_CLOSED}"
         elif facts["unknown"]:
             mark, outlook = "⚠️", (f"{attempt} was abandoned; the attempt count is unreadable, so whether the "
                                    f"worker retries is unknown")
@@ -1020,7 +1247,8 @@ def _check_stamp(checked: datetime) -> str:
 
 def evaluate_run_final(
     run: Optional[Dict[str, Any]], *, run_date: date, posting_day: bool, now: datetime, max_attempts: Any,
-    stale_seconds: Any, checked_at: Optional[datetime], nightly: str = NIGHTLY_NEVER,
+    stale_seconds: Any, checked_at: Optional[datetime], nightly: str = NIGHTLY_NEVER, lane: str = RUN_LANE_MAIN,
+    lane_open: bool = True,
 ) -> Optional[str]:
     """The final word on the run of `run_date`, judged from `final_hour_et()` the next day (`final_due`: the
     worker's last tick that may still touch it has run) — or None when the nightly check already said all
@@ -1062,11 +1290,24 @@ def evaluate_run_final(
     already. A `failed` run whose last completed stage is `assets_ready` never says "This day's posts will
     not go out": its posts were recorded and go to the review chat like any day's (`_POSTS_RECORDED`),
     exactly as the nightly check says; a run that never finished but stopped at that stage is never "the
-    day is lost" (`_POSTS_RECORDED_STOPPED`) — unless its checkpoint recorded no post (`_recorded_none`)."""
+    day is lost" (`_POSTS_RECORDED_STOPPED`) — unless its checkpoint recorded no post (`_recorded_none`).
+
+    `lane` (migration 210): as in `evaluate_run_health` — the main lane's texts byte for byte, a spotlight run
+    named "<day> · spotlight" with its own words, hours and hints, its `nothing_qualified` skip quiet unless its
+    trail shows a failed data source (`_skip_text`). ValueError for an unknown lane.
+
+    `lane_open` (C0, 2026-11-16): as in `evaluate_run_health` — `_final_work` passes `selection.is_spotlight_day` for
+    the run's date, read when the word is judged. A SPOTLIGHT run whose lane is closed for that date is never "no retry
+    happened — check the marketing-worker cron" (the claim gate refused every retry: the cron is healthy) and never
+    "the worker resumes a day only until …": its line names the closed lane (`_LANE_CLOSED`). The main lane ignores
+    it. Residual, accepted: the lane is read when the word is judged, not during the retry window, so a lane reopened
+    before the word (or closed only after the window) is judged by its state now."""
+    words = _lane_words(lane)
     if not posting_day:
         return None
+    closed = _lane_closed(lane, lane_open)
     now = _aware(now)
-    day = run_date.strftime("%a %Y-%m-%d")
+    day = _day_label(run_date, lane)
     checked = _aware(checked_at) if isinstance(checked_at, datetime) else None
     if not isinstance(run, dict):
         if checked is not None:
@@ -1077,17 +1318,17 @@ def evaluate_run_final(
             why = "the nightly check's record no longer says whether its alert went out"
         else:
             why = "the nightly check never went out"
-        return (f"⚠️ Marketing: no run for {day}, a posting day — the worker never claimed it, so nothing was "
-                f"posted for this day ({why}). {_no_run_hint()}.")
+        return (f"⚠️ Marketing: no run for {day}, {words.day_kind} — the worker never claimed it, so "
+                f"{words.nothing_was} ({why}). {_no_run_hint(lane)}.")
     facts = _run_facts(run, now=now, max_attempts=max_attempts, stale_seconds=stale_seconds)
     status, where, attempt, last_error = facts["status"], facts["where"], facts["attempt"], facts["last_error"]
     memory = _memory_line(run, day)
     error_tail = f"Last error: {last_error or '(none recorded)'}."
-    no_retry = _no_retry()
+    no_retry = f"no retry: {_LANE_CLOSED}" if closed else _no_retry(lane)
     recorded = _posts_recorded(run)
-    posts_fate = _POSTS_RECORDED if recorded else "This day's posts will not go out."
+    posts_fate = _POSTS_RECORDED if recorded else f"{words.posts[0].upper()}{words.posts[1:]} will not go out."
     # An abandoned run at `assets_ready` is not a lost day: its posts exist and the review bot offers them.
-    lost, stopped_tail = ("", f" {_POSTS_RECORDED_STOPPED}") if recorded else (" — the day is lost", "")
+    lost, stopped_tail = ("", f" {_POSTS_RECORDED_STOPPED}") if recorded else (f" — {words.lost}", "")
 
     if status in ("media_ready", "published"):
         if checked is None:
@@ -1100,7 +1341,7 @@ def evaluate_run_final(
         if status == "published":
             what = "its posts went out"
         elif _recorded_none(run):
-            what = "it recorded no posts, so nothing will be posted for this day"
+            what = f"it recorded no posts, so {words.nothing}"
         else:
             what = _RECOVERED_POSTS   # never "waiting for review": the owner may have decided them (MD-1)
         return _with_memory(f"✅ Marketing run {day} recovered at {_et_stamp(finished)} — {what}.", memory)
@@ -1113,7 +1354,7 @@ def evaluate_run_final(
             text: Optional[str] = (f"⚠️ Marketing run {day} ended FAILED {where}: {outlook}. {posts_fate} "
                                    f"{error_tail}")
         elif status == "skipped":
-            text = _skip_text(run, facts, day)
+            text = _skip_text(run, facts, day, lane=lane)
         elif status in ("planned", "in_progress") and facts["fresh"]:
             resumed = f", resumed after the {_check_stamp(checked)} check" if checked is not None else ""
             text = (f"⏳ Marketing run {day} is still running {where}, {attempt}{resumed} — if this attempt "
@@ -1127,12 +1368,17 @@ def evaluate_run_final(
 
     # Unchanged since the nightly check: speak only where that verdict could not be final.
     if status == "failed" and not facts["exhausted"]:
+        if closed:
+            return (f"⚠️ Marketing run {day} is still FAILED {where}, {attempt}: no retry happened — {_LANE_CLOSED}. "
+                    f"{posts_fate} {error_tail}")
         return (f"⚠️ Marketing run {day} is still FAILED {where}, {attempt}: no retry happened — check the "
                 f"marketing-worker cron (hourly at :15) and its last logs. {posts_fate} {error_tail}")
     if status in ("planned", "in_progress"):
         since = _et_stamp(touched) if touched is not None else "an unreadable time"
+        tail = (f" No retry: {_LANE_CLOSED}." if closed
+                else " Check the marketing-worker cron and its last logs.")
         return (f"⚠️ Marketing run {day} never finished{lost}: {status} {where}, {attempt}, "
-                f"untouched since {since}.{stopped_tail} Check the marketing-worker cron and its last logs.")
+                f"untouched since {since}.{stopped_tail}{tail}")
     return None
 
 
@@ -1446,26 +1692,45 @@ def scorecard(posts: List[Dict[str, Any]], *, week_end: date,
     return {"first": first, "last": week_end, "rows": rows}
 
 
-def _image_fallbacks(posts: List[Dict[str, Any]]) -> List[Tuple[Optional[date], List[Tuple[str, int]]]]:
-    """The run days whose live posts carry `metadata.image_fallback` (POST_METADATA_IMAGE_FALLBACK — a code
-    `create_posts` stamps on each post frozen as text where the day's picture should have gone), each with
-    (the reason in the owner's words, its posts): IMAGE_FALLBACK_REASONS' words in that order, an unknown
-    code as fixed words last — never the stored value. A post without a readable run day is under None,
-    listed last. Pure."""
-    by_day: Dict[Optional[date], Counter] = {}
+def _post_lane_or_main(post: Dict[str, Any]) -> str:
+    """The lane a post's digest row names: the spotlight lane only when its key reads back as a spotlight key
+    (`run_service.post_lane`), else the main lane — every other key is named by its date alone, exactly as
+    `run_service.post_run_label` names it (and as every row was named before the spotlight lane)."""
+    return RUN_LANE_SPOTLIGHT if post_lane(post) == RUN_LANE_SPOTLIGHT else RUN_LANE_MAIN
+
+
+def _run_text(day: Optional[date], post: Dict[str, Any]) -> str:
+    """A post's run as a digest row names it: "10-03" (byte for byte the rows of before), "11-17 · spotlight" for a
+    spotlight post, "?" without a readable run day."""
+    return lane_label(day.strftime("%m-%d"), _post_lane_or_main(post)) if day is not None else "?"
+
+
+def _image_fallbacks(posts: List[Dict[str, Any]]
+                     ) -> List[Tuple[Optional[date], Optional[str], List[Tuple[str, int]]]]:
+    """The runs whose live posts carry `metadata.image_fallback` (POST_METADATA_IMAGE_FALLBACK — a code
+    `create_posts` stamps on each post frozen as text where the day's picture should have gone), as (run day,
+    lane, [(the reason in the owner's words, its posts)]): IMAGE_FALLBACK_REASONS' words in that order, an unknown
+    code as fixed words last — never the stored value. Keyed by (day, lane) (migration 210): the main and the
+    spotlight run of one day each froze their own picture, so each gets its own line, main first. The lane is
+    the post key's (`_post_lane_or_main`). A post without a readable run day is under (None, None), listed last.
+    Pure."""
+    by_run: Dict[Tuple[Optional[date], Optional[str]], Counter] = {}
     for post in posts:
         code = _meta(post).get(POST_METADATA_IMAGE_FALLBACK)
         if not code:
             continue
         known = code if isinstance(code, str) and code in IMAGE_FALLBACK_REASONS else None
-        by_day.setdefault(post_run_date(post), Counter())[known] += 1
-    out: List[Tuple[Optional[date], List[Tuple[str, int]]]] = []
-    for day in sorted(by_day, key=lambda d: (d is None, d or date.min)):
-        counts = by_day[day]
+        day = post_run_date(post)
+        lane = _post_lane_or_main(post) if day is not None else None
+        by_run.setdefault((day, lane), Counter())[known] += 1
+    out: List[Tuple[Optional[date], Optional[str], List[Tuple[str, int]]]] = []
+    for day, lane in sorted(by_run, key=lambda k: (k[0] is None, k[0] or date.min,
+                                                   RUN_LANES.index(k[1]) if k[1] in RUN_LANES else len(RUN_LANES))):
+        counts = by_run[(day, lane)]
         reasons = [(IMAGE_FALLBACK_REASONS[c], counts[c]) for c in IMAGE_FALLBACK_REASONS if counts.get(c)]
         if counts.get(None):
             reasons.append((_UNKNOWN_FALLBACK, counts[None]))
-        out.append((day, reasons))
+        out.append((day, lane, reasons))
     return out
 
 
@@ -1512,65 +1777,97 @@ def _latency(posts: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"n": len(gaps), "median_s": statistics.median(gaps), "max_s": max(gaps)}
 
 
-def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date) -> Tuple[List[Tuple[date, str]], Optional[Tuple[float, date, str]]]:
+def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date
+              ) -> Tuple[List[Tuple[date, str]], Optional[Tuple[float, date, str, int, str]]]:
     """One (day, text) per posting day and per rest day with something other than a rest-day skip;
     plus the week's highest stage memory peak (MB, day, stage). A run skipped `rest_day` is a rest day
     whatever TODAY's calendar says (Batch 3): the posting days are a switch, and a week that changed them
     must not list its old rest days as "skipped — rest_day" (under an unchanged calendar nothing moves —
     selection skips a day as a rest day only when it is one). Every other run row is listed whatever today's
     calendar says — its own record, as `judged_posting_day` reads one; only a day with NO run row is judged
-    on today's calendar ("no run (a posting day)"), as nothing else records what that day was."""
-    by_day: Dict[date, Dict[str, Any]] = {}
+    on today's calendar ("no run (a posting day)"), as nothing else records what that day was.
+
+    Per (day, lane) (migration 210): a day's main row first, then its SPOTLIGHT row, prefixed "spotlight: " — a
+    spotlight day with no spotlight row (judged on today's spotlight calendar, `selection.is_spotlight_day`, like
+    the main lane's) reads "spotlight: no run (a spotlight day)", and a day where no spotlight series had a record
+    "spotlight: skipped — nothing qualified" (quiet in the nightly check, listed here). A row whose lane does not
+    read back is listed apart ("lane ?: "), never folded into a known lane. With no spotlight row and the lane
+    closed, the rows are byte for byte what they were."""
+    by_slot: Dict[Tuple[date, str], Dict[str, Any]] = {}
     for run in runs:
         if not isinstance(run, dict):
             continue
         d = _run_day(run)
         if d is None:
             continue
-        by_day[d] = run
+        try:
+            lane = run_lane(run)
+        except ValueError:
+            lane = _UNREADABLE_LANE
+        by_slot[(d, lane)] = run
     rows: List[Tuple[date, str]] = []
-    peak: Optional[Tuple[float, date, str, int]] = None   # (MB, day, stage, that run's alert line)
+    # (MB, day, stage, that run's alert line, its lane)
+    peak: Optional[Tuple[float, date, str, int, str]] = None
     d = week_start
     while d <= week_end:
-        run = by_day.get(d)
-        posting = selection.is_posting_day(d)
-        if run is None:
-            if posting:
-                rows.append((d, "no run (a posting day)"))
-        else:
-            status = _key(run.get("status")) or "unknown"
-            meta = _meta(run)
-            text = status
-            if status == "skipped":
-                reason = _key(meta.get("skip_reason"))
-                closed = meta.get("closed") if isinstance(meta.get("closed"), dict) else {}
-                why = reason or _key(closed.get("reason"))
-                if reason == "rest_day":
-                    text = ""
-                elif why:
-                    text = f"skipped — {why}"
-            elif status == "failed":
-                # `stage` is the LAST COMPLETED stage (migration 170), never where it failed.
-                stage = _key(run.get("stage"))
-                text = ("failed before any stage completed" if stage == RUN_STAGES[0]
-                        else f"failed after {stage or '?'}")
-                if _posts_recorded(run):
-                    # Review F1 (live regression, 2026-10-16): its posts exist and were offered like any day's,
-                    # so the day may well have posted — never let the row read as a lost day. Nothing more is
-                    # claimed: the digest reads no post of the run here, and a run resumed after midnight
-                    # records its posts on the next day (into next week's Posts section).
-                    text += " — its posts were recorded"
-            note = _series_note(run) if text else ""
-            if note:
-                # Drop 2: which series the day took, and what it fell back from.
-                text = f"{text} · {note}"
+        for lane in RUN_LANES + (_UNREADABLE_LANE,):
+            run = by_slot.get((d, lane))
+            prefix = _LANE_ROW_PREFIX[lane]
+            if run is None:
+                if lane == RUN_LANE_MAIN and selection.is_posting_day(d):
+                    rows.append((d, "no run (a posting day)"))
+                elif lane == RUN_LANE_SPOTLIGHT and selection.is_spotlight_day(d):
+                    rows.append((d, f"{prefix}no run (a spotlight day)"))
+                continue
+            text = _run_row_text(run)
             if text:
-                rows.append((d, text))
+                rows.append((d, f"{prefix}{text}"))
             for mb, stage in _memory_peaks(run):
                 if peak is None or mb > peak[0]:
-                    peak = (mb, d, stage, _memory_alert_mb(run))
+                    peak = (mb, d, stage, _memory_alert_mb(run), lane)
         d += timedelta(days=1)
     return rows, peak
+
+
+#: A run row whose lane does not read back (`run_service.run_lane` raises) — listed apart in the digest.
+_UNREADABLE_LANE = "?"
+#: How a digest run row names its lane: nothing for the main lane (the rows of before, byte for byte).
+_LANE_ROW_PREFIX: Dict[str, str] = {RUN_LANE_MAIN: "", RUN_LANE_SPOTLIGHT: f"{RUN_LANE_SPOTLIGHT}: ",
+                                    _UNREADABLE_LANE: "lane ?: "}
+#: A skip reason the digest says in words rather than its code ("skipped — nothing qualified").
+_SKIP_ROW_WORDS: Dict[str, str] = {"nothing_qualified": "nothing qualified"}
+
+
+def _run_row_text(run: Dict[str, Any]) -> str:
+    """One run row's digest text ("" for a rest-day skip, never listed): its status, why it skipped or where it
+    failed, and the series note."""
+    status = _key(run.get("status")) or "unknown"
+    meta = _meta(run)
+    text = status
+    if status == "skipped":
+        reason = _key(meta.get("skip_reason"))
+        closed = meta.get("closed") if isinstance(meta.get("closed"), dict) else {}
+        why = reason or _key(closed.get("reason"))
+        if reason == "rest_day":
+            text = ""
+        elif why:
+            text = f"skipped — {_SKIP_ROW_WORDS.get(why, why)}"
+    elif status == "failed":
+        # `stage` is the LAST COMPLETED stage (migration 170), never where it failed.
+        stage = _key(run.get("stage"))
+        text = ("failed before any stage completed" if stage == RUN_STAGES[0]
+                else f"failed after {stage or '?'}")
+        if _posts_recorded(run):
+            # Review F1 (live regression, 2026-10-16): its posts exist and were offered like any day's,
+            # so the day may well have posted — never let the row read as a lost day. Nothing more is
+            # claimed: the digest reads no post of the run here, and a run resumed after midnight
+            # records its posts on the next day (into next week's Posts section).
+            text += " — its posts were recorded"
+    note = _series_note(run) if text else ""
+    if note:
+        # Drop 2: which series the day took, and what it fell back from.
+        text = f"{text} · {note}"
+    return text
 
 
 def _listed(value: Any) -> Optional[List[Any]]:
@@ -1748,6 +2045,47 @@ def _gemini_week(rows: Optional[List[Any]], first: date, last: date) -> Optional
     return micros if micros <= _MICROS_BOUND else None
 
 
+#: A week's per-post art spend when there is none to show (`_art_week`).
+_NO_ART: Dict[str, int] = {"micros": 0, "images": 0, "images_uncertain": 0}
+
+
+def _art_week(rows: Optional[List[Any]], first: date, last: date) -> Tuple[Optional[Dict[str, int]], bool]:
+    """(The per-post ART spend of the scripts dated `first`..`last` (ET) — {micros, images, images_uncertain} —
+    and whether that week shows an art part at all), from `run_service.art_usage_between`'s rows ({run_date, lane,
+    art}: the raw `output.art` record, ANY number of scripts a day — both lanes count) through the cap's own
+    pricing (`run_service.art_spend_of`: each record at the larger of its stored estimate and today's re-pricing;
+    an uncertain image or Claude call at its full worst case).
+
+    (_NO_ART, False) for a week with no art record, or only records that spent nothing (the build's gate records —
+    the switch on, nothing eligible): the cost line then never names art, byte for byte as before. (None, True) —
+    "art unreadable", never a guess — when the rows could not be read (`rows` None: the read failed, so the week MAY
+    have had art), an in-window record's spend cannot be read, the sum is beyond ±$1,000,000, or a record cannot be
+    dated (it might belong to either week). A row without art (None) is never read further."""
+    if rows is None:
+        return None, True
+    inside: List[Any] = []
+    for row in rows:
+        art = row.get("art") if isinstance(row, dict) else row
+        if art is None:
+            continue
+        day = _ledger_date(row.get("run_date")) if isinstance(row, dict) else None
+        if day is None:
+            logger.warning("marketing digest: a script's art record cannot be dated — the art part of the week "
+                           "%s..%s is unreadable", first, last)
+            return None, True
+        if first <= day <= last:
+            inside.append(row)
+    if not inside:
+        return dict(_NO_ART), False
+    spent = art_spend_of(inside)
+    if spent is None or spent["micros"] > _MICROS_BOUND:
+        logger.warning("marketing digest: an art record dated %s..%s has a spend that cannot be read%s — the art part "
+                       "of that week is unreadable", first, last, "" if spent is None else " (beyond ±$1,000,000)")
+        return None, True
+    out = {k: spent[k] for k in _NO_ART}
+    return out, any(out.values())
+
+
 def _x_week(rows: Optional[List[Any]], start: datetime, end: datetime) -> Tuple[Optional[int], int]:
     """(X spend in [start, end) by each journal entry's OWN time — exact to our ledger — or None, and the
     number of undated entries seen). None when the rows could not be read, an in-window amount cannot
@@ -1825,24 +2163,33 @@ def _fee_week(monthly_micros: int) -> int:
 
 
 def _usage_part(x: Optional[int], gemini: Optional[int], worker: Optional[int],
-                claude: Optional[int] = None, claude_seen: bool = False) -> Dict[str, Any]:
-    """One week's USAGE — the parts that move with what the engine did (X, Gemini, the worker, and Claude
-    in a week that has Claude tokens: then and only then the part carries a "claude" key) — and the usage
-    parts that could not be read (the sum then leaves them out: a floor)."""
-    values = [("X", x), ("Gemini", gemini)] + ([("Claude", claude)] if claude_seen else []) + [("worker", worker)]
+                claude: Optional[int] = None, claude_seen: bool = False,
+                art: Optional[Dict[str, int]] = None, art_seen: bool = False) -> Dict[str, Any]:
+    """One week's USAGE — the parts that move with what the engine did (X, Gemini, the worker, Claude in a
+    week that has Claude tokens: then and only then the part carries a "claude" key, and the per-post ART in a
+    week that has art spend (`_art_week`): then and only then it carries "art" (micro-dollars, None when
+    unreadable), "art_images" and "art_uncertain") — and the usage parts that could not be read (the sum then
+    leaves them out: a floor)."""
+    art_micros = art["micros"] if isinstance(art, dict) else None
+    values = ([("X", x), ("Gemini", gemini)] + ([("Claude", claude)] if claude_seen else [])
+              + ([("art", art_micros)] if art_seen else []) + [("worker", worker)])
     unreadable = [name for name, v in values if v is None]
     part = {"x": x, "gemini": gemini, "worker": worker, "usage": sum(v for _name, v in values if v is not None),
             "usage_unreadable": unreadable, "usage_partial": bool(unreadable)}
     if claude_seen:
         part["claude"] = claude
+    if art_seen:
+        part.update(art=art_micros, art_images=art["images"] if isinstance(art, dict) else None,
+                    art_uncertain=art["images_uncertain"] if isinstance(art, dict) else None)
     return part
 
 
 def _cost_part(x: Optional[int], gemini: Optional[int], worker: Optional[int],
                upload_post: Optional[int], claude: Optional[int] = None,
-               claude_seen: bool = False) -> Dict[str, Any]:
+               claude_seen: bool = False, art: Optional[Dict[str, int]] = None,
+               art_seen: bool = False) -> Dict[str, Any]:
     """Last week's whole cost: its usage (`_usage_part`) plus the plan fee's share."""
-    part = _usage_part(x, gemini, worker, claude, claude_seen)
+    part = _usage_part(x, gemini, worker, claude, claude_seen, art, art_seen)
     part.update(upload_post=upload_post, total=part["usage"] + (upload_post if upload_post is not None else 0),
                 unreadable=part["usage_unreadable"] + ([] if upload_post is not None else ["Upload-Post"]))
     return part
@@ -1852,6 +2199,7 @@ def weekly_cost(
     *, week_start: date, week_end: date, live: List[Dict[str, Any]], posts_capped: bool,
     runs: Optional[List[Any]], prev_runs: Optional[List[Any]], charge_rows: Optional[List[Any]],
     script_rows: Optional[List[Any]], upload_post_fee_micros: Any, cost_warn_micros: Any,
+    art_rows: Optional[List[Any]] = (),
 ) -> Dict[str, Any]:
     """Last week's cost part by part (`_cost_part`), the week before's USAGE (`_usage_part`), and the
     usage alert line. Pure. A part that cannot be read is None — the sum then leaves it out and says so —
@@ -1861,7 +2209,9 @@ def weekly_cost(
     in force then is not recorded, and today's fee (MARKETING_UPLOAD_POST_MONTHLY_USD, read at call time)
     would misprice it by the whole fee the first Monday after a plan change — so the two weeks are
     compared by usage, like with like. Claude's tokens are priced apart from Gemini's (`_claude_week`),
-    each week on its own; a week without any carries no Claude part at all."""
+    each week on its own; a week without any carries no Claude part at all. The per-post ART (workstream C,
+    `art_rows` = `run_service.art_usage_between`'s rows; () = none read, None = the read failed) is priced the
+    same way, each week on its own (`_art_week`): a week without art spend carries no art part at all."""
     start, end = week_bounds(week_start, week_end)
     prev_first, prev_last = week_start - timedelta(days=7), week_start - timedelta(days=1)
     prev_start, _prev_end = week_bounds(prev_first, prev_last)   # _prev_end == start
@@ -1872,15 +2222,17 @@ def weekly_cost(
 
     x_last, undated = _x_week(charge_rows, start, end)
     x_prev, _undated_prev = _x_week(charge_rows, prev_start, start)
+    art_rows = list(art_rows) if isinstance(art_rows, (list, tuple)) else None
     last = _cost_part(x_last, _gemini_week(script_rows, week_start, week_end),
                       _worker_week(runs, week_start, week_end), fee_week,
-                      *_claude_week(script_rows, week_start, week_end))
+                      *_claude_week(script_rows, week_start, week_end), *_art_week(art_rows, week_start, week_end))
     uploads, uploads_unsure = _uploads(live)
     last.update(undated=undated, uploads=uploads, uploads_floor=bool(posts_capped) or uploads_unsure,
                 free=fee == 0)
     before = _usage_part(x_prev, _gemini_week(script_rows, prev_first, prev_last),
                          _worker_week(prev_runs, prev_first, prev_last),
-                         *_claude_week(script_rows, prev_first, prev_last))
+                         *_claude_week(script_rows, prev_first, prev_last),
+                         *_art_week(art_rows, prev_first, prev_last))
     return {"last": last, "before": before, "warn": warn}
 
 
@@ -1893,11 +2245,12 @@ def summarize_week(
     metrics_enabled: bool = False, store: str = "prelaunch", posts_capped: bool = False,
     charge_rows: Optional[List[Dict[str, Any]]] = None, prev_runs: Optional[List[Dict[str, Any]]] = None,
     script_rows: Optional[List[Dict[str, Any]]] = None, upload_post_fee_micros: Any = 0,
-    cost_warn_micros: Any = 0, measured_capped: bool = False,
+    cost_warn_micros: Any = 0, measured_capped: bool = False, art_rows: Any = (),
 ) -> Dict[str, Any]:
     """The digest's numbers from the rows the gather read. Pure. A section whose rows could not be read
     is passed as None and stays None ("unreadable" in the message) — never an empty or zero section.
-    The cost line's inputs (`charge_rows`, `prev_runs`, `script_rows`) follow the same rule: None makes
+    The cost line's inputs (`charge_rows`, `prev_runs`, `script_rows`, and the per-post art's `art_rows` —
+    `run_service.art_usage_between`; its default () reads "no art") follow the same rule: None makes
     only their part of the cost "unreadable". `measured` (the 35-day published posts) feeds both the
     follower snapshots and the 4-week `scorecard`; `measured_capped` says that read hit its limit (its
     newest rows are the missing ones). The week's top post and the picture fallbacks come from `posts`."""
@@ -1905,6 +2258,7 @@ def summarize_week(
     runs, measured, link_hits, escalated = (_listed(runs), _listed(measured), _listed(link_hits),
                                             _listed(escalated))
     charge_rows, prev_runs, script_rows = _listed(charge_rows), _listed(prev_runs), _listed(script_rows)
+    art_rows = _listed(art_rows)
     spend = spend if isinstance(spend, dict) else None
     runway = runway if isinstance(runway, dict) else None
     metrics_job = metrics_job if isinstance(metrics_job, dict) else None
@@ -1927,7 +2281,7 @@ def summarize_week(
         if kind:
             expired[kind] += 1
         run_day = post_run_date(p)
-        run_txt = run_day.strftime("%m-%d") if run_day else "?"
+        run_txt = _run_text(run_day, p)   # "10-03", or "11-17 · spotlight" for the spotlight lane's post
         if p.get("status") == "rejected":
             review = _meta(p).get("review") if isinstance(_meta(p).get("review"), dict) else {}
             reason = review.get("reason")
@@ -1951,7 +2305,7 @@ def summarize_week(
                 continue
             run_day = post_run_date(p)
             since = _parse_ts(_meta(p).get("escalated_at"))
-            escalated_rows.append((_label(_platform(p)), run_day.strftime("%m-%d") if run_day else "?",
+            escalated_rows.append((_label(_platform(p)), _run_text(run_day, p),
                                    _et_stamp(since) if since else "?"))
 
     spend_out = None
@@ -1976,7 +2330,7 @@ def summarize_week(
     cost = weekly_cost(
         week_start=week_start, week_end=week_end, live=live, posts_capped=bool(posts_capped), runs=runs,
         prev_runs=prev_runs, charge_rows=charge_rows, script_rows=script_rows,
-        upload_post_fee_micros=upload_post_fee_micros, cost_warn_micros=cost_warn_micros)
+        upload_post_fee_micros=upload_post_fee_micros, cost_warn_micros=cost_warn_micros, art_rows=art_rows)
 
     run_rows, peak = _run_rows(runs, week_start, week_end) if runs is not None else (None, None)
     measured_rows = [p for p in measured if isinstance(p, dict)] if measured is not None else None
@@ -2032,12 +2386,25 @@ def _usage_text(part: Dict[str, Any]) -> str:
     return f"≥ {_usd(usage)} ({_and(names)} unreadable)" if names else f"≈ {_usd(usage)}"
 
 
+def _art_text(part: Dict[str, Any]) -> str:
+    """A week's per-post art part (workstream C): "art ≈ $0.402 (3 images)" — with ", 1 unconfirmed" when an image
+    call's billing is unknown (it is priced at its full worst case, `post_art.estimated_micros`) — or "art
+    unreadable" (never a guess). No model or provider is named."""
+    micros, images, unsure = part.get("art"), part.get("art_images"), part.get("art_uncertain")
+    if type(micros) is not int or type(images) is not int or type(unsure) is not int:
+        return "art unreadable"
+    counts = _plural(images, "image", "images") + (f", {_n(unsure)} unconfirmed" if unsure else "")
+    return f"art ≈ {_usd(micros)} ({counts})"
+
+
 def _cost_lines(cost: Any) -> List[str]:
     """The weekly cost block: last week's total and parts; then USAGE (X + Gemini + worker, never the plan
     fee) for last week beside the week before — like with like, as the fee in force a week earlier is not
     recorded; and the usage alert when last week's usage passed MARKETING_WEEKLY_COST_WARN_USD. Claude
     appears only when a week had Claude tokens: as a part of last week's line when last week did, and in
-    the usage label when either week did — a Gemini-only fortnight renders exactly as before Claude. It sits
+    the usage label when either week did — a Gemini-only fortnight renders exactly as before Claude. The per-post
+    ART (workstream C) follows the same rule: "art ≈ $x (n images)" (`_art_text`) only in a week with art spend,
+    "art" in the usage label when either week had some — a fortnight without art renders exactly as before. It sits
     right under the date line, so the row caps never touch it and the last-resort cut (which keeps the
     top) never drops it. An unreadable part is named and its sum becomes a floor ("≥")."""
     if not isinstance(cost, dict) or not isinstance(cost.get("last"), dict) or not isinstance(cost.get("before"), dict):
@@ -2062,7 +2429,10 @@ def _cost_lines(cost: Any) -> List[str]:
     if "claude" in last:
         claude = last.get("claude")
         gemini_txt += f" · Claude ≈ {_usd(claude)}" if type(claude) is int else " · Claude unreadable"
-    usage_label = "X + Gemini + Claude + worker" if "claude" in last or "claude" in before else "X + Gemini + worker"
+    if "art" in last:
+        gemini_txt += f" · {_art_text(last)}"
+    usage_label = " + ".join(["X", "Gemini"] + (["Claude"] if "claude" in last or "claude" in before else [])
+                             + (["art"] if "art" in last or "art" in before else []) + ["worker"])
     worker_txt = f"worker ≈ {_usd(worker)}" if type(worker) is int else "worker unreadable"
     if type(upload) is not int:
         upload_txt = "Upload-Post unreadable"
@@ -2201,9 +2571,12 @@ def _render_digest(r: Dict[str, Any], cap: int, score_cap: Optional[int] = None)
         lines += [f"• {_day(d)} {text}" for d, text in r["runs"]]
         peak = r.get("memory_peak")
         if peak:
-            mb, d, stage, alert = peak
+            mb, d, stage, alert = peak[:4]
+            lane = peak[4] if len(peak) > 4 else RUN_LANE_MAIN
             flag = f" ⚠️ above {_n(alert)} MB" if mb > alert else ""
-            lines.append(f"Worker memory peak: {_n(int(round(mb)))} MB ({stage}, {_day(d)}){flag}")
+            # the spotlight run's peak is named by its lane (`lane_label`); the main run's exactly as before
+            day = lane_label(_day(d), lane)
+            lines.append(f"Worker memory peak: {_n(int(round(mb)))} MB ({stage}, {day}){flag}")
     lines.append("")
 
     # posts
@@ -2243,10 +2616,12 @@ def _render_digest(r: Dict[str, Any], cap: int, score_cap: Optional[int] = None)
         if fallbacks:
             # Codes only, in the owner's words (IMAGE_FALLBACK_REASONS). "text posts instead", never "posted as
             # text": a member may have been rejected or expired, not posted.
-            lines.append(f"🖼 Picture not used on {_plural(len(fallbacks), 'day', 'days')} (text posts instead):")
-            lines += _capped([f"{_day(d) if d is not None else 'an unreadable day'}: "
+            # Days, not runs: a day's main and spotlight run each get their own line below (one day, two lines).
+            days = len({d for d, _lane, _reasons in fallbacks})
+            lines.append(f"🖼 Picture not used on {_plural(days, 'day', 'days')} (text posts instead):")
+            lines += _capped([f"{lane_label(_day(d), lane) if d is not None else 'an unreadable day'}: "
                               + "; ".join(f"{words} ({_plural(n, 'post', 'posts')})" for words, n in reasons)
-                              for d, reasons in fallbacks], cap)
+                              for d, lane, reasons in fallbacks], cap)
     if r.get("rehearsal"):
         lines.append(f"(+{_n(r['rehearsal'])} rehearsal rows — dry run, never publishable; not counted)")
     lines.append("")
@@ -2456,13 +2831,44 @@ async def _runway(svc: Any, today: date) -> Dict[str, Any]:
     limit = selection.news_recent_limit()
     with_today = list(await svc.recent_source_refs(today + timedelta(days=1), limit))
     before_today = list(await svc.recent_source_refs(today, limit))
-    # Today has a row exactly when the two reads differ (the later bound shifts every row by one), and it
-    # is the newest; it used a lesson only when that row is one — a news day's row never did. (Comparing
-    # the two lesson-FILTERED lists instead would call a news day "picked" once the ledger outgrows the
-    # read: the one row only `before_today` reaches may be a lesson.) Lessons only, this is the old test.
-    today_picked = with_today != before_today and bool(selection.lesson_refs(with_today[:1]))
+    # Today's rows are the newest of `with_today` (the later bound shifts every older row down by their count);
+    # today used a lesson only when one of THEM is one — a news day's row never did. (Comparing the two
+    # lesson-FILTERED lists instead would call a news day "picked" once the ledger outgrows the read: the row
+    # only `before_today` reaches may be a lesson.) Since migration 210 a day may hold TWO rows (the main lane's
+    # and the spotlight lane's, newest first by creation): the main lesson is not always the first — a spotlight
+    # retry after 16:15 ET lands above it — so every row of today counts (`_rows_of_today`), never only [:1].
+    today_picked = bool(selection.lesson_refs(with_today[:_rows_of_today(with_today, before_today, limit=limit)]))
     return pool_runway(pool, selection.lesson_refs(with_today), today=today, today_picked=today_picked,
                        classes=classes, news_series=news_series)
+
+
+def _rows_of_today(with_today: List[Any], before_today: List[Any], *, limit: int) -> int:
+    """How many of the newest rows of `with_today` (the ledger read through today) are TODAY's, given
+    `before_today` (the same read stopping before today) and the read's `limit`. Pure; at most len(RUN_LANES) —
+    one script per run, one run per (day, lane).
+
+    A read the limit did not cut holds every older row, so today's count is the length difference. A cut read
+    (the ledger outgrew the limit) is matched by content: the smallest shift k for which `with_today[k:]` lines up
+    with `before_today` — the last len(RUN_LANES) − 1 positions left out of the comparison, since a day the limit
+    splits may come back as either of its rows. Two reads that line up at no shift (a row written between them, a
+    hand edit) fall back to the old rule — one row when they differ — logged at WARNING, never a guess beyond it."""
+    lanes = len(RUN_LANES)
+    if len(with_today) < limit:
+        k = len(with_today) - len(before_today)
+        if 0 <= k <= lanes:
+            return k
+        logger.warning("marketing digest: the runway's two ledger reads differ by %d rows (at most %d a day) — "
+                       "today's rows read as %d", k, lanes, max(0, min(k, lanes)))
+        return max(0, min(k, lanes))
+    tail = lanes - 1
+    for k in range(0, min(lanes, len(with_today)) + 1):
+        m = len(with_today) - k - tail
+        if m > 0 and with_today[k:k + m] == before_today[:m]:
+            return k
+    k = 1 if with_today != before_today else 0
+    logger.warning("marketing digest: the runway's two ledger reads line up at no shift up to %d — today's rows "
+                   "read as %d (the old rule)", lanes, k)
+    return k
 
 
 async def _job_state(svc: Any, job: str) -> Dict[str, Any]:
@@ -2529,6 +2935,9 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
                                   svc.list_charge_rows_since("x", prev_start, limit=X_CHARGE_ROW_LIMIT))
     prev_runs = await _optional("the week before's runs", svc.list_runs_between(prev_week_start, prev_week_end))
     script_rows = await _optional("the scripts' token counts", svc.script_tokens_between(prev_week_start, week_end))
+    # The per-post art (workstream C): every script's `output.art` record of both weeks, both lanes — the monthly
+    # cap's own read; a failure makes only the art part "unreadable" (the week MAY have had art), never "none".
+    art_rows = await _optional("the scripts' art usage", svc.art_usage_between(prev_week_start, week_end))
     escalated = await _optional("escalated posts", svc.list_posts_filtered(
         status="queued", order="claimed_at", limit=ESCALATED_LIMIT, not_null=("metadata->>escalated_at",)))
     runway = await _optional("the content pool's runway", _runway(svc, today))
@@ -2541,7 +2950,7 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
         store=_store_state(), posts_capped=len(posts) >= WEEK_POST_LIMIT,
         charge_rows=charge_rows, prev_runs=prev_runs, script_rows=script_rows,
         upload_post_fee_micros=upload_post_fee_micros(), cost_warn_micros=weekly_cost_warn_micros(),
-        measured_capped=measured_capped,
+        measured_capped=measured_capped, art_rows=art_rows,
     )
 
 
@@ -2604,18 +3013,65 @@ def _tally(counters: Dict[str, int], sent: bool, rate_limited: bool) -> None:
         counters["failed"] += 1
 
 
+def _spotlight_day(run_date: date, run: Any) -> bool:
+    """Whether the spotlight lane's health is judged for `run_date`: a spotlight day on the calendar in force NOW
+    (`selection.is_spotlight_day`), or a day whose spotlight run row exists — a row is created only on a day the
+    lane was open (the claim gate), so its own record says the day was one, whatever the switch says now (the
+    B3PD-2 rule, as `judged_posting_day` reads the main lane's)."""
+    return isinstance(run, dict) or selection.is_spotlight_day(run_date)
+
+
+def _status_of(run: Any) -> Any:
+    return run.get("status") if isinstance(run, dict) else None
+
+
+def _one_message(texts: Iterable[Optional[str]]) -> Optional[str]:
+    """The lanes' texts as ONE message — the main lane's first, a blank line between — or None when no lane has
+    anything to say. Each job sends at most one message a day whatever the lane count; one main text alone is
+    sent byte for byte as before. Each text is bounded (every server string in it is length-capped), so two fit
+    Telegram's limit; past it `_send_one` cuts the message with a visible "…" — never two messages."""
+    parts = [t for t in texts if t]
+    return "\n\n".join(parts) if parts else None
+
+
+def _main_lane_nightly(run_date: date, spot: Any, how: str) -> str:
+    """The nightly check's record (`how`, `nightly_check_time`) as evidence that `run_date` was a MAIN posting day
+    (`judged_posting_day`). The one check is due on a main posting day OR a spotlight day (`health_due`), so its
+    success proves the main lane's day only when the spotlight lane cannot have been why it ran: on a day the
+    posting days in force now do not list but the spotlight lane's day is (`_spotlight_day`: today's spotlight
+    calendar, or the spotlight run's own row), the success may be the spotlight's alone — NIGHTLY_NEVER, and the
+    main run's own row decides (`ran_as_posting_day`). Otherwise `how` unchanged (B3PD-2, as before the lanes).
+
+    Without this a spotlight weekday the main lane does not post on (MARKETING_SPOTLIGHT_WEEKDAYS "wed" beside the
+    main "mon,tue,thu,sat") read as a main posting day the next afternoon, and a main run that never claimed that
+    rest day, or stopped before its first kick, got a false "the day is lost" (lane review, 2026-11-15). Residual,
+    accepted: a day that WAS a main posting day and a spotlight day, whose main weekday was dropped since and whose
+    main run stopped before its first kick (nothing in its row shows the posting day), gets no main final word."""
+    if not selection.is_posting_day(run_date) and _spotlight_day(run_date, spot):
+        return NIGHTLY_NEVER
+    return how
+
+
 async def _health_work(chat_id: int, at: datetime, counters: Dict[str, int]) -> Tuple[bool, int, Optional[str]]:
-    """Today's run, judged by `evaluate_run_health`; one message when something is wrong. Done (True)
-    when there is nothing to say or the message went out."""
+    """Today's runs — the main lane's and the spotlight lane's — judged by `evaluate_run_health`; ONE message when
+    something is wrong with either. Done (True) when there is nothing to say or the message went out. A failed
+    read of either lane's run raises: the attempt fails and a later tick judges both again (never one lane on a
+    guess about the other)."""
     today = _et_day(at)
-    run = await get_marketing_run_service().get_run_for_date(today)
+    svc = get_marketing_run_service()
+    run = await svc.get_run_for_date(today)
+    spot = await svc.get_run_for_date(today, lane=RUN_LANE_SPOTLIGHT)
     counters["checked"] += 1
-    text = evaluate_run_health(run, run_date=today, posting_day=selection.is_posting_day(today), now=at,
-                               max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
-                               stale_seconds=settings.MARKETING_RUN_STALE_SECONDS)
+    knobs = dict(now=at, max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
+                 stale_seconds=settings.MARKETING_RUN_STALE_SECONDS)
+    text = _one_message((
+        evaluate_run_health(run, run_date=today, posting_day=selection.is_posting_day(today), **knobs),
+        evaluate_run_health(spot, run_date=today, posting_day=_spotlight_day(today, spot), lane=RUN_LANE_SPOTLIGHT,
+                            lane_open=selection.is_spotlight_day(today), **knobs),
+    ))
     if text is None:
-        logger.info("marketing run health %s: nothing to report (status=%s)", today,
-                    run.get("status") if isinstance(run, dict) else None)
+        logger.info("marketing run health %s: nothing to report (status=%s, spotlight status=%s)", today,
+                    _status_of(run), _status_of(spot))
         return True, 0, None
     sent, why, limited = await _send_one(chat_id, text, what=f"run-health alert for {today}")
     _tally(counters, sent, limited)
@@ -2643,16 +3099,23 @@ async def _final_work(chat_id: int, at: datetime, counters: Dict[str, int]) -> T
         logger.info("marketing run health (final) %s: no nightly check went out for that day (none succeeded) — "
                     "every outcome but a good day is reported", run_date)
     run = await svc.get_run_for_date(run_date)
+    spot = await svc.get_run_for_date(run_date, lane=RUN_LANE_SPOTLIGHT)
     counters["checked"] += 1
-    # B3PD-2: a past day is a posting day by its own record too — never only by TODAY's posting days.
-    text = evaluate_run_final(run, run_date=run_date, posting_day=judged_posting_day(run_date, nightly=how, run=run),
-                              now=at, max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
-                              stale_seconds=settings.MARKETING_RUN_STALE_SECONDS, checked_at=checked_at,
-                              nightly=how)
+    knobs = dict(run_date=run_date, now=at, max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
+                 stale_seconds=settings.MARKETING_RUN_STALE_SECONDS, checked_at=checked_at, nightly=how)
+    # B3PD-2: a past day is a posting day by its own record too — never only by TODAY's posting days. The one
+    # nightly check judged both lanes (it is due on either lane's day), so what it SAID serves both (`knobs`); whether
+    # its success proves the MAIN lane's day is `_main_lane_nightly`'s call.
+    main_posting_day = judged_posting_day(run_date, nightly=_main_lane_nightly(run_date, spot, how), run=run)
+    text = _one_message((
+        evaluate_run_final(run, posting_day=main_posting_day, **knobs),
+        evaluate_run_final(spot, posting_day=_spotlight_day(run_date, spot), lane=RUN_LANE_SPOTLIGHT,
+                           lane_open=selection.is_spotlight_day(run_date), **knobs),
+    ))
     if text is None:
-        logger.info("marketing run health (final) %s: nothing to add to the nightly check of %s (status=%s)",
-                    run_date, _et_stamp(checked_at) if checked_at is not None else "(none)",
-                    run.get("status") if isinstance(run, dict) else None)
+        logger.info("marketing run health (final) %s: nothing to add to the nightly check of %s (status=%s, "
+                    "spotlight status=%s)", run_date, _et_stamp(checked_at) if checked_at is not None else "(none)",
+                    _status_of(run), _status_of(spot))
         return True, 0, None
     sent, why, limited = await _send_one(chat_id, text, what=f"final run-health word for {run_date}")
     _tally(counters, sent, limited)
@@ -2661,7 +3124,8 @@ async def _final_work(chat_id: int, at: datetime, counters: Dict[str, int]) -> T
 
 #: B3PD-2 (2026-10-20): what `_final_owed` decided for the ET day it ran on — {"day", "owed": True/False}, or
 #: after a failed read {"day", "owed": None, "retry_at": monotonic} — so a day after a rest day costs at most ONE
-#: read of the records per process (two rows), never one per tick.
+#: read of the records per process (at most three rows: the nightly check's, the main run's, the spotlight run's),
+#: never one per tick.
 _FINAL_OWED: Dict[str, Any] = {}
 #: How long a failed `_final_owed` read waits before it is tried again (a ledger outage is logged this often).
 FINAL_OWED_RETRY_SECONDS = 600
@@ -2680,13 +3144,20 @@ async def _final_owed(at: datetime) -> bool:
     already decides — yesterday's run. Under an unchanged calendar both say no (a rest day has no nightly check,
     and its run closes `skipped` `rest_day` at its first kick), so nothing is claimed or sent: the default days
     stay as before but for these reads. A failed read is logged (WARNING) and retried after
-    FINAL_OWED_RETRY_SECONDS — never a word on a guess. Never raises but CancelledError."""
+    FINAL_OWED_RETRY_SECONDS — never a word on a guess. Never raises but CancelledError.
+
+    The spotlight lane (migration 210): a spotlight day NOW is `final_due`'s own day too; and when neither the
+    nightly record nor the main run says yesterday was a posting day, the spotlight run's row is read last — its
+    own record (`ran_as_posting_day`) owes the word as well, so MARKETING_SPOTLIGHT_WEEKDAYS (or its switch)
+    changed since never cancels a word that day's spotlight alert promised. "Owed" only runs `_final_work`: a nightly
+    success that may have been the spotlight lane's alone owes the word, and `_final_work` then judges the MAIN lane
+    on its own run row (`_main_lane_nightly`) — at worst a claim that sends nothing, never a false main alert."""
     et = _aware(at).astimezone(ET)
     if et.hour < final_hour_et():
         return False
     today = et.date()
     run_date = today - timedelta(days=1)
-    if selection.is_posting_day(run_date):
+    if _a_lane_day(run_date):
         return False   # `final_due`'s own day
     memo = _FINAL_OWED
     if memo.get("day") == today:
@@ -2703,6 +3174,8 @@ async def _final_owed(at: datetime) -> bool:
         owed = how in (NIGHTLY_CHECKED, NIGHTLY_TIME_UNKNOWN)
         run = None if owed else await svc.get_run_for_date(run_date)
         owed = owed or ran_as_posting_day(run)
+        spot = None if owed else await svc.get_run_for_date(run_date, lane=RUN_LANE_SPOTLIGHT)
+        owed = owed or ran_as_posting_day(spot)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -2716,9 +3189,10 @@ async def _final_owed(at: datetime) -> bool:
     _FINAL_OWED.update(day=today, owed=owed)
     if owed:
         logger.info("marketing run health (final) %s: not a posting day on today's MARKETING_POST_WEEKDAYS, but its "
-                    "own record says it was one (nightly check: %s; run status %s) — the posting days changed "
-                    "since; its final word is due", run_date, how,
-                    run.get("status") if isinstance(run, dict) else "not read")
+                    "own record says it was one (nightly check: %s; run status %s; spotlight run status %s) — the "
+                    "posting days changed since; its final word is due", run_date, how,
+                    run.get("status") if isinstance(run, dict) else "not read",
+                    spot.get("status") if isinstance(spot, dict) else "not read")
     return owed
 
 

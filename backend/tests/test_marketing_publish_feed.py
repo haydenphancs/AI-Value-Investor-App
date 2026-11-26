@@ -889,3 +889,43 @@ def test_every_feed_send_decides_its_own_sound():
 
     param = inspect.signature(feed._send).parameters["silent"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default is inspect.Parameter.empty
+
+
+# ── the spotlight lane (migration 210, 2026-11-15) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_spotlight_every_feed_line_names_a_spotlight_posts_run(ledger, tg):
+    """A spotlight post's key is `<date>:spotlight:<platform>:<format>` (`run_service.idempotency_key_for`): the Posted
+    reply, the Retracted fallback and every alert name its run "<date> · spotlight" (`run_service.post_run_label`) —
+    the owner can tell the 10:00 post from the 16:00 one. A main post's lines on the same day are unchanged."""
+    posted = _seed(ledger, run_date="2026-11-17")
+    retracted = _seed(ledger, status="retracted", fmt="image", run_date="2026-11-17")
+    alerted = _seed(ledger, status="failed", fmt="video", external_id=None, run_date="2026-11-17",
+                    extra_meta={"alert_kind": "failed", "alert_text": "❌ refused"})
+    for pid in (posted, retracted, alerted):
+        row = _post(ledger, pid)
+        row["idempotency_key"] = f"2026-11-17:spotlight:{row['platform']}:{row['format']}"
+    main = _seed(ledger, run_date="2026-11-17")
+    assert _post(ledger, main)["idempotency_key"].startswith("2026-11-17:x:text")
+    counters = await feed.feed_cycle()
+    assert (counters["posted"], counters["retracted"], counters["alerts"], counters["failed"]) == (2, 1, 1, 0)
+    texts = [p["text"] for p in tg.of("sendMessage")]
+    assert f"✅ Posted on X · text · run 2026-11-17 · spotlight\n{X_URL}" in texts
+    assert f"✅ Posted on X · text · run 2026-11-17\n{X_URL}" in texts                    # main: as before
+    assert "❌ refused\n(X · video · run 2026-11-17 · spotlight)" in texts
+    assert any(re.fullmatch(_RETRACTED_RE + r" · X · image · run 2026-11-17 · spotlight", t) for t in texts)
+    _no_parse_mode(tg)
+
+
+@pytest.mark.parametrize("key, label", [
+    ("2026-11-17:x:text", "2026-11-17"),
+    ("2026-11-17:spotlight:x:text", "2026-11-17 · spotlight"),
+    ("2026-11-17:spotlight:nope:text", "2026-11-17"),       # a key that does not read back: its date, never a lane
+    ("2026-11-17", "2026-11-17"),
+    ("garbage-key", "garbage-ke"),                          # ≥ 10 characters: the first ten, as before
+    ("short", "?"),
+    (None, "?"),
+])
+def test_spotlight_the_feed_run_label_is_the_key_date_plus_the_spotlight_lane(key, label):
+    assert feed._run_date({"idempotency_key": key}) == label

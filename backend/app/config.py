@@ -204,6 +204,8 @@ class Settings(BaseSettings):
     # (default: byte-identical to before) or "claude" (Claude first; any Claude failure, refusal,
     # timeout or used-up credits falls back to the same call on Gemini). Unknown → gemini + ERROR.
     # No key → every role is gemini. WEB service only: the media worker never holds this key.
+    # The key also serves the marketing per-post art's brief and check (MARKETING_ART_*, below; 2026-11-15) —
+    # Claude with NO fallback, through llm_provider.ClaudeOnly, never a role: these switches do not touch it.
     # Every Claude setting is CAYDEX_-prefixed on purpose: Claude Code sessions export CLAUDE_EFFORT,
     # ANTHROPIC_BASE_URL (and may export ANTHROPIC_API_KEY), so the plain names would silently steer a
     # local preview or calibration run (review 2026-10-30: CLAUDE_EFFORT=xhigh in this very shell).
@@ -227,7 +229,8 @@ class Settings(BaseSettings):
     CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS: float = Field(120.0, gt=0, le=240, allow_inf_nan=False)
     # After used-up credits, a 429 or an auth refusal, every role skips Claude for this long
     # (process-local). Used-up credits stay used up until the next billing cycle; an hour keeps
-    # the retry cost to one failed call an hour.
+    # the retry cost to one failed call an hour. The marketing art makes no Claude call while it is
+    # open, and opens it only on used-up credits or an auth refusal (never on a 429 or an overload).
     CAYDEX_CLAUDE_BREAKER_SECONDS: float = Field(3600.0, ge=0, le=86400, allow_inf_nan=False)
 
     # ── 90-day news-sentiment backfill (news_sentiment_backfill_service) ──
@@ -1568,7 +1571,28 @@ class Settings(BaseSettings):
     # from it (services/marketing/digest_service.py): the nightly check from this hour +
     # MARKETING_MAX_RUN_ATTEMPTS (capped at 23 — 22:00 ET with the defaults; none at all at hour 23), the
     # next day's final word from this hour (16:00 ET). Anything outside 0-23 fails the deploy at boot.
+    # It is also the SPOTLIGHT lane's deadline: that lane is open only while MARKETING_SPOTLIGHT_HOUR_ET +
+    # MARKETING_MAX_RUN_ATTEMPTS <= this hour (below), so every spotlight attempt has ended before the main
+    # run's first tick and the run-health timing above covers both lanes.
     MARKETING_RUN_HOUR_ET: int = Field(16, ge=0, le=23)
+    # ── The SPOTLIGHT lane (owner decision 2026-11-15: "Add a second daily post" on "Tue, Thu, Sat", "Full
+    # set: video + picture", in its own morning slot). A second run on a spotlight day, claimed as its own
+    # row (UNIQUE (run_date, lane), migration 210) through POST /api/v1/internal/marketing/lanes/spotlight/
+    # claim. Its series chain (selection.spotlight_plan_for: the single-company spotlight series, then Money
+    # Map) ends in a SKIP — never the lesson — and is gated by the same MARKETING_NEWS_SERIES ∩ shipped series
+    # ∩ MARKETING_CONTENT_CLASSES as the main lane. Master switch, fail-closed: while False the lane's claim
+    # answers `not_scheduled` before any read or write, and no other code path changes (the main lane is byte
+    # for byte today's). Read at CALL time (selection.spotlight_on / spotlight_lane_open).
+    MARKETING_SPOTLIGHT_ENABLED: bool = False
+    # The spotlight lane's run hour, MIRRORED here like MARKETING_RUN_HOUR_ET: the ET hour (0-23) from which the
+    # worker's hourly tick may claim a spotlight run. It MUST equal the worker service's own
+    # MARKETING_SPOTLIGHT_HOUR_ET (marketing/main.py; the defaults are pinned equal) — change both together.
+    # Why 10, not 9: the Form 4 feed needs the morning to carry the previous evening's filings (the spotlight's
+    # freshness gate). The lane is OPEN only while this hour + MARKETING_MAX_RUN_ATTEMPTS <= MARKETING_RUN_HOUR_ET
+    # (10 + 6 = 16 with the defaults): otherwise its last attempts would run into the main run's, so the lane is
+    # CLOSED and an ERROR is logged once (selection.spotlight_lane_open) — never a failed deploy. Anything
+    # outside 0-23 fails the deploy at boot.
+    MARKETING_SPOTLIGHT_HOUR_ET: int = Field(10, ge=0, le=23)
     # Publisher cadence. It is an interval loop like notification_dispatch, not a daily claim:
     # posts become `approved` at arbitrary times (a reviewer's Approve) and Upload-Post jobs finish
     # asynchronously, so it must wake often enough to publish and to reconcile.
@@ -1603,6 +1627,54 @@ class Settings(BaseSettings):
     # X bills per post that carries a URL, so X captions are link-free unless this is flipped
     # (read by the writer's X caption composer, post_copy.py). Fail-closed.
     MARKETING_X_ALLOW_URLS: bool = False
+    # The closed FIRST-LINE PREFIXES of the template captions (owner decision 2026-11-15 "Loosen caption hype
+    # words", scope "Spotlights + Form 4 + earnings"; news_templates.FIRST_LINE_PREFIXES: "🚨 BREAKING:" only while
+    # the source is at most one federal business day old, "🚨 Insider purchase alert:", "📊 13F filing:"), at the
+    # start of a caption's first line only — never the YouTube title, the picture, the alt text or the video.
+    # Read ONCE per template build (script_service._build_template_day, beside MARKETING_X_ALLOW_URLS) and FROZEN
+    # into the accepted output (`first_line_prefix_on`): create_posts re-composes from the frozen value, so flipping
+    # this between a build and its posts neither refuses the day nor changes a caption — and turning it off never
+    # removes a prefix from a day already built (reject that bundle in review). Fail-closed: False = every caption
+    # byte for byte the unprefixed composition. Web only (the worker never composes captions).
+    MARKETING_FIRST_LINE_PREFIX: bool = False
+    # ── Per-post ART (owner decisions 2026-11-15: "Google draws, Claude checks"; "Picture and video cover";
+    # main lane "Video cover now, pictures later"). A single-company template post may get ONE new 16:9 picture
+    # in the Money Moves art style (app/services/money_moves_art_style.py, imported read-only — Money Moves itself
+    # is untouched): Claude writes a short brief from name-free company facts, the image model draws it, Claude
+    # inspects the drawn picture, at most one redraw; only a picture that passed is stored (public, content-
+    # addressed marketing-media/art/<sha256[:32]>.jpg). The worker draws it on the spotlight 'feature' picture
+    # band and/or the video's opening card, with a burned "AI illustration" label. There is NO fallback for the
+    # brief or the check, and art is OPTIONAL: any failure, a missing key, an open Claude breaker, the budget —
+    # no art that day and today's drawing, never a refused, skipped or failed day. WEB service only (the worker
+    # gets no new variable; its 'post_art' capability is code).
+    # Master switch, fail-closed, read at CALL time: off → no art step, and the read-back stops sending art to
+    # the worker at once (a real kill switch: an accepted output with art is then drawn without it). Owner decision
+    # 2026-11-20 ("Keep the code but use it nowhere for now; the switch stays off"): leave it OFF — no shipped series
+    # carries art (post_art.ART_SERIES is empty), so even on it would only record `not_a_company_series`.
+    MARKETING_ART_ENABLED: bool = False
+    # The month's art ceiling in USD (the ET month): the spend recorded in marketing_scripts.output.art.usage +
+    # this run's WORST case (2 draws × the image call's attempts × MARKETING_ART_IMAGE_MICROS + 4 Claude calls at
+    # CAYDEX_CLAUDE_MAX_TOKENS output) must stay under it, else no art (`budget_cap`); an unreadable spend read is
+    # no art (`budget_unreadable`). 0 = no art. Calls whose billing is unknown (a timeout, a cancelled call) count
+    # at their worst case. Out of range, NaN or inf fails the deploy.
+    MARKETING_ART_MONTHLY_BUDGET_USD: float = Field(30.0, ge=0, le=500, allow_inf_nan=False)
+    # The art step's OWN wall-clock budget, on top of the template build's (script_service
+    # TEMPLATE_BUILD_BUDGET_SECONDS). The ceiling (le 240) is what keeps the build + art + two kick waits under the
+    # worker's script poll budget and the voice stage inside its start margin (pinned by tests); a value outside
+    # 60-240 fails the deploy. Each Claude call inside it gets a client deadline that fits what is left.
+    MARKETING_ART_BUDGET_SECONDS: int = Field(180, ge=60, le=240)
+    # The brief and check model (Claude's vision; no temperature — API 2026-10-21). Opus 5.5 always thinks, so
+    # each call is sent with max_tokens = CAYDEX_CLAUDE_MAX_TOKENS at effort low. A blank model, or one without a
+    # price in services/marketing/digest_service.py's Claude price table, means no art (ERROR once): the cap could
+    # not price it. Uses the shared CAYDEX_ANTHROPIC_API_KEY; no key = no art. An art call opens the shared Claude
+    # breaker only on used-up credits or an auth refusal — a 429 or an overload only means no art that run.
+    MARKETING_ART_CLAUDE_MODEL: str = "claude-opus-5-5"
+    # The drawing model (integrations/gemini.py::generate_image, the Money Moves art model). A blank value, or a
+    # "-preview" / "-latest" model (they move or vanish), means no art (ERROR once).
+    MARKETING_ART_IMAGE_MODEL: str = "gemini-3-pro-image"
+    # The price of ONE image call in micro-USD (134,000 = $0.134, the 1K/2K price on 2026-11-15), used by the
+    # monthly cap and the weekly digest's "art ≈ $" part. Outside 1,000-1,000,000 fails the deploy.
+    MARKETING_ART_IMAGE_MICROS: int = Field(134_000, ge=1_000, le=1_000_000)
     # The semantic compliance judge (services/marketing/judge.py), the second gate after the
     # regex validators: `enforce` (a verdict fails the round / drops the outlet), `shadow`
     # (verdicts recorded, never block — safe while no run creates posts), `off`. Anything
@@ -1793,8 +1865,11 @@ class Settings(BaseSettings):
     # Which NEWS SERIES selection may use. A series runs only when its class is in
     # MARKETING_CONTENT_CLASSES, its id is listed HERE and its code has shipped
     # (selection.SHIPPED_SERIES); a series off here falls through to the next step of its day's
-    # chain, which always ends in the lesson. Ids: ceo_buys, insider_buys, thirteen_f, congress_count,
-    # company_stakes, earnings, money_map, theme_explainer. Comma-separated, case- and
+    # chain, which ends in the lesson (the main lane) or in a skip (the spotlight lane). It gates BOTH lanes
+    # (2026-11-15): the kill switch for a series is this one setting, whichever lane would post it. Ids:
+    # ceo_buys, insider_buys, thirteen_f, congress_count, company_stakes, earnings, money_map,
+    # theme_explainer, insider_spotlight, thirteen_f_spotlight (the last two: the spotlight lane's
+    # single-company series). Comma-separated, case- and
     # space-insensitive, normalised to the sorted set. An unknown id is dropped here, and a listed
     # series that has not shipped yet is dropped at kick time — both logged at ERROR, never a failed
     # deploy. Empty = no news series (every posting day is the lesson). Read at kick time
@@ -1813,7 +1888,7 @@ class Settings(BaseSettings):
         import logging
 
         known = ("ceo_buys", "insider_buys", "thirteen_f", "congress_count", "company_stakes", "earnings",
-                 "money_map", "theme_explainer")
+                 "money_map", "theme_explainer", "insider_spotlight", "thirteen_f_spotlight")
         if not isinstance(value, str):
             logging.getLogger(__name__).error(
                 "MARKETING_NEWS_SERIES: not a string (%s) — no news series", type(value).__name__)
@@ -1984,6 +2059,44 @@ class Settings(BaseSettings):
             logging.getLogger(__name__).warning(
                 "MARKETING_POST_WEEKDAYS: %s has no sat — Saturday is the week's one lesson-only day; without it a "
                 "news week posts the lesson only when a news day falls through to it", ",".join(days))
+        return ",".join(days)
+
+    # The SPOTLIGHT lane's days (owner decision 2026-11-15: "Tue, Thu, Sat"): the same day tokens as
+    # MARKETING_POST_WEEKDAYS (selection.WEEKDAY_TOKENS), comma-separated, case- and space-insensitive, normalised
+    # to weekday order. Unlike MARKETING_POST_WEEKDAYS it NEVER falls back to its default: an unknown token is
+    # dropped with an ERROR, and a value with no known day left or a non-string is "" with an ERROR — no spotlight
+    # day, the lane closed. A blank value is "" too (a deliberate "no day"). Read at CALL time
+    # (selection.spotlight_weekdays) by the lane's claim gate, its plan and the ledger-read size; the week's LAST
+    # listed day is the one that leads with the 13F spotlight in season. Change it only in the morning ET, never
+    # between MARKETING_SPOTLIGHT_HOUR_ET and that day's spotlight media_ready. Inert while
+    # MARKETING_SPOTLIGHT_ENABLED is off.
+    MARKETING_SPOTLIGHT_WEEKDAYS: str = "tue,thu,sat"
+
+    @field_validator("MARKETING_SPOTLIGHT_WEEKDAYS", mode="before")
+    @classmethod
+    def _spotlight_weekdays_fail_closed(cls, value: object) -> str:
+        """Normalise `MARKETING_SPOTLIGHT_WEEKDAYS` to its known day tokens, comma-joined in weekday order (mon
+        first). The inline literal mirrors `selection.WEEKDAY_TOKENS` (config imports no app module;
+        tests/test_marketing_selection.py pins the two equal). FAIL-CLOSED, never the default: an unknown token is
+        dropped with an ERROR; no known day left (blank excepted) or a non-string is "" with an ERROR."""
+        import logging
+
+        known = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+        if not isinstance(value, str):
+            logging.getLogger(__name__).error(
+                "MARKETING_SPOTLIGHT_WEEKDAYS: not a string (%s) — no spotlight day, the lane is closed",
+                type(value).__name__)
+            return ""
+        tokens = {t.strip().lower() for t in value.split(",") if t.strip()}
+        unknown = sorted(tokens - set(known))
+        if unknown:
+            logging.getLogger(__name__).error(
+                "MARKETING_SPOTLIGHT_WEEKDAYS: ignored unknown day(s) %s — the tokens are mon,tue,wed,thu,fri,sat,sun",
+                ",".join(t[:24] for t in unknown[:10]))
+        days = [day for day in known if day in tokens]
+        if not days and tokens:
+            logging.getLogger(__name__).error(
+                "MARKETING_SPOTLIGHT_WEEKDAYS: no known day left — no spotlight day, the lane is closed")
         return ",".join(days)
 
     # Instagram TRIAL REELS (shown to non-followers first): off | share_if_liked | dont_share, mapped to

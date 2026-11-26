@@ -408,6 +408,16 @@ backend/marketing/**/*.m4a
 backend/marketing/**/*.mp3
 backend/marketing/**/*.wav
 
+# A git worktree under .claude/worktrees/ links these folders back to the main checkout as SYMLINKS
+# (2026-11-20). A trailing-slash pattern (`venv/`, `backend/marketing/out/` above) matches only a
+# DIRECTORY, never a symlink, so without these slash-less twins `git add -A` in a worktree commits the
+# links — and merging that commit into the main checkout replaces the real, ignored folders (the venv,
+# the narration clips, backend/marketing/out with the approved FINAL_REFERENCE mocks) with self-pointing
+# links, deleting what they held. Pinned by tests/test_marketing_worker.py. Stage files by NAME anyway.
+backend/venv
+backend/marketing/out
+backend/data/money_moves_audio
+
 
 # ── Paths purged from history on 2026-09-10 (GitHub Support ticket 4747129) ────
 # Every path the history rewrite removed must stay ignored, or one `git add -A` re-publishes it

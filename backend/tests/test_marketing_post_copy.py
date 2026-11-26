@@ -1296,19 +1296,21 @@ def test_the_composed_bluesky_caption_has_exactly_one_go_link_and_no_hashtag(cat
         assert pc.carries_go_link("bluesky", post.caption)
 
 
-# ── the post image's footer (drop 1, 2026-10-09) ──────────────────────────────
+# ── the post image's footer (drop 1, 2026-10-09; ONE short line since the restyle, news-v23) ──────────────
 #
 # Code-owned copy burned into every post image (`pc.image_footer`), required by the server among the
 # image's declared on-screen text. Nothing scans it at runtime — like the value line, these tests are
 # its only guard: pinned verbatim, and scanned exactly like the caption disclaimers it stands beside.
+# Restyle (owner-approved 2026-11-19, "if we can't remove, then say it shortly"): a lesson picture's footer is
+# "Not investment advice" alone — "Educational only", the AI line, the date and the brand left the PICTURE (the brand
+# is its top row); every CAPTION keeps them, unchanged (the digests below prove it).
 
+#: The lesson footer of news-v22 and before — what the picture said until the restyle (the digest write-back below).
+_OLD_AI_FOOTER = "Educational only · not investment advice · Written with AI assistance · {d} · Caydex"
 _FOOTER_GOLDEN = {
-    date(2026, 10, 9): ("Educational only · not investment advice · Written with AI assistance · "
-                        "Oct 9, 2026 · Caydex"),
-    date(2027, 1, 5): ("Educational only · not investment advice · Written with AI assistance · "
-                       "Jan 5, 2027 · Caydex"),
-    date(2028, 2, 29): ("Educational only · not investment advice · Written with AI assistance · "
-                        "Feb 29, 2028 · Caydex"),
+    date(2026, 10, 9): "Not investment advice",
+    date(2027, 1, 5): "Not investment advice",
+    date(2028, 2, 29): "Not investment advice",
 }
 
 
@@ -1317,37 +1319,42 @@ def test_the_image_footer_is_pinned_verbatim(run_date):
     assert pc.image_footer(run_date) == _FOOTER_GOLDEN[run_date]
     assert pc.image_footer(run_date, "ai") == _FOOTER_GOLDEN[run_date]
     assert pc.image_footer(run_date, authorship="ai") == _FOOTER_GOLDEN[run_date]
+    assert pc.IMAGE_FOOTER_HEAD == "Not investment advice"
 
 
-def test_the_image_footer_discloses_ai_and_claims_no_narration():
-    """An AI-written lesson image says so; nothing in an image is narrated (the video's own
-    disclaimer card says "Script and narration generated with AI" — never the image)."""
+def test_the_lesson_picture_footer_is_the_short_line_and_the_caption_keeps_the_ai_line():
+    """The restyle moved the AI line, the date and the brand OFF the picture only: the lesson's captions still say
+    "Written with AI assistance" / "AI-assisted" with the date and the publisher, and nothing on the picture is
+    narrated or a claim."""
     footer = pc.image_footer(DATE)
     low = footer.lower()
-    assert "Written with AI assistance" in footer and re.search(r"\bAI\b", footer)
+    assert footer == "Not investment advice"
+    assert "educational" not in low and "caydex" not in low and not re.search(r"\bAI\b", footer)
     assert "narrat" not in low and "voice" not in low
-    assert "not investment advice" in low and "educational" in low
-    assert footer.endswith(f"· {pc.PUBLISHER}") and pc.PUBLISHER == "Caydex"
-    assert not re.search(r"caydex,?\s+inc", low)
     for banned in ("financial advisor", "financial adviser", "investment advisor", "investment adviser"):
         assert banned not in low
+    # ... and every caption disclaimer still carries what left the picture
+    assert "Written with AI assistance" in pc.disclaimer_long(DATE) and "Sep 23, 2026" in pc.disclaimer_long(DATE)
+    assert "AI-assisted" in pc.disclaimer_short() and pc.disclaimer_short().endswith(pc.PUBLISHER)
 
 
 @pytest.mark.parametrize("authorship", ["template", "AI", "Ai", "", "human", None, 1, "ai "])
 def test_the_image_footer_refuses_any_authorship_but_ai(authorship):
-    """`template` (drop 2) words a footer only with its required `source` and `as_of` (tests at the
-    end of this file), so a bare "template" call still raises; anything else is a typo — never a
-    footer that drops (or invents) the AI line."""
+    """`template` (drop 2) words a footer only with its family's `source` (tests at the end of this file), so a bare
+    "template" call still raises; anything else is a typo — never a footer worded for a guess."""
     with pytest.raises(ValueError):
         pc.image_footer(DATE, authorship)
 
 
-#: What the public-copy scan finds in the footer — exactly what it finds in the short caption
-#: disclaimer: the disclaimer's own "investment advice" and "Educational only" (2026-10-31: the
-#: purpose label is the notice's job, so model text that writes it is `code_owned` — this pin is the
-#: proof the row matches the notice's own wording), the brand, and nothing else.
+#: What the public-copy scan finds in the caption's SHORT disclaimer (and, until the restyle, in the picture footer):
+#: the disclaimer's own "investment advice" and "Educational only" (2026-10-31: the purpose label is the notice's
+#: job, so model text that writes it is `code_owned` — this pin is the proof the row matches the notice's own
+#: wording), the brand, and nothing else.
 _FOOTER_SCAN = [("banned_phrase", "investment advice"), ("brand_mention", "caydex"), ("code_owned", "advice"),
                 ("code_owned", "educational only")]
+#: ... and in every short PICTURE footer since the restyle (news-v23): its own "investment advice", nothing else —
+#: no brand (the brand row is its own string), no purpose label, no source or date word a rule reads.
+_SHORT_FOOTER_SCAN = [("banned_phrase", "investment advice"), ("code_owned", "advice")]
 
 
 @pytest.mark.parametrize("run_date", sorted(_FOOTER_GOLDEN))
@@ -1357,13 +1364,13 @@ def test_the_image_footer_passes_the_public_copy_scan(run_date):
     footer = pc.image_footer(run_date)
     for kw in ({"allow_emoji": True}, {"allow_emoji": False, "strict_instruments": True},
                {"allow_emoji": False, "strict_instruments": False}):
-        assert [(v.code, v.detail) for v in scan_text("f", clean(footer), **kw)] == _FOOTER_SCAN, kw
-    # Anti-vacuity: the scan reads the caption disclaimer the same way.
+        assert [(v.code, v.detail) for v in scan_text("f", clean(footer), **kw)] == _SHORT_FOOTER_SCAN, kw
+    # Anti-vacuity: the scan reads the caption disclaimer the same way it always did.
     assert [(v.code, v.detail) for v in scan_text("f", clean(pc.disclaimer_short()))] == _FOOTER_SCAN
     assert clean(footer) == footer                    # what is stored is what was pinned
     assert not re.search(r"[%$]", footer)             # no price, no percentage
     assert pc.x_link_tokens(footer) == []             # no link
-    assert "\n" not in footer and footer.count("·") == 4
+    assert "\n" not in footer and "·" not in footer  # one short line, no separator
     assert len(footer) <= ONSCREEN_TEXT_MAX_CHARS     # declarable as on-screen text
     low = footer.lower()
     for word in ("pick", "signal", "guarantee", "return", "profit", "beat", "recommend", "fmp",
@@ -1382,7 +1389,7 @@ def test_the_image_footer_scans_like_a_disclaimer_under_every_items_own_settings
         got = scan_text("x", footer, allow_emoji=True,
                         strict_instruments=content_pool.strict_instruments(item.kind),
                         company_terms=item.company_terms, sheet_words=item.grounding.tokens)
-        assert [(v.code, v.detail) for v in got] == _FOOTER_SCAN, item.key
+        assert [(v.code, v.detail) for v in got] == _SHORT_FOOTER_SCAN, item.key
 
 
 # ── authorship (drop 2, contract D8; owner decision 4 of 2026-10-09) ─────────────────────────────
@@ -1399,7 +1406,9 @@ from app.services.trillion_club.copy_rules import contains_banned_copy, contains
 
 TEMPLATE = "template"
 NEWS_CATEGORIES = ("news:ceo_buys", "news:insider_buys", "news:thirteen_f", "news:congress_count",
-                   "news:company_stakes", "news:earnings", "news:money_map", "news:theme_explainer")
+                   "news:company_stakes", "news:earnings", "news:money_map", "news:theme_explainer",
+                   # the spotlight lane (news-v22, 2026-11-15)
+                   "news:insider_spotlight", "news:thirteen_f_spotlight")
 JUNK_AUTHORSHIPS = ("AI", "Template", "template ", " ai", "", "human", "writer", None, 1, True,
                     ["ai"], ("template",), b"ai")
 
@@ -1455,6 +1464,10 @@ _AI_DIGEST_BEFORE_AUTHORSHIP = "2300ab6a9d9db454f974f9189e0c9536225fcafa5d3cf18c
 #: `_as_before_the_search_line` writes the old CTA back and must reproduce the digest above exactly, so
 #: nothing else moved.
 _AI_DIGEST_SEARCH_LINE = "cee49707caa89f7c33955dc18ecb489951ce66f2c1dcc1732ac20f88d210ddc2"
+#: …and since the restyle (news-v23, owner-approved 2026-11-19) — the ONE deliberate change: the lesson PICTURE's
+#: footer is the short line ("Not investment advice"). `_as_before_the_restyle` writes the old footer back and must
+#: reproduce `_AI_DIGEST_SEARCH_LINE` exactly, so no caption, disclaimer, budget or suffix moved.
+_AI_DIGEST_RESTYLE = "1031cb8dfe49de808d954d2a335d9ce6107850253b57932228955856a85b7101"
 #: What the YouTube-description CTA said after the value line before 2026-10-15.
 _OLD_YOUTUBE_TAIL = " Learn more: https://caydexinvest.com/go/youtube"
 
@@ -1481,11 +1494,29 @@ def _as_before_the_search_line(rows):
     return out, touched
 
 
+def _as_before_the_restyle(rows):
+    """A deep copy of `_ai_outputs()` rows with every picture-footer row written back as news-v22 wrote it (the long
+    line with the AI line, the date and the brand), and how many rows that touched — the footer rows alone."""
+    out, touched = json.loads(json.dumps(rows, ensure_ascii=False)), 0
+    for row in out:
+        if row[0] == "footer":
+            d = date.fromisoformat(row[1])
+            assert row[2] == pc.IMAGE_FOOTER_HEAD, row
+            row[2] = _OLD_AI_FOOTER.format(d=f"{d:%b} {d.day}, {d.year}")
+            touched += 1
+    return out, touched
+
+
 def test_every_ai_output_is_byte_identical_to_before_authorship_but_the_youtube_cta():
     rows = _ai_outputs()
     assert len(rows) == 6584   # anti-vacuity: the whole matrix is really walked
-    assert _ai_digest() == _AI_DIGEST_SEARCH_LINE
-    assert _ai_digest(authorship="ai") == _AI_DIGEST_SEARCH_LINE
+    assert _ai_digest() == _AI_DIGEST_RESTYLE
+    assert _ai_digest(authorship="ai") == _AI_DIGEST_RESTYLE
+    # news-v23: only the three picture-footer rows moved — written back, the search-line digest comes back exactly
+    rows, footers = _as_before_the_restyle(rows)
+    assert footers == 3
+    blob = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+    assert hashlib.sha256(blob.encode("utf-8")).hexdigest() == _AI_DIGEST_SEARCH_LINE
     before, touched = _as_before_the_search_line(rows)
     # 16 categories × 4 states × 2 X-URL settings: one suffix row, and 2 bodies × 2 check dates of composed
     # YouTube captions — every one of them, and nothing else, differs from the pre-2026-10-15 module.
@@ -1612,7 +1643,7 @@ def _template_copy_strings():
     """Every code-owned string a template post can carry: the disclaimers, card, footer, value lines,
     CTAs and the news hashtags."""
     out = list(_template_disclaimers(DATE).values())
-    out.append(pc.image_footer(DATE, TEMPLATE, source="SEC Form 4 filings", as_of="Filed Oct 5–9, 2026"))
+    out += [golden for _source, _when, golden in _TEMPLATE_FOOTER_GOLDEN]   # news-v23: every family's short footer
     out += [pc.value_line(s) for s in STATES]
     out.append(pc.SEARCH_LINE)   # the YouTube CTA's tail and the automatic first comment
     out += [c for f in pc.CAPTION_FIELDS for s in STATES for a in (False, True)
@@ -1755,6 +1786,8 @@ _NEWS_TAGS = {
     "news:congress_count": "#congress", "news:company_stakes": "#businessnews",
     "news:earnings": "#earnings", "news:money_map": "#businessmodel",
     "news:theme_explainer": "#industrytrends",
+    # the spotlight lane (news-v22, 2026-11-15): filings, like the Form 4 / 13F roundups
+    "news:insider_spotlight": "#secfilings", "news:thirteen_f_spotlight": "#secfilings",
 }
 
 
@@ -1781,7 +1814,11 @@ def test_every_shipped_series_has_its_news_tag():
     series = getattr(selection, "SERIES", None)
     if series is None:
         pytest.skip("selection.SERIES (contract D3) is not declared yet")
+    # Every registered series has its news tag (news-v22, 2026-11-15: the spotlight pair shipped with its templates
+    # — the strict pin the lane work relaxed while the pair was registered ahead of them is back).
     assert {f"news:{s.id}" for s in series} == set(NEWS_CATEGORIES)
+    for s in series:
+        assert pc.hashtags_for("x", f"news:{s.id}") != ["#investing"], s.id
 
 
 # ── made_with_ai ─────────────────────────────────────────────────────────────
@@ -1817,6 +1854,49 @@ def test_the_made_with_ai_format_tables_mirror_the_schema():
     assert pc._TEMPLATE_FORMATS == sch.FROZEN_POST_FORMATS
 
 
+# Per-post art (workstream C; owner decision 2026-11-15, reversing 2026-10-09's "False on template image posts" for a
+# picture that DREW the AI art): `ai_art` makes a template IMAGE post True — never a text post (no picture), and a
+# video is True already.
+@pytest.mark.parametrize("fmt, ai_art, expected", [
+    ("image", True, True), ("image", False, False),
+    ("text", True, False), ("text", False, False),
+    ("video", True, True), ("video", False, True),
+])
+def test_a_template_image_post_is_made_with_ai_only_when_its_picture_drew_the_art(fmt, ai_art, expected):
+    assert pc.made_with_ai(TEMPLATE, fmt, ai_art=ai_art) is expected
+
+
+@pytest.mark.parametrize("fmt", ["video", "carousel", "image", "text", "podcast", "article"])
+@pytest.mark.parametrize("ai_art", [True, False])
+def test_an_ai_post_stays_made_with_ai_whatever_the_art(fmt, ai_art):
+    assert pc.made_with_ai("ai", fmt, ai_art=ai_art) is True
+
+
+@pytest.mark.parametrize("fmt", ["video", "image", "text"])
+def test_without_art_the_flag_is_exactly_todays(fmt):
+    """The default is no art: every call that predates the art (create_posts on a day without it) answers as before."""
+    assert pc.made_with_ai(TEMPLATE, fmt) is pc.made_with_ai(TEMPLATE, fmt, ai_art=False)
+    assert pc.made_with_ai("ai", fmt) is pc.made_with_ai("ai", fmt, ai_art=False) is True
+
+
+@pytest.mark.parametrize("bad", [1, 0, None, "yes", "True", [True]])
+@pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
+def test_ai_art_must_be_a_real_bool_never_a_guess(bad, authorship):
+    with pytest.raises(ValueError, match="ai_art"):
+        pc.made_with_ai(authorship, "image", ai_art=bad)
+
+
+@pytest.mark.parametrize("fmt", ["carousel", "podcast", "article"])
+def test_art_never_opens_a_format_no_template_post_takes(fmt):
+    with pytest.raises(ValueError):
+        pc.made_with_ai(TEMPLATE, fmt, ai_art=True)
+
+
+def test_the_made_with_ai_docstring_records_the_dated_owner_decision():
+    doc = pc.made_with_ai.__doc__ or ""
+    assert "2026-10-09" in doc and "2026-11-15" in doc and "ai_art" in doc
+
+
 # ── an unknown authorship is a ValueError everywhere ─────────────────────────
 
 
@@ -1836,7 +1916,7 @@ def test_every_function_refuses_an_unknown_authorship(junk):
         lambda: pc.compose("x", BODIES, category="news:ceo_buys", run_date=DATE, authorship=junk),
         lambda: pc.compose("youtube", BODIES, category="news:ceo_buys", run_date=DATE, authorship=junk),
         lambda: pc.check_composed(post, DATE, junk),
-        lambda: pc.image_footer(DATE, junk, source="SEC Form 4 filings", as_of="Filed Oct 5–9, 2026"),
+        lambda: pc.image_footer(DATE, junk, source=pc.FOOTER_SOURCE_FORM4, when="filed Oct 5–9, 2026"),
         lambda: pc.made_with_ai(junk, "video"),
     ]
     for i, call in enumerate(calls):
@@ -1844,88 +1924,189 @@ def test_every_function_refuses_an_unknown_authorship(junk):
             call()
 
 
-# ── the template image footer ────────────────────────────────────────────────
+# ── the template image footer (ONE short line per family since the restyle, news-v23) ───────────────
+#
+# RESTYLE_SPEC §1 (owner-approved 2026-11-19): "Not investment advice · Source: <family source>" (+ " · <date>" for
+# the families that date their picture). The source words are a CLOSED table (`pc.FOOTER_WHEN_PATTERNS`), never a
+# free slot; the date has its family's shape. "Educational only", the brand and "Not affiliated with anyone named"
+# left the picture; the captions keep them (`_template_outputs` digest, unchanged).
 
 _TEMPLATE_FOOTER_GOLDEN = [
-    ("SEC Form 4 filings", "Filed Oct 5–9, 2026",
-     "Educational only · not investment advice · Source: SEC Form 4 filings · Filed Oct 5–9, 2026 · "
-     "Caydex · Not affiliated with anyone named"),
-    ("SEC Form 13F", "Quarter ended Sep 30, 2026 · filed Nov 14, 2026",
-     "Educational only · not investment advice · Source: SEC Form 13F · Quarter ended Sep 30, 2026 · "
-     "filed Nov 14, 2026 · Caydex · Not affiliated with anyone named"),
-    ("company financial statements", "Fiscal 2025",
-     "Educational only · not investment advice · Source: company financial statements · Fiscal 2025 · "
-     "Caydex · Not affiliated with anyone named"),
-    ("Nscale Form S-1 (Sep 18, 2026)", "As of Mar 27, 2026",
-     "Educational only · not investment advice · Source: Nscale Form S-1 (Sep 18, 2026) · "
-     "As of Mar 27, 2026 · Caydex · Not affiliated with anyone named"),
+    (pc.FOOTER_SOURCE_FORM4, "filed Nov 17–18, 2026",
+     "Not investment advice · Source: SEC Form 4 · filed Nov 17–18, 2026"),
+    (pc.FOOTER_SOURCE_FORM4, "filed Nov 16, 2026", "Not investment advice · Source: SEC Form 4 · filed Nov 16, 2026"),
+    (pc.FOOTER_SOURCE_FORM4, "filed Sep 28–Oct 2, 2026",
+     "Not investment advice · Source: SEC Form 4 · filed Sep 28–Oct 2, 2026"),
+    (pc.FOOTER_SOURCE_FORM4, "filed Dec 31, 2026–Jan 4, 2027",
+     "Not investment advice · Source: SEC Form 4 · filed Dec 31, 2026–Jan 4, 2027"),
+    (pc.FOOTER_SOURCE_13F, "filed Nov 13, 2026", "Not investment advice · Source: SEC Form 13F · filed Nov 13, 2026"),
+    (pc.FOOTER_SOURCE_13F, "amended Nov 14, 2026",
+     "Not investment advice · Source: SEC Form 13F · amended Nov 14, 2026"),
+    (pc.FOOTER_SOURCE_STATEMENTS, "fiscal 2025",
+     "Not investment advice · Source: company financial statements · fiscal 2025"),
+    # news-v23 phase 3 (2026-11-20): the theme's "growth + profit" picture — its rows' latest fiscal years
+    (pc.FOOTER_SOURCE_STATEMENTS, "fiscal 2025 or 2026",
+     "Not investment advice · Source: company financial statements · fiscal 2025 or 2026"),
+    (pc.FOOTER_SOURCE_STATEMENTS, "fiscal 2024 to 2026",
+     "Not investment advice · Source: company financial statements · fiscal 2024 to 2026"),
+    (pc.FOOTER_SOURCE_EARNINGS, None, "Not investment advice · Source: company results and analyst consensus"),
+    (pc.FOOTER_SOURCE_CONGRESS, "November 2026",
+     "Not investment advice · Source: congressional disclosures · November 2026"),
+    (pc.FOOTER_SOURCE_FILINGS, None, "Not investment advice · Source: company filings"),
+    (pc.FOOTER_SOURCE_FILINGS_MARKET, None, "Not investment advice · Source: company filings and market data"),
 ]
 
 
-@pytest.mark.parametrize("source, as_of, golden", _TEMPLATE_FOOTER_GOLDEN)
-def test_the_template_image_footer_is_pinned_verbatim(source, as_of, golden):
+def test_the_template_footer_sources_are_the_spec_words_verbatim():
+    assert (pc.FOOTER_SOURCE_FORM4, pc.FOOTER_SOURCE_13F, pc.FOOTER_SOURCE_STATEMENTS, pc.FOOTER_SOURCE_EARNINGS,
+            pc.FOOTER_SOURCE_CONGRESS, pc.FOOTER_SOURCE_FILINGS, pc.FOOTER_SOURCE_FILINGS_MARKET) == (
+        "SEC Form 4", "SEC Form 13F", "company financial statements", "company results and analyst consensus",
+        "congressional disclosures", "company filings", "company filings and market data")
+    assert set(pc.FOOTER_WHEN_PATTERNS) == set(pc.IMAGE_FOOTER_SOURCES)
+    assert {s for s, _w, _g in _TEMPLATE_FOOTER_GOLDEN} == set(pc.IMAGE_FOOTER_SOURCES)   # every family pinned
+    # the families that end at their source, and the ones that date their picture
+    assert {s for s, p in pc.FOOTER_WHEN_PATTERNS.items() if p is None} == {
+        pc.FOOTER_SOURCE_EARNINGS, pc.FOOTER_SOURCE_FILINGS, pc.FOOTER_SOURCE_FILINGS_MARKET}
+
+
+@pytest.mark.parametrize("source, when, golden", _TEMPLATE_FOOTER_GOLDEN)
+def test_the_template_image_footer_is_pinned_verbatim(source, when, golden):
     from app.schemas.marketing import ONSCREEN_TEXT_MAX_CHARS, validate_onscreen_text
 
-    for run_date in (DATE, date(2028, 2, 29)):   # the as-of label carries the date, not the run date
-        assert pc.image_footer(run_date, TEMPLATE, source=source, as_of=as_of) == golden
-        assert pc.image_footer(run_date, authorship=TEMPLATE, source=source, as_of=as_of) == golden
-    assert golden.endswith(f"· {pc.PUBLISHER} · {pc.NON_AFFILIATION.rstrip('.')}")
-    assert len(golden) <= ONSCREEN_TEXT_MAX_CHARS
+    for run_date in (DATE, date(2028, 2, 29)):   # the date is the family's, never the run date
+        assert pc.image_footer(run_date, TEMPLATE, source=source, when=when) == golden
+        assert pc.image_footer(run_date, authorship=TEMPLATE, source=source, when=when) == golden
+    assert golden.startswith(f"{pc.IMAGE_FOOTER_HEAD} · Source: {source}")
+    assert pc.PUBLISHER not in golden and pc.NON_AFFILIATION.rstrip(".") not in golden
+    assert len(golden) <= pc.IMAGE_FOOTER_MAX_CHARS <= ONSCREEN_TEXT_MAX_CHARS
     validate_onscreen_text([golden])   # declarable as on-screen text
+    assert pc.image_footer_problem(golden, TEMPLATE) is None
+    assert pc.image_footer_problem(golden, TEMPLATE, source=source) is None
 
 
-@pytest.mark.parametrize("source, as_of, golden", _TEMPLATE_FOOTER_GOLDEN)
-def test_the_template_image_footer_passes_the_public_copy_scan(source, as_of, golden):
+@pytest.mark.parametrize("source, when, golden", _TEMPLATE_FOOTER_GOLDEN)
+def test_the_template_image_footer_passes_the_public_copy_scan(source, when, golden):
     for kw in ({"allow_emoji": True}, {"allow_emoji": False, "strict_instruments": True},
                {"allow_emoji": False, "strict_instruments": False}):
-        assert [(v.code, v.detail) for v in scan_text("f", clean(golden), **kw)] == _FOOTER_SCAN, kw
+        assert [(v.code, v.detail) for v in scan_text("f", clean(golden), **kw)] == _SHORT_FOOTER_SCAN, kw
     assert clean(golden) == golden and "\n" not in golden
     assert not re.search(r"\bAI\b", golden) and "Written with AI" not in golden
     assert pc.x_link_tokens(golden) == []
     assert not contains_banned_copy(golden) and not contains_forecast(golden)
+    assert not re.search(r"[%$]", golden)
     low = golden.lower()
-    for word in ("fmp", "financial modeling prep", "pick", "signal", "recommend", "buy", "sell", "price"):
+    for word in ("fmp", "financial modeling prep", "pick", "signal", "recommend", "buy", "sell", "price", "caydex",
+                 "educational", "affiliated", "quarter"):
         assert not re.search(rf"(?<![a-z]){re.escape(word)}", low), word
 
 
 @pytest.mark.parametrize("kw", [
-    {}, {"source": "SEC Form 4 filings"}, {"as_of": "Filed Oct 5–9, 2026"},
-    {"source": None, "as_of": "Fiscal 2025"}, {"source": "SEC Form 13F", "as_of": None},
+    {}, {"when": "filed Oct 5–9, 2026"},
+    {"source": pc.FOOTER_SOURCE_FORM4}, {"source": pc.FOOTER_SOURCE_13F}, {"source": pc.FOOTER_SOURCE_STATEMENTS},
+    {"source": pc.FOOTER_SOURCE_CONGRESS},
+    {"source": pc.FOOTER_SOURCE_EARNINGS, "when": "filed Oct 5, 2026"},
+    {"source": pc.FOOTER_SOURCE_FILINGS, "when": "fiscal 2025"},
 ])
-def test_the_template_image_footer_needs_its_source_and_as_of(kw):
+def test_the_template_image_footer_needs_exactly_its_familys_date(kw):
     with pytest.raises(ValueError):
         pc.image_footer(DATE, TEMPLATE, **kw)
 
 
-@pytest.mark.parametrize("bad", [
-    "", "   ", " SEC Form 4 filings", "SEC Form 4 filings ", "SEC  Form 4", "SEC Form 4\nfilings",
-    "SEC Form 4\tfilings", "SEC\x00Form 4", "SEC Form 4\u2028filings", "a" * (pc.FOOTER_SLOT_MAX_CHARS + 1),
-    "FMP", "Data from fmp", "Financial Modeling Prep", "financialmodelingprep.com data",
-    "https://www.sec.gov/edgar", "www.sec.gov", 4, b"SEC", ["SEC Form 4 filings"],
+@pytest.mark.parametrize("source", [
+    "SEC Form 4 filings", "SEC Form 13F-HR/A", "sec form 4", "SEC Form 4 ", " SEC Form 4", "FMP",
+    "Financial Modeling Prep", "https://www.sec.gov", "company revenue breakdowns; grouping by Caydex",
+    "Nscale Form S-1 (Sep 18, 2026)", "", None, 4, b"SEC Form 4", ["SEC Form 4"],
 ])
-@pytest.mark.parametrize("slot", ["source", "as_of"])
-def test_a_bad_template_footer_slot_is_refused(bad, slot):
-    good = {"source": "SEC Form 4 filings", "as_of": "Filed Oct 5–9, 2026"}
+def test_a_source_outside_the_family_table_is_refused(source):
+    """The source is CODE-OWNED: the old free slot (a stake's own document title, the vendor's name, a link) is gone."""
     with pytest.raises(ValueError):
-        pc.image_footer(DATE, TEMPLATE, **dict(good, **{slot: bad}))
-
-
-def test_a_template_footer_slot_at_the_cap_is_accepted():
-    from app.schemas.marketing import ONSCREEN_TEXT_MAX_CHARS
-
-    footer = pc.image_footer(DATE, TEMPLATE, source="a" * pc.FOOTER_SLOT_MAX_CHARS,
-                             as_of="b" * pc.FOOTER_SLOT_MAX_CHARS)
-    assert len(footer) <= ONSCREEN_TEXT_MAX_CHARS   # two full slots still declarable on screen
-
-
-@pytest.mark.parametrize("kw", [{"source": "SEC Form 4 filings"}, {"as_of": "Fiscal 2025"},
-                                {"source": "SEC Form 13F", "as_of": "Fiscal 2025"}])
-def test_the_ai_image_footer_refuses_a_source_or_as_of(kw):
-    """The ai footer has no slot for them: a caller passing one has confused the two authorships."""
+        pc.image_footer(DATE, TEMPLATE, source=source, when="filed Oct 5, 2026")
     with pytest.raises(ValueError):
+        pc.image_footer(DATE, TEMPLATE, source=source)
+
+
+@pytest.mark.parametrize("source, bad", [
+    (pc.FOOTER_SOURCE_FORM4, "Filed Oct 5–9, 2026"),          # the old as-of label (capital F)
+    (pc.FOOTER_SOURCE_FORM4, "filed Oct 5-9, 2026"),          # a hyphen, never the en dash
+    (pc.FOOTER_SOURCE_FORM4, "filed Oct 5–9"),                # no year
+    (pc.FOOTER_SOURCE_FORM4, "filed October 5, 2026"),
+    (pc.FOOTER_SOURCE_FORM4, "filed Oct 5, 2026 · Caydex"),
+    (pc.FOOTER_SOURCE_13F, "Quarter ended Sep 30, 2026 · filed Nov 14, 2026"),   # the owner dropped the quarter
+    (pc.FOOTER_SOURCE_13F, "filed Nov 13, 2026 · amended Nov 14, 2026"),        # one date, never both
+    (pc.FOOTER_SOURCE_13F, "filed Nov 31st, 2026"),
+    (pc.FOOTER_SOURCE_STATEMENTS, "Fiscal 2025"), (pc.FOOTER_SOURCE_STATEMENTS, "fiscal 2025, ended Aug 31, 2025"),
+    (pc.FOOTER_SOURCE_CONGRESS, "Nov 2026"), (pc.FOOTER_SOURCE_CONGRESS, "November 2026 · as of Nov 18, 2026"),
+    (pc.FOOTER_SOURCE_CONGRESS, "november 2026"),
+    (pc.FOOTER_SOURCE_FORM4, "filed Oct 5, 2026\n"), (pc.FOOTER_SOURCE_FORM4, " filed Oct 5, 2026"),
+    (pc.FOOTER_SOURCE_FORM4, "filed Oct 5, 2026 " + "x" * 200),
+])
+def test_a_date_outside_its_familys_shape_is_refused(source, bad):
+    with pytest.raises(ValueError):
+        pc.image_footer(DATE, TEMPLATE, source=source, when=bad)
+
+
+@pytest.mark.parametrize("kw", [{"source": pc.FOOTER_SOURCE_FORM4}, {"when": "fiscal 2025"},
+                                {"source": pc.FOOTER_SOURCE_13F, "when": "filed Nov 13, 2026"},
+                                {"as_of": "Fiscal 2025"}])
+def test_the_ai_image_footer_refuses_a_source_or_date(kw):
+    """The ai footer has no slot for them: a caller passing one has confused the two authorships (and the old
+    `as_of` keyword is gone — a caller still passing it fails loudly)."""
+    with pytest.raises((ValueError, TypeError)):
         pc.image_footer(DATE, **kw)
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, TypeError)):
         pc.image_footer(DATE, "ai", **kw)
+
+
+#: Every picture footer a release before the restyle wrote (news-v22): the server refuses each as a stored footer.
+_LONG_FOOTERS = [
+    "Educational only · not investment advice · Written with AI assistance · Oct 9, 2026 · Caydex",
+    ("Educational only · not investment advice · Source: SEC Form 4 filings · Filed Nov 9–15, 2026 · Caydex · "
+     "Not affiliated with anyone named"),
+    ("Educational only · not investment advice · Source: SEC Form 13F · Quarter ended Sep 30, 2026 · filed Nov 13, "
+     "2026 · Caydex · Not affiliated with anyone named"),
+    ("Educational only · not investment advice · Source: company financial statements · Fiscal 2025, ended Aug 31, "
+     "2025 · Caydex · Not affiliated with anyone named"),
+]
+
+
+@pytest.mark.parametrize("footer", _LONG_FOOTERS)
+@pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
+def test_image_footer_problem_refuses_the_long_footer_of_before_the_restyle(footer, authorship):
+    assert pc.image_footer_problem(footer, authorship) is not None
+
+
+@pytest.mark.parametrize("footer, authorship, source, ok", [
+    ("Not investment advice", "ai", None, True),
+    ("Not investment advice", TEMPLATE, None, False),          # a lesson's footer is never a template's
+    ("Not investment advice · Source: company filings", "ai", None, False),
+    ("Not investment advice · Source: company filings", TEMPLATE, None, True),
+    ("Not investment advice · Source: company filings", TEMPLATE, pc.FOOTER_SOURCE_FILINGS, True),
+    ("Not investment advice · Source: company filings", TEMPLATE, pc.FOOTER_SOURCE_FILINGS_MARKET, False),
+    ("Not investment advice · Source: company filings and market data", TEMPLATE, pc.FOOTER_SOURCE_FILINGS, False),
+    ("Not investment advice · Source: company filings and market data", TEMPLATE, None, True),
+    ("Not investment advice · Source: SEC Form 4 · filed Nov 9–15, 2026", TEMPLATE, pc.FOOTER_SOURCE_FORM4, True),
+    ("Not investment advice · Source: SEC Form 4 · filed Nov 9–15, 2026", TEMPLATE, pc.FOOTER_SOURCE_13F, False),
+    ("Not investment advice · Source: SEC Form 4", TEMPLATE, None, False),                    # its date is missing
+    ("Not investment advice · Source: company filings · fiscal 2025", TEMPLATE, None, False),  # a date it never takes
+    ("Not investment advice · Source: SEC Form 4 filings · filed Nov 9, 2026", TEMPLATE, None, False),
+    ("Not investment advice · Source: FMP", TEMPLATE, None, False),
+    ("not investment advice", "ai", None, False), ("Not investment advice ", "ai", None, False),
+    ("Not investment advice · Caydex", "ai", None, False),
+    ("Not investment advice · Source: company filings", "human", None, False),
+    (None, "ai", None, False), (3, TEMPLATE, None, False), ("x" * 10_000, TEMPLATE, None, False),
+])
+def test_image_footer_problem_accepts_exactly_what_image_footer_writes(footer, authorship, source, ok):
+    assert (pc.image_footer_problem(footer, authorship, source=source) is None) is ok
+
+
+def test_image_footer_problem_agrees_with_image_footer_on_every_family():
+    """What `image_footer` writes, `image_footer_problem` accepts — and nothing that differs by one character."""
+    for source, when, golden in _TEMPLATE_FOOTER_GOLDEN:
+        written = pc.image_footer(DATE, TEMPLATE, source=source, when=when)
+        assert pc.image_footer_problem(written, TEMPLATE, source=source) is None
+        for mutant in (written + ".", written[:-1], written.replace("·", "-", 1), written.upper(),
+                       "Educational only · " + written, written + " · Caydex"):
+            assert pc.image_footer_problem(mutant, TEMPLATE) is not None, mutant
 
 
 # ══ Batch 3 (2026-10-20): the per-FORMAT disclaimer of an EXTRA video post ══════════════════════════════
@@ -2048,7 +2229,9 @@ def _template_outputs():
             rows.append(["disclaimer_for", field, str(d), pc.disclaimer_for(field, d, TEMPLATE)])
     rows.append(["short", pc.disclaimer_short(TEMPLATE)])
     bad_bodies = dict(BODIES, youtube_title="Price > value\nnow", x="a" * 300, youtube_description="Patience > timing.")
-    for category in NEWS_CATEGORIES + CATEGORIES[:2]:
+    # the categories that existed before Batch 3 (news-v22's two spotlight categories are pinned by their own test:
+    # every output of theirs is the Form 4 roundup's, `test_news_v22_the_spotlight_categories_compose_as_the_roundups`)
+    for category in NEWS_CATEGORIES[:8] + CATEGORIES[:2]:
         for state in STATES + ("junk",):
             for allow in (False, True):
                 for field in pc.CAPTION_FIELDS:
@@ -2072,8 +2255,29 @@ def test_batch3_every_template_output_is_byte_identical_to_before_batch3():
     assert len(rows) == 4037   # anti-vacuity: the whole matrix is really walked
     blob = json.dumps(rows, ensure_ascii=False, sort_keys=True)
     assert hashlib.sha256(blob.encode("utf-8")).hexdigest() == _TEMPLATE_DIGEST_BEFORE_BATCH3
-    # and the ai outputs, through the authorship digest the drop-2 test already pins
-    assert _ai_digest() == _AI_DIGEST_SEARCH_LINE
+    # and the ai outputs, through the authorship digest the drop-2 test already pins (news-v23: the restyle's)
+    assert _ai_digest() == _AI_DIGEST_RESTYLE
+
+
+@pytest.mark.parametrize("category", ["news:insider_spotlight", "news:thirteen_f_spotlight"])
+def test_news_v22_the_spotlight_categories_compose_as_the_roundups(category):
+    """The spotlight lane's two categories (news-v22, 2026-11-15) carry the filings tag (#secfilings), so every budget,
+    suffix and composed caption is the Form 4 roundup's byte for byte — no new copy anywhere in this module."""
+    assert NEWS_CATEGORIES[:8] == ("news:ceo_buys", "news:insider_buys", "news:thirteen_f", "news:congress_count",
+                                   "news:company_stakes", "news:earnings", "news:money_map", "news:theme_explainer")
+    assert pc._CATEGORY_TAG[category] == pc._CATEGORY_TAG["news:ceo_buys"] == "#secfilings"
+    for state in STATES:
+        for allow in (False, True):
+            for field in pc.CAPTION_FIELDS:
+                assert pc.body_budget(field, category, DATE, allow_x_url=allow, store_state=state,
+                                      authorship=TEMPLATE) == pc.body_budget(
+                    field, "news:ceo_buys", DATE, allow_x_url=allow, store_state=state, authorship=TEMPLATE)
+            for platform in pc.PLATFORMS:
+                a = pc.compose(platform, BODIES, category=category, run_date=DATE, allow_x_url=allow,
+                               store_state=state, authorship=TEMPLATE)
+                b = pc.compose(platform, BODIES, category="news:ceo_buys", run_date=DATE, allow_x_url=allow,
+                               store_state=state, authorship=TEMPLATE)
+                assert a.as_dict() == b.as_dict() and pc.check_composed(a, DATE, TEMPLATE) == []
 
 
 @pytest.mark.parametrize("authorship", ["ai", TEMPLATE])
@@ -2216,3 +2420,46 @@ def test_batch3_extra_video_fields_mirror_the_schema():
         for authorship in pc.AUTHORSHIPS:
             assert "narration" in pc.disclaimer_for(platform, DATE, authorship, video=True).lower()
             assert "narration" not in pc.disclaimer_for(platform, DATE, authorship).lower()
+
+
+# ── news-v22: the closed first-line prefixes (owner decision 2026-11-15 "Loosen caption hype words") ──────────────
+#
+# `news_templates.FIRST_LINE_PREFIXES` open a template caption's first line; this module only counts them. X weighs
+# each emoji 2 (twitter-text v3), so a prefix costs X one more than its code points; Bluesky counts code points; the
+# emoji is 4 UTF-8 bytes (Threads' picture-post cap is in bytes). design_content step 7: 13 / 27 / 15 on X.
+
+
+@pytest.mark.parametrize("pid, x_weight, code_points", [
+    ("insider.breaking", 13, 12), ("insider.alert", 27, 26), ("thirteen_f.filing", 15, 14),
+    ("earnings.breaking", 13, 12)])
+def test_news_v22_a_first_line_prefix_costs_x_its_emoji_twice(pid, x_weight, code_points):
+    from app.services.marketing import news_templates as T
+
+    head = T.FIRST_LINE_PREFIXES[pid] + " "
+    assert pc.x_weighted_length(head) == pc.measured_length("x", head) == x_weight == len(head) + 1
+    assert pc.measured_length("bluesky", head) == pc.measured_length("threads", head) == code_points == len(head)
+    assert len(head.encode("utf-8")) == code_points + 3
+    # a prefixed body that fills X's template budget exactly composes at 280 weighted; one character more is refused
+    category = "news:insider_spotlight"
+    budget = pc.body_budget("x", category, DATE, store_state=pc.STORE_LIVE, authorship=TEMPLATE)
+    body = head + "a" * (budget - x_weight)
+    post = pc.compose("x", {"x": body}, category=category, run_date=DATE, store_state=pc.STORE_LIVE,
+                      authorship=TEMPLATE)
+    assert pc.x_weighted_length(post.caption) == pc.LIMITS["x"] and pc.check_composed(post, DATE, TEMPLATE) == []
+    over = pc.compose("x", {"x": body + "a"}, category=category, run_date=DATE, store_state=pc.STORE_LIVE,
+                      authorship=TEMPLATE)
+    assert "over_platform_limit" in {v.code for v in pc.check_composed(over, DATE, TEMPLATE)}
+    # the composed caption keeps the prefix at position 0 and its code-owned suffix whole
+    assert post.caption.startswith(head) and post.caption.endswith(pc.disclaimer_for("x", DATE, TEMPLATE))
+
+
+@pytest.mark.parametrize("when", ["fiscal 2025 and 2026", "fiscal 2025 or", "fiscal 2025–2026", "fiscal 25 or 26",
+                                  "fiscal 2025 or 2026 or 2027", "fiscal 2025, 2026", "fiscal year 2025"])
+def test_phase3_the_statements_footer_takes_only_one_year_two_years_or_a_span(when):
+    """news-v23 phase 3 (2026-11-20): the statements family's date is one fiscal year (a Money Map), or — the theme's
+    "growth + profit" rows — two years ("fiscal 2025 or 2026", the theme sub line's own wording) or a span ("fiscal 2024
+    to 2026"); anything else is refused, at write and at the server's re-check."""
+    with pytest.raises(ValueError):
+        pc.image_footer(DATE, TEMPLATE, source=pc.FOOTER_SOURCE_STATEMENTS, when=when)
+    bad = f"{pc.IMAGE_FOOTER_HEAD} · Source: {pc.FOOTER_SOURCE_STATEMENTS} · {when}"
+    assert pc.image_footer_problem(bad, TEMPLATE) is not None

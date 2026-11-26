@@ -403,7 +403,18 @@ async def load_post_image(post: Dict[str, Any]) -> Union[PostImage, MediaProblem
     if not url.lower().startswith("https://"):
         return MediaProblem("the picture's public URL is not https", definite=True)
     output = script.get("output") if isinstance(script, dict) and script.get("status") == "accepted" else None
-    image_post = normalize_image_post(output.get("image_post")) if isinstance(output, dict) else None
+    # review of 2026-11-26: the alt text of the picture the worker REGISTERED — a template whose older-worker picture
+    # differs (a Money Map loss year, a 13F list past five rows) carries that picture's alt text too, and the declared
+    # on-screen strings say which picture this is (`news_templates.picture_alt`); every other output: `image_post`
+    alt_source = output.get("image_post") if isinstance(output, dict) else None
+    if isinstance(output, dict) and "image_post_pre_v23" in output:
+        from app.services.marketing.news_templates import picture_alt
+
+        alt_source = picture_alt(output, md.get("onscreen_text"))
+        if alt_source is not output.get("image_post"):
+            logger.warning("marketing post image run_id=%s asset=%s: the picture is an older worker's (none of the "
+                           "look_v23 strings drawn) — its alt text is the stored image_post_pre_v23", run_id, ids[0])
+    image_post = normalize_image_post(alt_source) if isinstance(output, dict) else None
     if image_post is None:
         return MediaProblem(f"run {run_id}'s accepted script carries no image_post for the picture's alt text",
                             definite=True)

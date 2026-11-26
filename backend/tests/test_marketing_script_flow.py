@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import logging
 import threading
 import time
@@ -54,6 +55,19 @@ def _same(stored: Any, wanted: Any) -> bool:
     return False
 
 
+#: Columns the fake reads as their NOT NULL DEFAULT when a row lacks them (a row a test appends straight to `.rows`,
+#: bypassing `insert`'s defaults) — `lane` (migration 210: `TEXT NOT NULL DEFAULT 'main'` on marketing_runs and
+#: marketing_scripts), so every row written before the lanes, and every main-lane INSERT, is the main lane's.
+_READ_DEFAULTS: Dict[str, Any] = {"lane": "main"}
+
+
+def _cell(row: Dict[str, Any], col: str) -> Any:
+    """`row[col]`, or the column's default (`_READ_DEFAULTS`) when the row lacks it — as the real column reads."""
+    if col in _READ_DEFAULTS and col not in row:
+        return _READ_DEFAULTS[col]
+    return row.get(col)
+
+
 class _Q:
     def __init__(self, table: "_T", op: str, payload=None):
         self.t, self.op, self.payload = table, op, payload
@@ -75,7 +89,7 @@ class _Q:
 
     def eq(self, c, v):
         self._check_plain()
-        self.filters.append(lambda r, c=c, v=v: _same(r.get(c), v))
+        self.filters.append(lambda r, c=c, v=v: _same(_cell(r, c), v))
         return self
 
     def is_(self, c, v):
@@ -87,6 +101,18 @@ class _Q:
     def lt(self, c, v):
         self._check_plain()
         self.filters.append(lambda r, c=c, v=v: r.get(c) is not None and str(r.get(c)) < str(v))
+        return self
+
+    # `gte` / `lte` (the spotlight lane's cross-lane read, `lane_scripts_between`): NULL never matches, like `lt`;
+    # only ISO dates are compared here, whose string order is their order.
+    def gte(self, c, v):
+        self._check_plain()
+        self.filters.append(lambda r, c=c, v=v: r.get(c) is not None and str(r.get(c)) >= str(v))
+        return self
+
+    def lte(self, c, v):
+        self._check_plain()
+        self.filters.append(lambda r, c=c, v=v: r.get(c) is not None and str(r.get(c)) <= str(v))
         return self
 
     def order(self, col, *, desc=False, **_k):
@@ -117,13 +143,16 @@ class _Q:
         rows = self.t.rows
         if self.op == "insert":
             row = dict(self.payload)
-            for key in self.t.unique:
-                if any(all(r.get(k) == row.get(k) for k in key) for r in rows):
-                    raise APIError({"code": "23505", "message": "duplicate key value violates unique "
-                                    "constraint", "details": None, "hint": None})
             row.setdefault("id", str(uuid.uuid4()))
+            # Defaults BEFORE the unique check, as in Postgres; a column the row lacks is compared as its read
+            # default (`_cell`): a main-lane INSERT never sends `lane`, and its (run_date, 'main') must still meet
+            # an existing main row (migration 210).
             for k, v in self.t.defaults.items():
                 row.setdefault(k, copy.deepcopy(v))
+            for key in self.t.unique:
+                if any(all(_cell(r, k) == _cell(row, k) for k in key) for r in rows):
+                    raise APIError({"code": "23505", "message": "duplicate key value violates unique "
+                                    "constraint", "details": None, "hint": None})
             rows.append(row)
             return _Res([dict(row)])
         hits = [r for r in rows if all(f(r) for f in self.filters)]
@@ -160,8 +189,10 @@ class _T:
 class FakeSB:
     def __init__(self):
         self.tables = {
-            mrs.RUNS: _T([("run_date",)], {"status": "planned", "stage": "planned", "metadata": {},
-                                           "timings": {}, "attempts": 0, "dry_run": True}),
+            # migration 210: one run per (day, lane). `lane` (NOT NULL DEFAULT 'main') is NOT stored by the fake
+            # when an INSERT omits it — it reads as 'main' (`_cell`) — so a test can see what the INSERT sent.
+            mrs.RUNS: _T([("run_date", "lane")], {"status": "planned", "stage": "planned", "metadata": {},
+                                                  "timings": {}, "attempts": 0, "dry_run": True}),
             mrs.ASSETS: _T([("storage_path",)], {"status": "pending_upload", "metadata": {}}),
             mrs.POSTS: _T([("idempotency_key",)], {"metadata": {}, "attempts": 0}),
             mrs.SCRIPTS: _T([("run_id",)], {"status": "selected", "generations": 0, "violations": [],
@@ -275,6 +306,10 @@ def world(monkeypatch):
     # tests that need a news day turn them on themselves.
     from app.config import Settings
     for name in ("MARKETING_CONTENT_CLASSES", "MARKETING_NEWS_SERIES"):
+        monkeypatch.setattr(mrs.settings, name, Settings.model_fields[name].default)
+    # The spotlight lane (migration 210) at its declared defaults — closed — likewise: `news_recent_limit()` and the
+    # spotlight selection read it. `spot_world` opens it.
+    for name in ("MARKETING_SPOTLIGHT_ENABLED", "MARKETING_SPOTLIGHT_WEEKDAYS", "MARKETING_SPOTLIGHT_HOUR_ET"):
         monkeypatch.setattr(mrs.settings, name, Settings.model_fields[name].default)
     # The claim window is computed from the ET date; pin it so the fixed POSTING_DAY is "today".
     monkeypatch.setattr(ss, "_today_et", lambda: POSTING_DAY)
@@ -445,8 +480,8 @@ async def test_a_lost_insert_response_is_adopted_and_still_mirrored(world):
     class LostResponse(mrs.MarketingRunService):
         fired = False
 
-        async def insert_script(self, row):
-            out = await super().insert_script(row)
+        async def insert_script(self, row, **kw):
+            out = await super().insert_script(row, **kw)
             if not LostResponse.fired:
                 LostResponse.fired = True
                 raise mrs.MarketingRunError("insert_script failed (run_id=x): APIError: 520")
@@ -608,9 +643,15 @@ async def test_accepted_script_returns_only_the_worker_subset(world):
                            # Batch 2: always present — their presence is the worker's "this web knows" signal
                            "video_features", "end_card_cta",
                            # Batch 2 fix (CARDS-B2-1): which card a data card replaces — None without one
-                           "data_card_slot"}
+                           "data_card_slot",
+                           # per-post art (workstream C): None on a lesson, always (and without art anywhere)
+                           "art",
+                           # news-v23: on every read-back — the look's own strings are allowed by this web
+                           "look"}
+    assert script["look"] == "news-v23"
     assert (script["content_class"], script["authorship"], script["series"], script["video_layout"],
             script["opening_card"], script["image_spec"], script["logos"]) == ("A", "ai", None, None, None, None, [])
+    assert script["art"] is None
     # No feature switched on; the package carries no store state, so the end card keeps the legacy CTA.
     assert script["video_features"] == [] and script["end_card_cta"] == "caydexinvest.com"
     assert script["data_card_slot"] is None
@@ -2814,7 +2855,8 @@ def test_the_kick_route_serializes_the_frozen_formats(client, monkeypatch):
     monkeypatch.setattr(mi, "get_marketing_script_service", lambda: Svc(script))
     body = client.post(f"{_BASE}/runs/r1/script", headers=_H).json()
     assert body["script"]["post_formats"] == {"bluesky": "image", "tiktok": "video"}
-    assert body["script"]["image_post"] == _IMG and body["script"]["image_footer"].endswith("· Caydex")
+    # news-v23 (restyle 2026-11-19): the lesson picture's footer is the one short line
+    assert body["script"]["image_post"] == _IMG and body["script"]["image_footer"] == "Not investment advice"
     # an older service shape (no drop-1 keys) still answers, with nulls the worker treats as absent
     legacy = {k: v for k, v in script.items() if k not in ("post_formats", "image_post", "image_footer")}
     monkeypatch.setattr(mi, "get_marketing_script_service", lambda: Svc(legacy))
@@ -2874,6 +2916,52 @@ def test_a_threads_caption_over_500_utf8_bytes_freezes_threads_as_text(caption, 
     else:
         assert logged == []
     assert mrs.frozen_post_formats(out) == out["post_formats"]
+
+
+def _composed_template(rec, run_date, pictured):
+    """A composed template output as the build stores it before the freeze: every logo a wordmark."""
+    out = news_templates.compose(rec, run_date=run_date, store_state="live", allow_x_url=False,
+                                 picture_outlets=pictured)
+    out["logos"] = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None, "bytes": None, "width": None,
+                     "height": None} for r in out["logo_refs"]]
+    return out
+
+
+def test_a_list_posts_x_and_bluesky_freeze_in_the_format_their_captions_were_written_for(caplog):
+    """Review 2026-11-20 (confirmed): an eight-change 13F used to DROP X and Bluesky (their captions could not list the
+    picture's "+2 more"), X although it is TEXT under the production switches. Composed for the production picture
+    platforms (`template_picture_outlets(True, False, …)`: X not among them), X is a text post (rows from the top, no
+    promise owed) and Bluesky — pictured, but too short to keep the promise — is written as a text post too and listed in
+    `text_outlets`: the freeze makes it TEXT with `image_fallback` reason `caption_list_long` (owner words), while
+    Facebook, LinkedIn and Threads post the picture. Mutation-checked by hand: the `list_text` branch removed from
+    `freeze_post_formats` froze Bluesky as an image under a "+2 more" its caption does not keep — red."""
+    import test_marketing_news_templates as NT
+
+    platforms = ("bluesky", "facebook", "linkedin", "threads")
+    pictured = ss.template_picture_outlets(True, False, platforms)
+    assert pictured == ["bluesky", "facebook", "linkedin", "threads"]
+    assert ss.template_picture_outlets(False, True, platforms) == []
+    assert ss.template_picture_outlets(True, True, ("threads", "tiktok", "nope")) == ["threads", "x"]
+    out = _composed_template(NT.f13s_list8(), NT.SPOT_SAT, pictured)
+    assert out["dropped_outlets"] == {} and out["text_outlets"] == ["bluesky"] and out["picture_outlets"] == pictured
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        frozen = ss.freeze_post_formats(out, NT.SPOT_SAT, image_posts=True, x_images=False, run_id="r-list",
+                                        image_platforms=platforms)
+    formats = frozen["post_formats"]
+    assert formats["bluesky"] == "text" and formats["x"] == "text"
+    assert {formats[p] for p in ("facebook", "linkedin", "threads")} == {"image"}
+    assert frozen[ss.IMAGE_FALLBACK_KEY] == {"reason": "caption_list_long", "platforms": ["bluesky"]}
+    assert "caption_list_long" in schemas.IMAGE_FALLBACK_REASONS
+    assert any("could not list the rows its picture leaves out" in r.getMessage() for r in caplog.records)
+    # a platform the COMPOSITION did not picture never posts the picture, whatever the freeze's switches say — its
+    # caption is a text post's (no fallback: as if left off)
+    only_fb = _composed_template(NT.f13s_list8(), NT.SPOT_SAT, ["facebook"])
+    frozen = ss.freeze_post_formats(only_fb, NT.SPOT_SAT, image_posts=True, x_images=True, run_id="r-list2")
+    assert frozen["post_formats"]["facebook"] == "image"
+    assert {frozen["post_formats"][p] for p in ("x", "bluesky", "linkedin", "threads")} == {"text"}
+    assert ss.IMAGE_FALLBACK_KEY not in frozen
+    assert news_templates.revalidate(json.loads(json.dumps(frozen)), fact_sheet=json.loads(json.dumps(
+        news_rules.fact_sheet(NT.f13s_list8(), rejections={}, selection={}))), run_date=NT.SPOT_SAT) == []
 
 
 def test_a_long_threads_caption_with_image_posts_off_is_text_as_always(caplog):
@@ -3111,8 +3199,9 @@ def test_a_default_freeze_decides_exactly_as_before_batch_1():
 
 def test_the_image_fallback_key_is_the_shared_contract():
     assert ss.IMAGE_FALLBACK_KEY == schemas.POST_METADATA_IMAGE_FALLBACK == "image_fallback"
+    # review 2026-11-20: `caption_list_long` — a list post's X / Bluesky caption that cannot keep its picture's promise
     assert set(schemas.IMAGE_FALLBACK_REASONS) == {"image_dropped", "worker_capability", "image_spec_invalid",
-                                                   "threads_caption_long", "freeze_failed"}
+                                                   "threads_caption_long", "caption_list_long", "freeze_failed"}
     assert all(isinstance(w, str) and w.strip() for w in schemas.IMAGE_FALLBACK_REASONS.values())
 
 
@@ -3906,7 +3995,9 @@ def _b2_ceo_week() -> news_rules.InsiderBuysWeek:
 
     return news_rules.InsiderBuysWeek(series="ceo_buys", window_start=start, window_end=end, rows=(
         buy("LOW", "Lowe's", 2_300_000.0, 9_812.0, end - timedelta(days=3), holding="indirect"),
-        buy("SBUX", "Starbucks", 410_000.0, 4_850.0, end - timedelta(days=2))))
+        buy("SBUX", "Starbucks", 410_000.0, 4_850.0, end - timedelta(days=2)),
+        # owner decisions 2026-11-20 ("3 - 5 companies at once"): a Form 4 week holds three companies at least
+        buy("NKE", "Nike", 250_000.0, 3_500.0, end - timedelta(days=1))))
 
 
 def _b2_composed() -> Dict[str, Any]:
@@ -3948,7 +4039,12 @@ async def test_a_template_freezes_its_data_card_and_the_whole_chain_agrees(world
                                         "generations": 0, "tokens_used": 0, "violations": []})
     script = (await svc.kick(rid, claim=_holder(svc, rid)))["script"]
     assert script["video_features"] == (expected or [])
-    assert script["image_spec"] == stored["image_spec"] and script["image_footer"] == stored["image_footer"]
+    # news-v23: a holder without look_v23 (these claims predate it) is sent the picture without the ticker chips its
+    # walker would refuse — the rest of the spec exactly as stored
+    sent_spec = (stored["image_spec"] if "look_v23" in caps
+                 else ss._without_look_chips(stored["image_spec"], rid))
+    assert sent_spec != stored["image_spec"]                              # the roundup's rows carry chips
+    assert script["image_spec"] == sent_spec and script["image_footer"] == stored["image_footer"]
     assert script["end_card_cta"] == "Search Caydex on the App Store"
     # CARDS-B2-1: the data card replaces "The purchase" (card 2 of a Form 4 roundup) — never the last card,
     # "Same week", whose "At least one more …" is the roundup's own hedge
@@ -4673,3 +4769,1891 @@ async def test_the_world_is_a_lesson_world_whatever_the_environment_says(monkeyp
     assert reached == []
     assert row["status"] == "accepted"
     assert not str(row["source_ref"]).startswith(news_rules.LEDGER_PREFIX)        # the day is the lesson
+
+
+# ── Spotlight lane (migration 210, 2026-11-15): the script row's lane comes from its run ──────────────────────
+# `run_service.insert_script` is the ONE writer of `marketing_scripts.lane`, from the run row the kick already holds
+# (no extra read); a main run's selecting INSERT stays byte for byte what it was (it never sends the column).
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_scripts_lane_is_its_runs_and_a_main_insert_never_sends_it(world, monkeypatch):
+    sb, runs = world
+    sent: List[Dict[str, Any]] = []
+    real = sb.tables[mrs.SCRIPTS].insert
+
+    def spy(payload):
+        sent.append(dict(payload))
+        return real(payload)
+
+    monkeypatch.setattr(sb.tables[mrs.SCRIPTS], "insert", spy)
+    handed: List[Any] = []
+    real_insert_script = runs.insert_script
+
+    async def recording_insert_script(row, **kw):
+        handed.append((row["run_id"], (kw.get("run") or {}).get("id")))
+        return await real_insert_script(row, **kw)
+
+    monkeypatch.setattr(runs, "insert_script", recording_insert_script)
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter([]))
+    main_id = _run(sb, REST_DAY)
+    spot_id = _run(sb, REST_DAY, lane="spotlight")          # the same day's second run (a rest day for both)
+    for rid in (main_id, spot_id):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+        assert state["status"] == "rest_day", state
+    assert [sorted(p) for p in sent] == [["run_date", "run_id", "status"], ["lane", "run_date", "run_id", "status"]]
+    assert sent[1]["lane"] == "spotlight"
+    assert "lane" not in _script_row(sb, main_id) and _script_row(sb, spot_id)["lane"] == "spotlight"
+    # the kick hands insert_script the run it already read: the lane costs no extra read
+    assert handed == [(main_id, main_id), (spot_id, spot_id)]
+
+
+# ── Spotlight lane (migration 210, 2026-11-15): selection at the kick, the skip, the cross-lane exclusion ────────
+# A spotlight run reads `selection.spotlight_plan_for` (never `plan_for`), narrowed by the SAME classes and
+# per-series switch as the main lane, and its chain ends in `selection.SKIP`: a day where nothing qualifies writes
+# ONE `rejected` / `nothing_qualified` script with its trail — never the lesson, never a rest day. Both lanes keep
+# away from the other lane's day (`_cross_lane`): (a) its same-day ledger refs, (b) the LEAD company it drew within
+# CROSS_LANE_COMPANY_DAYS (a main run checks only spotlight rows), (c) the series it used that day — and an
+# exclusion never reaches the source's refusal memo (`remember_template_refusal`), only a real template refusal does.
+# The records, the fake company-news source and the Storage fake are template_flow's (imported lazily: that module
+# imports this one).
+
+#: Thursday 2026-11-19: a spotlight weekday inside the Q3 13F season (not the week's last spotlight day), and a main
+#: posting day whose enabled chain (the default series) is Money Map → lesson. Saturday the 21st leads with the 13F.
+SPOT_TUE, SPOT_THU, SPOT_SAT = date(2026, 11, 17), date(2026, 11, 19), date(2026, 11, 21)
+assert (SPOT_TUE.weekday(), SPOT_THU.weekday(), SPOT_SAT.weekday()) == (1, 3, 5)
+#: What a spotlight-lane worker declares on its claim: the drop-2 worker's capabilities and `layout_feature`
+#: (news-v22: the spotlight pair's `feature` picture — a holder without it has the pair dropped from its chain,
+#: `script_service.FEATURE_LAYOUT_SERIES`).
+#: news-v23 (2026-11-19): + look_v23 — the worker that ships the restyle declares it, and an older holder's chain never
+#: holds earnings (`test_the_earnings_table_is_kept_off_the_chain_of_a_holder_without_look_v23`)
+_SPOT_CAPS = ["layouts_2b", "news_templates", "post_image", "layout_feature", "look_v23"]
+
+
+def _tf():
+    import test_marketing_template_flow as TF
+
+    return TF
+
+
+@pytest.fixture
+def spot_world(world, monkeypatch):
+    """`world` plus a template day's settings (template_flow's `tworld`) and the spotlight lane OPEN: switch on,
+    Tue/Thu/Sat, 10:00 + 6 attempts <= 16:00, the news classes — whatever this machine's environment says."""
+    from app.config import Settings
+
+    TF = _tf()
+    sb, runs = world
+    sb.storage = TF.FakeStorage()
+    for name, value in (("MARKETING_CONTENT_CLASSES", "A,C,F"),
+                        ("MARKETING_NEWS_SERIES", Settings.model_fields["MARKETING_NEWS_SERIES"].default),
+                        ("MARKETING_IMAGE_POSTS", True), ("MARKETING_X_ALLOW_URLS", False),
+                        ("MARKETING_FIRST_LINE_PREFIX", False),
+                        ("SUPABASE_URL", TF._SB_PUBLIC), ("MARKETING_SPOTLIGHT_ENABLED", True),
+                        ("MARKETING_SPOTLIGHT_WEEKDAYS", "tue,thu,sat"), ("MARKETING_SPOTLIGHT_HOUR_ET", 10),
+                        ("MARKETING_MAX_RUN_ATTEMPTS", 6), ("MARKETING_RUN_HOUR_ET", 16)):
+        monkeypatch.setattr(mrs.settings, name, value)
+    monkeypatch.setattr(ss.smart_link, "store_state", lambda: "live")
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_THU)
+    selection._log_lane_closed.cache_clear()
+    selection._parse_spotlight_weekdays_text.cache_clear()
+    yield sb, runs
+    selection._log_lane_closed.cache_clear()
+    selection._parse_spotlight_weekdays_text.cache_clear()
+
+
+def _lane_run(sb: FakeSB, day: date, lane: str = "spotlight", *, caps=None) -> str:
+    """A HELD run of `lane` on `day` whose holder declared `caps` (the drop-2 worker's by default)."""
+    meta: Dict[str, Any] = {"claim_nonce": NONCE, "worker_capabilities": list(_SPOT_CAPS if caps is None else caps)}
+    extra: Dict[str, Any] = {"metadata": meta, "worker_version": "spotlight-test"}
+    if lane != "main":
+        extra["lane"] = lane
+    return _run(sb, day, **extra)
+
+
+def _drawn(sb: FakeSB, day: date, lead: str, *, lane: str = "spotlight", template: str = "insider_spotlight",
+           ref: Optional[str] = None) -> str:
+    """An ACCEPTED script of another run on `day` whose post drew `lead` as its lead company (a spotlight-layout
+    image with that header logo) — what the cross-lane read sees. Returns its source_ref."""
+    ref = ref or f"news:{template}:{lead}:{day.isoformat()}"
+    row = {"run_id": str(uuid.uuid4()), "run_date": day.isoformat(), "status": "accepted", "template_id": template,
+           "source_ref": ref, "output": {"image_spec": {"layout": "spotlight", "header": {"logo": lead}},
+                                         "logo_refs": [{"key": lead, "name": lead.title()}]}}
+    if lane != "main":
+        row["lane"] = lane
+    sb.tables[mrs.SCRIPTS].rows.append(row)
+    return ref
+
+
+def _mm(sym: str, name: str):
+    """A Money Map record the template accepts, for company `sym`."""
+    TF = _tf()
+    return TF.costco(company=TF.co(sym, name))
+
+
+def test_spotlight_the_constants_the_kick_writes_are_the_schemas():
+    assert ss.REASON_NOTHING_QUALIFIED == "nothing_qualified" and ss.REASON_NOTHING_QUALIFIED in schemas.SCRIPT_REJECT_REASONS
+    assert ss.OTHER_LANE == "other_lane" and ss.OTHER_LANE in ss.SERIES_OUTCOMES
+    assert len(ss.OTHER_LANE_SERIES) <= 60 and len(ss.OTHER_LANE_COMPANY) <= 60   # a trail reason is cut at 60
+    assert ss.CROSS_LANE_COMPANY_DAYS == 2
+    assert selection.SKIP not in selection.SERIES_BY_ID and selection.SKIP in selection.CHAIN_TERMINALS
+
+
+@pytest.mark.parametrize("output, lead", [
+    ({"image_spec": {"layout": "spotlight", "header": {"logo": "nvda"}},
+      "logo_refs": [{"key": "NVDA", "name": "NVIDIA"}]}, "NVDA"),
+    ({"image_spec": {"layout": "bars", "header": {"logo": " COST "}}, "logo_refs": []}, "COST"),
+    # a roundup's header beats its rows; without a header the first row (the first logo ref) leads
+    ({"image_spec": {"layout": "rows", "header": {"logo": "BRK-B"}, "sections": []},
+      "logo_refs": [{"key": "BRK-B"}, {"key": "AAPL"}]}, "BRK-B"),
+    ({"image_spec": {"layout": "rows", "sections": []}, "logo_refs": [{"key": "AAPL"}, {"key": "MSFT"}]}, "AAPL"),
+    # a pair leads with its LEFT company (the investor), whatever the ref order says
+    ({"image_spec": {"layout": "pair", "left": {"logo": "TSLA"}, "right": {"logo": "SPCX"}},
+      "logo_refs": [{"key": "SPCX"}, {"key": "TSLA"}]}, "TSLA"),
+    ({"image_spec": {"layout": "pair", "left": {"name": "Nscale"}, "right": {"logo": "NVDA"}},
+      "logo_refs": [{"key": "NVDA"}]}, "NVDA"),
+    ({"image_spec": {"layout": "grid", "tiles": []}, "logo_refs": [{"key": "AMD"}, {"key": "INTC"}]}, "AMD"),
+    ({"hook": "a lesson", "cards": []}, None),                          # a lesson draws no company
+    ({"image_spec": {"layout": "spotlight", "header": {"logo": ""}}, "logo_refs": "junk"}, None),
+    ({"image_spec": "junk", "logo_refs": [None, {"key": 7}, {"key": "  "}, {"key": "ok"}]}, "OK"),
+    (None, None), ("junk", None), ([], None),
+])
+def test_spotlight_lead_company_is_the_header_the_pairs_left_or_the_first_logo(output, lead):
+    assert ss.lead_company(output) == lead
+
+
+@pytest.mark.parametrize("row, series", [
+    # a spotlight day that reached its SKIP: never the lesson
+    ({"status": "rejected", "reject_reason": "nothing_qualified", "fact_sheet": {"selection": {"trail": [
+        {"series": "money_map", "outcome": "no_candidates"}, {"series": "skip", "outcome": "no_candidates"}]}}},
+     "skip"),
+    ({"status": "rejected", "reject_reason": "nothing_qualified", "fact_sheet": {"selection": {"trail": []}}}, "skip"),
+    ({"status": "rejected", "reject_reason": "nothing_qualified",
+      "fact_sheet": {"selection": {"trail": [{"series": "money_map", "outcome": "other_lane"}]}}}, "skip"),
+    # the main lane, unchanged: the chosen step, else the template's series, else the lesson
+    ({"template_id": "money_map", "fact_sheet": {"selection": {"trail": [{"series": "money_map", "outcome": "chosen"}]}}},
+     "money_map"),
+    ({"template_id": "money_map", "fact_sheet": {"selection": {"trail": [
+        {"series": "ceo_buys", "outcome": "no_candidates"}]}}}, "money_map"),
+    ({"template_id": "myth_vs_fact", "fact_sheet": {"selection": {"trail": [
+        {"series": "ceo_buys", "outcome": "no_candidates"}]}}}, "lesson"),
+])
+def test_spotlight_the_mirror_of_a_skip_trail_is_skip_never_the_lesson(row, series):
+    assert ss._selection_mirror(row)["series"] == series
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_day_where_nothing_qualifies_is_one_rejected_nothing_qualified_row(spot_world, monkeypatch,
+                                                                                               caplog):
+    """The spotlight chain on the 13F season's Saturday is 13F spotlight → insider spotlight → Money Map → SKIP; the
+    pair is not listed in the per-series switch (its default), so only Money Map is asked (the main Saturday is the
+    lesson alone, so Money Map stays the spotlight's — C0). It has nothing: ONE `rejected` row, reason
+    `nothing_qualified`, lane spotlight, its trail ending in the SKIP step — the kick answers `rejected` (the worker
+    closes the day `skipped`), the writer is never called and nothing is mirrored as the lesson."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_SAT)
+    news = TF.FakeNews({})
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer, news=news)
+    rid = _lane_run(sb, SPOT_SAT)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state == {"status": "rejected", "source_ref": None, "template_id": None, "reason": "nothing_qualified",
+                     "violations": []}
+    assert [c["series"] for c in news.calls] == ["money_map"] and writer.calls == []
+    (row,) = sb.tables[mrs.SCRIPTS].rows
+    assert (row["status"], row["reject_reason"], row["lane"], row["last_error"]) == (
+        "rejected", "nothing_qualified", "spotlight", "spotlight: nothing qualified")
+    assert row["fact_sheet"] == {"selection": {"plan": "spotlight_13f_lead", "chain": ["money_map", "skip"], "trail": [
+        {"series": "money_map", "outcome": "no_candidates", "reason": "money_map_none_qualified"},
+        {"series": "skip", "outcome": "no_candidates"}]}}
+    assert ss._selection_mirror(row)["series"] == "skip"
+    # the run mirrors the SKIP and its trail (never the lesson, never a pick it did not make): the run-health texts
+    # and the digest read the run, and must tell this quiet day from a data source that failed (lane review)
+    run_row = _run_row(sb, rid)
+    assert run_row["metadata"]["series"] == "skip"
+    assert run_row["metadata"]["series_trail"] == row["fact_sheet"]["selection"]["trail"]
+    assert not run_row.get("source_ref") and not run_row.get("template_id") and not run_row.get("content_class")
+    assert run_row["metadata"]["claim_nonce"] == NONCE                 # a merge: the claim is untouched
+    assert any("NOTHING QUALIFIED" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+    # idempotent: the next kick answers the same row, nothing rebuilt
+    again = await svc.kick(rid, claim=_holder(svc, rid))
+    assert again == state and len(news.calls) == 1 and len(sb.tables[mrs.SCRIPTS].rows) == 1
+
+
+@pytest.mark.parametrize("day, plan, money_map", [(SPOT_THU, "spotlight_13f", False),
+                                                   (SPOT_SAT, "spotlight_13f_lead", True)])
+@pytest.mark.asyncio
+async def test_spotlight_a_run_takes_the_spotlight_chain_and_posts_a_money_map(spot_world, monkeypatch, caplog, day,
+                                                                               plan, money_map):
+    """A spotlight run is selected from `spotlight_plan_for` (never the main calendar: a Saturday's main plan is the
+    lesson alone, a Thursday's leads with earnings) narrowed by MARKETING_NEWS_SERIES — the weekly roundups and
+    earnings listed never run there (the spotlight calendar holds none of them); the listed spotlight pair (shipped,
+    news-v22) is asked first in the calendar's order. C0 (2026-11-16): a series the MAIN lane's chain holds that day
+    leaves the spotlight's — Thursday's main chain is earnings → Money Map → lesson, so the Thursday spotlight never
+    asks Money Map and, the pair finding nothing, SKIPS; Saturday's main day is the lesson alone, so Money Map is
+    chosen there. Its accepted script is the spotlight's row; its ledger read names the lane."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES",
+                        "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight,thirteen_f_spotlight,earnings")
+    reads: List[Any] = []
+    real = runs.recent_source_refs
+
+    async def spy(before, limit, **kw):
+        reads.append((before, limit, kw))
+        return await real(before, limit, **kw)
+
+    monkeypatch.setattr(runs, "recent_source_refs", spy)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer, news=news)
+    rid = _lane_run(sb, day)
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    pair = (["insider_spotlight", "thirteen_f_spotlight"] if plan == "spotlight_13f"
+            else ["thirteen_f_spotlight", "insider_spotlight"])
+    misses = [{"series": s, "outcome": "no_candidates", "reason": f"{s}_none_qualified"} for s in pair]
+    row = _script_row(sb, rid)
+    assert row["lane"] == "spotlight" and writer.calls == []
+    assert reads == [(day, selection.news_recent_limit(), {"lane": "spotlight"})]
+    assert selection.news_recent_limit() == 60 * (4 + 3)                # both lanes' days in the ledger read
+    if money_map:
+        assert state["status"] == "accepted" and state["template_id"] == "money_map", state
+        assert [c["series"] for c in news.calls] == [*pair, "money_map"]
+        assert row["source_ref"] == "news:money_map:COST:2025"
+        assert row["fact_sheet"]["selection"] == {
+            "plan": plan, "chain": [*pair, "money_map", "skip"],
+            "trail": [*misses, {"series": "money_map", "outcome": "chosen"}]}
+        assert _run_row(sb, rid)["metadata"]["series"] == "money_map"
+    else:
+        assert state["status"] == "rejected" and state["reason"] == "nothing_qualified", state
+        assert [c["series"] for c in news.calls] == pair                # Money Map is the main lane's that day
+        assert row["fact_sheet"]["selection"] == {
+            "plan": plan, "chain": [*pair, "skip"], "trail": [*misses, {"series": "skip", "outcome": "no_candidates"}]}
+        assert any("main lane's series left out=['money_map']" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("why, settings_patch, day", [
+    ("the switch went off after the claim", {"MARKETING_SPOTLIGHT_ENABLED": False}, SPOT_THU),
+    ("the weekday left the list", {"MARKETING_SPOTLIGHT_WEEKDAYS": "tue,sat"}, SPOT_THU),
+    ("the weekdays became unreadable", {"MARKETING_SPOTLIGHT_WEEKDAYS": "someday"}, SPOT_THU),
+    ("the news classes went off", {"MARKETING_CONTENT_CLASSES": "A"}, SPOT_THU),
+    ("the hours stopped fitting", {"MARKETING_SPOTLIGHT_HOUR_ET": 11}, SPOT_THU),
+])
+@pytest.mark.asyncio
+async def test_spotlight_a_lane_closed_after_the_claim_is_a_rest_day(spot_world, monkeypatch, why, settings_patch,
+                                                                     day):
+    TF = _tf()
+    sb, runs = spot_world
+    for name, value in settings_patch.items():
+        monkeypatch.setattr(mrs.settings, name, value)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, day)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rest_day", why
+    assert news.calls == [] and _script_row(sb, rid)["status"] == "rest_day" and _script_row(sb, rid)["lane"] == "spotlight"
+
+
+@pytest.mark.parametrize("caps", [["post_image"], [], ["layouts_2b", "post_image"]])
+@pytest.mark.asyncio
+async def test_spotlight_a_holder_that_cannot_draw_a_template_skips_never_the_lesson(spot_world, monkeypatch, caplog,
+                                                                                      caps):
+    """The spotlight lane is news-only: a holder without `news_templates` cannot draw its template, and the lesson
+    is no fallback here (the main lane posts the week's) — the day skips `nothing_qualified`, WARNING naming the
+    worker; the source and the writer are never asked."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_SAT)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer, news=news)
+    rid = _lane_run(sb, SPOT_SAT, caps=caps)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified"
+    assert news.calls == [] and writer.calls == [] and svc._builds == {}
+    assert _script_row(sb, rid)["fact_sheet"]["selection"]["trail"] == [
+        {"series": "skip", "outcome": "no_candidates", "reason": "worker_without_news_templates"}]
+    assert any(r.levelno == logging.WARNING and "spotlight-test" in r.getMessage()
+               and "never falls to the lesson" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("series, day", [
+    # MARKETING_NEWS_SERIES gates both lanes: with Money Map pulled after the claim, the Saturday has no series left
+    ("ceo_buys,insider_buys", SPOT_SAT),
+    # C0 (2026-11-16): the Thursday's only spotlight series is the main lane's Money Map — no spotlight day at all
+    (None, SPOT_THU),
+])
+@pytest.mark.asyncio
+async def test_spotlight_a_chain_with_no_series_left_is_no_spotlight_day_and_the_kick_rests(spot_world, monkeypatch,
+                                                                                           caplog, series, day):
+    """A spotlight chain left with no series is NOT a spotlight day (`selection.spotlight_day_problem`, the one
+    predicate the claim gate, the kick and the digest share): the claim answers `not_scheduled`, and a run claimed
+    before the switch changed RESTS at the kick (the rest_day row, WARNING naming why) — no build task, no source
+    asked, never a `nothing_qualified` alert about a day that could only skip."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    if series is not None:
+        monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", series)
+    assert selection.spotlight_day_problem(day) == selection.SPOTLIGHT_NO_SERIES
+    assert await runs.claim_run(day, worker_version="t", dry_run=True, lane="spotlight") == (None, mrs.NOT_SCHEDULED)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, day)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rest_day", state
+    assert news.calls == [] and svc._builds == {}
+    assert _script_row(sb, rid)["status"] == "rest_day" and _script_row(sb, rid)["lane"] == "spotlight"
+    assert any(selection.SPOTLIGHT_NO_SERIES in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_spotlight_the_skip_mirror_is_written_once_only_on_a_held_run_and_a_lost_write_is_logged(
+        spot_world, monkeypatch, caplog):
+    """`_heal_skip_mirror`: ONE fenced merge on a held run, nothing when it already holds the trail (a replayed kick
+    writes nothing), nothing on a run no live claim holds, and a failed write is a WARNING naming the run — the kick
+    still answers the skip (the mirror is informational: the script row is the record)."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_SAT)
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=TF.FakeNews({}))
+    writes: List[Dict[str, Any]] = []
+    real = runs.update_run
+
+    async def spy(run_id, **kw):
+        writes.append(kw)
+        return await real(run_id, **kw)
+
+    monkeypatch.setattr(runs, "update_run", spy)
+    rid = _lane_run(sb, SPOT_SAT)
+    first = await svc.kick(rid, claim=_holder(svc, rid))
+    assert first["reason"] == "nothing_qualified"
+    assert [sorted(w) for w in writes] == [["cas", "metadata"]] and writes[0]["cas"] is True
+    assert set(writes[0]["metadata"]) == {"series", "series_trail"}
+    assert await svc.kick(rid, claim=_holder(svc, rid)) == first and len(writes) == 1      # already mirrored
+
+    # a run no live claim holds: nothing written (an update bumps updated_at, the claim's liveness)
+    row = _script_row(sb, rid)
+    stale = {**_run_row(sb, rid), "metadata": {"claim_nonce": NONCE}, "status": "skipped"}
+    await svc._heal_skip_mirror(stale, row)
+    assert len(writes) == 1
+
+    # a lost write: logged with the run, never raised
+    async def boom(run_id, **kw):
+        raise mrs.MarketingRunError("update_run failed: RuntimeError: ledger down")
+
+    monkeypatch.setattr(runs, "update_run", boom)
+    held = {**_run_row(sb, rid), "metadata": {"claim_nonce": NONCE}}
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        await svc._heal_skip_mirror(held, row)
+    assert any("could not mirror the skip trail" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("row", [
+    {"status": "rest_day"},                                                                     # a rest day
+    {"status": "rejected", "reject_reason": "empty_pool", "fact_sheet": {"selection": {"trail": [
+        {"series": "ceo_buys", "outcome": "no_candidates"}]}}},                                  # a lesson day's empty pool
+    {"status": "rejected", "reject_reason": "content", "fact_sheet": {}},
+])
+@pytest.mark.asyncio
+async def test_a_row_without_a_pick_that_never_reached_skip_mirrors_nothing(world, monkeypatch, row):
+    """The main lane, unchanged: a row with no source_ref mirrors nothing unless its trail reached SKIP (only a
+    spotlight `nothing_qualified` row does)."""
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    writes: List[Any] = []
+
+    async def spy(run_id, **kw):
+        writes.append(kw)
+        return None
+
+    monkeypatch.setattr(runs, "update_run", spy)
+    rid = _run(sb, POSTING_DAY)
+    await svc._heal_mirror(_run_row(sb, rid), {"run_id": rid, **row})
+    assert writes == []
+
+
+@pytest.mark.asyncio
+async def test_spotlight_an_unknown_lane_is_refused_before_any_selection(spot_world):
+    sb, runs = spot_world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=_tf().FakeNews({}))
+    rid = _lane_run(sb, SPOT_THU, lane="sideline")
+    with pytest.raises(mrs.MarketingRequestInvalid):
+        await svc.kick(rid, claim=_holder(svc, rid))
+    assert sb.tables[mrs.SCRIPTS].rows == []
+
+
+# ── the cross-lane exclusion ──────────────────────────────────────────────────
+
+
+#: An earnings off-season Thursday inside the Q3 13F season (the second review's example): the main chain is Money Map
+#: → lesson with the default switch.
+SPOT_OFF_THU = date(2026, 12, 3)
+
+
+@pytest.mark.asyncio
+async def test_spotlight_an_off_season_thursday_leaves_the_money_map_to_the_main_lane(spot_world, monkeypatch):
+    """C0 (2026-11-16, the second review's major): two runs on an off-season Thursday. The spotlight's chain never holds
+    Money Map — the main lane's chain that day does — so the 10:00 spotlight asks only its insider spotlight and skips
+    `nothing_qualified`; the 16:00 main run then posts ITS Money Map (Walmart), never a second weekly lesson. Before,
+    the spotlight took Money Map and rule (c) sent the main day to the lesson."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_OFF_THU)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "ceo_buys,insider_buys,thirteen_f,money_map,"
+                                                               "insider_spotlight")
+    spot_news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    spot = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=spot_news)
+    sid = _lane_run(sb, SPOT_OFF_THU)
+    state = await spot.kick(sid, claim=_holder(spot, sid))
+    await _drain(spot)
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified", state
+    assert [c["series"] for c in spot_news.calls] == ["insider_spotlight"]
+    assert _script_row(sb, sid)["fact_sheet"]["selection"]["chain"] == ["insider_spotlight", "skip"]
+    main_news = TF.FakeNews({"money_map": TF.cands("money_map", _mm("WMT", "Walmart"))})
+    main = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=main_news)
+    mid = _lane_run(sb, SPOT_OFF_THU, lane="main")
+    state = await main.kick(mid, claim=_holder(main, mid))
+    await _drain(main)
+    assert state["status"] == "accepted" and state["template_id"] == "money_map", state
+    assert state["source_ref"] == "news:money_map:WMT:2025"
+    assert _script_row(sb, mid)["fact_sheet"]["selection"]["trail"] == [{"series": "money_map", "outcome": "chosen"}]
+    assert "lane" not in _script_row(sb, mid)                           # the main INSERT never sends the column
+
+
+@pytest.mark.asyncio
+async def test_spotlight_rule_c_still_guards_a_series_the_other_lane_used_that_day(spot_world):
+    """Rule (c) stays as the guard for anything the calendars cannot see (a switch changed between the two runs of one
+    day): an accepted spotlight Money Map on the Thursday — which C0 no longer produces under one set of settings — still
+    sends the main lane's Money Map `other_lane` before the source is asked, and the day ends in the lesson."""
+    TF = _tf()
+    sb, runs = spot_world
+    _drawn(sb, SPOT_THU, "COST", template="money_map", ref="news:money_map:COST:2025")
+    main_news = TF.FakeNews({"money_map": TF.cands("money_map", _mm("WMT", "Walmart"))})
+    main = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=main_news)
+    mid = _lane_run(sb, SPOT_THU, lane="main")
+    state = await main.kick(mid, claim=_holder(main, mid))
+    await _drain(main)
+    assert state["template_id"] in selection.LESSON_TEMPLATE_IDS and main_news.calls == []
+    assert _script_row(sb, mid)["fact_sheet"]["selection"]["trail"] == [
+        {"series": "money_map", "outcome": "other_lane", "reason": "posted by the other lane today"},
+        {"series": "lesson", "outcome": "chosen"}]
+    assert "lane" not in _script_row(sb, mid)                           # the main INSERT never sends the column
+
+
+@pytest.mark.asyncio
+async def test_spotlight_the_other_lanes_same_day_ref_joins_the_exclude_set(spot_world):
+    """Rule (a): the `recent` read stops before the run date, so the other lane's SAME-DAY pick reaches the source's
+    exclude set only through the lane-aware read — while the main lane's own earlier refs are there as before."""
+    TF = _tf()
+    sb, runs = spot_world
+    same_day = _drawn(sb, SPOT_THU, "NVDA")
+    TF._seed_recent(sb, SPOT_THU - timedelta(days=7), "news:money_map:AAPL:2025")
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    mid = _lane_run(sb, SPOT_THU, lane="main")
+    state = await svc.kick(mid, claim=_holder(svc, mid))
+    assert state["template_id"] == "money_map"
+    assert news.calls[0]["exclude"] == frozenset({same_day, "news:money_map:AAPL:2025"})
+
+
+@pytest.mark.parametrize("days_before, excluded", [(0, True), (1, True), (2, True), (3, False)])
+@pytest.mark.asyncio
+async def test_spotlight_the_main_lane_skips_a_company_the_spotlight_led_with_in_the_last_two_days(
+        spot_world, monkeypatch, caplog, days_before, excluded):
+    """Rule (b) on the main lane: a Money Map of Costco is EXCLUDED while a spotlight post led with Costco on a run
+    dated within CROSS_LANE_COMPANY_DAYS (the next candidate posts) — and offered again from the third day. The
+    exclusion is never reported to the source as a template refusal."""
+    TF = _tf()
+    sb, runs = spot_world
+    _drawn(sb, SPOT_THU - timedelta(days=days_before), "COST")
+    news = TF.ReportingNews({"money_map": TF.cands("money_map", TF.costco(), _mm("WMT", "Walmart"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    mid = _lane_run(sb, SPOT_THU, lane="main")
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        state = await svc.kick(mid, claim=_holder(svc, mid))
+    assert state["source_ref"] == ("news:money_map:WMT:2025" if excluded else "news:money_map:COST:2025")
+    assert news.reported == []
+    assert _script_row(sb, mid)["fact_sheet"]["selection"]["trail"] == [{"series": "money_map", "outcome": "chosen"}]
+    assert any("EXCLUDED" in r.getMessage() and "COST" in r.getMessage() for r in caplog.records) is excluded
+
+
+@pytest.mark.asyncio
+async def test_spotlight_the_main_lane_never_checks_its_own_companies(spot_world, monkeypatch):
+    """The main lane's rule (b) reads only SPOTLIGHT rows: a main post that led with Costco yesterday changes
+    nothing — so with the spotlight lane off (and no spotlight row) the main day is what it always was."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(mrs.settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+    _drawn(sb, SPOT_THU - timedelta(days=1), "COST", lane="main", template="money_map",
+           ref="news:money_map:COST:2024")
+    news = TF.ReportingNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    mid = _lane_run(sb, SPOT_THU, lane="main")
+    state = await svc.kick(mid, claim=_holder(svc, mid))
+    assert state["source_ref"] == "news:money_map:COST:2025" and news.reported == []
+
+
+@pytest.mark.asyncio
+async def test_spotlight_the_spotlight_keeps_away_from_both_lanes_recent_companies(spot_world, monkeypatch):
+    """Rule (b) on the spotlight lane reads EVERY lane's rows, its own earlier days included: Costco (main, two days
+    before) and Walmart (spotlight, two days before) are excluded, so Money Map falls back `other_lane` /
+    `other_lane_company` and the day skips — and neither exclusion is reported to the source."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_SAT)
+    _drawn(sb, SPOT_THU, "COST", lane="main", template="money_map", ref="news:money_map:COST:2024")
+    _drawn(sb, SPOT_THU, "WMT")
+    news = TF.ReportingNews({"money_map": TF.cands("money_map", TF.costco(), _mm("WMT", "Walmart"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    sid = _lane_run(sb, SPOT_SAT)
+    state = await svc.kick(sid, claim=_holder(svc, sid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified"
+    assert news.reported == []
+    assert _script_row(sb, sid)["fact_sheet"]["selection"]["trail"] == [
+        {"series": "money_map", "outcome": "other_lane", "reason": "other_lane_company"},
+        {"series": "skip", "outcome": "no_candidates"}]
+    assert ss._selection_mirror(_script_row(sb, sid))["series"] == "skip"
+
+
+@pytest.mark.asyncio
+async def test_spotlight_an_excluded_money_map_is_never_remembered_but_a_refused_one_is(spot_world):
+    """RR-major (the lane review of 2026-11-15): with a recording `remember_template_refusal`, a Money Map the
+    template REFUSES is reported (its own code, the run date), the Costco Money Map the spotlight's same-day post
+    led with is EXCLUDED and NOT reported — the 28-day memo never hears of it — and the next candidate posts."""
+    TF = _tf()
+    sb, runs = spot_world
+    _drawn(sb, SPOT_THU, "COST")
+    news = TF.ReportingNews({"money_map": TF.cands("money_map", TF.stale_costco(), TF.costco(),
+                                                      _mm("WMT", "Walmart"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    mid = _lane_run(sb, SPOT_THU, lane="main")
+    state = await svc.kick(mid, claim=_holder(svc, mid))
+    assert state["source_ref"] == "news:money_map:WMT:2025"
+    assert news.reported == [("news:money_map:COST:2022", ("stale_source",), SPOT_THU)]
+
+
+@pytest.mark.asyncio
+async def test_spotlight_an_excluded_stake_is_never_remembered_but_a_refused_one_is(spot_world, monkeypatch):
+    """The stake twin: NVIDIA led a spotlight post the day before, so NVIDIA's stakes post is EXCLUDED and NOT
+    reported (the stake memo would hold it for its fingerprint's life); a post whose stake the template refuses ("%" in
+    its source title) IS reported. Every candidate gone, the series falls back `all_refused` and the day is the
+    lesson."""
+    import test_marketing_news_templates as NT
+
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "company_stakes")
+    monkeypatch.setattr(ss, "_today_et", lambda: NT.STAKES_RUN)
+    _drawn(sb, NT.STAKES_RUN - timedelta(days=1), "NVDA")
+    refused = NT.one(NT.stake(stake_id="0b8f3c2e-1d4a-4e6b-8c9d-2a7e5f1b3c04", source_title="Intel 8-K (a 9% stake)"))
+    news = TF.ReportingNews({"company_stakes": TF.cands("company_stakes", refused, NT.nvidia_stakes())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    mid = _lane_run(sb, NT.STAKES_RUN, lane="main")
+    state = await svc.kick(mid, claim=_holder(svc, mid))
+    await _drain(svc)
+    assert state["template_id"] in selection.LESSON_TEMPLATE_IDS
+    assert news.reported == [(TF.R.ledger_key(refused), ("slot_rejected",), NT.STAKES_RUN)]
+    assert _script_row(sb, mid)["fact_sheet"]["selection"]["trail"][0] == {
+        "series": "company_stakes", "outcome": "all_refused", "reason": "slot_rejected"}
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_stake_excluded_alone_falls_back_other_lane_and_is_never_reported(spot_world, monkeypatch):
+    import test_marketing_news_templates as NT
+
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "company_stakes")
+    monkeypatch.setattr(ss, "_today_et", lambda: NT.STAKES_RUN)
+    _drawn(sb, NT.STAKES_RUN, "NVDA")
+    news = TF.ReportingNews({"company_stakes": TF.cands("company_stakes", NT.nvidia_stakes())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    mid = _lane_run(sb, NT.STAKES_RUN, lane="main")
+    state = await svc.kick(mid, claim=_holder(svc, mid))
+    await _drain(svc)
+    assert state["template_id"] in selection.LESSON_TEMPLATE_IDS and news.reported == []
+    assert _script_row(sb, mid)["fact_sheet"]["selection"]["trail"] == [
+        {"series": "company_stakes", "outcome": "other_lane", "reason": "other_lane_company"},
+        {"series": "lesson", "outcome": "chosen"}]
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_failed_cross_lane_read_crashes_the_build_and_the_next_kick_builds_afresh(spot_world,
+                                                                                                    monkeypatch):
+    """The cross-lane read is never guessed: one that fails raises into the kick (a 5xx the worker retries) with
+    nothing written, and the next kick builds the day afresh."""
+    TF = _tf()
+    sb, runs = spot_world
+    real = runs.lane_scripts_between
+    fail = [1]
+
+    async def flaky(start, end):
+        if fail[0]:
+            fail[0] -= 1
+            raise mrs.MarketingRunError("lane_scripts_between failed: 520")
+        return await real(start, end)
+
+    monkeypatch.setattr(runs, "lane_scripts_between", flaky)
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_SAT)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    sid = _lane_run(sb, SPOT_SAT)
+    with pytest.raises(mrs.MarketingRunError):
+        await svc.kick(sid, claim=_holder(svc, sid))
+    await _drain(svc)
+    assert sb.tables[mrs.SCRIPTS].rows == [] and news.calls == []
+    state = await svc.kick(sid, claim=_holder(svc, sid))
+    assert state["status"] == "accepted" and state["template_id"] == "money_map"
+
+
+@pytest.mark.asyncio
+async def test_spotlight_with_the_switch_off_a_main_template_day_is_unchanged(spot_world, monkeypatch):
+    """The main lane, the spotlight lane off and no spotlight row: the stored row is exactly what the same build
+    stores when the cross-lane read is skipped altogether (the pre-lane flow) — same exclude set, same output, same
+    fact sheet, the INSERT without `lane`."""
+    TF = _tf()
+    monkeypatch.setattr(mrs.settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+    stored = []
+    for skip_cross_lane in (False, True):
+        sb = FakeSB()
+        sb.storage = TF.FakeStorage()
+        runs = mrs.MarketingRunService(supabase=sb)
+        TF._seed_recent(sb, SPOT_THU - timedelta(days=7), "news:money_map:AAPL:2025")
+        _drawn(sb, SPOT_THU - timedelta(days=1), "COST", lane="main", template="money_map",
+               ref="news:money_map:COST:2024")
+        sent: List[Dict[str, Any]] = []
+        real = sb.tables[mrs.SCRIPTS].insert
+        sb.tables[mrs.SCRIPTS].insert = lambda payload, real=real, sent=sent: (sent.append(dict(payload)),
+                                                                               real(payload))[1]
+        svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]),
+                                        news=TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())}))
+        if skip_cross_lane:
+            async def nothing(run, run_date, lane):
+                return frozenset(), frozenset(), frozenset()
+
+            monkeypatch.setattr(svc, "_cross_lane", nothing)
+        mid = _lane_run(sb, SPOT_THU, lane="main")
+        state = await svc.kick(mid, claim=_holder(svc, mid))
+        assert state["template_id"] == "money_map"
+        (payload,) = sent
+        assert "lane" not in payload
+        stored.append(({k: v for k, v in payload.items() if k not in ("run_id", "generation_id")},
+                       svc._news.calls[0]["exclude"]))
+    assert stored[0] == stored[1]
+
+
+class _LaneRows:
+    """A `runs` whose cross-lane read answers `rows` (and records the window it was asked for)."""
+
+    def __init__(self, rows):
+        self.rows, self.asked = rows, []
+
+    async def lane_scripts_between(self, start, end):
+        self.asked.append((start, end))
+        return self.rows
+
+
+def _out(lead: str) -> Dict[str, Any]:
+    return {"image_spec": {"layout": "spotlight", "header": {"logo": lead}}, "logo_refs": [{"key": lead}]}
+
+
+_ODD_ROWS = [
+    "not a row", None,
+    {"run_id": "self", "run_date": "2026-11-19", "lane": "main", "source_ref": "news:own", "template_id": "money_map",
+     "output": _out("OWN")},                                                       # this run's own row: never counted
+    {"run_id": "a", "run_date": "2026-11-19", "lane": "spotlight", "source_ref": "news:a", "template_id": "money_map",
+     "output": _out("AAA")},                                                       # the other lane, today
+    {"run_id": "b", "run_date": "2026-11-19T00:00:00", "lane": None, "source_ref": "news:b",
+     "template_id": "theme_explainer", "output": _out("BBB")},                    # main (no lane), today
+    {"run_id": "c", "run_date": "2026-11-18", "lane": "spotlight", "source_ref": "news:c", "template_id": "earnings",
+     "output": _out("CCC")},                                                       # the other lane, yesterday
+    {"run_id": "d", "run_date": "2026-11-17", "lane": "main", "source_ref": None, "template_id": 7,
+     "output": "junk"},                                                            # main, unreadable
+    {"run_id": "e", "run_date": None, "lane": "sideline", "source_ref": "news:e", "template_id": "money_map",
+     "output": _out("EEE")},                                                       # an unknown lane, no date
+    {"run_id": "f", "run_date": "2026-11-19", "lane": "sideline", "source_ref": "", "template_id": "",
+     "output": _out("FFF")},                                                       # an unknown lane, today
+    # tomorrow (only a MAIN read reaches it — C0's forward day): the spotlight's ref and lead count, its series never
+    {"run_id": "g", "run_date": "2026-11-20", "lane": "spotlight", "source_ref": "news:g", "template_id": "company_stakes",
+     "output": _out("GGG")},
+]
+
+
+def _roots(*syms: str) -> set:
+    return {ss.LEAD_KEY_ROOT + sym for sym in syms}
+
+
+@pytest.mark.parametrize("lane, refs, taken, leads", [
+    # the main lane: the spotlight's (and any unknown lane's) refs of today and tomorrow, its series of today; leads of
+    # non-main rows only (as issuer-root keys: these rows name no company)
+    ("main", {"news:a", "news:g"}, {"money_map"}, _roots("AAA", "CCC", "EEE", "FFF", "GGG")),
+    # the spotlight: the main lane's (and any unknown lane's) same-day refs and series; every lane's leads (its read
+    # ends on the run date, so the fake's tomorrow row is one a real read never returns — counted as a lead only)
+    ("spotlight", {"news:b"}, {"theme_explainer"}, _roots("AAA", "BBB", "CCC", "EEE", "FFF", "GGG")),
+])
+@pytest.mark.asyncio
+async def test_spotlight_the_cross_lane_read_tolerates_odd_rows_and_never_counts_its_own(lane, refs, taken, leads):
+    runs = _LaneRows(_ODD_ROWS)
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter([]))
+    got = await svc._cross_lane({"id": "self"}, SPOT_THU, lane)
+    assert got == (frozenset(refs), frozenset(taken), frozenset(leads))
+    through = SPOT_THU + timedelta(days=1) if lane == "main" else SPOT_THU
+    assert runs.asked == [(SPOT_THU - timedelta(days=ss.CROSS_LANE_COMPANY_DAYS), through)]
+
+
+@pytest.mark.parametrize("output, keys", [
+    ({"image_spec": {"layout": "spotlight", "header": {"logo": "GOOGL"}},
+      "logo_refs": [{"key": "GOOGL", "name": "Alphabet"}]}, {"root:GOOG", "name:alphabet"}),
+    ({"image_spec": {"layout": "bars", "header": {"logo": "GOOG"}},
+      "logo_refs": [{"key": "GOOG", "name": "  ALPHABET  "}]}, {"root:GOOG", "name:alphabet"}),
+    ({"image_spec": {"layout": "rows", "header": {"logo": "BRK-B"}, "sections": []},
+      "logo_refs": [{"key": "BRK-B", "name": "Berkshire Hathaway"}]}, {"root:BRK", "name:berkshire hathaway"}),
+    # an OTC foreign line is never folded into a root (often another company)
+    ({"image_spec": {"layout": "spotlight", "header": {"logo": "CMPRF"}}, "logo_refs": [{"key": "CMPRF"}]},
+     {"root:CMPRF"}),
+    ({"hook": "a lesson"}, set()), (None, set()), ("junk", set()),
+])
+def test_spotlight_lead_keys_fold_share_classes_and_names(output, keys):
+    assert ss.lead_keys(output) == frozenset(keys)
+
+
+@pytest.mark.parametrize("drawn, name, excluded", [
+    ("GOOGL", None, True),               # the second review's case: one company, two listings — by its issuer root
+    ("ABCD", "Alphabet", True),          # another key, the same display name
+    ("GOOGF", None, False),              # an OTC foreign line: not Alphabet's family, not its name
+])
+@pytest.mark.asyncio
+async def test_spotlight_rule_b_compares_the_issuer_not_the_listing(spot_world, monkeypatch, caplog, drawn, name,
+                                                                     excluded):
+    """Rule (b) (the second review, 2026-11-16): the spotlight's post led with Alphabet as GOOGL (its Money Map seed
+    symbol); the main lane's earnings walk keeps GOOG for Alphabet. A raw-symbol compare let both out within 48 h — the
+    lead is now compared by its issuer root and its display name. Review 2026-11-20 (confirmed): the adapter returns
+    ONE earnings record per call (`_earnings_day`), as fed here — the old version of this test fed two records and
+    pinned "the next one posts", a world production never has: a matched LEAD excluded the whole day's results. Now
+    Alphabet alone is DROPPED from the post (`ss.narrow_other_lane_lead`, before the fact sheet and the ledger key, so
+    the key names only the companies drawn) and the other companies' results post; never reported to the source.
+    Mutation-checked by hand: `narrow_other_lane_lead` returning the record unchanged turns this red."""
+    import test_marketing_news_templates as NT
+
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: NT.EARNINGS_RUN)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "earnings")
+    ref = _drawn(sb, NT.EARNINGS_RUN - timedelta(days=2), drawn)
+    if name is not None:
+        row = next(r for r in sb.tables[mrs.SCRIPTS].rows if r["source_ref"] == ref)
+        row["output"]["logo_refs"][0]["name"] = name
+    # news-v23: ONE post of several companies; rule (b) compares its LEAD (the first, largest row)
+    day = NT.earnings(lead=NT.earnings_row(company=NT.co("GOOG", "Alphabet")), others=2)
+    assert [r.company.symbol for r in day.reports][0] == "GOOG" and len(day.reports) == 3
+    news = TF.ReportingNews({"earnings": TF.cands("earnings", day)})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    mid = _lane_run(sb, NT.EARNINGS_RUN, lane="main")
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        state = await svc.kick(mid, claim=_holder(svc, mid))
+    await _drain(svc)
+    assert state["template_id"] == "earnings", state
+    posted = dataclasses.replace(day, reports=day.reports[1:]) if excluded else day
+    assert state["source_ref"] == TF.R.ledger_key(posted)
+    assert ("GOOG" in state["source_ref"]) is not excluded
+    assert news.reported == []
+    assert any("GOOG DROPPED from the post" in r.getMessage() for r in caplog.records) is excluded
+    trail = _script_row(sb, mid)["fact_sheet"]["selection"]["trail"]
+    assert trail == [{"series": "earnings", "outcome": "chosen"}]
+
+
+@pytest.mark.asyncio
+async def test_spotlight_rule_b_a_two_company_day_left_with_one_falls_through_as_an_exclusion(spot_world, monkeypatch):
+    """Review 2026-11-20: a two-company earnings day whose lead the other lane drew is left with ONE company — fewer
+    than the post's minimum: the series falls through `other_lane` / `other_lane_company` (an EXCLUSION, never a
+    template refusal: nothing reported to the source, never `all_refused`) and the day is the lesson."""
+    import test_marketing_news_templates as NT
+
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: NT.EARNINGS_RUN)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "earnings")
+    _drawn(sb, NT.EARNINGS_RUN - timedelta(days=1), "GOOGL")
+    day = NT.earnings(lead=NT.earnings_row(company=NT.co("GOOG", "Alphabet")), others=1)
+    news = TF.ReportingNews({"earnings": TF.cands("earnings", day)})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    mid = _lane_run(sb, NT.EARNINGS_RUN, lane="main")
+    state = await svc.kick(mid, claim=_holder(svc, mid))
+    await _drain(svc)
+    assert state["template_id"] != "earnings" and news.reported == []
+    trail = _script_row(sb, mid)["fact_sheet"]["selection"]["trail"]
+    assert trail[0] == {"series": "earnings", "outcome": "other_lane", "reason": "other_lane_company"}, trail
+
+
+def test_narrow_other_lane_lead_drops_each_drawn_lead_of_a_several_company_record_only():
+    """`ss.narrow_other_lane_lead` (review 2026-11-20): an earnings day or a Congress month drops its lead while the lead
+    is one the other lane drew — the next lead checked the same way — and is None below its minimum; every other record
+    (a stakes post's investor, a Money Map's one company) comes back as it is (the output check excludes it whole)."""
+    import test_marketing_news_templates as NT
+
+    avoid = ss.lead_keys({"image_spec": {"layout": "spotlight", "header": {"logo": "GOOGL"}},
+                          "logo_refs": [{"key": "GOOGL", "name": "Alphabet"}]})
+    day = NT.earnings(lead=NT.earnings_row(company=NT.co("GOOG", "Alphabet")), others=3)
+    out, dropped = ss.narrow_other_lane_lead(day, avoid)
+    assert dropped == ["GOOG"] and [r.company.symbol for r in out.reports] == [r.company.symbol
+                                                                               for r in day.reports[1:]]
+    # the next lead drawn too: both dropped, two left
+    second = ss.lead_keys({"logo_refs": [{"key": day.reports[1].company.symbol,
+                                          "name": day.reports[1].company.name}]})
+    out2, dropped2 = ss.narrow_other_lane_lead(day, avoid | second)
+    assert dropped2 == ["GOOG", day.reports[1].company.symbol] and len(out2.reports) == 2
+    assert ss.narrow_other_lane_lead(NT.earnings(lead=NT.earnings_row(company=NT.co("GOOG", "Alphabet"))),
+                                     avoid) == (None, ["GOOG"])
+    assert ss.narrow_other_lane_lead(day, frozenset()) == (day, [])
+    month = NT.congress(others=2)
+    lead = month.counts[0].company
+    cut, gone = ss.narrow_other_lane_lead(month, ss.lead_keys({"logo_refs": [{"key": lead.symbol, "name": lead.name}]}))
+    assert gone == [lead.symbol] and [c.company.symbol for c in cut.counts] == [c.company.symbol
+                                                                              for c in month.counts[1:]]
+    assert TF_R().ledger_key(cut) == TF_R().ledger_key(month)          # a Congress post's key is its month's
+    for other in (NT.nvidia_stakes(), NT.costco()):
+        assert ss.narrow_other_lane_lead(other, avoid | ss.lead_keys({"logo_refs": [{"key": "NVDA"}, ]})) == (other, [])
+
+
+def TF_R():
+    return _tf().R
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_resumed_main_run_of_yesterday_sees_todays_spotlight_pick(spot_world, monkeypatch):
+    """C0 (the second review's optional fix): yesterday's MAIN run, resumed today after today's spotlight accepted a
+    Money Map of Costco, never takes the same ledger key — its cross-lane read reaches run_date + 1, so the spotlight's
+    pick joins its exclude set (rule (a)) and its lead joins the companies to avoid (rule (b)): Walmart posts."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_SAT)
+    sat_ref = _drawn(sb, SPOT_SAT, "COST", template="money_map", ref="news:money_map:COST:2025")
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco(), _mm("WMT", "Walmart"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    fri = SPOT_SAT - timedelta(days=1)
+    monkeypatch.setattr(mrs.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,fri,sat")
+    mid = _lane_run(sb, fri, lane="main")
+    state = await svc.kick(mid, claim=_holder(svc, mid))
+    await _drain(svc)
+    assert state["template_id"] == "money_map" and state["source_ref"] == "news:money_map:WMT:2025", state
+    assert sat_ref in news.calls[0]["exclude"]
+
+
+class _BuildRuns:
+    """The four reads/writes `_build_template_day` makes, in memory."""
+
+    def __init__(self):
+        self.inserted: List[Dict[str, Any]] = []
+
+    async def get_script(self, run_id):
+        return None
+
+    async def recent_source_refs(self, before, limit, **kw):
+        return []
+
+    async def lane_scripts_between(self, start, end):
+        return []
+
+    async def insert_script(self, row, **kw):
+        self.inserted.append(dict(row))
+        return dict(row), True
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_chain_whose_terminal_is_the_wrong_one_still_ends_in_its_lanes_own(monkeypatch, caplog):
+    """Defensive (unreachable through the calendars): a spotlight chain that names the lesson still SKIPS, and a main
+    chain that names the skip still selects the lesson — each logged at ERROR."""
+    runs = _BuildRuns()
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter([]), news=_tf().FakeNews({}))
+    lessons: List[Any] = []
+
+    async def lesson(run, run_date, recent, *, classes, selection_block):
+        lessons.append(selection_block)
+        return {"status": "selected", "template_id": "myth_vs_fact"}
+
+    monkeypatch.setattr(svc, "_select_lesson", lesson)
+    classes = frozenset({"A", "C", "F"})
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        row = await svc._build_template_day({"id": "s", "lane": "spotlight"}, SPOT_THU,
+                                            selection.DayPlan(False, (selection.LESSON,), "spotlight"),
+                                            (selection.LESSON,), classes)
+        assert row["reject_reason"] == "nothing_qualified" and lessons == []
+        assert row["fact_sheet"]["selection"]["trail"] == [{"series": "skip", "outcome": "no_candidates"}]
+        row = await svc._build_template_day({"id": "m"}, SPOT_THU,
+                                            selection.DayPlan(False, (selection.SKIP,), "thursday"),
+                                            (selection.SKIP,), classes)
+        assert row["template_id"] == "myth_vs_fact" and lessons[0]["trail"] == [{"series": "lesson", "outcome": "chosen"}]
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("never posts the lesson" in m for m in errors) and any("always ends in the lesson" in m for m in errors)
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_broken_news_source_skips_the_day_never_the_lesson(spot_world, monkeypatch, caplog):
+    """The company-news source cannot load: every series falls back `error` and the spotlight day skips
+    `nothing_qualified` — the main lane's "every series falls through to the lesson" never happens here."""
+    sb, runs = spot_world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+
+    def broken():
+        raise ImportError("adapter import failed")
+
+    monkeypatch.setattr(svc, "_news_source_fn", broken)
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_SAT)
+    sid = _lane_run(sb, SPOT_SAT)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        state = await svc.kick(sid, claim=_holder(svc, sid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified"
+    assert _script_row(sb, sid)["fact_sheet"]["selection"]["trail"] == [
+        {"series": "money_map", "outcome": "error", "reason": "news_source_unavailable"},
+        {"series": "skip", "outcome": "no_candidates"}]
+    assert any("falls through to the skip (nothing_qualified)" in r.getMessage() for r in caplog.records)
+    # the outage reaches the RUN, where the nightly check reads it: never a quiet "nothing qualified" (OBS-1)
+    meta = _run_row(sb, sid)["metadata"]
+    assert meta["series"] == "skip" and meta["series_trail"][0]["outcome"] == "error"
+    from app.services.marketing import digest_service as ds
+    text = ds.evaluate_run_health({**_run_row(sb, sid), "status": "skipped",
+                                   "metadata": {**meta, "skip_reason": "nothing_qualified"}},
+                                  run_date=SPOT_SAT, posting_day=True, now=datetime.now(timezone.utc), max_attempts=6,
+                                  stale_seconds=2700, lane="spotlight")
+    assert text is not None and "Selection: nothing posted (fell back from Money Map: an error)" in text
+
+
+# ── the spotlight lane, workstream B2 (2026-11-15): the insider spotlight's ledger inputs, the spotlight budgets ────
+# B decisions 5-6, with C0 (2026-11-16): a build whose chain holds `insider_spotlight` reads the END of the last Form 4
+# window an earlier insider spotlight CHECKED (`runs.last_checked_window`: recorded on that series' trail entry,
+# `TRAIL_WINDOW_KEY`) and the insider spotlights accepted within the 14-day cooldown (`runs.lane_scripts_between`: their
+# symbol and display name), and hands BOTH to that series' `candidates()` call only; every other series — and every
+# build whose chain does not hold it — is asked exactly as before. A failed read stops the build (it raises into the
+# kick), never a spotlight chosen on a guess. The window the collector checked rides back on its answer and is RECORDED
+# on its trail entry — chosen, refused or nothing qualified, never when the feed was unavailable. The pair SHIPPED with
+# its templates (news-v22); here it is LISTED in the per-series switch. On Thursday SPOT_THU the main lane's chain holds
+# Money Map, so the spotlight's chain is the pair alone (C0).
+
+
+def _ship_the_spotlight_pair(monkeypatch) -> None:
+    """List the (shipped) spotlight pair in the per-series switch, beside Money Map."""
+    assert selection.SPOTLIGHT_SERIES <= selection.SHIPPED_SERIES
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "money_map,insider_spotlight,thirteen_f_spotlight")
+
+
+def _accepted(sb: FakeSB, day: date, template: str, ref: Optional[str], lead: Optional[str], name: Optional[str], *,
+              lane: str = "spotlight") -> None:
+    output: Dict[str, Any] = {}
+    if lead is not None:
+        output = {"image_spec": {"layout": "spotlight", "header": {"logo": lead}},
+                  "logo_refs": [{"key": lead, **({"name": name} if name is not None else {})}]}
+    row = {"run_id": str(uuid.uuid4()), "run_date": day.isoformat(), "status": "accepted", "template_id": template,
+           "source_ref": ref, "output": output}
+    if lane != "main":
+        row["lane"] = lane
+    sb.tables[mrs.SCRIPTS].rows.append(row)
+
+
+def _checked(sb: FakeSB, day: date, start: date, end: date, *, lane: str = "spotlight") -> None:
+    """A spotlight script of another run on `day` (a quiet `nothing_qualified` row) whose insider spotlight entry
+    recorded the Form 4 window [start, end] as CHECKED."""
+    row = {"run_id": str(uuid.uuid4()), "run_date": day.isoformat(), "status": "rejected",
+           "reject_reason": "nothing_qualified", "fact_sheet": {"selection": {"trail": [
+               {"series": "insider_spotlight", "outcome": "no_candidates", "reason": "insider_spotlight_none_qualified",
+                ss.TRAIL_WINDOW_KEY: {"start": start.isoformat(), "end": end.isoformat()}},
+               {"series": "skip", "outcome": "no_candidates"}]}}}
+    if lane != "main":
+        row["lane"] = lane
+    sb.tables[mrs.SCRIPTS].rows.append(row)
+
+
+@pytest.mark.asyncio
+async def test_spotlight_b2_the_insider_spotlight_alone_gets_its_ledger_inputs(spot_world, monkeypatch, caplog):
+    TF = _tf()
+    sb, runs = spot_world
+    _ship_the_spotlight_pair(monkeypatch)
+    _checked(sb, SPOT_TUE, date(2026, 11, 10), date(2026, 11, 16))          # Tuesday's spotlight checked to Monday
+    _checked(sb, SPOT_TUE - timedelta(days=1), date(2026, 11, 14), date(2026, 11, 15), lane="main")   # never read
+    # within the 14-day cooldown (run dates Nov 5 .. Nov 19): Contoso (its key and its name), Fabrikam (a key that
+    # does not parse: its lead and name), a row that names nothing; outside it or not an insider spotlight: ignored
+    _accepted(sb, date(2026, 11, 10), "insider_spotlight", "news:insider_spotlight:CTSO:2026-11-03", "CTSO", "Contoso")
+    _accepted(sb, date(2026, 11, 12), "insider_spotlight", "junk", "FBK", "Fabrikam")
+    _accepted(sb, date(2026, 11, 14), "insider_spotlight", None, None, None)
+    _accepted(sb, date(2026, 11, 4), "insider_spotlight", "news:insider_spotlight:OLD:2026-10-28", "OLD", "Old Co")
+    _accepted(sb, date(2026, 11, 12), "money_map", "news:money_map:COST:2025", "COST", "Costco")
+    _accepted(sb, date(2026, 11, 16), "ceo_buys", "news:ceo_buys:2026-11-09", "GME", "GameStop", lane="main")
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, SPOT_THU)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified", state
+    assert [c["series"] for c in news.calls] == ["insider_spotlight", "thirteen_f_spotlight"]   # Money Map: main's
+    first, *rest = news.calls
+    assert first["kw"] == {"spotlight_checked_through": date(2026, 11, 16),
+                           "spotlight_recent": (("CTSO", "Contoso"), ("FBK", "Fabrikam"))}
+    assert all(c["kw"] == {} for c in rest)                    # the 13F spotlight: as before
+    assert any("names no company" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_spotlight_b2_no_checked_window_within_the_cooldown_is_none(spot_world, monkeypatch):
+    TF = _tf()
+    sb, runs = spot_world
+    _ship_the_spotlight_pair(monkeypatch)
+    _checked(sb, SPOT_THU - timedelta(days=15), date(2026, 10, 28), date(2026, 11, 3))     # outside the 14 days
+    news = TF.FakeNews({})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, SPOT_THU)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    assert news.calls[0]["series"] == "insider_spotlight"
+    assert news.calls[0]["kw"] == {"spotlight_checked_through": None, "spotlight_recent": ()}
+
+
+@pytest.mark.parametrize("broken", ["last_checked_window", "lane_scripts_between"])
+@pytest.mark.asyncio
+async def test_spotlight_b2_a_failed_ledger_read_stops_the_build_never_a_guess(spot_world, monkeypatch, caplog, broken):
+    TF = _tf()
+    sb, runs = spot_world
+    _ship_the_spotlight_pair(monkeypatch)
+    real = getattr(runs, broken)
+    fail = {"n": 1}
+
+    async def flaky(*a, **kw):
+        # the cross-lane read uses lane_scripts_between too (2 days): fail only the cooldown's 14-day read
+        if broken == "lane_scripts_between" and (a[1] - a[0]).days < news_rules.SPOTLIGHT_ISSUER_COOLDOWN_DAYS:
+            return await real(*a, **kw)
+        if fail["n"]:
+            fail["n"] -= 1
+            raise mrs.MarketingRunError(f"{broken} failed: 520")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(runs, broken, flaky)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, SPOT_THU)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        with pytest.raises(mrs.MarketingRunError):
+            await svc.kick(rid, claim=_holder(svc, rid))
+    assert news.calls == [] and not [r for r in sb.tables[mrs.SCRIPTS].rows if r.get("run_id") == rid]
+    assert any("ledger reads failed" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+    # the next kick builds the day afresh
+    for _ in range(50):
+        if not svc._builds:
+            break
+        await asyncio.sleep(0)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified", state
+    assert news.calls[0]["kw"]["spotlight_checked_through"] is None
+
+
+@pytest.mark.asyncio
+async def test_spotlight_b2_no_ledger_input_is_read_unless_the_chain_holds_the_insider_spotlight(spot_world,
+                                                                                               monkeypatch):
+    """The two reads happen only for a build whose (enabled) chain holds `insider_spotlight`: never while the switch
+    does not list it (its default, today's production), never on the main lane."""
+    TF = _tf()
+    sb, runs = spot_world
+    reads: List[Any] = []
+    real = runs.last_checked_window
+
+    async def spy(*a, **kw):
+        reads.append((a, kw))
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(runs, "last_checked_window", spy)
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_SAT)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, SPOT_SAT)                               # the pair not listed: the chain is Money Map → skip
+    assert (await svc.kick(rid, claim=_holder(svc, rid)))["status"] == "accepted"
+    assert reads == [] and all(c["kw"] == {} for c in news.calls)
+    _ship_the_spotlight_pair(monkeypatch)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "money_map,thirteen_f_spotlight")
+    news2 = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco(company=TF.co("WMT", "Walmart")))})
+    svc2 = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news2)
+    monkeypatch.setattr(ss, "_today_et", lambda: SPOT_THU)
+    rid2 = _lane_run(sb, SPOT_THU)
+    assert (await svc2.kick(rid2, claim=_holder(svc2, rid2)))["status"] in ("accepted", "rejected")
+    assert reads == [] and [c["series"] for c in news2.calls] == ["thirteen_f_spotlight"]
+
+
+# ── C0 (2026-11-16): the checked Form 4 window is recorded on the trail and anchors the next window ───────────────
+
+_THU_WINDOW = (date(2026, 11, 13), date(2026, 11, 18))
+
+
+def _insider_entry(row: Dict[str, Any]) -> Dict[str, Any]:
+    return next(e for e in row["fact_sheet"]["selection"]["trail"] if e["series"] == "insider_spotlight")
+
+
+@pytest.mark.parametrize("answer, recorded", [
+    ("none_qualified", True), ("all_recent", True), ("unavailable", False), ("no_new_window", False),
+])
+@pytest.mark.asyncio
+async def test_c0_the_checked_window_is_recorded_on_the_insider_spotlights_trail_entry(spot_world, monkeypatch, answer,
+                                                                                       recorded):
+    """Whenever the collector CHECKED a window — nothing qualified, everything already posted (or chosen / refused, the
+    same code path) — the window rides on the insider spotlight's trail entry (`TRAIL_WINDOW_KEY`); never when its data
+    source was unavailable (the feed behind) or there was no new day to check. The run's `series_trail` mirror never
+    carries it."""
+    TF = _tf()
+    sb, runs = spot_world
+    _ship_the_spotlight_pair(monkeypatch)
+    answers = {
+        "none_qualified": TF.cands("insider_spotlight", skip="insider_spotlight_none_qualified",
+                                   checked_window=_THU_WINDOW),
+        "all_recent": TF.cands("insider_spotlight", skip="insider_spotlight_none_qualified",
+                               rejections={"already_posted": 2}, checked_window=_THU_WINDOW),
+        "unavailable": TF.NewsUnavailable("insider_spotlight", "insider_feed_behind"),
+        "no_new_window": TF.cands("insider_spotlight", skip="insider_spotlight_no_new_window"),
+    }
+    news = TF.FakeNews({"insider_spotlight": answers[answer]})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, SPOT_THU)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["reason"] == "nothing_qualified"
+    entry = _insider_entry(_script_row(sb, rid))
+    if recorded:
+        assert entry[ss.TRAIL_WINDOW_KEY] == {"start": "2026-11-13", "end": "2026-11-18"}
+    else:
+        assert ss.TRAIL_WINDOW_KEY not in entry
+    assert all(set(step) <= {"series", "outcome", "reason"} for step in _run_row(sb, rid)["metadata"]["series_trail"])
+    assert await runs.last_checked_window("spotlight", "insider_spotlight", before=SPOT_SAT, within_days=14) == (
+        _THU_WINDOW if recorded else None)
+
+
+@pytest.mark.parametrize("case, recorded", [("too_few_rows", False), ("other_lane", False), ("stale_source", True),
+                                           ("adapter_too_few", False)])
+@pytest.mark.asyncio
+async def test_review_1126_a_list_cut_below_three_leaves_its_window_unchecked(spot_world, monkeypatch, case, recorded):
+    """Review of 2026-11-26 (correctness): with the 3-company minimum, recording every checked window dropped each
+    1-2-company slice for good (each window is 1-2 business days on the Tue/Thu/Sat cadence). Now a window whose list
+    fell below three — the adapter's `insider_spotlight_too_few_companies` (no window returned), the composer's
+    `too_few_rows` after its per-company drops — or whose lead the other lane drew (`other_lane`) is NOT recorded:
+    `last_checked_window` then reads the older one, and the next spotlight's window reaches back over these days. Any
+    other refusal (a stale record) still records its window. Mutation-checked: passing `extra=checked` on both branches
+    again turns the too_few_rows and other_lane legs red."""
+    import test_marketing_news_templates as NT
+
+    TF = _tf()
+    sb, runs = spot_world
+    _ship_the_spotlight_pair(monkeypatch)
+    three = NT.isp_n(3)
+    if case == "too_few_rows":
+        # the composer's own drop: a row led by a sitting member of Congress (the roster) leaves two companies
+        day = date(2026, 11, 18)
+        rows = [NT.isp_company(NT.ip(sym, name, role, "Alma Adams" if i == 2 else None, amt, shares, 2, [day], [day],
+                                     cost))
+                for i, (sym, name, role, amt, shares, cost) in enumerate(NT._ISP7[:3])]
+        answer = TF.cands("insider_spotlight", NT.isp_list(*rows, start=date(2026, 11, 17), end=day),
+                          checked_window=_THU_WINDOW)
+    elif case == "other_lane":
+        _drawn(sb, date(2026, 11, 18), three.companies[0].lead.company.symbol, lane="main", template="ceo_buys",
+               ref="news:ceo_buys:2026-11-09")
+        answer = TF.cands("insider_spotlight", three, checked_window=_THU_WINDOW)
+    elif case == "stale_source":
+        stale = NT.isp_n(3, day=date(2026, 11, 6), start=date(2026, 11, 5), end=date(2026, 11, 6))
+        answer = TF.cands("insider_spotlight", stale, checked_window=_THU_WINDOW)
+    else:                                    # the adapter's own answer (`_collect_insider_spotlight`): no window
+        answer = TF.cands("insider_spotlight", skip="insider_spotlight_too_few_companies")
+    news = TF.FakeNews({"insider_spotlight": answer})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, SPOT_THU)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["reason"] == "nothing_qualified"
+    entry = _insider_entry(_script_row(sb, rid))
+    assert entry["outcome"] == {"too_few_rows": "all_refused", "other_lane": "other_lane",
+                                "stale_source": "all_refused", "adapter_too_few": "no_candidates"}[case], entry
+    assert (ss.TRAIL_WINDOW_KEY in entry) is recorded, entry
+    if case in ("too_few_rows", "stale_source"):
+        assert entry["reason"] == case, entry                                   # the composer's own code, nothing else
+    assert await runs.last_checked_window("spotlight", "insider_spotlight", before=SPOT_SAT, within_days=14) == (
+        _THU_WINDOW if recorded else None)
+
+
+@pytest.mark.asyncio
+async def test_review_1126_a_full_cooldown_of_full_company_lists_reaches_the_adapter(spot_world):
+    """Review of 2026-11-26 (correctness): the cooldown input names EVERY company of every insider list accepted in the
+    last 14 days; the adapter's bound (`SPOTLIGHT_RECENT_MAX`, 64 when a list was one company) refused all of them once
+    a 5-day-a-week schedule had 9 full lists in the window — every insider list then failed into the theme. The bound
+    is now one list a day of at most INSIDER_MAX_ROWS companies over the cooldown's 15 days: the worst case (a list
+    on each of the 14 earlier days, five companies each since the final review — 70 pairs) is accepted.
+    Mutation-checked: a bound below 70 raises."""
+    from app.services.marketing import company_news_adapter as A
+
+    assert A.SPOTLIGHT_RECENT_MAX == (news_rules.SPOTLIGHT_ISSUER_COOLDOWN_DAYS + 1) * news_rules.INSIDER_MAX_ROWS
+    sb, runs = spot_world
+    letters = "ABCDEFGHIJKLMNOP"
+    for d in range(1, news_rules.SPOTLIGHT_ISSUER_COOLDOWN_DAYS + 1):
+        day = SPOT_THU - timedelta(days=d)
+        syms = [f"Q{letters[d]}{letters[k]}" for k in range(news_rules.INSIDER_MAX_ROWS)]
+        sb.tables[mrs.SCRIPTS].rows.append({
+            "run_id": str(uuid.uuid4()), "run_date": day.isoformat(), "lane": "spotlight", "status": "accepted",
+            "template_id": "insider_spotlight",
+            "source_ref": f"news:insider_spotlight:{'+'.join(syms)}:{(day - timedelta(days=2)).isoformat()}",
+            "output": {"logo_refs": [{"key": s_, "name": f"Company {s_}"} for s_ in syms]}, "fact_sheet": {}})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=None)
+    rid = _lane_run(sb, SPOT_THU)
+    kw = await svc._spotlight_source_kw(_run_row(sb, rid), SPOT_THU)
+    recent = kw["spotlight_recent"]
+    assert len(recent) == news_rules.SPOTLIGHT_ISSUER_COOLDOWN_DAYS * news_rules.INSIDER_MAX_ROWS == 70
+    assert A._spotlight_recent_arg(recent) == recent                      # accepted whole, never a shorter cooldown
+
+
+@pytest.mark.asyncio
+async def test_c0_a_13f_led_saturday_never_loses_the_thursday_filings(spot_world, monkeypatch):
+    """The second-review scenario B asked for: Thursday's spotlight checks Nov 13-18 (recorded); Saturday — the season's
+    13F-LED day — posts a 13F spotlight and never asks the insider spotlight (no window recorded); Tuesday's insider
+    spotlight is then told the last checked day is WEDNESDAY Nov 18, so its window starts Thursday Nov 19. The previous
+    RUN's date (Saturday) would have started it on Friday and lost Thursday's filings."""
+    TF = _tf()
+    sb, runs = spot_world
+    _ship_the_spotlight_pair(monkeypatch)
+    thu_news = TF.FakeNews({"insider_spotlight": TF.cands("insider_spotlight", skip="insider_spotlight_none_qualified",
+                                                          checked_window=_THU_WINDOW)})
+    thu = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=thu_news)
+    tid = _lane_run(sb, SPOT_THU)
+    assert (await thu.kick(tid, claim=_holder(thu, tid)))["reason"] == "nothing_qualified"
+    # Saturday's 13F-led day: an accepted 13F spotlight whose trail never reached the insider spotlight
+    sb.tables[mrs.SCRIPTS].rows.append({
+        "run_id": str(uuid.uuid4()), "run_date": SPOT_SAT.isoformat(), "lane": "spotlight", "status": "accepted",
+        "template_id": "thirteen_f_spotlight", "source_ref": "news:thirteen_f_spotlight:0001067983:2026Q3:NWT",
+        "output": {}, "fact_sheet": {"selection": {"trail": [{"series": "thirteen_f_spotlight", "outcome": "chosen"}]}}})
+    tue = date(2026, 11, 24)
+    monkeypatch.setattr(ss, "_today_et", lambda: tue)
+    tue_news = TF.FakeNews({})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=tue_news)
+    rid = _lane_run(sb, tue)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    insider = next(c for c in tue_news.calls if c["series"] == "insider_spotlight")
+    assert insider["kw"]["spotlight_checked_through"] == date(2026, 11, 18)
+    window = news_rules.spotlight_window(tue, insider["kw"]["spotlight_checked_through"], tue)
+    assert window == (date(2026, 11, 19), date(2026, 11, 23))                  # Thursday through Monday
+
+
+@pytest.mark.asyncio
+async def test_c0_a_quiet_no_new_window_day_falls_through_and_stays_quiet(spot_world, monkeypatch):
+    """The Friday-holiday Saturday (Dec 26, 2026: Christmas closed Friday, the newest filing is Thursday's): the insider
+    spotlight answers `insider_spotlight_no_new_window` — a content skip. The chain falls through to its next series,
+    the trail records no window (nothing was checked), and a day that ends in the skip is quiet in the nightly check."""
+    from app.services.marketing import digest_service as ds
+
+    TF = _tf()
+    sb, runs = spot_world
+    _ship_the_spotlight_pair(monkeypatch)
+    sat = date(2026, 12, 26)
+    monkeypatch.setattr(ss, "_today_et", lambda: sat)
+    news = TF.FakeNews({"insider_spotlight": TF.cands("insider_spotlight", skip="insider_spotlight_no_new_window")})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, sat)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["reason"] == "nothing_qualified"
+    assert [c["series"] for c in news.calls] == ["thirteen_f_spotlight", "insider_spotlight", "money_map"]
+    entry = _insider_entry(_script_row(sb, rid))
+    assert entry == {"series": "insider_spotlight", "outcome": "no_candidates",
+                     "reason": "insider_spotlight_no_new_window"}
+    run = {**_run_row(sb, rid), "status": "skipped",
+           "metadata": {**_run_row(sb, rid)["metadata"], "skip_reason": "nothing_qualified"}}
+    assert ds.evaluate_run_health(run, run_date=sat, posting_day=True, now=datetime.now(timezone.utc), max_attempts=6,
+                                  stale_seconds=2700, lane="spotlight") is None
+
+
+@pytest.mark.parametrize("output, name", [
+    ({"image_spec": {"layout": "spotlight", "header": {"logo": "CTSO"}},
+      "logo_refs": [{"key": "CTSO", "name": "  Contoso  Corp "}]}, "Contoso Corp"),
+    ({"image_spec": {"layout": "rows", "sections": []}, "logo_refs": [{"key": "AAPL", "name": "Apple"},
+                                                                       {"key": "MSFT", "name": "Microsoft"}]}, "Apple"),
+    ({"image_spec": {"layout": "spotlight", "header": {"logo": "CTSO"}}, "logo_refs": [{"key": "CTSO"}]}, None),
+    ({"image_spec": {"layout": "spotlight", "header": {"logo": "CTSO"}},
+      "logo_refs": [{"key": "OTHER", "name": "Other"}]}, None),
+    ({"image_spec": {"layout": "spotlight", "header": {"logo": "CTSO"}},
+      "logo_refs": [{"key": "CTSO", "name": "  "}]}, None),
+    ({"hook": "a lesson"}, None), (None, None), ("junk", None),
+    ({"logo_refs": [{"key": "X", "name": "N" * 200}]}, "N" * 80),
+])
+def test_spotlight_b2_lead_company_name_is_the_leads_logo_ref_name(output, name):
+    assert ss.lead_company_name(output) == name
+
+
+def test_spotlight_b2_the_context_series_is_the_insider_spotlight():
+    assert ss.SPOTLIGHT_CONTEXT_SERIES == "insider_spotlight" and ss.SPOTLIGHT_CONTEXT_SERIES in selection.SPOTLIGHT_SERIES
+    assert ss.SERIES_BUDGET_SECONDS["insider_spotlight"] == 60.0
+    assert ss.SERIES_BUDGET_SECONDS["thirteen_f_spotlight"] == 120.0
+
+
+# ── news-v22 (B5): the first-line prefix switch is read ONCE per build and frozen ─────────────────────────────────────
+
+
+@pytest.mark.parametrize("at_build, at_posts", [(True, False), (False, True)], ids=["on_then_off", "off_then_on"])
+@pytest.mark.asyncio
+async def test_spotlight_b5_the_first_line_prefix_switch_is_read_once_per_build_and_frozen(spot_world, monkeypatch,
+                                                                                           at_build, at_posts):
+    """MARKETING_FIRST_LINE_PREFIX is read ONCE when the template build starts (beside MARKETING_X_ALLOW_URLS) and frozen
+    into the accepted output (`first_line_prefix_on`). Flipped while the series is being asked, the stored output keeps
+    the build's first value — on: every caption the prefix fits opens on "🚨 BREAKING:" (every person of the insider
+    list filed the business day before the Thursday run — owner decisions 2026-11-20: a list is BREAKING only when all
+    are); off: no prefix anywhere. Flipped again before create_posts, the posts are
+    recorded with exactly the stored captions: the re-check re-composes from the frozen value, never today's switch."""
+    import test_marketing_news_templates as NT
+
+    TF = _tf()
+    sb, runs = spot_world
+    _ship_the_spotlight_pair(monkeypatch)
+    monkeypatch.setattr(mrs.settings, "MARKETING_X_IMAGES", False)
+    monkeypatch.setattr(mrs.settings, "MARKETING_FIRST_LINE_PREFIX", at_build)
+
+    async def answer():
+        monkeypatch.setattr(mrs.settings, "MARKETING_FIRST_LINE_PREFIX", not at_build)   # flipped mid-build
+        return TF.cands("insider_spotlight", NT.isp_n(3))
+
+    news = TF.FakeNews({"insider_spotlight": answer})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, SPOT_THU)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "accepted" and state["template_id"] == "insider_spotlight", state
+    assert mrs.settings.MARKETING_FIRST_LINE_PREFIX is (not at_build)     # the flip happened during the build
+    row = _script_row(sb, rid)
+    out = row["output"]
+    assert out["first_line_prefix_on"] is at_build
+    breaking = news_templates.FIRST_LINE_PREFIXES["insider.breaking"]
+    assert out["first_line_prefix"] == (breaking if at_build else None)
+    assert out["captions"]["x"].startswith(f"{breaking} ") is at_build
+    assert not [b for b in out["captions"].values() if breaking in b] or at_build
+    assert news_templates.revalidate(out, fact_sheet=row["fact_sheet"], run_date=SPOT_THU) == []
+    # create_posts under the OTHER switch value: recorded with the stored (frozen) captions, pending review
+    monkeypatch.setattr(mrs.settings, "MARKETING_FIRST_LINE_PREFIX", at_posts)
+    assert out["post_formats"]["x"] == "text"
+    (post,) = await runs.create_posts(rid, [{"platform": "x", "format": "text"}], claim=_holder(svc, rid))
+    assert post["status"] == "pending_review" and post["caption"] == out["posts"]["x"]["caption"]
+    assert post["caption"].startswith(f"{breaking} ") is at_build
+    assert post["idempotency_key"] == f"{SPOT_THU.isoformat()}:spotlight:x:text"
+
+
+def test_spotlight_b5_the_build_reads_the_switch_strictly_and_once():
+    """Source pin (comments stripped): `_build_template_day` reads MARKETING_FIRST_LINE_PREFIX exactly once, strictly
+    (`is True`: anything but a real True is off), and hands that one value to every candidate's compose."""
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(ss.MarketingScriptService._build_template_day))
+    tree = ast.parse(src)
+    reads = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "MARKETING_FIRST_LINE_PREFIX"]
+    assert len(reads) == 1
+    compares = [n for n in ast.walk(tree) if isinstance(n, ast.Compare) and isinstance(n.left, ast.Attribute)
+                and n.left.attr == "MARKETING_FIRST_LINE_PREFIX"]
+    assert len(compares) == 1 and isinstance(compares[0].ops[0], ast.Is)
+    assert isinstance(compares[0].comparators[0], ast.Constant) and compares[0].comparators[0].value is True
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "_compose_candidate"]
+    assert len(calls) == 1 and any(k.arg == "first_line_prefix" for k in calls[0].keywords)
+    # never re-read per candidate (the AST, so the docstring's mention of the name cannot hide a read)
+    per_candidate = ast.parse(textwrap.dedent(inspect.getsource(ss.MarketingScriptService._compose_candidate)))
+    assert not [n for n in ast.walk(per_candidate)
+                if isinstance(n, ast.Attribute) and n.attr == "MARKETING_FIRST_LINE_PREFIX"]
+
+
+# ══ Per-post art (workstream C, slice C3, 2026-11-16): the read-back and the freeze's one holder read ═══════════════
+#
+# The worker's read-back carries `art` — url, sha256, bytes, width, height ONLY — exactly while MARKETING_ART_ENABLED
+# is on, read at CALL time (a real kill switch), and None for a lesson, a failed record or a record that does not
+# validate. `_frozen_output` records its ONE holder read for the art gate (`art_holder`) with no extra statement.
+
+from app.services.marketing import post_art  # noqa: E402
+
+_ART_SB = "https://sb.example"
+
+
+def _ok_art(sha: str = "d" * 64, **over) -> Dict[str, Any]:
+    rec = {"version": post_art.ART_VERSION, "status": "ok", "reason": None, "surfaces": ["cover"],
+           "subject": "a heavy cast-iron flywheel", "treatment": "duotone_press",
+           "models": {"brief": "claude-opus-5-5", "check": "claude-opus-5-5", "image": "gemini-3-pro-image"},
+           "usage": {"images": 1, "images_uncertain": 0, "estimated_micros": 134_000},
+           "url": post_art.expected_art_url(sha), "sha256": sha, "bytes": 480_000, "width": 1376, "height": 774}
+    rec.update(over)
+    return rec
+
+
+@pytest.fixture
+def art_on(monkeypatch):
+    from test_marketing_post_art import keep_art_on_money_map
+
+    monkeypatch.setattr(mrs.settings, "SUPABASE_URL", _ART_SB)
+    monkeypatch.setattr(mrs.settings, "MARKETING_MEDIA_BUCKET", "marketing-media")
+    monkeypatch.setattr(mrs.settings, "MARKETING_ART_ENABLED", True)
+    # owner decision 2026-11-20 ("use it nowhere for now"): no shipped series carries art; the kept code is exercised
+    # on the Money Map, put back into the art set for the test only (shipped sets: test_marketing_post_art)
+    keep_art_on_money_map(monkeypatch)
+
+
+def _art_composed() -> Dict[str, Any]:
+    """A Money Map's accepted output — the series the kept art code was built for (its cover); owner decision
+    2026-11-20 ("use it nowhere for now"): shipped, no series carries art, so `art_on` puts the Money Map back."""
+    import test_marketing_news_templates as NT
+
+    out = news_templates.compose(NT.costco(), run_date=NT.THU, store_state="live", allow_x_url=False)
+    out["logos"] = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None, "bytes": None,
+                     "width": None, "height": None} for r in news_templates.logo_refs(out)]
+    return out
+
+
+def test_the_read_back_sends_the_art_five_keys_only_while_the_switch_is_on(art_on, monkeypatch):
+    from app.schemas.marketing import WorkerScript
+
+    out = {**_art_composed(), "art": _ok_art()}
+    sent = ss.worker_script(out, run_id="r-art")
+    assert sent["art"] == {k: out["art"][k] for k in ("url", "sha256", "bytes", "width", "height")}
+    wire = json.loads(WorkerScript(**sent).model_dump_json())
+    assert wire["art"] == sent["art"]
+    blob = json.dumps(wire).lower()
+    for word in ("claude", "gemini", "subject", "flywheel", "usage", "micros", "treatment"):
+        assert word not in blob, word                       # never a model, the subject or the spend
+    # the kill switch, read at CALL time: the very same accepted output, the switch off → no art
+    monkeypatch.setattr(mrs.settings, "MARKETING_ART_ENABLED", False)
+    assert ss.worker_script(out, run_id="r-art")["art"] is None
+    monkeypatch.setattr(mrs.settings, "MARKETING_ART_ENABLED", "true")      # only a real True is on
+    assert ss.worker_script(out, run_id="r-art")["art"] is None
+
+
+@pytest.mark.parametrize("case", ["no_art", "failed", "lesson", "insider", "bad_url", "bad_size"])
+def test_the_read_back_sends_no_art_that_may_not_be_drawn(art_on, caplog, case):
+    base = _art_composed()
+    out = {
+        "no_art": base,
+        "failed": {**base, "art": {**_ok_art(), "status": "failed", "reason": "check_failed"}},
+        "lesson": {**_package(KEY), "art": _ok_art()},
+        # owner decisions 2026-11-20 ("Drop it from insider posts"): art on a Form 4 week is never drawn
+        "insider": {**_b2_composed(), "art": _ok_art()},
+        "bad_url": {**base, "art": _ok_art(url="https://elsewhere.example/x.jpg")},
+        "bad_size": {**base, "art": _ok_art(width=1376, height=1376)},
+    }[case]
+    with caplog.at_level(logging.ERROR):
+        assert ss.worker_script(out, run_id="r-art")["art"] is None
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR and "post art" in r.getMessage()]
+    assert bool(errors) is (case in ("lesson", "insider", "bad_url", "bad_size"))   # a record where none belongs is loud
+
+
+def test_a_raise_reading_the_art_is_no_art_never_a_failed_read_back(art_on, monkeypatch, caplog):
+    def boom(_output):
+        raise RuntimeError("a bug in the art reader")
+
+    monkeypatch.setattr(ss.post_art, "worker_art", boom)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        sent = ss.worker_script({**_b2_composed(), "art": _ok_art()}, run_id="r-art")
+    assert sent["art"] is None and sent["opening_card"] is not None
+    assert any("art could not be read for the worker" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("image_posts", [False, True])
+@pytest.mark.asyncio
+async def test_the_freeze_records_its_one_holder_read_for_the_art_gate(world, monkeypatch, image_posts):
+    """`art_holder` (a template build with the art switch on) receives the freeze's ONE holder read — made for it even
+    while image posts and video features are off — and the stored output is the same with or without it. None: the
+    reads are exactly today's. A lesson never reads for art."""
+    sb, runs = world
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]))
+    rid = _b2_run(sb, _B2_DAY, caps=[*_B2_CAPS, "post_art"])
+    reads: List[str] = []
+    real = runs.get_run
+
+    async def counting(run_id):
+        reads.append(run_id)
+        return await real(run_id)
+
+    monkeypatch.setattr(runs, "get_run", counting)
+    plain = await svc._frozen_output(_b2_composed(), _B2_DAY, run_id=rid, gen_id="g", image_posts=image_posts,
+                                     fact_sheet=_b2_sheet())
+    assert len(reads) == (1 if image_posts else 0)
+    reads.clear()
+    holder: Dict[str, Any] = {}
+    stored = await svc._frozen_output(_b2_composed(), _B2_DAY, run_id=rid, gen_id="g", image_posts=image_posts,
+                                      fact_sheet=_b2_sheet(), art_holder=holder)
+    assert reads == [rid]                                      # ONE read, whatever the other switches say
+    run, error = holder["holder"]
+    assert error is None and run["id"] == rid and "post_art" in mrs.run_worker_capabilities(run)
+    assert json.dumps(stored, sort_keys=True) == json.dumps(plain, sort_keys=True)
+    # a lesson package: no read for art (the art step never runs for a lesson)
+    reads.clear()
+    lesson_holder: Dict[str, Any] = {}
+    await svc._frozen_output(_package(KEY), POSTING_DAY, run_id=rid, gen_id="g", image_posts=False,
+                             art_holder=lesson_holder)
+    assert reads == [] and lesson_holder == {}
+    # a failed read is recorded as such (the art gate then says `ledger_unreadable`), the freeze goes on
+    async def failing(run_id):
+        raise mrs.MarketingRunError("PostgREST 503")
+
+    monkeypatch.setattr(runs, "get_run", failing)
+    broken: Dict[str, Any] = {}
+    await svc._frozen_output(_b2_composed(), _B2_DAY, run_id=rid, gen_id="g", image_posts=False,
+                             fact_sheet=_b2_sheet(), art_holder=broken)
+    assert broken["holder"][0] is None and isinstance(broken["holder"][1], mrs.MarketingRunError)
+
+
+# ══ news-v23 (2026-11-19): the ONE 13F list, read back by a worker older than look_v23 ═════════════════════════════
+
+
+def _f13_list_output(factory: str) -> Dict[str, Any]:
+    import test_marketing_news_templates as NT
+
+    rec = getattr(NT, factory)()
+    run_day = NT.SPOT_SAT if rec.series == "thirteen_f_spotlight" else NT.TUE
+    out = news_templates.compose(rec, run_date=run_day, store_state="live", allow_x_url=False)
+    out["post_formats"] = {p: "image" for p in out["posts"]}
+    out["logos"] = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None} for r in out["logo_refs"]]
+    return json.loads(json.dumps(out))
+
+
+@pytest.mark.parametrize("factory", ["f13s_list8", "berkshire"])
+def test_a_pre_v23_holder_gets_a_13f_list_its_walkers_take_and_the_server_still_allows(factory, caplog):
+    """A worker older than look_v23 refuses, in its CLOSED walkers, the 13F list cover (`list`), a row's `chip` and a
+    section of more than five rows: it is sent today's opening card, the rows without chips, at most five of them and
+    then no "+N more" line — every string left one the server allows for this run, each step with a WARNING. A
+    look_v23 holder gets the stored output untouched."""
+    out = _f13_list_output(factory)
+    stored = copy.deepcopy(out)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        old = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b"])
+    assert out == stored                                                       # the stored output is never touched
+    assert "list" in stored["opening_card"] and "list" not in old["opening_card"]
+    assert {k: v for k, v in stored["opening_card"].items() if k != "list"} == old["opening_card"]
+    sec, was = old["image_spec"]["sections"][0], stored["image_spec"]["sections"][0]
+    assert len(sec["rows"]) == min(len(was["rows"]), ss.PRE_V23_MAX_SECTION_ROWS) == min(len(was["rows"]), 5)
+    assert all(set(r) == {"logo", "cells"} for r in sec["rows"])
+    assert ("more" in sec) == ("more" in was and len(was["rows"]) <= 5)
+    allowed = set(template_onscreen.image_strings(stored["image_spec"], stored["logos"]))
+    assert set(template_onscreen.image_strings(old["image_spec"], stored["logos"])) <= allowed
+    assert set(template_onscreen.opening_strings(old["opening_card"], stored["logos"])) <= set(
+        template_onscreen.opening_strings(stored["opening_card"], stored["logos"]))
+    assert ("its list cover (13F / Congress Count / Form 4 roundup) is sent without the list" in caplog.text
+            and "ticker chips" in caplog.text)
+    new = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b", "look_v23"])
+    assert new["image_spec"] == stored["image_spec"] and new["opening_card"] == stored["opening_card"]
+
+
+def test_the_8_holding_list_is_the_case_that_needs_the_cut():
+    """Anti-vacuity for the test above: the eight-holding spotlight's picture really holds six rows and a "+N more"
+    line, more than the older walker's five."""
+    sec = _f13_list_output("f13s_list8")["image_spec"]["sections"][0]
+    assert len(sec["rows"]) == 6 > ss.PRE_V23_MAX_SECTION_ROWS and sec["more"] == "+2 more changes in the caption"
+
+
+@pytest.mark.parametrize("factory, lead", [("berkshire", "STZ"), ("f13s_list_listed", "NWT"), ("f13s_list5", "NWT")])
+def test_a_13f_list_leads_with_its_first_row_never_the_listed_filers_plate(factory, lead):
+    """Rule (b) of the cross-lane exclusion compares LEADS: the 13F list's lead is its first (largest) holding change,
+    as before the restyle — a listed filer's plate in the picture's header (Berkshire's BRK-B) is never the lead.
+    Mutation-checked by hand (2026-11-19): without the 13F branch in `lead_company` the listed cases read the filer."""
+    out = _f13_list_output(factory)
+    assert out["image_spec"]["sections"][0]["rows"][0]["logo"] == lead == ss.lead_company(out)
+    assert ss.lead_company_name(out) == next(r["name"] for r in out["logo_refs"] if r["key"] == lead)
+    if out["image_spec"].get("header"):
+        assert out["image_spec"]["header"]["logo"] != lead                 # anti-vacuity: a plate was there
+
+
+# ══ news-v23 (2026-11-19): the earnings table and the Congress list, read back by a worker older than look_v23 ═══════
+
+
+def _v23_list_output(series: str) -> Dict[str, Any]:
+    import test_marketing_news_templates as NT
+
+    rec, day = (NT.congress(), NT.CONGRESS_RUN) if series == "congress_count" else (NT.earnings(others=3),
+                                                                                       NT.EARNINGS_RUN)
+    out = news_templates.compose(rec, run_date=day, store_state="live", allow_x_url=False)
+    out["post_formats"] = {p: "image" for p in out["posts"]}
+    out["logos"] = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None} for r in out["logo_refs"]]
+    return json.loads(json.dumps(out))
+
+
+def test_a_pre_v23_holder_gets_the_congress_list_without_its_chips_and_list_cover(caplog):
+    """The Congress Count's ONE list (news-v23) reaches an older worker as rows of `logo` + `cells` (no chip) and today's
+    opening card (no `list`) — every string still one the server allows for the run; a look_v23 holder gets it as
+    stored."""
+    out = _v23_list_output("congress_count")
+    stored = copy.deepcopy(out)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        old = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b"])
+    assert out == stored
+    sec = old["image_spec"]["sections"][0]
+    assert all(set(r) == {"logo", "cells"} for r in sec["rows"]) and len(sec["rows"]) == 3
+    assert "list" in stored["opening_card"] and "list" not in old["opening_card"]
+    allowed = set(template_onscreen.image_strings(stored["image_spec"], stored["logos"]))
+    assert set(template_onscreen.image_strings(old["image_spec"], stored["logos"])) <= allowed
+    assert set(template_onscreen.opening_strings(old["opening_card"], stored["logos"])) <= set(
+        template_onscreen.opening_strings(stored["opening_card"], stored["logos"]))
+    assert "its list cover (13F / Congress Count / Form 4 roundup)" in caplog.text
+    new = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b", "look_v23"])
+    assert new["image_spec"] == stored["image_spec"] and new["opening_card"] == stored["opening_card"]
+
+
+#: What an OLDER worker's closed walker takes (news-v22 — the worker on main before `look_v23`:
+#: marketing/news_layouts.py `_w_rows` reads a row as `obj(raw, path, ("cells",), ("logo",))` and a section as
+#: `obj(section, path, ("rows",), ("heading", "more"))`, and `cards.LAYOUTS` holds these five): any other key or layout
+#: raises in its walk, and its render fails (render.RenderInputError) — loudly, the run recorded failed.
+_OLDER_ROW_KEYS = frozenset({"cells", "logo"})
+_OLDER_SECTION_KEYS = frozenset({"rows", "heading", "more"})
+_OLDER_LAYOUTS = frozenset({"rows", "spotlight", "pair", "bars", "grid"})
+#: An older worker's claim: every capability but `look_v23` and `theme_angles`.
+_OLDER_CAPS = ["news_templates", "post_image", "layouts_2b", "video_v2"]
+
+
+def test_final_review_an_older_worker_reclaiming_an_earnings_day_gets_the_table_and_fails_loudly():
+    """Final review of 2026-11-26 (a worker rollback mid-run): an older worker re-claiming an earnings day a newer worker
+    built used to get rows of names alone — the `table` (the row's ONLY figures) and the section's `columns` cut — a
+    picture of reporters with no figure, which its walker drew and the server's allow-list accepted (a subset). The cut
+    now keeps them (`template_onscreen.PRE_V23_ROW_DROPS`): that walker refuses the picture and the render fails loudly —
+    no picture rather than one without its meaning. Only the ticker chip is dropped. Mutation-checked by hand: "table"
+    back in PRE_V23_ROW_DROPS turns this red."""
+    out = _v23_list_output("earnings")
+    sec = out["image_spec"]["sections"][0]
+    assert "columns" in sec and all("table" in r and "chip" in r for r in sec["rows"])           # anti-vacuity
+    old = ss.worker_script(out, run_id="r", capabilities=_OLDER_CAPS)
+    cut = old["image_spec"]["sections"][0]
+    assert cut["columns"] == sec["columns"] and len(cut["rows"]) == len(sec["rows"]) == 4
+    assert [r["table"] for r in cut["rows"]] == [r["table"] for r in sec["rows"]]
+    assert all("chip" not in r for r in cut["rows"])
+    # its closed walker refuses it: a loud render failure, never names without figures
+    assert set(cut) - _OLDER_SECTION_KEYS and all(set(r) - _OLDER_ROW_KEYS for r in cut["rows"])
+    assert ss._pre_v23_section(sec)["columns"] == sec["columns"]
+
+
+def test_the_earnings_table_is_kept_off_the_chain_of_a_holder_without_look_v23(caplog):
+    """The earnings post's picture IS the table, which an older worker cannot draw: `_without_look_series` drops
+    `earnings` from that holder's chain (the day falls through to its next series), with a WARNING naming it; a
+    look_v23 holder, or a chain without earnings, is left as it is. Mutation-checked by hand (2026-11-20): with
+    LOOK_V23_SERIES empty the first assertion fails."""
+    old_run = {"id": "r1", "metadata": {"worker_capabilities": ["news_templates", "post_image", "layouts_2b"]}}
+    new_run = {"id": "r2", "metadata": {"worker_capabilities": ["news_templates", "post_image", "layouts_2b",
+                                                                "look_v23"]}}
+    chain = ("earnings", "money_map")
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        assert ss._without_look_series(chain, old_run, lane=ss.RUN_LANE_MAIN) == ("money_map",)
+    assert "did not declare 'look_v23'" in caplog.text and "['earnings']" in caplog.text
+    assert ss._without_look_series(chain, new_run, lane=ss.RUN_LANE_MAIN) == chain
+    assert ss._without_look_series(("money_map", "congress_count"), old_run, lane=ss.RUN_LANE_MAIN) == (
+        "money_map", "congress_count")
+    # news-v23 (company stakes): one investor's list draws each stake's basis word as its row's `label` — an older
+    # walker refuses the key, and without it an amount would stand without its basis: kept off that chain too
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        assert ss._without_look_series(("company_stakes", "theme_explainer"), old_run, lane=ss.RUN_LANE_MAIN) == (
+            "theme_explainer",)
+    assert "['company_stakes']" in caplog.text
+    # owner decisions 2026-11-20: the insider LIST (its rows' grey detail line, its two-line headline) is look_v23's too
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        assert ss._without_look_series(("insider_spotlight", "theme_explainer"), old_run,
+                                       lane=ss.RUN_LANE_SPOTLIGHT) == ("theme_explainer",)
+    assert "['insider_spotlight']" in caplog.text
+    assert ss.LOOK_V23_SERIES == frozenset({"earnings", "company_stakes", "insider_spotlight"})
+
+
+def test_final_review_an_older_worker_reclaiming_a_stakes_day_keeps_every_basis_and_fails_loudly():
+    """Final review of 2026-11-26 (a worker rollback mid-run): an older worker re-claiming a company-stakes day a newer
+    worker built used to get each row WITHOUT its `label` — the stake's basis ("committed up to", "fair value", …), the
+    one place the picture states it — so a commitment or a fair value drew as a bare "$5B", read as money invested, and
+    the server's allow-list accepted it (a subset). The cut now keeps every basis label
+    (`template_onscreen.PRE_V23_ROW_DROPS`): that worker's closed walker refuses the picture and the render fails loudly
+    — never an amount without its basis. Only the ticker chip is dropped; the list cover goes as before. Mutation-checked
+    by hand: "label" back in PRE_V23_ROW_DROPS turns this red."""
+    import test_marketing_news_templates as NT
+
+    for factory in (NT.berkshire_mixed, NT.nvidia_stakes_more):          # carrying + fair value; four "invested"
+        out = news_templates.compose(factory(), run_date=NT.STAKES_RUN, store_state="live", allow_x_url=False)
+        out["post_formats"] = {p: "image" for p in out["posts"]}
+        out["logos"] = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None} for r in out["logo_refs"]]
+        out = json.loads(json.dumps(out))
+        _older_stakes_reclaim(out)
+    mixed = news_templates.compose(NT.berkshire_mixed(), run_date=NT.STAKES_RUN, store_state="live", allow_x_url=False)
+    assert {r["label"] for r in mixed["image_spec"]["sections"][0]["rows"]} - {"invested"}     # not vacuous
+
+
+def _older_stakes_reclaim(out: Dict[str, Any]) -> None:
+    sec = out["image_spec"]["sections"][0]
+    assert all("label" in r and "chip" in r for r in sec["rows"])                        # anti-vacuity
+    old = ss.worker_script(out, run_id="r", capabilities=_OLDER_CAPS)
+    cut = old["image_spec"]["sections"][0]
+    assert [r["label"] for r in cut["rows"]] == [r["label"] for r in sec["rows"]] and len(cut["rows"]) == len(sec["rows"])
+    assert all("chip" not in r for r in cut["rows"])
+    assert all(set(r) - _OLDER_ROW_KEYS for r in cut["rows"])          # its closed walker refuses it: a loud failure
+    assert "list" not in old["opening_card"]
+    allowed = set(template_onscreen.image_strings(out["image_spec"], out["logos"]))
+    assert set(template_onscreen.image_strings(old["image_spec"], out["logos"])) <= allowed
+
+
+@pytest.mark.parametrize("factory", ["power_machine", "silicon_growth", "cyber_insiders", "battlefield_congress"])
+def test_final_review_an_older_worker_reclaiming_a_theme_angle_day_gets_the_layout_it_refuses(factory):
+    """Final review of 2026-11-26: a theme angle 2-5 picture (`ranked` / `figures` / `ledger` / `tally`) a newer worker
+    built and froze, re-claimed by a worker without `theme_angles`, is sent UNCHANGED — that worker's walker does not
+    know the layout and its render fails loudly; nothing guesses a picture for it (the write-time freeze to TEXT covers
+    only a holder that held the run while it was written)."""
+    import test_marketing_news_templates as NT
+
+    out = news_templates.compose(getattr(NT, factory)(), run_date=NT.THEME_WED, store_state="live", allow_x_url=False)
+    out["post_formats"] = {p: "image" for p in out["posts"]}
+    out["logos"] = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None} for r in out["logo_refs"]]
+    out = json.loads(json.dumps(out))
+    assert out["image_spec"]["layout"] not in _OLDER_LAYOUTS                             # anti-vacuity: angles 2-5
+    old = ss.worker_script(out, run_id="r", capabilities=[*_OLDER_CAPS, "look_v23"])
+    assert old["image_spec"] == out["image_spec"]
+
+
+
+# ══ 2026-11-20: the Money Map cover's figure label and the Form 4 roundup's list cover, read back by an older worker ══
+
+
+def _r5_output(factory: str, run_day: str) -> Dict[str, Any]:
+    import test_marketing_news_templates as NT
+
+    out = news_templates.compose(getattr(NT, factory)(), run_date=getattr(NT, run_day), store_state="live",
+                                 allow_x_url=False)
+    out["post_formats"] = {p: "image" for p in out["posts"]}
+    out["logos"] = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None} for r in out["logo_refs"]]
+    return json.loads(json.dumps(out))
+
+
+@pytest.mark.parametrize("factory", ["costco", "rivian"])
+def test_r5_a_pre_v23_holder_gets_the_money_map_cover_without_its_label_and_its_figure(factory, caplog):
+    """An older worker's CLOSED opening-card walker refuses `figure_label` (news-v23, 2026-11-20): it is sent the card
+    WITHOUT the label AND without the figure the label explains (a bare "$2.94" beside "How Costco makes money" would
+    read as something else) — the kicker, the logo, the ticker chip and the headline, a subset of the strings the server
+    allows, with a WARNING. A look_v23 holder gets the stored card. Mutation-checked by hand (2026-11-20): with only the
+    label dropped (the figure kept) the "figure" assertion turned red."""
+    out = _r5_output(factory, "THU")
+    stored = copy.deepcopy(out)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        old = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b"])
+    assert out == stored
+    assert {"figure", "figure_label"} <= set(stored["opening_card"])                              # anti-vacuity
+    # owner decision 2026-11-20: a LOSS year's cover is its costs card (its `costs` and the `subtitle` over it) — an
+    # older worker gets neither (today's plain opening card); a profit year never carries them
+    cover = {"costs", "subtitle"}
+    assert (cover <= set(stored["opening_card"])) == (factory == "rivian")
+    assert old["opening_card"] == {k: v for k, v in stored["opening_card"].items()
+                                   if k not in ("figure", "figure_label", *cover)}
+    assert set(template_onscreen.opening_strings(old["opening_card"], stored["logos"])) <= set(
+        template_onscreen.opening_strings(stored["opening_card"], stored["logos"]))
+    assert "without the figure and the label its walker would refuse" in caplog.text
+    assert ("the loss year's costs cover its walker would refuse" in caplog.text) == (factory == "rivian")
+    new = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b", "look_v23"])
+    assert new["opening_card"] == stored["opening_card"]
+
+
+@pytest.mark.parametrize("factory", ["costco", "rivian"])
+def test_loss_a_pre_v23_holder_gets_the_money_map_picture_without_its_costs_card(factory, caplog):
+    """Owner decision 2026-11-20 ("A: costs vs revenue"): a LOSS year's picture carries a `costs` card an older worker's
+    CLOSED `bars` walker refuses — such a holder is sent the picture WITHOUT it (and without the plate's chip), and
+    draws today's flow card and callout: every string still one the server allows. A look_v23 holder gets the stored
+    spec, costs card and all. A profit year never carries one. Mutation-checked by hand: with `costs` kept for the
+    older holder, the "costs" assertion turned red."""
+    out = _r5_output(factory, "THU")
+    stored = copy.deepcopy(out)
+    loss = factory == "rivian"
+    assert ("costs" in stored["image_spec"]) == loss                                          # anti-vacuity
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        old = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b"])
+    assert out == stored and "costs" not in old["image_spec"] and "chip" not in old["image_spec"]["header"]
+    assert old["image_spec"] == {**{k: v for k, v in stored["image_spec"].items() if k != "costs"},
+                                 "header": {k: v for k, v in stored["image_spec"]["header"].items() if k != "chip"}}
+    assert set(template_onscreen.image_strings(old["image_spec"], stored["logos"])) <= set(
+        template_onscreen.image_strings(stored["image_spec"], stored["logos"]))
+    assert ("a loss year's costs card" in caplog.text) is True                 # the warning names it either way
+    new = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b", "look_v23"])
+    assert new["image_spec"] == stored["image_spec"]
+
+
+def test_r5_a_pre_v23_holder_gets_the_form4_roundup_cover_without_its_list(caplog):
+    """The Form 4 roundup's list cover (news-v23, 2026-11-20) reaches an older worker as the plain opening card — the
+    kicker, the lead row's logo and the roundup's headline (no chip, no figure: none was stored) — every string one the
+    server allows; a look_v23 holder gets the list."""
+    out = _r5_output("ceo_roundup", "MON")
+    stored = copy.deepcopy(out)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        old = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b"])
+    assert "list" in stored["opening_card"] and old["opening_card"] == {
+        "kicker": stored["opening_card"]["kicker"], "logos": ["GME"], "headline": stored["opening_card"]["headline"]}
+    assert set(template_onscreen.opening_strings(old["opening_card"], stored["logos"])) <= set(
+        template_onscreen.opening_strings(stored["opening_card"], stored["logos"]))
+    assert "Form 4 roundup" in caplog.text
+    new = ss.worker_script(out, run_id="r", capabilities=["news_templates", "post_image", "layouts_2b", "look_v23"])
+    assert new["opening_card"] == stored["opening_card"]
+
+
+# ── owner decisions 2026-11-20: the theme is the quiet Form 4 week's fallback in BOTH lanes ─────────────────────────────
+# "i pick option 1: 3-5, but if it's a quite week - if we don't have enough data, then use different topic like posting
+# the theme (cyber war, AI chip,....)". The 28-day rule (`company_news_rules.THEME_REPEAT_DAYS`) is read from the theme
+# ledger of BOTH lanes, so one theme never posts twice inside 28 days, whichever lane posted it first.
+
+
+@pytest.mark.parametrize("posted_lane, posted_day, run_lane, run_day", [
+    # Monday's quiet Form 4 week posted a theme; Thursday's spotlight (its insider list too few) must not repeat it
+    ("main", date(2026, 11, 16), "spotlight", SPOT_THU),
+    # the spotlight posted it on Saturday; the next Monday's main lane (a quiet week again) must not repeat it
+    ("spotlight", SPOT_SAT, "main", date(2026, 11, 23)),
+    # 26 days before: a Monday main-lane theme, then a Saturday spotlight inside the four weeks
+    ("main", date(2026, 10, 26), "spotlight", date(2026, 11, 22) - timedelta(days=1)),
+], ids=["main_then_spotlight", "spotlight_then_main", "four_weeks_less_a_day"])
+@pytest.mark.asyncio
+async def test_theme_fallback_never_posts_one_theme_twice_inside_28_days_across_lanes(
+        spot_world, monkeypatch, posted_lane, posted_day, run_lane, run_day):
+    """The build hands the theme collector the theme ledger of BOTH lanes (`theme_refs_between`, THEME_HISTORY_DAYS
+    back, the run day included), and the REAL collector refuses the theme the other lane posted fewer than 28 days
+    before (`already_posted`, before any read) — fed exactly what this build passed. Mutation-checked by hand
+    (2026-11-20): `theme_refs_between` reading the caller's lane only turned this red."""
+    import importlib
+
+    TA = importlib.import_module("test_marketing_company_news_adapter")
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: run_day)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES",
+                        "ceo_buys,insider_buys,money_map,insider_spotlight,theme_explainer")
+    monkeypatch.setattr(mrs.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    ref = f"news:theme_explainer:ai-chips:make_money:{posted_day.isoformat()}"
+    _accepted(sb, posted_day, "theme_explainer", ref, None, None, lane=posted_lane)
+    news = TF.FakeNews({})                                    # every series quiet: the chain reaches the theme
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, run_day, lane=run_lane)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    asked = [c["series"] for c in news.calls]
+    assert "theme_explainer" in asked, asked
+    if run_lane == "main" and run_day.weekday() == 0:
+        assert asked[:3] == ["ceo_buys", "insider_buys", "theme_explainer"], asked      # right after the Form 4 pair
+    if run_lane == "spotlight":
+        assert asked[:2] == ["insider_spotlight", "theme_explainer"], asked             # right after the insider list
+    (call,) = [c for c in news.calls if c["series"] == "theme_explainer"]
+    history = call["kw"]["theme_history"]
+    assert ref in history, history
+    world = TA.theme_world()
+    got = await TA.trun(world, run_date=run_day, theme_history=history)
+    assert got.records == () and got.rejections == {"already_posted": 1}
+    # anti-vacuity: the same collector posts the theme when the ledger is empty
+    TA.A.clear_memo()
+    assert [r.slug for r in (await TA.trun(TA.theme_world(), run_date=run_day)).records] == ["ai-chips"]
+
+
+def test_theme_fallback_the_two_lanes_never_both_ask_for_the_theme_on_one_day(monkeypatch):
+    """The same day is C0's (2026-11-16): a day whose MAIN chain holds the theme — every Monday (owner decisions
+    2026-11-20, after the Form 4 pair) and every Wednesday it leads — drops it from that day's SPOTLIGHT chain, whatever
+    weekdays the spotlight runs on; on any other day only the spotlight asks for it. Ten years, every series on."""
+    acf = frozenset({"A", "C", "F"})
+    every = frozenset(selection.SHIPPED_SERIES)
+    every_day = (0, 1, 2, 3, 4, 5, 6)
+    monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,wed,thu,fri,sat,sun")
+    main_days = {0, 2}
+    seen = {"main": 0, "spotlight": 0}
+    d = date(2026, 1, 1)
+    while d < date(2036, 1, 1):
+        main = selection.main_lane_series(d, acf, every)
+        spot = selection.spotlight_chain(d, classes=acf, news_series=every, weekdays=every_day).chain
+        both = "theme_explainer" in main and "theme_explainer" in spot
+        assert not both, d
+        if "theme_explainer" in main:
+            assert d.weekday() in main_days, d
+            seen["main"] += 1
+        if "theme_explainer" in spot:
+            assert d.weekday() not in main_days, d
+            seen["spotlight"] += 1
+        d += timedelta(days=1)
+    assert seen["main"] > 900 and seen["spotlight"] > 2000, seen

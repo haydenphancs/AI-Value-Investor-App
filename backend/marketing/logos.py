@@ -31,28 +31,23 @@ Why each piece is shaped the way it is:
 * **A logo never ends the day.** Every failure is `None` for that key (a wordmark tile), logged
   with the key and the reason — ERROR for a sha mismatch, WARNING for anything else. Never a
   SkipRun, never an exception out of `resolve_logos`.
-* **Visible on its plate.** The cards draw a logo unaltered on a WHITE plate (`cards.PLATE`). A
-  white-on-transparent mark (a dark-theme logo), a fully transparent PNG or a white JPEG passes every
-  header check and would draw an empty white square — with no company name either, since a verified
-  logo draws no wordmark. So the decode composites it onto the plate's white and counts the pixels
-  that visibly differ from it (darkest channel below VISIBLE_CHANNEL_BELOW, one linear histogram);
-  under MIN_VISIBLE_FRACTION of the area it is refused, and the wordmark is drawn instead (WARNING).
-* **Whole on its plate** (LIVE-LOGO-1, 2026-10-20). A logo made for a DARK background — white
-  artwork plus one coloured accent, on real transparency — is visible on the white plate, but only
-  its accent: FMP's GameStop drew as a lone red "S", Amazon's as a lone orange smile, on the 500 ms
-  platform cover. Such a logo is refused (wordmark) when at least TRANSPARENT_SHARE_MIN of its
-  pixels are transparent and the bounding box of its VISIBLE ink covers less than
-  MIN_VISIBLE_BOX_SHARE of the bounding box of its solid pixels (alpha ≥ BOX_ALPHA_MIN, so a faint
-  stray pixel, glow or shadow tail never widens that box — review RR-B2F-3: two alpha-20 corner
-  pixels refused a fully visible disc; white artwork under half opacity is read as a glow too;
-  `visible_box_share`). Measured on the 30 real logos of the 2026-10-20 live review: GME 0.49 and
-  AMZN 0.27 are refused; the lowest kept transparent logo is BSX at 0.81. A logo with no real
-  transparency is exempt: its ground is part of the design (ETN, ALMR and CBRS draw a small mark on
-  their own white tile, 0.22-0.32). Accepted over-refusal: a white tile with a small mark on a
-  transparent canvas reads as the same shape, and draws its wordmark. Known gap (a box test, not a
-  shape test): white artwork whose coloured accents span its whole box — a white wordmark between a
-  coloured underline and a dot, or inside a thin coloured ring — passes and draws only the accents;
-  no real logo reviewed has that shape, and every template post is reviewed before it goes out.
+* **Visible on its disc** (restyle 2026-11-19, owner: "never fall back to the wordmark just because the logo is
+  light"). The cards draw a logo unaltered on a round DISC — WHITE (`cards.PLATE`), or DARK (DARK_DISC_RGB, the
+  look's NAVY_CHIP) for a logo made for a dark background (`disc_tone`). The decode composites the logo onto the
+  white disc and counts the pixels that visibly differ from it (darkest channel below VISIBLE_CHANNEL_BELOW, one
+  linear histogram), and checks it shows WHOLE there (LIVE-LOGO-1: a logo made for a dark background — white
+  artwork plus a coloured accent, on real transparency — shows only its accent on white: FMP's GameStop drew as a
+  lone red "S", Amazon's as a lone orange smile; `visible_box_share` under MIN_VISIBLE_BOX_SHARE once at least
+  TRANSPARENT_SHARE_MIN of its pixels are transparent — the box of its solid pixels, alpha ≥ BOX_ALPHA_MIN, so a
+  faint stray pixel or glow never widens it). A logo visible and whole on white takes the white disc. One that is
+  not takes the DARK disc when it has some transparency (DARK_TRANSPARENT_SHARE_MIN) and is visible and whole THERE (lightest channel at least
+  DARK_VISIBLE_CHANNEL_FROM once composited onto the dark disc); anything else — a fully transparent PNG, a white
+  JPEG with no transparency (it would draw a blank square on either disc) — is refused and the wordmark is drawn
+  (WARNING). Measured on the 30 real logos of the 2026-10-20 live review: GME 0.49 and AMZN 0.27 (on white) take
+  the dark disc; the lowest white-disc transparent logo is BSX at 0.81; ETN, ALMR and CBRS (a small mark on their
+  own opaque white tile, no transparency) keep the white disc. Known gap (a box test, not a shape test): white
+  artwork whose coloured accents span its whole box passes on white and draws only the accents; every template
+  post is reviewed before it goes out.
 * **No baked checkerboard** (LIVE-LOGO-2). An editor's "transparent" grid saved INTO the pixels —
   two light neutral greys alternating in squares (FMP's Boston Scientific: 254/237 in 6 px squares
   behind the name; the editors' standard light grid is 255/204, Photoshop's and GIMP's "light
@@ -90,7 +85,7 @@ import re
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 logger = logging.getLogger("marketing.logos")
 
@@ -150,8 +145,16 @@ LOGOS_WORST_CASE_SECONDS = LOGOS_BUDGET_SECONDS + LOGO_DOWNLOAD_TIMEOUT_SECONDS 
 #: plate, whose darkest channel is below this (≈ 1.3:1 luminance contrast against white or more).
 PLATE_RGB = (255, 255, 255)
 VISIBLE_CHANNEL_BELOW = 225
-#: A logo with fewer visible pixels than this fraction of its area draws as a blank plate: refused.
+#: A logo with fewer visible pixels than this fraction of its area draws as a blank disc: refused.
 MIN_VISIBLE_FRACTION = 0.005
+#: The DARK disc (restyle 2026-11-19: the look's NAVY_CHIP, pinned equal to marketing/look.py by the tests) and
+#: what counts as visible on it: a pixel, composited onto it, whose lightest channel is at least this (≈ 1.5:1
+#: luminance contrast against the disc or more).
+DARK_DISC_RGB = (17, 24, 39)
+DARK_VISIBLE_CHANNEL_FROM = 60
+#: A logo takes the dark disc only with at least this share of its pixels transparent (FMP's Analog Devices: a
+#: white tile whose play mark is cut out, 22 % transparent — white tile and dark mark on the dark disc).
+DARK_TRANSPARENT_SHARE_MIN = 0.05
 #: LIVE-LOGO-1 (module doc): a pixel is TRANSPARENT below this alpha (and opaque from it — a fainter one
 #: composites to ≥ 240 on the plate, never visible); a logo with at least TRANSPARENT_SHARE_MIN of its
 #: pixels transparent whose visible ink spans less than MIN_VISIBLE_BOX_SHARE of its SOLID box — the
@@ -234,7 +237,7 @@ def logo_url_pattern(origin: str) -> "re.Pattern[str]":
 def wide_sample_mode(mode: Any) -> bool:
     """Is `mode` a Pillow mode whose samples are wider than 8 bits — `I;16` / `I;16B` / `I;16L` / `I;16N`
     (a 16-bit grayscale PNG), `I` (32-bit int) or `F` (32-bit float)? `convert("RGBA")`, which
-    cards.draw_plate runs, CLIPS those samples at 255 instead of scaling them (review R9: a 50%-grey
+    look.draw_disc runs, CLIPS those samples at 255 instead of scaling them (review R9: a 50%-grey
     0x8000 band of a 16-bit greyscale PNG drew as pure white), so the logo would be drawn altered —
     never unaltered, as the owner requires (2026-10-09 decision 3). Refused: the wordmark is drawn.
     (16-bit RGB and grey+alpha PNGs open as RGB / RGBA and convert correctly.)"""
@@ -244,10 +247,9 @@ def wide_sample_mode(mode: Any) -> bool:
 def decode_problem(data: bytes, ext: str) -> Optional[str]:
     """Why `data` is not a drawable logo of type `ext` ("png" | "jpg"), or None. The size limits
     are read from the HEADER before any pixel is decoded; then `verify()` and a full decode of a
-    fresh handle; then the logo must be VISIBLE on the white plate (`visible_pixels` ≥
-    MIN_VISIBLE_FRACTION of its area — review LOGO-1: a white-on-transparent, transparent or white logo
-    would draw an empty plate and no wordmark), WHOLE on it (`visible_box_share` — LIVE-LOGO-1: a logo
-    made for a dark background shows only its accent) and free of a baked checkerboard (`checker_share`
+    fresh handle; then the logo must show visibly and WHOLE on the white disc or — a logo made for a
+    dark background, on real transparency — on the dark disc (`disc_problem`: review LOGO-1, LIVE-LOGO-1;
+    a fully transparent or an opaque white logo shows on neither) and be free of a baked checkerboard (`checker_share`
     — LIVE-LOGO-2). Any Pillow error (a truncated file, a bomb warning) is a problem, never a raise."""
     from PIL import Image
 
@@ -277,15 +279,10 @@ def decode_problem(data: bytes, ext: str) -> Optional[str]:
                 im.load()
                 if im.size != (w, h):
                     return f"decoded {im.size}, header said {(w, h)}"
-                rgba = im.convert("RGBA")   # what cards.draw_plate does: a mode it cannot is refused HERE
-            visible = visible_pixels(rgba)
-            if visible < MIN_VISIBLE_FRACTION * w * h:
-                return (f"an invisible logo on the white plate ({visible} visible pixels of {w}x{h}; "
-                        f"needs {MIN_VISIBLE_FRACTION:.1%})")
-            box_share = visible_box_share(rgba)
-            if box_share is not None and box_share < MIN_VISIBLE_BOX_SHARE:
-                return (f"only part of the logo shows on the white plate (its visible ink spans {box_share:.0%} "
-                        f"of its solid box, needs {MIN_VISIBLE_BOX_SHARE:.0%}: a logo made for a dark background)")
+                rgba = im.convert("RGBA")   # what look.draw_disc does: a mode it cannot is refused HERE
+            problem = disc_problem(rgba)
+            if problem is not None:
+                return problem
             checker = checker_share(rgba)
             if checker is not None:
                 side, across, down = checker
@@ -303,7 +300,7 @@ def _lut(keep: Callable[[int], bool]) -> List[int]:
 
 
 def _darkest_on_plate(rgba: Any) -> Any:
-    """The darkest channel ("L") of `rgba` composited onto the plate exactly as cards.draw_plate does
+    """The darkest channel ("L") of `rgba` composited onto the white disc exactly as look.draw_disc does
     (alpha over PLATE_RGB)."""
     from PIL import Image, ImageChops
 
@@ -315,9 +312,181 @@ def _darkest_on_plate(rgba: Any) -> Any:
 
 def visible_pixels(rgba: Any) -> int:
     """How many pixels of the RGBA image `rgba` visibly differ from the plate once composited onto it
-    exactly as cards.draw_plate does (alpha over PLATE_RGB): those whose darkest channel is below
+    exactly as look.draw_disc does (alpha over PLATE_RGB): those whose darkest channel is below
     VISIBLE_CHANNEL_BELOW. Linear: two channel-wise minimums and one histogram, no Python pixel loop."""
     return sum(_darkest_on_plate(rgba).histogram()[:VISIBLE_CHANNEL_BELOW])
+
+
+def _lightest_on(rgba: Any, ground: Tuple[int, int, int]) -> Any:
+    """The LIGHTEST channel ("L") of `rgba` composited onto a flat `ground` (alpha over it)."""
+    from PIL import Image, ImageChops
+
+    plate = Image.new("RGBA", rgba.size, ground + (255,))
+    plate.alpha_composite(rgba)
+    r, g, b, _a = plate.split()
+    return ImageChops.lighter(ImageChops.lighter(r, g), b)
+
+
+def _transparent(rgba: Any) -> bool:
+    """Has `rgba` real transparency — at least DARK_TRANSPARENT_SHARE_MIN of its pixels below OPAQUE_ALPHA_MIN (an
+    opaque white logo has none: on the dark disc it would draw a blank square)?"""
+    w, h = rgba.size
+    return sum(rgba.getchannel("A").histogram()[:OPAQUE_ALPHA_MIN]) >= DARK_TRANSPARENT_SHARE_MIN * w * h
+
+
+def _whole_on_white(rgba: Any) -> Optional[str]:
+    """Why `rgba` does not show (visibly and whole) on the WHITE disc, or None."""
+    w, h = rgba.size
+    visible = visible_pixels(rgba)
+    if visible < MIN_VISIBLE_FRACTION * w * h:
+        return (f"an invisible logo on the white disc ({visible} visible pixels of {w}x{h}; "
+                f"needs {MIN_VISIBLE_FRACTION:.1%})")
+    box_share = visible_box_share(rgba)
+    if box_share is not None and box_share < MIN_VISIBLE_BOX_SHARE:
+        return (f"only part of the logo shows on the white disc (its visible ink spans {box_share:.0%} of its "
+                f"solid box, needs {MIN_VISIBLE_BOX_SHARE:.0%}: a logo made for a dark background)")
+    return None
+
+
+def _whole_on_dark(rgba: Any) -> Optional[str]:
+    """Why `rgba` does not show (visibly and whole) on the DARK disc, or None: it needs real transparency (an
+    opaque logo is its own ground — a white one would draw a blank square), DARK_VISIBLE_CHANNEL_FROM or lighter on
+    at least MIN_VISIBLE_FRACTION of its area, and that ink spanning MIN_VISIBLE_BOX_SHARE of its solid box."""
+    w, h = rgba.size
+    if not _transparent(rgba):
+        return "no transparency (its own ground would be drawn as a blank square on the dark disc)"
+    lit = _lightest_on(rgba, DARK_DISC_RGB).point(_lut(lambda v: v >= DARK_VISIBLE_CHANNEL_FROM))
+    visible = lit.histogram()[255]
+    if visible < MIN_VISIBLE_FRACTION * w * h:
+        return f"an invisible logo on the dark disc too ({visible} visible pixels of {w}x{h})"
+    solid_box = rgba.getchannel("A").point(_lut(lambda v: v >= BOX_ALPHA_MIN)).getbbox()
+    lit_box = lit.getbbox()
+    if solid_box and lit_box and _box_area(lit_box) / _box_area(solid_box) < MIN_VISIBLE_BOX_SHARE:
+        return "only part of the logo shows on the dark disc too"
+    return None
+
+
+#: news-v23 — a logo FMP serves on an opaque LIGHT PLATE (Lennar's white square around a small wordmark,
+#: Constellation Brands' white margin): all four corners opaque (alpha ≥ LIGHT_PLATE_ALPHA_MIN), alike within
+#: LIGHT_PLATE_CORNER_SPREAD per channel, and light (luminance ≥ LIGHT_PLATE_MIN_LUMA). The disc takes the plate's
+#: own colour and the logo is sized by its MARKS — the pixels further than LIGHT_PLATE_MARK_TOL (L1, RGB) from the
+#: plate, alpha ≥ LIGHT_PLATE_MARK_ALPHA — never by its margin (the approved mock_f13_lists `real_logo`).
+LIGHT_PLATE_ALPHA_MIN = 250
+LIGHT_PLATE_CORNER_SPREAD = 12
+LIGHT_PLATE_MIN_LUMA = 225
+LIGHT_PLATE_MARK_TOL = 36
+LIGHT_PLATE_MARK_ALPHA = 48
+
+
+def opaque_plate(rgba: Any) -> Optional[Tuple[int, int, int]]:
+    """The colour of the opaque plate the RGBA logo was served on — its four corners opaque (alpha ≥
+    LIGHT_PLATE_ALPHA_MIN) and alike (LIGHT_PLATE_CORNER_SPREAD per channel), their mean — or None."""
+    w, h = rgba.size
+    if w < 2 or h < 2:
+        return None
+    corners = [rgba.getpixel(p) for p in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))]
+    if min(c[3] for c in corners) < LIGHT_PLATE_ALPHA_MIN:
+        return None
+    if max(abs(a[i] - b[i]) for a in corners for b in corners for i in range(3)) > LIGHT_PLATE_CORNER_SPREAD:
+        return None
+    return tuple(sum(c[i] for c in corners) // 4 for i in range(3))  # type: ignore[return-value]
+
+
+def light_plate(rgba: Any) -> Optional[Tuple[int, int, int]]:
+    """The opaque LIGHT plate colour the RGBA logo was served on (`opaque_plate`, luminance ≥
+    LIGHT_PLATE_MIN_LUMA), or None. An opaque DARK plate (Berkshire's navy square) is the logo's own tile."""
+    plate = opaque_plate(rgba)
+    if plate is None or 0.2126 * plate[0] + 0.7152 * plate[1] + 0.0722 * plate[2] < LIGHT_PLATE_MIN_LUMA:
+        return None
+    return plate
+
+
+#: news-v23 (visual-fidelity round, 2026-11-20 — theme_insiders_cyber.jpg's Rapid7: mock_theme_insiders `circle_tile`,
+#: "a full-bleed square tile: it becomes the disc, so its wordmark can be read") — a DARK IMAGE TILE: a logo served as
+#: an opaque, about-square picture (every pixel alpha ≥ LIGHT_PLATE_ALPHA_MIN, aspect within IMAGE_TILE_ASPECT) that
+#: is NOT one flat plate (its corners differ: a gradient or a picture — `opaque_plate` is None) and is dark (WHITE
+#: reads on its border's mean colour at ≥ IMAGE_TILE_MIN_WHITE_CONTRAST:1, WCAG). Its MARKS are the pixels whose luma
+#: (ITU-R 601, Pillow's "L") differs from the border mean's by more than IMAGE_TILE_MARK_LUMA_TOL — a white wordmark
+#: on the tile's dark ground — or whose colour is further than IMAGE_TILE_MARK_RGB_TOL (L1, RGB) from it (a coloured
+#: accent: Rapid7's orange "7"); the ground's own gradient stays under both. A flat dark plate (Berkshire's navy
+#: square, Arm's cyan one — the approved f13_list_berkshire.jpg / theme_ai_chips.jpg keep it whole on the white disc)
+#: and a light or mid-tone picture tile (Vertiv's orange square: theme_biggest_power.jpg keeps it whole) are not dark
+#: image tiles.
+IMAGE_TILE_ASPECT = (0.9, 1.1)
+IMAGE_TILE_MIN_WHITE_CONTRAST = 4.5
+IMAGE_TILE_MARK_LUMA_TOL = 64
+IMAGE_TILE_MARK_RGB_TOL = 200
+IMAGE_TILE_BORDER_SHARE = 0.04
+
+
+def _wcag_luminance(rgb: Sequence[float]) -> float:
+    def ch(v: float) -> float:
+        v /= 255.0
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * ch(rgb[0]) + 0.7152 * ch(rgb[1]) + 0.0722 * ch(rgb[2])
+
+
+def dark_image_tile(rgba: Any) -> Optional[Any]:
+    """The L mask (255 / 0) of a DARK IMAGE TILE's marks (see IMAGE_TILE_ASPECT's block), or None when the RGBA logo
+    is not one. Linear: a few Pillow passes over the image, no Python pixel loop."""
+    from PIL import Image, ImageChops, ImageStat
+
+    w, h = rgba.size
+    if w < 8 or h < 8 or not IMAGE_TILE_ASPECT[0] <= w / h <= IMAGE_TILE_ASPECT[1]:
+        return None
+    if rgba.getchannel("A").getextrema()[0] < LIGHT_PLATE_ALPHA_MIN or opaque_plate(rgba) is not None:
+        return None
+    rgb = rgba.convert("RGB")
+    b = max(1, int(round(min(w, h) * IMAGE_TILE_BORDER_SHARE)))
+    strips = [rgb.crop(box) for box in ((0, 0, w, b), (0, h - b, w, h), (0, b, b, h - b), (w - b, b, w, h - b))]
+    total = sum(s.size[0] * s.size[1] for s in strips)
+    mean = [sum(ImageStat.Stat(s).sum[i] for s in strips) / total for i in range(3)]
+    if 1.05 / (_wcag_luminance(mean) + 0.05) < IMAGE_TILE_MIN_WHITE_CONTRAST:
+        return None
+    ground = 0.299 * mean[0] + 0.587 * mean[1] + 0.114 * mean[2]
+    lumas = rgb.convert("L").point(_lut(lambda v: abs(v - ground) > IMAGE_TILE_MARK_LUMA_TOL))
+    diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, tuple(int(round(v)) for v in mean)))
+    r, g, b_ = diff.split()
+    # r + g + b > TOL without overflow: the halves are summed (each ≤ 127), compared with TOL / 2
+    half = ImageChops.add(ImageChops.add(r.point(lambda v: v // 2), g.point(lambda v: v // 2)),
+                          b_.point(lambda v: v // 2))
+    colours = half.point(_lut(lambda v: v > IMAGE_TILE_MARK_RGB_TOL // 2))
+    marks = ImageChops.lighter(lumas, colours)
+    return marks if marks.getbbox() else None
+
+
+def plate_marks(rgba: Any, plate: Tuple[int, int, int]) -> Any:
+    """The L mask (255 / 0) of the logo's MARKS on its light `plate`: alpha ≥ LIGHT_PLATE_MARK_ALPHA and further
+    than LIGHT_PLATE_MARK_TOL (sum of the three channel differences) from the plate. Linear Pillow passes only."""
+    from PIL import Image, ImageChops
+
+    rgb = rgba.convert("RGB")
+    diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, plate))
+    r, g, b = diff.split()
+    # r + g + b > TOL, without overflow: each channel is ≤ 255, the sum is clipped at 255 (> TOL either way)
+    total = ImageChops.add(ImageChops.add(r, g), b)
+    far = total.point(_lut(lambda v: v > LIGHT_PLATE_MARK_TOL))
+    solid = rgba.getchannel("A").point(_lut(lambda v: v >= LIGHT_PLATE_MARK_ALPHA))
+    return ImageChops.multiply(far, solid)
+
+
+def disc_tone(rgba: Any) -> str:
+    """"light" — the WHITE disc — when the RGBA logo shows visibly and whole on white (`_whole_on_white`); "dark" —
+    the DARK disc — otherwise (a logo made for a dark background: white artwork on real transparency). The ONE rule
+    `decode_problem` and the cards' disc drawing both use, so a logo that verified always draws whole."""
+    return "light" if _whole_on_white(rgba) is None else "dark"
+
+
+def disc_problem(rgba: Any) -> Optional[str]:
+    """Why the RGBA logo shows WHOLE on neither disc (it is refused: the wordmark is drawn), or None."""
+    on_white = _whole_on_white(rgba)
+    if on_white is None:
+        return None
+    on_dark = _whole_on_dark(rgba)
+    if on_dark is None:
+        return None
+    return f"{on_white}; on the dark disc: {on_dark}"
 
 
 def _box_area(box: Any) -> int:

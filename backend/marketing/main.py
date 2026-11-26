@@ -7,8 +7,20 @@ Runs as its own Railway cron service (`marketing/railway.toml`, image `marketing
 on an HOURLY schedule, and exits within seconds on every tick that has nothing to do. The
 hourly cadence is the catch-up mechanism: Railway skips a cron tick whose predecessor is
 still running and does no compute-first, so a killed or skipped slot would otherwise lose
-the day. Each tick asks the backend to claim today's ET date; the UNIQUE `run_date` row is
-the claim, and the row's `stage` checkpoint is where a resumed run continues from.
+the day. Each tick asks the backend to claim an ET date in a LANE (migration 210): the
+UNIQUE `(run_date, lane)` row is the claim, and the row's `stage` checkpoint is where a
+resumed run continues from. Two lanes (`LANES`): `main`, the day's post, claimed through
+`POST /runs/claim` from MARKETING_RUN_HOUR_ET with exactly the body it always had; and
+`spotlight`, the second post on the web's spotlight days, claimed through its own literal
+route `POST /lanes/spotlight/claim` from MARKETING_SPOTLIGHT_HOUR_ET (never a body field: an
+older web ignores unknown fields and would claim the MAIN run). The web decides whether the
+spotlight lane runs on a date (`not_scheduled` otherwise); the worker only asks.
+
+ONE PIPELINE PER TICK (`tick_plan`): the candidates are tried in order — yesterday's resumes
+first (a lane's, only before that lane's hour today: they expire then), then today's main,
+then today's spotlight — each with a FRESH claim nonce, and the first one claimed is run;
+the rest wait for the next tick. That keeps one tick inside WORKER_DEADLINE_SECONDS, below
+the backend's stale window.
 
 ⚠️ STANDALONE BY DESIGN. Nothing under `backend/marketing/` imports `app.*`:
   * `app.config.Settings` requires SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY, and this
@@ -25,13 +37,22 @@ Environment (all MARKETING_* so they never collide with the web service's variab
                              networking is NOT a drop-in: the web binds IPv4 0.0.0.0, and older
                              private networks are IPv6-only.)
   MARKETING_WORKER_TOKEN     shared secret, same value as the web service's setting
-  MARKETING_RUN_HOUR_ET      first hour (ET, 0-23) a tick may start today's run; default 16. The web
-                             service keeps a mirror of the same name for its run-health timing:
+  MARKETING_RUN_HOUR_ET      first hour (ET, 0-23) a tick may start today's MAIN run; default 16. The
+                             web service keeps a mirror of the same name for its run-health timing:
                              change both together.
+  MARKETING_SPOTLIGHT_HOUR_ET  first hour (ET) a tick may start today's SPOTLIGHT run; default 10.
+                             MIRRORED on the web service under the same name (its claim gate's hour
+                             rule, spotlight hour + MARKETING_MAX_RUN_ATTEMPTS <= run hour): change
+                             both together. Not a whole hour 0-23, or not before
+                             MARKETING_RUN_HOUR_ET → ERROR, and the spotlight lane is skipped that
+                             tick (the main lane is unaffected).
+  MARKETING_RUN_LANE         worker only, optional: "" (default) = both lanes; "main" or "spotlight"
+                             restricts every tick of this process to that lane (manual runs, with
+                             MARKETING_FORCE). Anything else → ERROR, exit 1, nothing claimed.
   MARKETING_WORKER_VERSION   free-form tag recorded on the run row; default "phase4"
   MARKETING_RENDER_THREADS   optional x264 thread count (default: the cgroup CPU quota, max 4)
   MARKETING_DRY_RUN          "true" (default) — recorded on the run; the publisher honours it
-  MARKETING_FORCE            "1" bypasses the hour gate (manual runs, local testing)
+  MARKETING_FORCE            "1" bypasses the hour gate of every lane (manual runs, local testing)
   MARKETING_RUN_DATE         YYYY-MM-DD override of the ET date to claim
   SUPABASE_PUBLISHABLE_KEY   optional; sent as `apikey` on the signed-upload PUT if set. It is
                              the one Supabase value this container may hold: Supabase designs
@@ -40,11 +61,12 @@ Environment (all MARKETING_* so they never collide with the web service's variab
 
 Exit codes: 0 = done / nothing to do / not claimed; 1 = a stage failed (recorded on the run
 as status=failed with last_error, so the first tick after MARKETING_RUN_STALE_SECONDS
-re-claims and resumes, up to MARKETING_MAX_RUN_ATTEMPTS).
+re-claims and resumes, up to MARKETING_MAX_RUN_ATTEMPTS), a claim call failed (the other
+candidates are still tried), or the configuration leaves nothing to claim.
 
-A tick BEFORE the window does one cheap thing before exiting: it asks the API to resume
-YESTERDAY's run if — and only if — one exists and was left failed or abandoned (a container
-killed after the last in-window tick). It never creates a run outside the window.
+A tick BEFORE a lane's window does one cheap thing for that lane: it asks the API to resume
+YESTERDAY's run of that lane if — and only if — one exists and was left failed or abandoned
+(a container killed after the last in-window tick). It never creates a run outside the window.
 """
 
 from __future__ import annotations
@@ -54,6 +76,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -80,6 +103,19 @@ logger = logging.getLogger("marketing_worker")
 # Mirrors RUN_STAGES in app/schemas/marketing.py. Duplicated on purpose (see the standalone
 # note above); tests/test_marketing_worker.py asserts the two stay equal.
 RUN_STAGES = ("planned", "selected", "scripted", "voiced", "rendered", "assets_ready")
+
+#: The run lanes (migration 210). Mirrors RUN_LANES in app/schemas/marketing.py (standalone, like
+#: RUN_STAGES); tests/test_marketing_worker.py asserts the two stay equal. The order is the tick's
+#: order among candidates of one kind: main before spotlight.
+LANES = ("main", "spotlight")
+LANE_MAIN, LANE_SPOTLIGHT = LANES
+#: Where each lane claims, under /api/v1/internal/marketing. The main lane keeps the route and the body
+#: it always had (byte for byte); the spotlight lane has its OWN LITERAL route — never a `lane` body
+#: field: the claim schema ignores unknown fields, so an older web would drop it and claim the MAIN run.
+#: An older web answers the spotlight route 404, and the tick skips the lane (`main`).
+CLAIM_PATHS: Dict[str, str] = {LANE_MAIN: "/runs/claim", LANE_SPOTLIGHT: "/lanes/spotlight/claim"}
+#: A whole ET hour, as an environment string: one or two ASCII digits (no sign, no decimal point).
+_HOUR_TEXT = re.compile(r"[0-9]{1,2}")
 
 _RETRYABLE_STATUS = {502, 503, 504}
 _HTTP_ATTEMPTS = 3
@@ -110,7 +146,12 @@ WORKER_DEADLINE_SECONDS = 30 * 60
 #: bound that matters.) A stage that cannot start in time is deferred to the next tick.
 #: tests/test_marketing_worker.py pins the relation for every stage. 13 min since drop 2a: the
 #: render's worst case grew by a template day's logo downloads (render.worst_case_seconds: 771.25 s).
-STAGE_START_MARGIN_SECONDS = 13 * 60
+#: 14 min since 2026-11-16 (workstream C, decision 11): the post image's share doubled for the per-post art's
+#: draw-then-fallback (render.IMAGE_RENDER_SECONDS 20 → 40: 791.25 s), and the art download joins it. The stale
+#: window still holds: the latest render start (1800 − 840 = 960 s) + its work and calls ends well under 2700 s. The
+#: web side sizes the template day against it: build + art + kicks + the voice stage ≤ 1800 − this
+#: (script_service.TEMPLATE_DAY_BUDGET_SECONDS, pinned by tests/test_marketing_template_flow.py).
+STAGE_START_MARGIN_SECONDS = 14 * 60
 #: A quick stage (one or two backend calls) needs only a small margin: gating it on the media
 #: stages' 12 minutes closed a finished day `failed` and spent an attempt for a one-second stage
 #: (review 2026-09-29). `voiced`/`rendered` use the small margin on a day with nothing to make
@@ -142,6 +183,69 @@ def should_run_now(now_et: datetime, run_hour_et: int, *, force: bool = False) -
     if not 0 <= run_hour_et <= 23:
         raise ValueError(f"run_hour_et must be 0-23, got {run_hour_et}")
     return now_et.hour >= run_hour_et
+
+
+def parse_run_lane(raw: Optional[str]) -> Optional[str]:
+    """MARKETING_RUN_LANE (worker only): "" — unset or blank — means every lane; "main" or "spotlight"
+    (any case, padded) means that lane only. Anything else is None, which `main` refuses before any claim
+    (ERROR, exit 1): a typo must never widen a manual run to both lanes."""
+    if raw is None:
+        return ""
+    value = raw.strip().lower()
+    if not value:
+        return ""
+    return value if value in LANES else None
+
+
+def spotlight_hour_et(raw: Any, *, run_hour: int) -> Optional[int]:
+    """The spotlight lane's hour from its environment string (MARKETING_SPOTLIGHT_HOUR_ET), or None —
+    the lane is skipped this tick, logged at ERROR, and the main lane is unaffected (fail closed).
+
+    Usable only as a whole hour 0-23 (one or two digits, surrounding blanks allowed) that comes BEFORE the
+    main run hour: the web's claim gate opens the lane only when spotlight hour + MARKETING_MAX_RUN_ATTEMPTS
+    <= MARKETING_RUN_HOUR_ET, so an hour at or after the main one could never be claimed — and it would put
+    the spotlight's resume of yesterday ahead of today's main run in the tick's order."""
+    text = raw.strip() if isinstance(raw, str) else ""
+    if not _HOUR_TEXT.fullmatch(text) or not 0 <= int(text) <= 23:
+        logger.error("MARKETING_SPOTLIGHT_HOUR_ET=%r is not a whole ET hour 0-23 — the spotlight lane is "
+                     "skipped this tick (the main lane is unaffected)", str(raw)[:40])
+        return None
+    hour = int(text)
+    if hour >= run_hour:
+        logger.error("MARKETING_SPOTLIGHT_HOUR_ET=%d is not before MARKETING_RUN_HOUR_ET=%d — the spotlight "
+                     "lane is skipped this tick (the web closes it too; set both services' spotlight hour "
+                     "earlier)", hour, run_hour)
+        return None
+    return hour
+
+
+def tick_plan(now_et: datetime, *, day: date, run_hour: int, spotlight_hour: Optional[int],
+              force: bool = False, only_lane: str = "") -> List[Tuple[str, date, bool]]:
+    """The claims one tick tries, in order, as (lane, run_date, resume_only). Pure.
+
+    A lane whose hour has come (`should_run_now`, so `force` makes every lane's come) is a candidate for
+    `day`; a lane whose hour has not come yet is a RESUME-ONLY candidate for the day before — the server
+    then resumes yesterday's run of that lane if one was left failed or abandoned, and never creates one.
+    The resumes come FIRST (each expires at its lane's hour today), then today's lanes; within each kind
+    main before spotlight (`LANES`). `spotlight_hour` None (unusable, `spotlight_hour_et`) leaves the
+    spotlight lane out; `only_lane` ("" = every lane) keeps one lane. `main` runs the first candidate the
+    server hands over and tries no other: one pipeline per tick."""
+    if only_lane and only_lane not in LANES:
+        raise ValueError(f"unknown lane {only_lane!r}")
+    hours: Dict[str, Optional[int]] = {LANE_MAIN: run_hour, LANE_SPOTLIGHT: spotlight_hour}
+    lanes = [lane for lane in LANES if hours[lane] is not None and only_lane in ("", lane)]
+    due = {lane: should_run_now(now_et, int(hours[lane]), force=force) for lane in lanes}  # type: ignore[arg-type]
+    yesterday = day - timedelta(days=1)
+    return ([(lane, yesterday, True) for lane in lanes if not due[lane]]
+            + [(lane, day, False) for lane in lanes if due[lane]])
+
+
+def run_lane(run: Dict[str, Any]) -> Any:
+    """The lane of a run row the server handed over: its `lane`, or "main" when it carries none (a web older
+    than migration 210 has only the main lane and echoes no lane). Any other value is returned as is, for the
+    caller to refuse."""
+    lane = run.get("lane")
+    return LANE_MAIN if lane is None else lane
 
 
 def sha256_hex(data: bytes) -> str:
@@ -184,10 +288,15 @@ def build_manifest(
     dry_run: bool,
     ffmpeg: Optional[str],
     fonts_dir: str,
+    lane: str = LANE_MAIN,
 ) -> Dict[str, Any]:
     """What this image can do. Uploaded as the run's `manifest` asset so the first real
     cron tick proves the whole claim → register → signed PUT → complete path end to end,
     and so the Railway environment is inspectable from the database.
+
+    A spotlight run's manifest also names its `lane` (the server keeps it under
+    `<run_date>/spotlight/`, so the public object says which run it belongs to); a MAIN run's
+    carries no lane key — its bytes, and so its content-addressed path, are what they always were.
 
     ⚠️ DETERMINISTIC: the bytes are hashed into the object's content-addressed path, so this
     must depend only on the image and the run — never a clock, PID, hostname or counter. A
@@ -195,6 +304,8 @@ def build_manifest(
     (up to MARKETING_MAX_RUN_ATTEMPTS a day) and made the "already ready" branch of
     `stage_preflight` dead code. The generation time travels in the asset row's `metadata`,
     which is not hashed."""
+    if lane not in LANES:
+        raise ValueError(f"unknown lane {lane!r}")
     fonts: List[str] = []
     fonts_error: Optional[str] = None
     try:
@@ -206,7 +317,7 @@ def build_manifest(
         logger.warning("fonts dir %s unreadable: %s", fonts_dir, fonts_error)
     # The manifest lands in a PUBLIC bucket, so it carries only what the pipeline needs to
     # know about itself (interpreter + ffmpeg versions, fonts) — no kernel/glibc fingerprint.
-    return {
+    manifest: Dict[str, Any] = {
         "worker_version": worker_version,
         "run_date": run_date.isoformat(),
         "dry_run": dry_run,
@@ -217,6 +328,9 @@ def build_manifest(
         "fonts_error": fonts_error,
         "stages_implemented": [name for name, _fn in MEDIA_STAGES],
     }
+    if lane != LANE_MAIN:
+        manifest["lane"] = lane
+    return manifest
 
 
 # ── the API client ────────────────────────────────────────────────────────────
@@ -318,14 +432,37 @@ class BackendClient:
     #: the run (`video_features` in the script read-back: a lesson's hook card, a template's data card,
     #: the push-in on card 0) and the end card the read-back names (`end_card_cta`) — the server
     #: freezes features only for a run whose holder declared it; an older image keeps today's video.
+    #: "layout_feature" (2026-11-15, the spotlight series): this image draws the `feature` template image
+    #: (cards.SHIPPED_LAYOUTS lists it: the art band with the kicker and the logo plate, the figure, its
+    #: label, the headline and the fact rows) — without it the server drops the series whose picture is a
+    #: feature layout from the day's chain, freezes such a picture's posts as text, and refuses a feature
+    #: picture registered by this run's holder.
+    #: "post_art" (2026-11-16, workstream C — per-post art, owner decisions 2026-11-15): this image downloads,
+    #: verifies and draws the read-back's `art` (`art.resolve_art`) on the `feature` picture's band and on a template
+    #: video's opening card, burning `cards.ART_LABEL` and declaring what it drew (`metadata.art_sha256` /
+    #: `metadata.opening_art_sha256`) — the server makes art only for a holder that declared it, so an older image
+    #: never costs a picture nobody draws. Appended LAST, and never required anywhere: art is optional, and a worker
+    #: that cannot draw it draws today's media.
+    #: "look_v23" (2026-11-19, the restyle news-v23): this image draws a `rows` row's ticker chip and the Money Map
+    #: plate's ticker chip (the server strips both from a holder that does not declare it), and draws the look's own
+    #: strings only for a read-back carrying `cards.LOOK` (`cards.new_look`). Appended LAST.
+    #: "theme_angles" (2026-11-20, news-v23 phase 3 — the weekly theme post): this image draws the `ranked` picture
+    #: (angle 2, a theme's members by market value), the theme grid's ticker chips, decoration and sub-line break, and
+    #: the theme's list cover (the server sends none of them to a holder that does not declare it). Appended LAST.
     #: Mirrors app.schemas.marketing.WORKER_CAPABILITIES (standalone: no `app.*` import);
     #: tests/test_marketing_worker.py pins the two equal.
-    WORKER_CAPABILITIES = ("post_image", "news_templates", "layouts_2b", "video_v2")
+    WORKER_CAPABILITIES = ("post_image", "news_templates", "layouts_2b", "video_v2", "layout_feature", "post_art",
+                           "look_v23", "theme_angles")
 
     def claim_run(
         self, run_date: date, worker_version: str, dry_run: bool, *,
-        claim_nonce: Optional[str] = None, resume_only: bool = False,
+        claim_nonce: Optional[str] = None, resume_only: bool = False, lane: str = LANE_MAIN,
     ) -> Dict[str, Any]:
+        """Claim `run_date` in `lane`. The body is the same for both lanes (and, for the main lane, the
+        body it always was); only the route names the lane (CLAIM_PATHS)."""
+        path = CLAIM_PATHS.get(lane)
+        if path is None:
+            raise ValueError(f"unknown lane {lane!r}")
         body: Dict[str, Any] = {
             "run_date": run_date.isoformat(), "worker_version": worker_version,
             "dry_run": dry_run, "resume_only": resume_only,
@@ -333,7 +470,7 @@ class BackendClient:
         }
         if claim_nonce:
             body["claim_nonce"] = claim_nonce
-        return self._call("POST", "/runs/claim", json=body)
+        return self._call("POST", path, json=body)
 
     def list_assets(self, run_id: str) -> Dict[str, Any]:
         """`{voice_asset_id, assets}`: the run's READY assets, as the server verified them."""
@@ -399,6 +536,7 @@ def stage_preflight(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any]
         dry_run=ctx["dry_run"],
         ffmpeg=ffmpeg_version(),
         fonts_dir=ctx["fonts_dir"],
+        lane=run_lane(run),
     )
     payload = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
     reg = api.register_asset(
@@ -528,12 +666,18 @@ REJECTION_SKIP_REASONS: Dict[str, str] = {
     "writer_unavailable": "writer_unavailable",
     "empty_pool": "empty_pool",
     "source_ineligible": "source_ineligible",
+    # A spotlight day whose series chain found no record (migration 210, 2026-11-15): the day skips — never
+    # the lesson. Not an operator problem (no key, model or corpus to fix).
+    "nothing_qualified": "nothing_qualified",
 }
 #: What a `rejected` body with no (or an unrecognised) `reason` is recorded as — the only
 #: meaning an older web service could have had.
 DEFAULT_REJECTION_SKIP_REASON = "content_rejected"
 #: Reasons an operator must act on (a key, a model, the corpus) — logged at ERROR.
 _OPERATOR_REJECTIONS = {"writer_unavailable", "empty_pool"}
+#: Reasons that are an ordinary outcome of the calendar, not a problem — logged at INFO (a spotlight day
+#: whose chain found no record; the weekly digest reports it). Every other rejection is a WARNING.
+_ROUTINE_REJECTIONS = {"nothing_qualified"}
 
 
 def rejection_skip_reason(run_id: str, state: Dict[str, Any]) -> str:
@@ -549,7 +693,8 @@ def rejection_skip_reason(run_id: str, state: Dict[str, Any]) -> str:
             DEFAULT_REJECTION_SKIP_REASON,
         )
         skip = DEFAULT_REJECTION_SKIP_REASON
-    level = logging.ERROR if skip in _OPERATOR_REJECTIONS else logging.WARNING
+    level = (logging.ERROR if skip in _OPERATOR_REJECTIONS
+             else logging.INFO if skip in _ROUTINE_REJECTIONS else logging.WARNING)
     logger.log(level, "script REJECTED run_id=%s skip_reason=%s source=%s violations=%s",
                run_id, skip, state.get("source_ref"), state.get("violations"))
     return skip
@@ -788,31 +933,35 @@ def main(argv: Optional[List[str]] = None) -> int:
         logger.error("MARKETING_API_BASE_URL and MARKETING_WORKER_TOKEN must be set")
         return 1
 
+    raw_lane = os.environ.get("MARKETING_RUN_LANE", "")
+    only_lane = parse_run_lane(raw_lane)
+    if only_lane is None:
+        logger.error("MARKETING_RUN_LANE=%r is not a lane — set it to %s, or leave it blank for every lane; "
+                     "nothing claimed", raw_lane[:40], " or ".join(LANES))
+        return 1
+
     run_hour = int(os.environ.get("MARKETING_RUN_HOUR_ET", "16"))
+    # The spotlight hour is read (and judged) only when this tick may claim the spotlight lane.
+    spotlight_hour = (spotlight_hour_et(os.environ.get("MARKETING_SPOTLIGHT_HOUR_ET", "10"), run_hour=run_hour)
+                      if only_lane != LANE_MAIN else None)
     worker_version = os.environ.get("MARKETING_WORKER_VERSION", "phase4").strip() or "phase4"
     dry_run = env_flag("MARKETING_DRY_RUN", True)
     force = env_flag("MARKETING_FORCE", False)
     now_et = datetime.now(ET)
-    run_date = (
+    day = (
         date.fromisoformat(os.environ["MARKETING_RUN_DATE"])
         if os.environ.get("MARKETING_RUN_DATE")
         else now_et.date()
     )
-
-    # One nonce per process: if the response to our own successful claim is lost, the retry
-    # is recognised as ours instead of being told "in_progress, someone else has it".
-    claim_nonce = uuid.uuid4().hex
-    in_window = should_run_now(now_et, run_hour, force=force)
-    resume_only = False
-    if not in_window:
-        # Outside the window the only legitimate work is finishing YESTERDAY's run if it was
-        # killed after the last in-window tick. `resume_only` never creates a run.
-        run_date = run_date - timedelta(days=1)
-        resume_only = True
-        logger.info(
-            "tick before window: now_et=%s run_hour_et=%d — checking %s for a resumable run",
-            now_et.strftime("%Y-%m-%d %H:%M"), run_hour, run_date,
-        )
+    plan = tick_plan(now_et, day=day, run_hour=run_hour, spotlight_hour=spotlight_hour, force=force,
+                     only_lane=only_lane)
+    if not plan:
+        # Only when MARKETING_RUN_LANE=spotlight and the spotlight hour is unusable (logged above).
+        logger.error("no lane to claim this tick (MARKETING_RUN_LANE=%s) — nothing claimed", only_lane or "both")
+        return 1
+    logger.info("tick now_et=%s run_hour_et=%d spotlight_hour_et=%s — candidates: %s",
+                now_et.strftime("%Y-%m-%d %H:%M"), run_hour, spotlight_hour,
+                ", ".join(f"{lane} {d}{' (resume only)' if resume else ''}" for lane, d, resume in plan))
 
     ctx: Dict[str, Any] = {
         "worker_version": worker_version,
@@ -823,47 +972,79 @@ def main(argv: Optional[List[str]] = None) -> int:
     }
 
     api = BackendClient(base_url, token)
+    claim_failed = False
     try:
-        claim = api.claim_run(
-            run_date, worker_version, dry_run, claim_nonce=claim_nonce, resume_only=resume_only,
-        )
-        run = claim.get("run") or {}
-        if not claim.get("claimed"):
-            logger.info(
-                "run_date=%s not claimed (reason=%s, status=%s, stage=%s) — exiting 0",
-                run_date, claim.get("reason"), run.get("status"), run.get("stage"),
-            )
-            return 0
-        logger.info(
-            "run_date=%s CLAIMED run_id=%s attempt=%s resume_after=%s dry_run=%s",
-            run_date, run["id"], run.get("attempts"), run.get("stage"), dry_run,
-        )
-        api.hold(run, claim_nonce)
-        try:
-            final = run_pipeline(api, run, ctx)
-        except WorkerDeferred as e:
-            logger.warning("pipeline DEFERRED run_id=%s: %s", run["id"], e)
+        for lane, run_date, resume_only in plan:
+            # A FRESH nonce per candidate claim: if the response to our own successful claim is lost,
+            # the client's retry resends the same body and is recognised as ours instead of being told
+            # "in_progress, someone else has it" — and two claims of one process never share a pair.
+            claim_nonce = uuid.uuid4().hex
+            if resume_only:
+                # Before the lane's window the only legitimate work is finishing YESTERDAY's run of it
+                # if it was killed after the last in-window tick. `resume_only` never creates a run.
+                logger.info("tick before the %s window: checking %s for a resumable run", lane, run_date)
             try:
-                api.update_run(run["id"], status="failed", finished=True,
-                               last_error=f"deferred: {e}"[:2000])
-            except Exception as e2:  # the deferral must still be visible somewhere
-                logger.error("could not record deferral on run %s: %s: %s", run["id"], type(e2).__name__, e2)
-            return 0
-        except WorkerAPIError as e:
-            if e.error_code != RUN_NOT_HELD:
-                return _record_failure(api, run, e)
-            logger.warning("run_id=%s is no longer held by this tick (%s) — exiting without a "
-                           "failure write", run["id"], e)
-            return 0
-        except Exception as e:
-            return _record_failure(api, run, e)
-        logger.info("run_date=%s finished status=%s in %.1fs", run_date, final, time.monotonic() - ctx["t0"])
-        return 0
-    except WorkerAPIError as e:
-        logger.error("backend API error: %s", e)
-        return 1
+                claim = api.claim_run(run_date, worker_version, dry_run, claim_nonce=claim_nonce,
+                                      resume_only=resume_only, lane=lane)
+            except WorkerAPIError as e:
+                if lane != LANE_MAIN and e.status in (404, 405):
+                    logger.warning("the web does not serve the %s lane yet (%s) — skipping it this tick",
+                                   lane, e)
+                    continue
+                logger.error("backend API error claiming lane=%s run_date=%s: %s", lane, run_date, e)
+                claim_failed = True
+                continue
+            run = claim.get("run") or {}
+            if not claim.get("claimed"):
+                logger.info("lane=%s run_date=%s not claimed (reason=%s, status=%s, stage=%s)",
+                            lane, run_date, claim.get("reason"), run.get("status"), run.get("stage"))
+                continue
+            if run_lane(run) != lane or not run.get("id"):
+                # Never run another lane's pipeline (or one without a row): the claim answer is not the
+                # run that was asked for. Nothing is written — the row is not provably ours to close.
+                logger.error("claimed lane=%s run_date=%s but the server handed over run_id=%s of lane %r — "
+                             "running nothing", lane, run_date, run.get("id"), run_lane(run))
+                return 1
+            ctx["lane"] = lane     # for the logs only: no stage branches on it
+            code = _run_claimed(api, run, ctx, claim_nonce, lane=lane, dry_run=dry_run)
+            # One pipeline per tick. A claim that failed before this one still fails the tick.
+            return code or (1 if claim_failed else 0)
+        return 1 if claim_failed else 0
     finally:
         api.close()
+
+
+def _run_claimed(api: BackendClient, run: Dict[str, Any], ctx: Dict[str, Any], claim_nonce: str, *,
+                 lane: str, dry_run: bool) -> int:
+    """Run the pipeline of the run this tick claimed; the tick's exit code. A deferral closes the run
+    `failed` for the next tick to resume (0); a run re-claimed underneath this tick is left to its new
+    holder (0); any other failure is recorded on the run (1)."""
+    logger.info(
+        "lane=%s run_date=%s CLAIMED run_id=%s attempt=%s resume_after=%s dry_run=%s",
+        lane, run.get("run_date"), run["id"], run.get("attempts"), run.get("stage"), dry_run,
+    )
+    api.hold(run, claim_nonce)
+    try:
+        final = run_pipeline(api, run, ctx)
+    except WorkerDeferred as e:
+        logger.warning("pipeline DEFERRED run_id=%s: %s", run["id"], e)
+        try:
+            api.update_run(run["id"], status="failed", finished=True,
+                           last_error=f"deferred: {e}"[:2000])
+        except Exception as e2:  # the deferral must still be visible somewhere
+            logger.error("could not record deferral on run %s: %s: %s", run["id"], type(e2).__name__, e2)
+        return 0
+    except WorkerAPIError as e:
+        if e.error_code != RUN_NOT_HELD:
+            return _record_failure(api, run, e)
+        logger.warning("run_id=%s is no longer held by this tick (%s) — exiting without a "
+                       "failure write", run["id"], e)
+        return 0
+    except Exception as e:
+        return _record_failure(api, run, e)
+    logger.info("lane=%s run_date=%s finished status=%s in %.1fs", lane, run.get("run_date"), final,
+                time.monotonic() - ctx["t0"])
+    return 0
 
 
 def _record_failure(api: BackendClient, run: Dict[str, Any], e: BaseException) -> int:

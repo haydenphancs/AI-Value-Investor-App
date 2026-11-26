@@ -50,22 +50,19 @@ from app.schemas import marketing as sch  # noqa: E402
 from app.services.marketing import company_news_rules, post_copy, selection  # noqa: E402
 from app.services.marketing import template_onscreen as tos  # noqa: E402
 from marketing import cards  # noqa: E402
+from marketing import look  # noqa: E402
 from marketing import news_layouts as nl  # noqa: E402
 
 _BACKEND = Path(__file__).resolve().parents[1]
 FONT = str(_BACKEND / "marketing" / "assets" / "fonts" / "Inter-Bold.ttf")
 _ONSCREEN = _BACKEND / "app" / "services" / "marketing" / "template_onscreen.py"
 
-STAKES_FOOTER = post_copy.image_footer(date(2026, 12, 29), "template", source="Nscale Form S-1 (Sep 18, 2026)",
-                                       as_of="As of Mar 27, 2026")
-# The theme source label is read from the rules (review round 14 renamed it), never restated here.
-THEME_FOOTER = post_copy.image_footer(date(2026, 10, 15), "template",
-                                      source=company_news_rules.SOURCE_LABELS["theme_explainer"], as_of="Oct 15, 2026")
-CONGRESS_FOOTER = post_copy.image_footer(date(2026, 12, 8), "template",
-                                         source="congressional periodic transaction reports",
-                                         as_of="November 2026 · as of Dec 8, 2026")
-EARNINGS_FOOTER = post_copy.image_footer(date(2027, 1, 14), "template", source="company results and analyst consensus",
-                                         as_of="Reported Nov 5, 2026")
+# news-v23 (restyle 2026-11-19): each family's one short footer line (its source words code-owned in post_copy)
+STAKES_FOOTER = post_copy.image_footer(date(2026, 12, 29), "template", source=post_copy.FOOTER_SOURCE_FILINGS)
+THEME_FOOTER = post_copy.image_footer(date(2026, 10, 15), "template", source=post_copy.FOOTER_SOURCE_FILINGS)
+CONGRESS_FOOTER = post_copy.image_footer(date(2026, 12, 8), "template", source=post_copy.FOOTER_SOURCE_CONGRESS,
+                                         when="November 2026")
+EARNINGS_FOOTER = post_copy.image_footer(date(2027, 1, 14), "template", source=post_copy.FOOTER_SOURCE_EARNINGS)
 
 #: Twelve theme members with LONG names: every one is 32 characters (COMPANY_MAX_CHARS) with two long
 #: words, and every caption line is a 36-character segment (SEGMENT_MAX_CHARS) plus its share.
@@ -194,7 +191,8 @@ FOOTERS = {"pair": STAKES_FOOTER, "pair_private": STAKES_FOOTER, "grid_12": THEM
 
 
 def _script(spec: Dict[str, Any]) -> Dict[str, Any]:
-    return {"authorship": "template", "image_spec": spec, "image_footer": spec["footer"], "logos": _entries()}
+    return {"authorship": "template", "look": cards.LOOK, "image_spec": spec, "image_footer": spec["footer"], "logos": _entries(),
+            "look": cards.LOOK}
 
 
 def _image(spec: Dict[str, Any], table: Dict[str, cards.LogoArt]) -> nl.TemplateImage:
@@ -232,17 +230,19 @@ def test_the_2b_key_tables_mirror_the_server_file_text():
         assert name in text, f"template_onscreen.py no longer assigns {name} as a literal"
         assert getattr(cards, name) == text[name] == getattr(tos, name), name
     assert tos.PAIR_SIDE_KEYS == {"left": (("logo", "name"), ()), "right": (("name",), ("logo",))}
-    assert tos.GRID_TILE_KEYS == (("logo", "name"), ("line",))
+    # news-v23 phase 3: a tile may carry its ticker chip (theme_ai_chips.jpg), a grid its icon and two-line sub
+    assert tos.GRID_TILE_KEYS == (("logo", "name"), ("chip", "line"))
     # the 2b caps the task relies on (≤ 12 tiles; pair lines ≤ 2, so label + 2 lines ≤ 3 short lines)
     assert (cards.MIN_TILES, cards.MAX_TILES, cards.MAX_LINES, cards.MAX_LOGOS) == (3, 12, 2, 12)
     assert tos.LAYOUT_KEYS["pair"] == (("left", "right", "figure", "label"), ("lines",))
-    assert tos.LAYOUT_KEYS["grid"] == (("title", "subtitle", "tiles"), ("more",))
+    assert tos.LAYOUT_KEYS["grid"] == (("title", "subtitle", "tiles"), ("more", "icon", "sub_break"))
 
 
 def test_the_worker_draws_every_contract_layout():
     assert set(nl.DRAWERS) == set(cards.LAYOUTS) == set(tos.LAYOUTS)
     for layout, (walker, placer) in nl.DRAWERS.items():
-        assert callable(walker) and callable(placer), layout
+        # news-v23: `feature` is laid out whole by `_place_feature` (its art band, the brand row on it): no placer
+        assert callable(walker) and (callable(placer) or (layout == "feature" and placer is None)), layout
     assert nl.DRAWERS["pair"] == (nl._w_pair, nl._lay_pair) and nl.DRAWERS["grid"] == (nl._w_grid, nl._lay_grid)
 
 
@@ -271,7 +271,10 @@ def test_the_worker_literal_ships_every_layout_in_a_fresh_interpreter():
 SERIES_LAYOUTS = {
     "ceo_buys": {"rows", "spotlight"}, "insider_buys": {"rows", "spotlight"}, "thirteen_f": {"rows"},
     "money_map": {"bars"}, "congress_count": {"spotlight"}, "earnings": {"rows"},
-    "company_stakes": {"pair"}, "theme_explainer": {"grid"},
+    # news-v23 (owner 2026-11-19, "public only"): one investor's stakes — a `rows` list, no longer the `pair`
+    "company_stakes": {"rows"}, "theme_explainer": {"grid"},
+    # the spotlight lane (news-v22, 2026-11-15): the art-band picture
+    "insider_spotlight": {"feature"}, "thirteen_f_spotlight": {"feature"},
 }
 
 
@@ -288,14 +291,17 @@ def test_a_shipped_series_has_its_layout_shipped_on_both_sides():
     """Shipping company_stakes / theme_explainer without flipping SHIPPED_LAYOUTS (both sides) would
     have every candidate refused `image_spec_invalid` and the day fall back — this pins the flip to
     the series."""
-    assert set(SERIES_LAYOUTS) == set(selection.SERIES_BY_ID)
+    # Every series has its layout pinned here (news-v22: the spotlight pair shipped with its `feature` picture —
+    # the strict pin the lane work relaxed while the pair was registered ahead of its templates is back).
+    assert set(selection.SHIPPED_SERIES) <= set(SERIES_LAYOUTS) == set(selection.SERIES_BY_ID)
     assert {"company_stakes", "theme_explainer"} <= selection.SHIPPED_SERIES     # drop 2b shipped them
     assert _unshipped_layouts_of_shipped_series(selection.SHIPPED_SERIES) == []
-    # the check is not vacuous: either side's literal without `pair` (a half-done flip) is caught
+    # the check is not vacuous: either side's literal without `grid` (a half-done flip) is caught (news-v23: no series
+    # draws the `pair` any more)
     for side in (tos, cards):
         with pytest.MonkeyPatch.context() as mp:
-            mp.setattr(side, "SHIPPED_LAYOUTS", tuple(x for x in side.LAYOUTS if x != "pair"))
-            assert _unshipped_layouts_of_shipped_series(selection.SHIPPED_SERIES) == ["company_stakes → pair"]
+            mp.setattr(side, "SHIPPED_LAYOUTS", tuple(x for x in side.LAYOUTS if x != "grid"))
+            assert _unshipped_layouts_of_shipped_series(selection.SHIPPED_SERIES) == ["theme_explainer → grid"]
 
 
 @pytest.mark.parametrize("name", sorted(SPECS_2B))
@@ -423,7 +429,16 @@ _REFUSALS_2B = [
     ("pair: version 2", "pair", ("version",), 2, "bad_version", "version"),
     # grid — closed keys
     ("grid: a tile share field", "grid_12", ("tiles", 0, "share"), 0.43, "unknown_key", "unknown key"),
-    ("grid: a tile chip", "grid_12", ("tiles", 3, "chip"), "GAMA", "unknown_key", "unknown key"),
+    # news-v23 phase 3: a tile's ticker chip is a known key now (theme_ai_chips.jpg) — a bad one is refused, as is a
+    # bad icon token or sub-line break
+    ("grid: a chip too long", "grid_12", ("tiles", 3, "chip"), "GAMMACORPXX", "bad_string", "chip"),
+    ("grid: a numeric chip", "grid_12", ("tiles", 3, "chip"), 42, "bad_string", "chip"),
+    ("grid: an unknown icon", "grid_12", ("icon",), "rocket", "bad_icon", "icon"),
+    ("grid: an icon number", "grid_12", ("icon",), 1, "bad_icon", "icon"),
+    ("grid: a zero sub break", "grid_12", ("sub_break",), 0, "bad_sub_break", "sub_break"),
+    ("grid: a sub break True", "grid_12", ("sub_break",), True, "bad_sub_break", "sub_break"),
+    ("grid: a sub break past the words", "grid_12", ("sub_break",), 99, "bad_sub_break", "sub_break"),
+    ("grid: a tile rank", "grid_12", ("tiles", 3, "rank"), "4", "unknown_key", "unknown key"),
     ("grid: a tile url", "grid_12", ("tiles", 11, "url"), "https://x.example/l.png", "unknown_key", "unknown key"),
     ("grid: a tile person", "grid_12", ("tiles", 1, "person"), "Lisa Su", "unknown_key", "unknown key"),
     ("grid: lines on a grid", "grid_12", ("lines",), ["a"], "unknown_key", "unknown key"),
@@ -500,10 +515,16 @@ def test_too_many_strings_is_the_same_count_on_both_sides(name, shipped_2b, monk
 
 
 def _words_by_field(layout) -> Dict[str, List[str]]:
+    """Each field's drawn words, in order, case-folded (news-v23: a headline is drawn upper-cased), without the " · "
+    separators a stat tile turns into its gap."""
     out: Dict[str, List[str]] = {}
     for ln in layout.lines:
-        out.setdefault(ln.field, []).extend(ln.text.split())
+        out.setdefault(ln.field, []).extend(w.casefold() for w in ln.text.split() if w != "·")
     return out
+
+
+def _spec_words(value: str) -> List[str]:
+    return [w.casefold() for w in value.split() if w != "·"]
 
 
 def _assert_draws_exactly_its_strings(image: nl.TemplateImage, layout) -> None:
@@ -512,20 +533,22 @@ def _assert_draws_exactly_its_strings(image: nl.TemplateImage, layout) -> None:
     is DECLARED (`image.strings`) — so nothing on the image is outside the declaration."""
     items = nl.walk(image.spec, image.logos)
     drawn = _words_by_field(layout)
-    expected = {path: value.split() for kind, path, value in items if kind == "text"}
+    expected = {path: _spec_words(value) for kind, path, value in items if kind == "text"}
     for path, words in expected.items():
         assert drawn.get(path) == words, (path, drawn.get(path), words)
     wordmark_fields = {f for f in drawn if f.startswith("wordmark:")}
-    assert set(drawn) == set(expected) | wordmark_fields
+    assert not any(f.startswith(look.TICKER_FIELD_PREFIX) for f in drawn)   # no 2b layout draws a ticker in a disc
+    assert drawn.get("brand") == [look.BRAND_ROW_WORD.casefold()]          # news-v23: the brand row (declared)
+    assert set(drawn) == set(expected) | wordmark_fields | {"brand"}
     for field in wordmark_fields:
         key = field.split(":", 1)[1]
         arts = [a for _b, a in layout.tiles if a.key == key]
         assert arts and all(a.wordmark for a in arts), f"a verified logo {key} drew text"
-        assert drawn[field] == arts[0].name.split() * len(arts)
+        assert drawn[field] == _spec_words(arts[0].name) * len(arts)
         assert arts[0].name in image.strings
+    declared = [s.casefold() for s in nl.drawn_strings(image, layout)]
     for ln in layout.lines:
-        whole = next(s for s in image.strings if ln.text in s)               # every drawn line is declared text
-        assert whole
+        assert any(ln.text.casefold() in s for s in declared), ln.text      # every drawn line is declared text
 
 
 @pytest.mark.parametrize("name", sorted(SPECS_2B))
@@ -560,42 +583,34 @@ def test_with_logos_drawn_the_strings_are_a_subset_with_the_footer(name, logo_fi
 
 
 def test_a_private_investee_is_a_wordmark_plate_of_its_own_name(logo_files, shipped_2b):
+    """news-v23 (stakes_nvidia.jpg): the investor's disc is the PLATE top-right (in its gold ring) beside its name as
+    the headline; the investee's disc is in the card under it — a private investee's a wordmark disc of its own
+    name (key "right.name"), declared once, as the spec's own string."""
     image = _image(_pair_private(), _table(logo_files))
     layout = nl.layout_template(image, font_path=FONT, layout_engine="basic")
     (left_box, left), (right_box, right) = layout.tiles
     assert not left.wordmark and left.key == "NVDA"
     assert right.wordmark and right.name == "Nscale" and right.key == "right.name"
     assert layout.field_lines("wordmark:right.name") == ["Nscale"]
-    assert left_box[2] < right_box[0] and left_box[1] == right_box[1]       # side by side, same row
+    assert left_box[0] > right_box[2] and left_box[3] < right_box[1]       # the plate top-right, the investee below
+    assert [d.ring for d in layout.discs] == [True, False]
     assert "Nscale" in image.strings and image.strings.count("Nscale") == 1  # declared once, as the spec's own
 
 
-def test_the_pair_arrow_is_a_shape_between_the_plates(logo_files, shipped_2b):
+def test_the_pair_draws_the_investor_as_the_headline_and_the_investee_card_under_it(logo_files, shipped_2b):
+    """news-v23: no arrow — the investor's name is the headline (WHITE, beside its plate), the investee's card under
+    it: its name (INK), the label small (INK2) above the figure (GOLD_INK) right-aligned, the lines on a tile."""
     image = _image(_pair(), _table(logo_files))
-    img, layout = nl.draw_template(image, font_path=FONT, layout_engine="basic")
-    (poly,) = layout.shapes
-    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
-    (lb, _), (rb, _) = layout.tiles
-    assert lb[2] < min(xs) < max(xs) < rb[0]                                # strictly between the plates
-    assert lb[1] < min(ys) < max(ys) < lb[3]                                # inside their row
-    assert max(xs) == poly[3][0] and poly[3][1] == (min(ys) + max(ys)) // 2  # the tip points right, mid-height
-    for ln in layout.lines:                                                 # no text in the gap
-        assert ln.ink[2] <= min(xs) or ln.ink[0] >= max(xs) or ln.ink[1] >= max(ys) or ln.ink[3] <= min(ys)
-    px = np.asarray(img)
-    region = px[min(ys):max(ys), min(xs):max(xs)].reshape(-1, 3)
-    accent = np.array(cards._rgb(cards.ACCENT))
-    assert (np.abs(region.astype(int) - accent).sum(axis=1) <= 6).sum() > 0.3 * len(region)   # drawn, ACCENT
-    assert nl._arrow(10, 100, 50, 10, 24, 17) == ((10, 45), (76, 45), (76, 33), (100, 50), (76, 67), (76, 55),
-                                                  (10, 55))
-
-
-def test_a_pair_with_no_room_for_the_arrow_does_not_fit(shipped_2b, monkeypatch):
-    """The arrow is part of the layout, never dropped: plates too wide for it step the sizes down,
-    and a gap that cannot hold it at the floor is CardOverflow (the day skips), never a missing arrow."""
-    monkeypatch.setattr(nl, "PAIR_HALF_GAP", 0)
-    monkeypatch.setattr(nl, "ARROW_PAD", 120)
-    with pytest.raises(cards.CardOverflow, match="arrow"):
-        nl.layout_template(_image(_pair(), _table()), font_path=FONT, layout_engine="basic")
+    layout = nl.layout_template(image, font_path=FONT, layout_engine="basic")
+    assert layout.shapes == ()
+    head = [ln for ln in layout.lines if ln.field == "left.name"]
+    assert head and {ln.fill for ln in head} == {look.WHITE} and all(ln.text == ln.text.upper() for ln in head)
+    (fig,) = [ln for ln in layout.lines if ln.field == "figure"]
+    (lab,) = [ln for ln in layout.lines if ln.field == "label"]
+    assert fig.fill == look.GOLD_INK and lab.fill == look.INK2 and lab.ink[3] <= fig.ink[1]
+    assert fig.anchor == lab.anchor == "rs"
+    tile = next(r for r in layout.rects if r.fill == look.TILE)
+    assert all(cards._within(ln.ink, tile.box) for ln in layout.lines if ln.field.startswith("lines["))
 
 
 # ── grid specifics ───────────────────────────────────────────────────────────
@@ -605,7 +620,9 @@ def test_twelve_long_named_tiles_fit_whole_in_two_columns(shipped_2b):
     image = _image(_grid(), _table())
     layout = nl.layout_template(image, font_path=FONT, layout_engine="basic")
     assert layout.step <= cards.RAMP_STEPS
-    drawn = _words_by_field(layout)
+    drawn: Dict[str, List[str]] = {}                        # exact words, case kept (a tile is never upper-cased)
+    for ln in layout.lines:
+        drawn.setdefault(ln.field, []).extend(ln.text.split())
     for i in range(12):
         assert drawn[f"tiles[{i}].name"] == GRID_NAMES[i].split()
         assert drawn[f"tiles[{i}].line"] == GRID_LINES[i].split()
@@ -661,12 +678,33 @@ def test_every_2b_layout_renders_a_baseline_jpeg_under_the_cap(name, drawn, tmp_
 
 
 def _not_neutral(rgb) -> "np.ndarray":
+    """A clearly GREEN or RED pixel — never the look's gold (GOLD, GOLD_INK) or blue."""
     r, g, b = (rgb[..., i].astype(int) for i in range(3))
-    return ((r - np.maximum(g, b)) > 40) | ((g - np.maximum(r, b)) > 40)
+    return (((r - np.maximum(g, b)) > 40) & (g < 90)) | ((g - np.maximum(r, b)) > 40)
+
+
+def _toned_mask(layout, shape) -> "np.ndarray":
+    """Where the look may put green or red: the logo discs and a mark whose colour IS green or red."""
+    allowed = np.zeros(shape, dtype=bool)
+
+    def allow(b, pad=2):
+        allowed[max(b[1] - pad, 0):b[3] + pad, max(b[0] - pad, 0):b[2] + pad] = True
+
+    for box, _art in layout.tiles:
+        allow(box, 0)
+    for r in layout.rects:
+        if r.fill in (look.GREEN, look.RED):
+            allow(r.box)
+    for ln in layout.lines:
+        if ln.fill in (look.GREEN, look.RED):
+            allow(ln.ink)
+    return allowed
 
 
 @pytest.mark.parametrize("name", sorted(SPECS_2B))
 def test_no_green_or_red_outside_the_logo_plates_and_nothing_in_the_margins(name, logo_files, shipped_2b):
+    """news-v23: a stake's figure and a theme's shares are GOLD_INK (neutral emphasis), never green or red; green and
+    red only on the logo discs; the side margins and the rows under the footer are the canvas."""
     image = _image(SPECS_2B[name](), _table(logo_files))
     img, layout = nl.draw_template(image, font_path=FONT, layout_engine="basic")
     px = np.asarray(img)
@@ -676,15 +714,18 @@ def test_no_green_or_red_outside_the_logo_plates_and_nothing_in_the_margins(name
     if any(not a.wordmark for _b, a in layout.tiles):
         assert _not_neutral(px)[~mask].any(), "the red/green test logos were not drawn — the check is vacuous"
     bad = _not_neutral(px) & mask
-    assert not bad.any(), f"{int(bad.sum())} green/red pixels outside the logo plates"
-    m = cards.IMAGE_MARGIN
-    page = np.array(cards._rgb(cards.PAGE))
-    footer_top = min(ln.ink[1] for ln in layout.lines if ln.field == "footer")
-    for region in (px[:m], px[:, :m], px[:, -m:], px[-m:], px[layout.panel[3]:footer_top]):
-        assert (region == page).all()
+    assert not bad.any(), f"{int(bad.sum())} green/red pixels outside the logo discs"
+    base = np.asarray(look.canvas(look.POST_FRAME))
+    x0, _y0, x1, _y1 = look.POST_FRAME.area
+    for region in (np.s_[:, :x0], np.s_[:, x1:], np.s_[1350 - 20:]):
+        assert (px[region] == base[region]).all()
     for ln in layout.lines:
-        bounds = (m, m, 1080 - m, 1350 - m) if ln.field == "footer" else layout.panel
-        assert cards._within(ln.ink, bounds), (ln.field, ln.ink)
+        if ln.field in ("brand", "kicker"):
+            assert ln.ink[3] <= layout.panel[1]
+        elif ln.field == "footer":
+            assert ln.ink[1] >= layout.panel[3]
+        else:
+            assert cards._within(ln.ink, layout.panel), (ln.field, ln.ink)
     for box, _art in layout.tiles:
         assert cards._within(box, layout.panel)
 
@@ -806,14 +847,18 @@ def test_earnings_two_rows_are_rows_the_shipped_validators_accept(order):
     out = nl.render_template_image(image, font_path=FONT, layout_engine="basic")
     assert len(out.data) <= cards.POST_IMAGE_MAX_BYTES
     if order == "recommended":
-        # the REPORTED figure is the right-aligned ACCENT cell; the estimate is the muted middle cell
+        # the REPORTED figure is the right-aligned big cell — NEUTRAL INK on earnings (news-v23: estimate and reported
+        # are never coloured); the estimate is the INK2 middle cell
         (fig,) = [ln for ln in layout.lines if ln.field == "sections[0].rows[0].cells[2]"]
         (est,) = [ln for ln in layout.lines if ln.field == "sections[0].rows[0].cells[1]"]
-        assert (fig.text, fig.anchor, fig.fill) == ("-$0.05", "ra", cards._rgb(cards.ACCENT))
-        assert est.text.startswith("vs ") and est.fill == nl.MUTED
+        assert (fig.text, fig.anchor, fig.fill) == ("-$0.05", "rm", look.INK)
+        assert est.text.startswith("vs ") and est.fill == look.INK2
 
 
 def test_no_green_or_red_on_the_reused_layouts(logo_files):
+    """With no series (these specs carry none) every figure is neutral: no green or red outside the logo discs. With
+    the congress_count series its members' count is GREEN (owner 2026-11-19: "use green … same green as the
+    purchases"); an earnings figure stays neutral INK whatever its sign."""
     for spec in (_congress(), _earnings()):
         img, layout = nl.draw_template(_image(spec, _table(logo_files)), font_path=FONT, layout_engine="basic")
         px = np.asarray(img)
@@ -821,6 +866,11 @@ def test_no_green_or_red_on_the_reused_layouts(logo_files):
         for box, _art in layout.tiles:
             mask[box[1]:box[3], box[0]:box[2]] = False
         assert not (_not_neutral(px) & mask).any()
+    for series, spec, field, tone in (("congress_count", _congress(), "figure", look.GREEN),
+                                      ("earnings", _earnings(), "sections[0].rows[0].cells[2]", look.INK)):
+        image = nl.template_image_for_script(dict(_script(spec), series=series), _table(logo_files))
+        layout = nl.layout_template(image, font_path=FONT, layout_engine="basic")
+        assert {ln.fill for ln in layout.lines if ln.field == field} == {tone}, series
 
 
 # ── the opening card covers all four 2b series, unchanged ───────────────────
@@ -845,7 +895,77 @@ def test_the_opening_card_covers_every_2b_series(series):
     assert tos.validate_opening_card(card, KEYS) is None
     allowed = tos.opening_strings(card, _entries())
     spec = cards.opening_spec(card, _table())                              # every logo a wordmark
-    assert cards.onscreen_strings(spec) == allowed
+    assert cards.onscreen_strings(spec) == [*allowed, cards.BRAND_ROW_WORD]  # news-v23: + the brand row's word
     layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
     assert layout.step <= cards.RAMP_STEPS and len(layout.tiles) == 1
     cards.check_glyphs([spec], FONT)
+
+
+# ── 2026-11-15: the `feature` layout arrived — the drop-2b pictures did not move a pixel ─────────────────────
+
+#: The pair and grid post images (Pillow 12.0.0, basic engine; wordmarks and drawn logos) in the approved look
+#: (news-v23, cards/v6) — re-pinned when the look changed every pixel, and the GRID again for news-v23 phase 3
+#: (2026-11-20, theme_ai_chips.jpg: the theme top's two-tone title, one name size and one line size for every tile, the
+#: tile text block centred; the pair pictures did not move). cards/v6 is not shipped yet, so no version bump.
+#: Fidelity review 2026-11-20: the pair wordmark pictures re-pinned (the kit's 26 px wordmark start, 1 px steps).
+_PRE_FEATURE_2B_GOLDEN = {
+    "grid_12:wm": "389f16f1d3f5312d7629b4e25bb995c386dd4b84e6e73b98b4ff67ea89cb3f93",
+    "grid_12:logos": "657dbd7567a5b680c2b0ed3e32fe5bae69d8f5e35abfbb9c8431c731599464b6",
+    "grid_min:wm": "0dfba6271d703fc2ba7928042c7fc8803593a1ff9d08d19d50fab8248eb8d2a0",
+    "grid_min:logos": "163d6dea458a071dc983435c8a8cf1ffe13918c90a8a33daf5a34c3adb52dd7b",
+    "pair:wm": "7334ac0c82f0eeae887b19738d2420a118efe4514cb3105beb745c53ebbc4e3c",
+    "pair:logos": "6c3e6138041b73b4cb94160b80595a6b2e887786a10396977a89a2302e9a41f8",
+    "pair_private:wm": "aadfe084e01dfebb3e95d0773dd7851e7a079b7aaff2b0e952c84c336e3a6228",
+    "pair_private:logos": "9d060e2de1e998c1bd96b80a45efa74d99a1f2518e44d472a9dd05d126da88f3",
+}
+
+
+@pytest.mark.skipif(PIL.__version__ != "12.0.0", reason="the golden bytes were measured on Pillow 12.0.0")
+def test_no_2b_picture_moved_when_the_feature_layout_arrived(logo_files):
+    import hashlib
+
+    got = {}
+    for name in sorted(SPECS_2B):
+        for mode, table in (("wm", _table()), ("logos", _table(logo_files))):
+            data = nl.render_template_image(_image(SPECS_2B[name](), table), font_path=FONT, layout_engine="basic").data
+            got[f"{name}:{mode}"] = hashlib.sha256(data).hexdigest()
+    assert got == _PRE_FEATURE_2B_GOLDEN
+
+
+def test_the_feature_layout_is_shipped_on_both_sides_and_only_a_layout_feature_worker_is_credited_with_it():
+    """`feature` (2026-11-15) joins the contract the way pair and grid did: in LAYOUTS and SHIPPED_LAYOUTS on both
+    sides, drawable by this worker (DRAWERS) — while the CAPABILITY decides who is handed one
+    (schemas.WORKER_LAYOUTS_FEATURE, declared as `layout_feature`; the 2b layouts keep `layouts_2b`)."""
+    assert "feature" in tos.LAYOUTS and "feature" in tos.SHIPPED_LAYOUTS
+    assert cards.SHIPPED_LAYOUTS == tos.SHIPPED_LAYOUTS and nl.DRAWERS["feature"] == (nl._w_feature, None)
+    assert sch.WORKER_LAYOUTS_FEATURE == ("feature",) and sch.WORKER_CAPABILITY_LAYOUT_FEATURE == "layout_feature"
+    assert not set(sch.WORKER_LAYOUTS_FEATURE) & set(sch.WORKER_LAYOUTS_2B)
+    assert sch.layout_capabilities("feature") == ("layout_feature",)
+    assert sch.layout_capabilities("pair") == sch.layout_capabilities("grid") == ("layouts_2b",)
+    for other in ("rows", "spotlight", "bars", None, 7, "table"):
+        assert sch.layout_capabilities(other) == ()
+
+
+# ── workstream C (2026-11-16): the per-post art never reaches a pair or a grid picture ─────────────────────────────
+
+
+@pytest.mark.parametrize("name", sorted(SPECS_2B))
+def test_a_pair_or_grid_picture_never_draws_art(name, logo_files, tmp_path, caplog):
+    """company_stakes (`pair`) and theme_explainer (`grid`) are never art series (owner decisions 2026-11-15: art only
+    for single-company records; their pictures keep their layouts): art offered to either picture is dropped with a
+    WARNING, the bytes are today's, and the declared strings carry no label. Only `feature` draws art."""
+    import hashlib
+
+    art_path = tmp_path / "art.jpg"
+    Image.new("RGB", (1376, 774), (200, 30, 30)).save(art_path, "JPEG", quality=90)
+    art = cards.ArtImage(sha256=hashlib.sha256(art_path.read_bytes()).hexdigest(), path=str(art_path), width=1376,
+                         height=774)
+    caplog.set_level(logging.WARNING, logger="marketing.news_layouts")
+    spec = SPECS_2B[name]()
+    image = nl.template_image_for_script(_script(spec), _table(logo_files), art=art)
+    assert image.art is None and nl.ART_LAYOUTS == ("feature",)
+    assert any("drawn only on a feature picture" in r.getMessage() for r in caplog.records)
+    out = nl.render_template_image(image, font_path=FONT, layout_engine="basic")
+    plain = nl.render_template_image(_image(spec, _table(logo_files)), font_path=FONT, layout_engine="basic")
+    assert out.data == plain.data and out.art_skipped is None and out.layout.art is None
+    assert cards.ART_LABEL not in nl.drawn_strings(image, out.layout)

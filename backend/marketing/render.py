@@ -45,7 +45,9 @@ Why each piece is shaped the way it is:
   per narration line (`hook_card=True`); the post image is the closed `image_spec`
   (`news_layouts`), never the `image_post` alt text; both reuse keys carry the logos drawn,
   `image_spec`, `opening_card` and `video_layout`. A `create_posts` refused with
-  MARKETING_TEMPLATE_REFUSED skips the day `template_refused` (deterministic, never retried).
+  MARKETING_TEMPLATE_REFUSED skips the day `template_refused` (deterministic, never retried) — and so
+  does a picture or video registration refused with it (final review 2026-11-20: a template accepted
+  under another template version, resumed after a deploy, can never post).
 * **Nothing is uploaded before every refusal is known**: the glyph checks, the image's layout and
   byte cap and the video's cards all run before the first registration, so a day skipped for its
   content leaves no public object behind.
@@ -73,6 +75,19 @@ Why each piece is shaped the way it is:
   and is not tried with less than PUSH_IN_FALLBACK_MIN_SECONDS), so the stage's worst case
   (`worst_case_seconds`) still holds. The local preview never falls back: it is how a host's ffmpeg is
   checked.
+* **Per-post art** (workstream C, owner decisions 2026-11-15: "Picture and video cover"): while the web's
+  MARKETING_ART_ENABLED is on, a template's read-back carries `art` ({url, sha256, bytes, width, height} — the
+  checked picture the web stored). It is resolved ONCE per stage, in the logos' directory (`art.resolve_art`: only
+  `art/<hex32>.jpg` of the run's own bucket origin, sha256-checked, decoded under its own pixel bound) and only
+  when a medium of the day can draw it: the `feature` picture's band (`news_layouts.ART_LAYOUTS` — a main-lane
+  picture never draws art) and the template video's opening card (`cards.cards_for_script(..., art=)`: one
+  company). Each surface that DRAWS it burns `cards.ART_LABEL` and declares the art's sha256
+  (`metadata.art_sha256` on the post image, `metadata.opening_art_sha256` on the video — None when not drawn;
+  the server refuses a mismatch, a label without the declaration and the reverse). A surface that cannot draw it
+  (`metadata.art_skipped` / `opening_art_skipped` say why) draws today's picture or opening card; art never skips,
+  fails or delays the day, and a lesson carrying art ignores it (WARNING). Both reuse keys carry the art drawn
+  or offered (`image_render_key(art=)`, `render_key(opening_art=)`); `worst_case_seconds` counts the one
+  download (`art.ART_WORST_CASE_SECONDS`).
 
 Heavy imports (Pillow via cards.py) live inside the functions. Nothing here imports app.*
 (tests/test_marketing_worker.py scans it). `skip`, `uploader` and `hasher` are injected from
@@ -136,14 +151,22 @@ RENDER_THREADS_MAX = 4
 #: and the end card's CTA; the video key carries the features and the card kinds. v5 (the Batch 2
 #: fix round, 2026-10-20): the caption file keeps a figure with its scale word (LIVE-CAP-1), the data
 #: card replaces the card the read-back names (the key carries its slot), the push-in falls back to a
-#: still card 0.
-RENDER_STAGE_VERSION = "render/v5"
+#: still card 0. v6 (2026-11-15, the spotlight posts): the `feature` template image (cards/v5) and, in
+#: the same release (workstream C), the per-post art on the picture and the opening card — bumped ONCE
+#: for both; a render that draws neither changes only its key.
+#: v7 (news-v23, 2026-11-19, the approved look — cards/v6): every card and picture is redrawn; a template's keys
+#: also carry its `series` (it picks the figures' colours: look.figure_tone), and every key the read-back's `look`
+#: (`cards.new_look`: whether the look's own strings are drawn).
+RENDER_STAGE_VERSION = "render/v7"
 #: The values the server freezes into an accepted script's `post_formats` (mirrors
 #: app.schemas.marketing.FROZEN_POST_FORMATS; tests/test_marketing_worker.py pins them equal).
 FROZEN_FORMATS: Tuple[str, ...] = ("video", "image", "text")
 #: The post image's share of the stage's worst case: laying it out (≤ RAMP_STEPS + 1 tries) and up
-#: to len(JPEG_QUALITIES) encodes of a 1080×1350 frame, generously, on a slow vCPU.
-IMAGE_RENDER_SECONDS = 20
+#: to len(JPEG_QUALITIES) encodes of a 1080×1350 frame, generously, on a slow vCPU. 40 since 2026-11-16
+#: (workstream C, decision 11; 20 before): a picture with per-post art may be laid out and encoded TWICE — with
+#: the art, then without it when the art cannot fit or encode — and the opening card's art attempt runs over the
+#: full ramp before its plain fallback. STAGE_START_MARGIN_SECONDS (main.py) grew to 14 min with it.
+IMAGE_RENDER_SECONDS = 40
 #: The push-in fallback (module doc) is not tried with less ffmpeg time than this left of the shared
 #: RENDER_TIMEOUT_SECONDS — a ~60 s video encodes in well under it; with less, the first failure stands.
 PUSH_IN_FALLBACK_MIN_SECONDS = 60.0
@@ -194,11 +217,13 @@ def worst_case_seconds(upload_timeout: float) -> float:
     half of what was left), plus a connect cap's worth of headroom for the last logo's sha, decode and
     write). A push-in fallback (`_render_media`) adds nothing: its ffmpeg run gets what is left of the failed
     render's RENDER_TIMEOUT_SECONDS, so both renders together fit one render's share of the video's worst
-    case. tests/test_marketing_worker.py pins it inside STAGE_START_MARGINS["rendered"]."""
-    from marketing import logos, video
+    case. Workstream C adds the per-post art's ONE download (`art.ART_WORST_CASE_SECONDS`: its share + one read
+    + a second for the sha, the decode and the write); the art's draw-then-fallback renders are in
+    IMAGE_RENDER_SECONDS (40). tests/test_marketing_worker.py pins it inside STAGE_START_MARGINS["rendered"]."""
+    from marketing import art, logos, video
 
     return (video.worst_case_seconds(upload_timeout) + IMAGE_RENDER_SECONDS + float(upload_timeout)
-            + logos.LOGOS_WORST_CASE_SECONDS)
+            + logos.LOGOS_WORST_CASE_SECONDS + art.ART_WORST_CASE_SECONDS)
 
 
 # ── pure helpers (unit-tested) ────────────────────────────────────────────────
@@ -284,52 +309,67 @@ def post_specs(outlets: Sequence[str], video_asset_id: Optional[str], image_asse
 
 
 def _template_inputs(logos: Optional[Sequence[Sequence[Any]]], image_spec: Any, opening_card: Any,
-                     video_layout: Any) -> Dict[str, Any]:
+                     video_layout: Any, series: Any = None, look: Any = None) -> Dict[str, Any]:
     """The drop-2a inputs of both keys: the logos actually drawn as logos ([[key, sha256 | None]]
     — None for a wordmark plate), the closed `image_spec`, the `opening_card` and the
-    `video_layout`, all as the script carries them (None / [] for a lesson)."""
+    `video_layout`, all as the script carries them (None / [] for a lesson) — and (news-v23) the
+    script's `series`, which picks the figures' colours (look.figure_tone), and `look` (`cards.new_look`: whether
+    the read-back's web allows the look's own strings — a template picture draws the brand row's word only then,
+    a string its key's texts do not carry)."""
     return {"logos": [[str(k), (str(sha) if sha else None)] for k, sha in (logos or [])],
-            "image_spec": image_spec, "opening_card": opening_card, "video_layout": video_layout}
+            "image_spec": image_spec, "opening_card": opening_card, "video_layout": video_layout,
+            "series": series if isinstance(series, str) else None, "look": look is True}
 
 
 def render_key(*, audio_sha256: str, words: Sequence[Dict[str, Any]], card_texts: Sequence[Sequence[str]],
                threads: int, card_version: str, video_version: str, max_seconds: float,
                layout_engine: str, logos: Optional[Sequence[Sequence[Any]]] = None, image_spec: Any = None,
                opening_card: Any = None, video_layout: Any = None, video_features: Sequence[str] = (),
-               card_kinds: Optional[Sequence[str]] = None, data_card_slot: Optional[int] = None) -> str:
+               card_kinds: Optional[Sequence[str]] = None, data_card_slot: Optional[int] = None,
+               opening_art: Optional[str] = None, series: Any = None, look: Any = None) -> str:
     """Identity of a render: everything that decides its bytes — including Pillow's text layout
     engine (raqm and basic measure, wrap and draw differently; the cards AND the caption phrase
     splits depend on it), (drop 2a) the logos drawn, the opening card and the video layout, and
     (Batch 2) the run's frozen video features (the push-in moves card 0; a hook card hides the
     hook's captions), each card's KIND (a hook card and a text card can draw the same string) and the
     data card's slot (`cards.applied_data_card_slot`: which text card it replaced; None — none drawn).
-    A push-in fallback is keyed with the features it really rendered (the frozen ones minus push_in)."""
+    A push-in fallback is keyed with the features it really rendered (the frozen ones minus push_in).
+    Workstream C: `opening_art` — the sha256 of the per-post art the opening card DRAWS (None: today's
+    opening card)."""
     if isinstance(video_features, (str, bytes)):
         raise ValueError("video_features is a collection of feature names, not one string")
     if data_card_slot is not None and (isinstance(data_card_slot, bool) or not isinstance(data_card_slot, int)):
         raise ValueError(f"data_card_slot must be an int or None, not {data_card_slot!r}")
+    if opening_art is not None and not isinstance(opening_art, str):
+        raise ValueError(f"opening_art must be a sha256 string or None, not {opening_art!r}")
     payload = {
         "stage": RENDER_STAGE_VERSION, "audio": audio_sha256, "words": list(words),
         "cards": [list(t) for t in card_texts], "threads": int(threads),
         "card_version": card_version, "video_version": video_version, "max_seconds": float(max_seconds),
-        "layout_engine": layout_engine, **_template_inputs(logos, image_spec, opening_card, video_layout),
+        "layout_engine": layout_engine,
+        **_template_inputs(logos, image_spec, opening_card, video_layout, series, look),
         "video_features": sorted(str(f) for f in video_features),
         "card_kinds": None if card_kinds is None else [str(k) for k in card_kinds],
-        "data_card_slot": data_card_slot,
+        "data_card_slot": data_card_slot, "opening_art": opening_art,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def image_render_key(*, texts: Sequence[str], card_version: str, layout_engine: str, max_bytes: int,
                      logos: Optional[Sequence[Sequence[Any]]] = None, image_spec: Any = None,
-                     opening_card: Any = None, video_layout: Any = None) -> str:
+                     opening_card: Any = None, video_layout: Any = None, art: Optional[str] = None,
+                     series: Any = None, look: Any = None) -> str:
     """Identity of a post image: everything that decides its bytes — the drawn strings in order,
     the card pipeline (layout, palette, JPEG ladder: CARD_RENDER_VERSION), the layout engine and
-    the byte cap (it picks the quality step), and (drop 2a) the logos drawn and the template spec."""
+    the byte cap (it picks the quality step), and (drop 2a) the logos drawn and the template spec.
+    Workstream C: `art` — the sha256 of the per-post art OFFERED to the picture (None: none). Whether it is
+    drawn or falls back is a deterministic function of these inputs, so the offer is the identity."""
+    if art is not None and not isinstance(art, str):
+        raise ValueError(f"art must be a sha256 string or None, not {art!r}")
     payload = {
         "stage": RENDER_STAGE_VERSION, "kind": "post_image", "texts": list(texts),
         "card_version": card_version, "layout_engine": layout_engine, "max_bytes": int(max_bytes),
-        **_template_inputs(logos, image_spec, opening_card, video_layout),
+        **_template_inputs(logos, image_spec, opening_card, video_layout, series, look), "art": art,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -487,10 +527,23 @@ def produce_video(*, workdir: Path, specs: Sequence[Any], words: Sequence[Dict[s
 
 
 def _register(api: Any, run_id: str, ctx: Dict[str, Any], data: bytes, *,
-              uploader: Callable[..., None], hasher: Callable[[bytes], str], **fields: Any) -> Dict[str, Any]:
+              uploader: Callable[..., None], hasher: Callable[[bytes], str],
+              skip: Callable[[str], BaseException], **fields: Any) -> Dict[str, Any]:
     """Register the bytes, PUT them through the signed URL and have the server verify them — or
-    nothing more when the server already holds them `ready` (`upload` None). Returns the row."""
-    reg = api.register_asset(run_id, sha256=hasher(data), bytes=len(data), **fields)
+    nothing more when the server already holds them `ready` (`upload` None). Returns the row.
+
+    A 409 MARKETING_TEMPLATE_REFUSED here (final review 2026-11-20) is the server saying the accepted TEMPLATE was
+    composed by another template version (a day accepted before a deploy, resumed after it): it can never post, so the
+    day is skipped `template_refused` at once — the same outcome create_posts gives — never retried six times."""
+    try:
+        reg = api.register_asset(run_id, sha256=hasher(data), bytes=len(data), **fields)
+    except Exception as e:
+        if getattr(e, "error_code", None) == TEMPLATE_REFUSED:
+            logger.error("run_id=%s: the server refused the %s — the accepted template was composed by another "
+                         "template version and can never post (read the web log 'TEMPLATE REFUSED' for this "
+                         "run): %s", run_id, fields.get("kind"), e)
+            raise skip("template_refused") from e
+        raise
     asset = reg["asset"]
     if reg.get("upload"):
         uploader(reg["upload"], data, apikey=ctx.get("apikey"))
@@ -568,6 +621,36 @@ def drawn_logos(table: Dict[str, Any]) -> List[List[Optional[str]]]:
     return [[key, None if art.wordmark else art.sha256] for key, art in table.items()]
 
 
+def picture_draws_art(script: Dict[str, Any]) -> bool:
+    """Can the day's post image draw per-post art — is its `image_spec` an `news_layouts.ART_LAYOUTS` (`feature`)
+    picture? (The main lane's pictures never draw art: "Video cover now, pictures later".)"""
+    from marketing import news_layouts
+
+    spec = script.get("image_spec") if isinstance(script, dict) else None
+    return isinstance(spec, dict) and spec.get("layout") in news_layouts.ART_LAYOUTS
+
+
+def _art_image(script: Dict[str, Any], listing: Dict[str, Any], *, template: bool, need_video: bool,
+               need_image: bool, dest_dir: Path, run_id: str) -> Any:
+    """The run's per-post art as a verified local file (`cards.ArtImage`), resolved ONCE for the stage in the
+    logos' directory — or None (today's drawing on every surface): the read-back carries no art (the normal case),
+    a LESSON carries it (contract drift: WARNING, ignored — only a template draws art), no medium of the day can
+    draw it (no video, and no `feature` picture), or `art.resolve_art` refused it (logged there). Never raises."""
+    from marketing import art, logos
+
+    if not isinstance(script, dict) or script.get("art") is None:
+        return None
+    if not template:
+        logger.warning("render run_id=%s: a lesson script carries art — ignored (only a template draws per-post art)",
+                       run_id)
+        return None
+    if not (need_video or (need_image and picture_draws_art(script))):
+        logger.info("render run_id=%s: the script carries art, but no medium of the day draws it (no video, no "
+                    "feature picture) — not fetched", run_id)
+        return None
+    return art.resolve_art(script, bucket_origin=logos.bucket_origin(listing), download=download, dest_dir=dest_dir)
+
+
 def stage_render(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *,
                  skip: Callable[[str], BaseException],
                  uploader: Callable[..., None],
@@ -609,28 +692,34 @@ def stage_render(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *,
     listing = api.list_assets(run_id)
     with tempfile.TemporaryDirectory(prefix="logos-") as logo_dir:
         table = _logo_table(script, listing, template=template, dest_dir=Path(logo_dir), run_id=str(run_id))
+        art_image = _art_image(script, listing, template=template, need_video=need_video, need_image=need_image,
+                               dest_dir=Path(logo_dir), run_id=str(run_id))
         return _render_media(api, run, ctx, listing=listing, table=table, template=template,
                              need_video=need_video, need_image=need_image, formats=formats,
-                             skip=skip, uploader=uploader, hasher=hasher)
+                             skip=skip, uploader=uploader, hasher=hasher, art_image=art_image)
 
 
 def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing: Dict[str, Any],
                   table: Dict[str, Any], template: bool, need_video: bool, need_image: bool,
                   formats: Dict[str, str], skip: Callable[[str], BaseException],
-                  uploader: Callable[..., None], hasher: Callable[[bytes], str]) -> Dict[str, Any]:
-    """`stage_render`'s body, inside the stage's logo directory (the files live until it returns)."""
+                  uploader: Callable[..., None], hasher: Callable[[bytes], str],
+                  art_image: Any = None) -> Dict[str, Any]:
+    """`stage_render`'s body, inside the stage's logo directory (the files live until it returns). `art_image`
+    (workstream C): the run's verified per-post art (`_art_image`), or None."""
     from marketing import cards, video
 
     SkipRun, sha256_hex = skip, hasher
     run_id = run["id"]
     script = ctx["script"]
     image_spec: Any = None
+    # Workstream C: the art is OFFERED to the picture only when it is a `feature` picture (never a main-lane one).
+    picture_art = art_image if (template and art_image is not None and picture_draws_art(script)) else None
     if need_image:
         try:
             if template:
                 from marketing import news_layouts
 
-                image_spec = news_layouts.template_image_for_script(script, table)
+                image_spec = news_layouts.template_image_for_script(script, table, art=picture_art)
             else:
                 image_spec = cards.image_for_script(script)
         except ValueError as e:
@@ -645,18 +734,21 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
     # out with basic in one attempt and raqm in the next would be a different object.
     engine = cards.resolve_layout_engine(None)
     # What a template's keys carry beside the drawn strings (None / [] for a lesson).
-    extra_key: Dict[str, Any] = {}
+    extra_key: Dict[str, Any] = {"look": cards.new_look(script)}
     if template:
         extra_key = {"logos": drawn_logos(table), "image_spec": script.get("image_spec"),
-                     "opening_card": script.get("opening_card"), "video_layout": script.get("video_layout")}
+                     "opening_card": script.get("opening_card"), "video_layout": script.get("video_layout"),
+                     "series": script.get("series"), "look": cards.new_look(script)}
 
     # ── each medium's identity, and whether a ready asset already IS it ──────
     image_texts: List[str] = []
     image_key = image_reuse = None
     if image_spec is not None:
         image_texts = (list(image_spec.strings) if template else cards.image_onscreen_strings(image_spec))
+        offered = image_spec.art.sha256 if template and image_spec.art is not None else None
         image_key = image_render_key(texts=image_texts, card_version=cards.CARD_RENDER_VERSION,
-                                     layout_engine=engine, max_bytes=cards.POST_IMAGE_MAX_BYTES, **extra_key)
+                                     layout_engine=engine, max_bytes=cards.POST_IMAGE_MAX_BYTES, **extra_key,
+                                     **({"art": offered} if offered else {}))
         image_reuse = _reusable_image(listing, image_key, cards.IMAGE_ROLE_POST)
     voice_row: Dict[str, Any] = {}
     words: List[Dict[str, Any]] = []
@@ -667,17 +759,24 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
     features: Tuple[str, ...] = ()
     hook_card = push_in = False
     data_slot: Optional[int] = None
+    opening_art: Optional[str] = None
+    art_report: Dict[str, Any] = {}
     if need_video:
         threads, limit = render_threads(), max_video_seconds()
         voice_row = _voice_row(listing)
         words = voice_row["metadata"]["words"]
+        cover_art: Dict[str, Any] = {}
+        if template and art_image is not None:
+            # Workstream C: the opening card draws the art when it can (one company, it fits, it reads); the plain
+            # opening card otherwise (`art_report` says why). A day without art calls with today's keywords.
+            cover_art = {"art": art_image, "report": art_report}
         try:
             # Batch 2: the run's frozen video features, read through cards' ONE reader — the cards
             # below draw from the same reading, so what is drawn, what moves and what is keyed agree.
             features = cards.video_features(script)
             # The feature cards (a hook card, a data card) are checked with THIS stage's font and
             # layout engine; one that cannot be drawn is left out there (today's card, never a skip).
-            specs = cards.cards_for_script(script, logos=table, font_path=font, layout_engine=engine)
+            specs = cards.cards_for_script(script, logos=table, font_path=font, layout_engine=engine, **cover_art)
         except ValueError as e:
             # The server always supplies the disclaimer card; a script without one must not render.
             raise RenderInputError(f"run {run_id}: {e}") from e
@@ -685,6 +784,8 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
         hook_card = cards.opens_on_hook_card(specs)
         push_in = cards.VIDEO_FEATURE_PUSH_IN in features
         data_slot = cards.applied_data_card_slot(specs)
+        if specs and specs[0].kind == "opening" and specs[0].art is not None:
+            opening_art = specs[0].art.sha256
 
         def key_for(rendered_features: Sequence[str]) -> str:
             return render_key(
@@ -693,6 +794,7 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
                 card_version=cards.CARD_RENDER_VERSION, video_version=video.VIDEO_RENDER_VERSION,
                 max_seconds=limit, layout_engine=engine, video_features=rendered_features,
                 card_kinds=[s.kind for s in specs], data_card_slot=data_slot, **extra_key,
+                **({"opening_art": opening_art} if opening_art else {}),
             )
 
         video_key = key_for(features)
@@ -788,11 +890,17 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
 
     # ── register + upload (image first) ───────────────────────────────────────
     produced: Dict[str, Any] = {}
+    picture_drew: Optional[bool] = None             # workstream C: did THIS render draw the art on the picture?
     if image_spec is not None:
         if image_reuse:
             logger.info("post image REUSED asset=%s run_id=%s (same inputs)", image_reuse, run_id)
             produced["image_asset_id"] = image_reuse
         else:
+            if template:
+                from marketing import news_layouts
+
+                # The drawn strings: + ART_LABEL when the picture drew the art (`news_layouts.drawn_strings`).
+                image_texts = news_layouts.drawn_strings(image_spec, image.layout)
             metadata = {"onscreen_text": image_texts, "image_role": cards.IMAGE_ROLE_POST,
                         "render_key": image_key, "render_version": RENDER_STAGE_VERSION,
                         "card_version": cards.CARD_RENDER_VERSION, "layout_engine": engine,
@@ -800,7 +908,14 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
                         "jpeg_quality": image.quality, "template_id": ctx.get("template_id")}
             if template:
                 metadata.update({"image_layout": image_spec.layout, "logos": drawn_logos(table)})
-            asset = _register(api, run_id, ctx, image.data, uploader=uploader, hasher=sha256_hex,
+                # Workstream C: the art this picture DREW (the server checks it is the accepted art, with its label),
+                # None when it drew none; why an offered art was not drawn.
+                drew = getattr(image.layout, "art", None)
+                picture_drew = drew is not None
+                metadata["art_sha256"] = drew.sha256 if drew is not None else None
+                if image.art_skipped is not None:
+                    metadata["art_skipped"] = image.art_skipped
+            asset = _register(api, run_id, ctx, image.data, uploader=uploader, hasher=sha256_hex, skip=SkipRun,
                               kind="card", ext=cards.POST_IMAGE_EXT, metadata=metadata)
             logger.info("post image READY run_id=%s asset=%s bytes=%d quality=%d step=%d strings=%d%s",
                         run_id, asset["id"], len(image.data), image.quality, image.layout.step, len(image_texts),
@@ -833,7 +948,13 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
                 metadata["push_in_fallback"] = push_in_fallback
             if per_line:
                 metadata["video_layout"] = cards.VIDEO_LAYOUT_PER_LINE
-            asset = _register(api, run_id, ctx, data, uploader=uploader, hasher=sha256_hex,
+            if template:
+                # Workstream C: the art the OPENING card drew (its label is among `onscreen`), None when it drew
+                # none; why an offered art was not drawn there.
+                metadata["opening_art_sha256"] = opening_art if (opening_art and 0 in shown) else None
+                if "opening_art_skipped" in art_report:
+                    metadata["opening_art_skipped"] = art_report["opening_art_skipped"]
+            asset = _register(api, run_id, ctx, data, uploader=uploader, hasher=sha256_hex, skip=SkipRun,
                               kind="video", ext="mp4", duration_seconds=round(duration, 3), metadata=metadata)
             logger.info("video READY run_id=%s asset=%s duration=%.1fs bytes=%d cards=%d threads=%d "
                         "features=%s kinds=%s push_in=%s%s data_slot=%s end_cta=%r%s", run_id, asset["id"], duration,
@@ -841,6 +962,16 @@ def _render_media(api: Any, run: Dict[str, Any], ctx: Dict[str, Any], *, listing
                         push_in, " (FALLBACK)" if push_in_fallback else "", data_slot, specs[-1].end_cta,
                         " layout=per_line" if per_line else "")
             produced["video_asset_id"] = asset["id"]
+    if art_image is not None:
+        # One line per stage that was offered art: where it was drawn, and why not elsewhere (rules: every
+        # degradation is logged; the server's review line reads the declarations, this is the worker's side).
+        drawn_on = [name for name, ok in (("picture", picture_drew), ("cover", need_video and opening_art is not None))
+                    if ok]
+        skipped = {name: why for name, why in (("picture", image.art_skipped if image is not None else None),
+                                               ("cover", art_report.get("opening_art_skipped"))) if why}
+        logger.info("art run_id=%s sha=%s… drawn_on=%s skipped=%s%s", run_id, art_image.sha256[:12],
+                    ",".join(drawn_on) or "none", skipped or "none",
+                    " (picture reused: as its earlier render drew it)" if image_reuse else "")
     return produced
 
 

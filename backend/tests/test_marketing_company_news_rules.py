@@ -35,6 +35,7 @@ import logging
 import math
 import random
 import re
+import uuid
 from dataclasses import fields, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -70,9 +71,31 @@ def purchase(sym="GME", name="GameStop", amount=2_500_000.0, role="ceo", person=
     return R.InsiderPurchase(**base)
 
 
-def insider_week(series="ceo_buys", rows=None):
+#: Owner decisions 2026-11-20 ("3 - 5 companies at once"): a Form 4 week holds INSIDER_MIN_ROWS..INSIDER_MAX_ROWS
+#: companies. A sample of fewer rows is padded with these smaller, unnamed rows of the series' role (appended in this
+#: order, never re-sorted — so a sample that is deliberately out of order stays out of order).
+WEEK_FILLERS = (("WTT", "Wingtip Toys"), ("WGB", "Woodgrove Bank"))
+
+
+def _pad(rows, series="ceo_buys"):
+    """`rows` padded to `R.INSIDER_MIN_ROWS` with WEEK_FILLERS (amounts at most the smallest row's: the order holds)."""
+    rows = list(rows)
+    low = min((r.amount_usd for r in rows), default=150_000.0)
+    for k in range(R.INSIDER_MIN_ROWS - len(rows)):
+        sym, name = WEEK_FILLERS[k]
+        role = "ceo" if series == "ceo_buys" else ("director", "cfo")[k]
+        rows.append(purchase(sym, name, min(low, (120_000.0, 110_000.0)[k]), role=role, person=None,
+                             shares=1_000.0, purchases=1, filing_dates=(date(2026, 11, 13),),
+                             earliest_trade_date=date(2026, 11, 12), latest_trade_date=date(2026, 11, 12)))
+    return tuple(rows)
+
+
+def insider_week(series="ceo_buys", rows=None, pad=True):
+    """A Form 4 week — padded to three rows (`_pad`) unless `rows` is empty, a list, or `pad` is False."""
     rows = rows if rows is not None else (
         purchase(), purchase("FOX", "Fox", 1_000_000.0, person=None, holding="mixed", amended=True))
+    if pad and isinstance(rows, tuple) and rows:
+        rows = _pad(rows, series)
     return R.InsiderBuysWeek(series=series, window_start=date(2026, 11, 9), window_end=date(2026, 11, 15),
                              rows=rows)
 
@@ -103,12 +126,25 @@ def congress(**kw):
 
 
 def stake(**kw):
-    base = dict(series="company_stakes", stake_id=UUID, investor=co("NVDA", "NVIDIA"), investee_name="Nscale",
-                investee=None, kind="private", value_usd=1e9, value_basis="invested", ownership_pct=None,
-                as_of=date(2026, 9, 15), verified_on=date(2026, 10, 1), source_title="NVIDIA Form 10-Q",
-                background=None, listed_since=None, local_listing=None, is_new=True)
+    """A stake ROW (news-v23: a row of `company_stakes`, a PUBLIC company's — NVIDIA → Intel by default)."""
+    base = dict(series="company_stakes", stake_id=UUID, investor=co("NVDA", "NVIDIA"), investee_name="Intel",
+                investee=co("INTC", "Intel"), kind="us_listed_off_13f", value_usd=1e9, value_basis="invested",
+                ownership_pct=None, as_of=date(2026, 9, 15), verified_on=date(2026, 10, 1),
+                source_title="NVIDIA Form 10-Q", background=None, listed_since=None, local_listing=None, is_new=True)
     base.update(kw)
     return R.CompanyStake(**base)
+
+
+UUID2 = "6a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+
+
+def company_stakes(*rows):
+    """news-v23 (owner 2026-11-19: "public only" + "add 1-3 more companies"): ONE investor's stakes in public companies —
+    NVIDIA's in Intel ($1B) and Contoso ($500M) by default, ranked by `R.stake_rank_key`."""
+    rows = rows or (stake(), stake(stake_id=UUID2, investee_name="Contoso", investee=co("CTSO", "Contoso"),
+                                   value_usd=5e8))
+    return R.CompanyStakes(series="company_stakes", investor=rows[0].investor,
+                           stakes=tuple(sorted(rows, key=R.stake_rank_key)))
 
 
 def earnings(**kw):
@@ -117,6 +153,23 @@ def earnings(**kw):
                 revenue_estimate=65e9)
     base.update(kw)
     return R.EarningsReport(**base)
+
+
+def congress_month(*counts, **kw):
+    """news-v23 (owner 2026-11-19: "2-3 companies at once"): ONE Congress Count post — NVIDIA's 5 and Contoso's 2 by
+    default, the month and read the first count's."""
+    counts = counts or (congress(), congress(company=co("CTSO", "Contoso"), members=2))
+    base = dict(series="congress_count", month=counts[0].month, fetched_on=counts[0].fetched_on, counts=counts)
+    base.update(kw)
+    return R.CongressMonth(**base)
+
+
+def earnings_day(*reports):
+    """news-v23 (owner 2026-11-19: "combine 2 to 4 companies at once"): ONE earnings post — Costco's and Contoso's
+    reports by default."""
+    reports = reports or (earnings(), earnings(company=co("CTSO", "Contoso"), eps_actual=1.12, eps_estimate=1.05,
+                                               revenue_actual=3.2e9, revenue_estimate=3.3e9))
+    return R.EarningsDay(series="earnings", reports=reports)
 
 
 def money_map(**kw):
@@ -139,17 +192,109 @@ def theme(n=6, **kw):
     return R.ThemeExplainer(**base)
 
 
+# The spotlight lane (owner decisions 2026-11-15): the design's worked example — Contoso, a Thursday run
+# (2026-11-19) whose window is Mon Nov 16 .. Wed Nov 18; role-only (the members-elect window).
+CTSO = ("CTSO", "Contoso")
+
+
+def isp_person(role="ceo", amount=2_001_650.0, shares=14_000.0, cost=(142.10, 143.85), person=None,
+               filings=(date(2026, 11, 18),), trades=(date(2026, 11, 16), date(2026, 11, 17)), purchases=2,
+               company=CTSO, **kw):
+    lo, hi = cost if cost is not None else (None, None)
+    base = dict(company=co(*company), role=role, person_name=person, amount_usd=amount, shares=shares,
+                purchases=purchases, earliest_trade_date=trades[0], latest_trade_date=trades[1], filing_dates=filings,
+                holding="direct", amended=False, cost_per_share_min_usd=lo, cost_per_share_max_usd=hi)
+    base.update(kw)
+    return R.InsiderPurchase(**base)
+
+
+def isp_director(**kw):
+    base = dict(role="director", amount=410_002.0, shares=2_900.0, cost=(141.38, 141.38),
+                filings=(date(2026, 11, 17),), trades=(date(2026, 11, 16), date(2026, 11, 16)), purchases=1)
+    base.update(kw)
+    return isp_person(**base)
+
+
+def isp_cfo(**kw):
+    base = dict(role="cfo", amount=250_000.0, shares=2_000.0, cost=(125.0, 125.0),
+                trades=(date(2026, 11, 17), date(2026, 11, 17)), purchases=1)
+    base.update(kw)
+    return isp_person(**base)
+
+
+def isp_row(lead=None, others=None):
+    """ONE company row of the insider list (owner decisions 2026-11-20): the worked example's Contoso by default."""
+    return R.InsiderSpotlightCompany(lead=isp_person() if lead is None else lead,
+                                     others=(isp_director(), isp_cfo()) if others is None else others)
+
+
+def isp_filler(sym, name, role, amount, cost, day):
+    """A small one-person row of another issuer, filed (and traded) on `day`."""
+    shares = round(amount / cost)
+    return R.InsiderSpotlightCompany(lead=isp_person(role=role, amount=shares * cost, shares=float(shares),
+                                                     cost=(cost, cost), filings=(day,), trades=(day, day),
+                                                     purchases=1, company=(sym, name)), others=())
+
+
+def isp_fillers(day):
+    """The list's second and third companies (Litware's director, Proseware's CFO), filed on `day` — so a sample
+    about ONE issuer's row is still a 3-company list."""
+    return (isp_filler("LTW", "Litware", "director", 140_000.0, 40.0, day),
+            isp_filler("PRSW", "Proseware", "cfo", 120_000.0, 25.0, day))
+
+
+def insider_spotlight(**kw):
+    """The insider LIST (owner decisions 2026-11-20): `lead` / `others` (when given) build its FIRST row — the worked
+    example's Contoso by default — and two small fillers filed on the window's last day complete it; `companies`
+    replaces every row."""
+    base = dict(series="insider_spotlight", window_start=date(2026, 11, 16), window_end=date(2026, 11, 18))
+    first = {k: kw.pop(k) for k in ("lead", "others") if k in kw}
+    if "lead" in first and first["lead"] is None:
+        first["lead"] = object()                     # a missing lead: refused by the row's own check
+    base.update(kw)
+    if "companies" not in base:
+        base["companies"] = (isp_row(**first), *isp_fillers(base["window_end"]))
+    return R.InsiderSpotlight(**base)
+
+
+def f13s_move(kind="decreased", shares=41_900_000.0, prev=60_000_000.0, **kw):
+    base = dict(company=co("NWT", "Northwind"), move=kind, shares=shares, prev_shares=prev, value_usd=1.2e9,
+                listed_on=None)
+    base.update(kw)
+    return R.ThirteenFMove(**base)
+
+
+#: news-v23 (owner 2026-11-19, "the range from 2 to 6 are okay"): a 13F post is a LIST of at least two — the
+#: fixtures' second holding, a tiny new one (its $1 value ranks it after any sized move)
+F13S_COMPANION = R.ThirteenFMove(company=R.CompanyRef(symbol="CTSO", name="Contoso"), move="newly_reported",
+                                 shares=1_000.0, prev_shares=0.0, value_usd=1.0, listed_on=None)
+
+
+def thirteen_f_spotlight(**kw):
+    """A 13F spotlight; ``move=`` (the holding under test) is shorthand for that holding beside F13S_COMPANION, in the
+    record's order — news-v23: never a single-holding record."""
+    base = dict(series="thirteen_f_spotlight", filer_name="Fabrikam Capital", filer_cik="0001234567",
+                filer_symbol=None, period="2026-Q3", period_end=date(2026, 9, 30), filed_on=date(2026, 11, 13),
+                amended_on=None, moves=(f13s_move(), F13S_COMPANION), eligible_moves=2, filing_moves=None)
+    if "move" in kw:
+        kw["moves"] = tuple(sorted((kw.pop("move"), F13S_COMPANION), key=R.thirteen_f_spotlight_order))
+    base.update(kw)
+    return R.ThirteenFSpotlight(**base)
+
+
 SAMPLES = {
     "ceo_buys": insider_week,
     "insider_buys": lambda: insider_week("insider_buys", (purchase(role="cfo"), purchase("FOX", "Fox", 1e6,
                                                                                          role="director",
                                                                                          person=None))),
     "thirteen_f": thirteen_f,
-    "congress_count": congress,
-    "company_stakes": stake,
-    "earnings": earnings,
+    "congress_count": congress_month,
+    "company_stakes": company_stakes,
+    "earnings": earnings_day,
     "money_map": money_map,
     "theme_explainer": theme,
+    "insider_spotlight": insider_spotlight,
+    "thirteen_f_spotlight": thirteen_f_spotlight,
 }
 
 
@@ -1012,15 +1157,79 @@ def test_ledger_keys_are_pinned():
     assert R.ledger_key(insider_week()) == "news:ceo_buys:2026-11-09"
     assert R.ledger_key(SAMPLES["insider_buys"]()) == "news:insider_buys:2026-11-09"
     assert R.ledger_key(thirteen_f()) == "news:thirteen_f:0001067983:2026-Q3"
-    assert R.ledger_key(congress()) == "news:congress_count:2026-11"
-    assert R.ledger_key(stake()) == f"news:company_stakes:{UUID}"
-    assert R.ledger_key(earnings()) == "news:earnings:COST:2027-01-12"
+    assert R.ledger_key(congress_month()) == "news:congress_count:2026-11"
+    # news-v23: EVERY stake the post holds, in row order (each posted once); one stake: the one-stake key of every
+    # post before news-v23
+    assert R.ledger_key(company_stakes(stake())) == f"news:company_stakes:{UUID}"
+    assert R.ledger_key(company_stakes()) == f"news:company_stakes:{UUID}+{UUID2}"
+    # news-v23: EVERY company's own key, in draw order (each posted once)
+    assert R.ledger_key(earnings_day()) == "news:earnings:COST:2027-01-12+CTSO:2027-01-12"
     assert R.ledger_key(money_map()) == "news:money_map:AAPL:2025"
     assert R.ledger_key(theme()) == "news:theme_explainer:quantum-computing:2026-10-01"
+    # the spotlight lane (2026-11-15): the LEAD's issuer and the window start; the filer, quarter and HOLDING
+    # owner decisions 2026-11-20: EVERY company of the insider list, in row order (each posted exactly once)
+    assert R.ledger_key(insider_spotlight()) == "news:insider_spotlight:CTSO+LTW+PRSW:2026-11-16"
+    assert R.ledger_key(thirteen_f_spotlight()) == "news:thirteen_f_spotlight:0001234567:2026-Q3:NWT"
     for make in SAMPLES.values():
         assert R.ledger_key(make()).startswith(R.LEDGER_PREFIX)
     with pytest.raises(ValueError):
         R.ledger_key(co())
+    for row in (congress(), earnings(), stake()):      # news-v23: a ROW of a several-company post is no record
+        with pytest.raises(ValueError):
+            R.ledger_key(row)
+
+
+def test_news_v23_a_stakes_key_names_every_stake_and_reads_back_strictly():
+    """company stakes (news-v23, owner 2026-11-19): one post holds 1-4 stakes (review 2026-11-20, RESTYLE_SPEC §2.5)
+    and its ledger key names EVERY one (`R.STAKES_KEY_JOIN`); `R.stake_ref_ids` reads what `ledger_key` writes — and a
+    one-stake key of any post before news-v23 the same, and a key of up to `R.STAKES_REF_MAX_IDS` (8: the reader is
+    never narrower than a key once written) — so the adapter counts each stake of a posted key as posted. Anything
+    malformed is None (skipped whole, never half-read). Mutation-checked by hand (2026-11-20): the duplicate check
+    removed from `stake_ref_ids`, the "the same id twice" row turned red."""
+    rows = [stake(stake_id=str(uuid.UUID(int=i + 1)), investee=co(f"S{chr(65 + i)}", f"Co {chr(65 + i)}"),
+                  investee_name=f"Co {chr(65 + i)}", value_usd=1e9 - i) for i in range(8)]
+    for n in (1, 2, 4):
+        rec = company_stakes(*rows[:n])
+        key = R.ledger_key(rec)
+        assert R.stake_ref_ids(key) == [r.stake_id for r in rec.stakes]
+        assert len(key) <= R.STAKES_REF_MAX_CHARS
+    eight = "news:company_stakes:" + "+".join(r.stake_id for r in rows)
+    assert R.STAKES_REF_MAX_IDS == 8 and R.stake_ref_ids(eight) == [r.stake_id for r in rows]
+    assert len(eight) <= R.STAKES_REF_MAX_CHARS
+    assert R.stake_ref_ids(f"news:company_stakes:{UUID}") == [UUID]            # every post before news-v23
+    for bad in (None, 7, "", "news:company_stakes:", f"news:company_stakes:{UUID}+", f"news:company_stakes:+{UUID}",
+                f"news:company_stakes:{UUID.upper()}", f"news:company_stakes:{UUID}+{UUID}",      # the same id twice
+                "news:company_stakes:" + "+".join(str(uuid.UUID(int=i + 1)) for i in range(9)),    # nine
+                f"news:earnings:{UUID}", f"news:company_stakes:{UUID} ", f"news:company_stakes:{UUID}:x",
+                "news:company_stakes:" + "+".join([UUID] * 1) + "+" + "x" * 400):
+        assert R.stake_ref_ids(bad) is None, bad
+
+
+def test_news_v23_a_stakes_post_is_ranked_public_and_one_investors():
+    """`R.CompanyStakes` (owner 2026-11-19 "public only"): every row a listed company of a kind that can be public, the
+    record's investor's, with its figure, never one stake or one company twice, ranked by `R.stake_rank_key` (the
+    largest figure first; an equal figure the EARLIER as-of date first — stakes_nvidia.jpg's Synopsys before
+    Coherent)."""
+    a = stake()
+    b = stake(stake_id=UUID2, investee_name="Contoso", investee=co("CTSO", "Contoso"), value_usd=1e9,
+              as_of=date(2026, 9, 1))
+    assert [r.stake_id for r in company_stakes(a, b).stakes] == [UUID2, UUID]          # Sep 1 before Sep 15
+    for rows, why in (((a, a), "one stake twice"),
+                      ((a, replace(b, investee=co("INTC", "Intel"), investee_name="Intel")), "same symbol"),
+                      ((stake(investee=None),), "public only"), ((stake(kind="private"),), "never public"),
+                      ((stake(kind="non_us_listed"),), "never public"),
+                      ((stake(investee=co("NVDA", "NVIDIA"), investee_name="NVIDIA"),), "in itself"),
+                      ((stake(value_usd=None, value_basis=None, ownership_pct=5.0),), "figure"),
+                      (tuple(stake(stake_id=str(uuid.UUID(int=i + 1)), investee=co(f"S{chr(65 + i)}", f"C {i}"),
+                                   investee_name=f"C {i}", value_usd=1e9 - i) for i in range(5)), "outside")):
+        with pytest.raises(ValueError, match=why):
+            R.CompanyStakes(series="company_stakes", investor=co("NVDA", "NVIDIA"), stakes=rows)
+    with pytest.raises(ValueError, match="investor's"):
+        R.CompanyStakes(series="company_stakes", investor=co("TSLA", "Tesla"), stakes=(a,))
+    with pytest.raises(ValueError, match="ranked"):
+        R.CompanyStakes(series="company_stakes", investor=co("NVDA", "NVIDIA"), stakes=(a, b))
+    assert R.PUBLIC_STAKE_KINDS == ("us_listed_off_13f", "on_13f_note", "commitment")
+    assert set(R.PUBLIC_STAKE_KINDS) <= set(R.STAKE_KINDS) and R.STAKES_POST_STAKES == (1, 4)
 
 
 def test_source_labels_are_pinned_and_never_name_the_vendor():
@@ -1028,11 +1237,15 @@ def test_source_labels_are_pinned_and_never_name_the_vendor():
     assert R.source_label(SAMPLES["insider_buys"]()) == "SEC Form 4 filings"
     assert R.source_label(thirteen_f()) == "SEC Form 13F"
     assert R.source_label(thirteen_f(amended_on=date(2026, 11, 20))) == "SEC Form 13F-HR/A"
-    assert R.source_label(congress()) == "congressional periodic transaction reports"
-    assert R.source_label(stake()) == "NVIDIA Form 10-Q"
-    assert R.source_label(earnings()) == "company results and analyst consensus"
+    assert R.source_label(congress_month()) == "congressional periodic transaction reports"
+    # news-v23: each stake names its own source (its row, its caption paragraph); the post's own label is the family's
+    assert R.source_label(company_stakes()) == "company filings and official releases"
+    assert R.source_label(earnings_day()) == "company results and analyst consensus"
     assert R.source_label(money_map()) == "company financial statements"
     assert R.source_label(theme()) == "company revenue breakdowns; grouping by Caydex"
+    assert R.source_label(insider_spotlight()) == "SEC Form 4 filings"
+    assert R.source_label(thirteen_f_spotlight()) == "SEC Form 13F"
+    assert R.source_label(thirteen_f_spotlight(amended_on=date(2026, 11, 20))) == "SEC Form 13F-HR/A"
     import re
     vendor = re.compile(r"fmp|financial\s*modeling\s*prep|financialmodelingprep", re.I)
     assert not [v for v in R.SOURCE_LABELS.values() if vendor.search(v)]
@@ -1185,15 +1398,20 @@ NAN, INF = float("nan"), float("inf")
     lambda: purchase(earliest_trade_date=date(2026, 10, 1)),
     lambda: purchase(earliest_trade_date=datetime(2026, 11, 10)), lambda: purchase(holding="joint"),
     lambda: purchase(amended=1),
-    lambda: insider_week(rows=()), lambda: insider_week(rows=tuple(purchase(f"S{c}", f"Co {c}") for c in "ABCDEF")),
+    lambda: insider_week(rows=()),
+    # owner decisions 2026-11-20: 3..8 companies — nine (the max + 1), two and one are refused
+    lambda: insider_week(rows=tuple(purchase(f"S{c}", f"Co {c}", 1e6 - i, person=None)
+                                    for i, c in enumerate("ABCDEFGHI"))),
+    lambda: insider_week(rows=(purchase(), purchase("FOX", "Fox", 1e6, person=None)), pad=False),
+    lambda: insider_week(rows=(purchase(),), pad=False),
     lambda: insider_week(rows=(purchase(), purchase())),
     lambda: insider_week(rows=(purchase("FOX", "Fox", 1e6), purchase())),
     lambda: insider_week(rows=(purchase(role="cfo"),)),
     lambda: insider_week("insider_buys", rows=(purchase(),)),
     lambda: insider_week(rows=(purchase(filing_dates=(date(2026, 11, 16),), latest_trade_date=date(2026, 11, 16)),)),
     lambda: insider_week(rows=[purchase()]),
-    lambda: R.InsiderBuysWeek("ceo_buys", date(2026, 11, 15), date(2026, 11, 9), (purchase(),)),
-    lambda: R.InsiderBuysWeek("ceo_buys", date(2026, 10, 1), date(2026, 11, 15), (purchase(),)),
+    lambda: R.InsiderBuysWeek("ceo_buys", date(2026, 11, 15), date(2026, 11, 9), _pad((purchase(),))),
+    lambda: R.InsiderBuysWeek("ceo_buys", date(2026, 10, 1), date(2026, 11, 15), _pad((purchase(),))),
     lambda: move(kind="newly_reported", prev_shares=10.0), lambda: move(kind="increased", listed_on=None, shares=5.0,
                                                                          prev_shares=10.0),
     lambda: move(kind="decreased", listed_on=None, shares=10.0, prev_shares=10.0),
@@ -1261,6 +1479,14 @@ def test_boundaries_that_must_pass():
     purchase(earliest_trade_date=date(2026, 10, 12))                       # exactly the 30-day lag
     purchase(latest_trade_date=date(2026, 11, 13))                         # filing + 1 day
     insider_week(rows=tuple(purchase(f"S{c}", f"Co {c}", 1e6 - i) for i, c in enumerate("ABCDE")))
+    # owner decisions 2026-11-20 ("3 to 5 :: at least 3 companies, at most 5 (the 5 largest purchases when more
+    # qualify)"; held to five by the final review of 2026-11-26): three (INSIDER_MIN_ROWS) to five (INSIDER_MAX_ROWS)
+    # companies, every one drawn (INSIDER_PICTURE_ROWS)
+    assert (R.INSIDER_MIN_ROWS, R.INSIDER_MAX_ROWS, R.INSIDER_PICTURE_ROWS) == (3, 5, 5)
+    # the ledger key READER stays wider than the writer (a key this branch's build could have written still reads)
+    assert R.INSIDER_SPOTLIGHT_KEY_MAX_SYMBOLS == 8 >= R.INSIDER_MAX_ROWS
+    insider_week(rows=tuple(purchase(f"S{c}", f"Co {c}", 1e6 - i, person=None) for i, c in enumerate("ABC")), pad=False)
+    insider_week(rows=tuple(purchase(f"S{c}", f"Co {c}", 1e6 - i, person=None) for i, c in enumerate("ABCDE")))
     earnings(revenue_actual=97.5e9, revenue_estimate=65e9)                  # ratio 1.5
     earnings(revenue_actual=32.5e9, revenue_estimate=65e9)                  # ratio 0.5
     earnings(eps_estimate=-0.10, eps_actual=-0.3)
@@ -1283,13 +1509,25 @@ def test_reason_sets_are_pinned():
         "congress_feed_unordered", "revenue_unavailable", "themes_unavailable", "budget_exhausted",
         "internal_error",
         # review of 2026-10-16 (ER-2): every quarterly-statement read of an earnings call failed
-        "earnings_statements_unavailable"}
+        "earnings_statements_unavailable",
+        # the spotlight lane (2026-11-15): the Form 4 walk has not passed the window's first day
+        "insider_feed_behind"}
     assert R.SKIP_REASONS == {
         "ceo_none_qualified", "insider_none_qualified", "earnings_none_qualified", "stakes_feature_off",
         "stakes_none_new", "stakes_none_unposted", "thirteen_f_off_season", "thirteen_f_none_qualified",
         "congress_not_due", "congress_none_qualified", "money_map_none_qualified", "theme_none_qualified",
         # Drop 2b (2026-10-10): no stake passed the gates (vs every passing one already posted)
-        "stakes_none_qualified"}
+        "stakes_none_qualified",
+        # the spotlight lane (2026-11-15)
+        "insider_spotlight_none_qualified", "thirteen_f_spotlight_none_qualified",
+        # C0 (2026-11-16): no new day to check while the feed is current — a quiet skip, never an outage
+        "insider_spotlight_no_new_window",
+        # news-v23 (owner 2026-11-19): ONE post of several companies — exactly one qualified, under the minimum
+        "earnings_too_few_companies", "congress_too_few_companies",
+        # news-v23 (company stakes, owner 2026-11-19 "public only"): stakes passed their gates, none of them public
+        "stakes_none_public",
+        # owner decisions 2026-11-20 ("3 - 5 companies at once"): a Form 4 post of one or two companies is never made
+        "ceo_too_few_companies", "insider_too_few_companies", "insider_spotlight_too_few_companies"}
     must = {"already_posted", "profile_missing", "not_major_exchange", "etf_or_fund", "adr", "not_usd", "inactive",
             "below_cap_floor", "company_name_unusable", "company_name_banned_word", "symbol_grammar",
             "warrant_unit_right", "price_reference_missing", "price_implausible", "over_cap_share",
@@ -1353,7 +1591,32 @@ def test_reason_sets_are_pinned():
                                           # the round-2 review of 2026-10-20 (RR2-MM-TEMPLATE-WALL): a Money Map
                                           # loss larger than revenue, refused at the read; a record its template
                                           # refused, reported back and remembered
-                                          "money_map_loss_above_revenue", "template_refused"}
+                                          "money_map_loss_above_revenue", "template_refused",
+                                          # the spotlight lane (2026-11-15): an issuer inside its cooldown; a 13F
+                                          # change under 25%; Berkshire kept for the main lane; a split-restated
+                                          # previous count
+                                          "spotlight_cooldown", "spotlight_change_too_small", "lead_filer_reserved",
+                                          "split_restated",
+                                          # news-v23 (the 13F list): fewer than two eligible holdings; the BUY-OUT
+                                          # CHECK of a closed-out holding (not trading, delisted, unchecked)
+                                          "too_few_holdings", "closed_out_not_trading", "closed_out_delisted",
+                                          "closed_out_unchecked",
+                                          # news-v23 (company stakes, owner 2026-11-19 "public only"): a stake
+                                          # whose company is not public (no listed U.S. symbol / a private or
+                                          # non-U.S. kind), not actively trading, or whose listing cannot be
+                                          # verified — dropped, never named
+                                          "stake_not_public", "stake_not_trading", "stake_listing_unverified",
+                                          # news-v23 phase 3 (the weekly theme post): an angle not built yet, one
+                                          # the run's worker cannot draw, too few market values; a member's
+                                          # market value left out
+                                          "theme_angle_not_built", "theme_angle_unsupported", "theme_values_thin",
+                                          "market_value_unusable",
+                                          # news-v23 phase 3, the last three angles (2026-11-20): an angle of filings
+                                          # while class C is off; each angle thin; a member left out (growth unusable
+                                          # or unreadable statements, an unusable Form 4 read); Congress not due
+                                          "theme_angle_class_off", "theme_growth_thin", "growth_unusable",
+                                          "statements_unreadable", "theme_insiders_thin", "insider_feed_unusable",
+                                          "theme_congress_thin", "theme_congress_not_due"}
     # `revenue_dropped` lost its producer in Batch 1 and stays (append-only: older fact sheets carry it).
     assert "revenue_dropped" in R.REJECTION_REASONS
     # Round 7 replaced rounds 1-6's amendment matchers with one person-level rule: their codes
@@ -1384,9 +1647,13 @@ def test_every_gate_returns_a_known_reason():
 def test_series_registries_agree():
     assert R.SERIES_CLASS == {
         "ceo_buys": "C", "insider_buys": "C", "thirteen_f": "C", "congress_count": "C",
-        "company_stakes": "F", "earnings": "F", "money_map": "F", "theme_explainer": "F"}
+        "company_stakes": "F", "earnings": "F", "money_map": "F", "theme_explainer": "F",
+        # the spotlight lane (2026-11-15): reportorial filings, deterministic templates
+        "insider_spotlight": "C", "thirteen_f_spotlight": "C"}
+    assert R.RECORD_TYPE_BY_SERIES["insider_spotlight"] is R.InsiderSpotlight
+    assert R.RECORD_TYPE_BY_SERIES["thirteen_f_spotlight"] is R.ThirteenFSpotlight
     assert tuple(R.SERIES_CLASS) == R.NEWS_SERIES == tuple(R.RECORD_TYPE_BY_SERIES)
-    assert set(R.SOURCE_LABELS) == set(R.NEWS_SERIES) - {"company_stakes"}
+    assert set(R.SOURCE_LABELS) == set(R.NEWS_SERIES)          # news-v23: a stakes post has its family label
     assert set(SAMPLES) == set(R.NEWS_SERIES)
     for series, cls in R.RECORD_TYPE_BY_SERIES.items():
         assert cls in R.RECORD_TYPES
@@ -1398,8 +1665,11 @@ def test_series_class_equals_selection_series():
     series = getattr(selection, "SERIES", None)
     if series is None:
         pytest.skip("selection.SERIES is not built yet (contract D3, another implementer); pinned literally above")
+    # Every registered series has its records here (the spotlight pair since 2026-11-15, shipped with its collectors
+    # and templates in news-v22), in the registry's order and class.
     assert {s.id: s.content_class for s in series} == R.SERIES_CLASS
     assert tuple(s.id for s in series) == R.NEWS_SERIES
+    assert selection.SPOTLIGHT_SERIES == {"insider_spotlight", "thirteen_f_spotlight"} <= set(R.NEWS_SERIES)
 
 
 def test_stake_vocabularies_come_from_the_club_schema():
@@ -1521,14 +1791,17 @@ def test_a_newly_listed_move_must_be_listed_inside_the_quarter(listed_on, ok):
     for a listing after the previous quarter's end (the diff is adjacent-quarter only) and no
     later than this quarter's end. The record refuses anything else — a hand-built or older fact
     sheet cannot carry the false sentence past it."""
-    build = lambda: thirteen_f(moves=(move(listed_on=listed_on),), counts=(("newly_reported", 1),))  # noqa: E731
+    # news-v23: a 13F record holds at least two moves — the move under test beside an unlisted second one
+    other = move("KO", "Coca-Cola", listed_on=None)
+    build = lambda: thirteen_f(moves=(move(listed_on=listed_on), other),       # noqa: E731
+                               counts=(("newly_reported", 2),))
     if ok:
         assert build().moves[0].listed_on == listed_on
     else:
         with pytest.raises(ValueError, match="listed_on"):
             build()
     # A newly reported move that is NOT newly listed carries no date at all, and is unaffected.
-    assert thirteen_f(moves=(move(listed_on=None),), counts=(("newly_reported", 1),)).moves[0].listed_on is None
+    assert thirteen_f(moves=(move(listed_on=None), other), counts=(("newly_reported", 2),)).moves[0].listed_on is None
 
 
 def test_a_stored_fact_sheet_with_an_out_of_quarter_listing_is_refused_on_read():
@@ -1916,7 +2189,10 @@ def test_the_2b_constants_are_pinned():
 # ── the shared contract (2026-10-10): `ThemeExplainer.theme_size` ─────────────
 
 def test_theme_size_is_the_last_field_optional_and_at_least_the_member_count():
-    assert [f.name for f in fields(R.ThemeExplainer)][-1] == "theme_size"
+    # news-v23 phase 3 appends the angle fields AFTER it (each additive, defaulted): theme_size stays the first optional
+    assert [f.name for f in fields(R.ThemeExplainer)][-9:] == ["theme_size", "angle", "posted_on", "values_as_of",
+                                                                "window_start", "window_end", "companies_checked",
+                                                                "month", "tickers_as_of_from_row"]
     assert theme().theme_size is None                                    # additive, defaulted
     assert theme(theme_size=6).theme_size == 6                           # == len(members): nothing dropped
     assert theme(theme_size=8).theme_size == 8                           # the gates dropped two
@@ -1944,6 +2220,22 @@ def test_theme_size_round_trips_and_an_older_sheet_still_reads():
         R.record_from_dict(dict(old, theme_size=5))
     with pytest.raises(ValueError):                                     # and still strict on unknown keys
         R.record_from_dict(dict(old, theme_count=9))
+
+
+def test_fix_the_row_dated_list_flag_is_a_strict_additive_bool():
+    """`ThemeExplainer.tickers_as_of_from_row` (fix round 2026-11-20): True when `tickers_as_of` is the theme row's
+    last write (the list's own date NULL) — that day only bounds the list's age and is never printed. Additive: a
+    sheet stored before it reads back False (its date WAS the list's); strict: only a bool, on the way in and back."""
+    rec = theme(tickers_as_of_from_row=True)
+    d = R.record_to_dict(rec)
+    assert d["tickers_as_of_from_row"] is True and R.record_from_dict(json.loads(json.dumps(d))) == rec
+    assert R.record_from_dict({k: v for k, v in d.items() if k != "tickers_as_of_from_row"}).tickers_as_of_from_row \
+        is False
+    for bad in ("yes", 1, 0, None):
+        with pytest.raises(ValueError):
+            theme(tickers_as_of_from_row=bad)
+        with pytest.raises(ValueError):
+            R.record_from_dict(dict(d, tickers_as_of_from_row=bad))
 
 
 def _p(sym, name, cik):
@@ -2488,3 +2780,954 @@ def test_only_the_descriptive_catalogue_name_takes_the_article():
     assert len(names) >= 100
     assert {n for n in names if R.takes_name_article(n)} == {"Louisiana data center venture"}
     assert all(h == h.lower() and h.isalpha() for h in R.DESCRIPTIVE_NAME_HEADS)
+
+
+# ── the spotlight lane (owner decisions 2026-11-15, "Add a second daily post") ─
+#
+# Records and pure rules only (workstream B1): the filed cost per share on `InsiderPurchase`, the two spotlight
+# records with their must-fail twins, the ledger keys and their readers, `spotlight_window`, the 25% change gate
+# exact at its boundary, and the one 13F move size the templates and the spotlight share.
+
+def test_the_spotlight_constants_are_pinned():
+    assert (R.SPOTLIGHT_MAX_OTHERS, R.SPOTLIGHT_MAX_WINDOW_DAYS, R.SPOTLIGHT_ISSUER_COOLDOWN_DAYS) == (4, 7, 14)
+    assert R.THIRTEEN_F_SPOTLIGHT_MIN_CHANGE == 0.25
+    assert R.BREAKING_MAX_BUSINESS_DAYS == 1
+    assert R.COST_PER_SHARE_REL_TOLERANCE == 1e-9
+    assert R.SPOTLIGHT_SINGLE_HOLDER_ROLES == {"ceo", "cfo"}
+    # the window cap is the main lane's own week, never longer
+    assert R.SPOTLIGHT_MAX_WINDOW_DAYS == R.INSIDER_WINDOW_DAYS
+
+
+# ── the filing's own cost per share (owner decision "Captions + picture") ─────
+
+def test_the_cost_fields_are_the_last_two_optional_fields_of_a_purchase():
+    assert [f.name for f in fields(R.InsiderPurchase)][-2:] == ["cost_per_share_min_usd", "cost_per_share_max_usd"]
+    assert purchase().cost_per_share_min_usd is None and purchase().cost_per_share_max_usd is None   # additive
+    p = purchase(amount=2_500_000, shares=100_000, cost_per_share_min_usd=24, cost_per_share_max_usd=26)
+    assert (p.cost_per_share_min_usd, p.cost_per_share_max_usd) == (24.0, 26.0)
+    assert isinstance(p.cost_per_share_min_usd, float) and isinstance(p.cost_per_share_max_usd, float)
+
+
+@pytest.mark.parametrize("lo, hi, ok", [
+    (25.0, 25.0, True),                       # one line: the average IS the cost
+    (24.0, 26.0, True),                       # several lines around the average
+    (25.0, 30.0, True), (20.0, 25.0, True),   # the average on an end
+    (25.0 * (1 + 5e-10), 30.0, True),         # inside the float slack
+    (25.0 * (1 + 2e-9), 30.0, False),         # just past it: not the lines' own costs
+    (20.0, 25.0 * (1 - 2e-9), False),
+    (30.0, 40.0, False), (10.0, 20.0, False),  # an outside figure (e.g. the profile price) never passes
+    (26.0, 24.0, False),                      # min above max
+    (None, 26.0, False), (24.0, None, False),  # both or neither
+    (0.0, 26.0, False), (-1.0, 26.0, False), (24.0, 0.0, False),
+    (NAN, 26.0, False), (24.0, INF, False), (True, 26.0, False), ("24", 26.0, False),
+])
+def test_the_filed_cost_must_hold_the_rows_own_average(lo, hi, ok):
+    make = lambda: purchase(amount=2_500_000.0, shares=100_000.0,     # noqa: E731 — average $25.00 a share
+                            cost_per_share_min_usd=lo, cost_per_share_max_usd=hi)
+    if ok:
+        make()
+    else:
+        with pytest.raises(ValueError):
+            make()
+
+
+def test_a_sheet_stored_before_the_cost_fields_still_reads_and_strictness_holds():
+    rows = (purchase(cost_per_share_min_usd=24.0, cost_per_share_max_usd=26.0),
+            purchase("FOX", "Fox", 1_000_000.0, person=None, shares=40_000.0))
+    rec = insider_week(rows=rows)
+    d = json.loads(json.dumps(R.record_to_dict(rec)))
+    assert (d["rows"][0]["cost_per_share_min_usd"], d["rows"][0]["cost_per_share_max_usd"]) == (24.0, 26.0)
+    for seed in range(3):                                               # 24.0 comes back as 24 on some reads
+        assert R.record_from_dict(_shuffle(json.loads(json.dumps(d)), random.Random(seed))) == rec
+    old = copy.deepcopy(d)
+    for row in old["rows"]:                                             # the pre-2026-11-15 shape
+        del row["cost_per_share_min_usd"], row["cost_per_share_max_usd"]
+    back = R.record_from_dict(old)
+    assert [(r.cost_per_share_min_usd, r.cost_per_share_max_usd) for r in back.rows] == [(None, None)] * 3
+    sheet = R.fact_sheet(rec, rejections={}, selection={})
+    assert R.record_from_fact_sheet(json.loads(json.dumps(sheet))) == rec
+    with pytest.raises(ValueError):                                     # an unknown key is still refused
+        R.record_from_dict(dict(old, rows=[dict(old["rows"][0], cost_per_share=25.0), *old["rows"][1:]]))
+    with pytest.raises(ValueError):                                     # half a pair is refused on the way back
+        R.record_from_dict(dict(old, rows=[dict(old["rows"][0], cost_per_share_min_usd=24.0), *old["rows"][1:]]))
+    with pytest.raises(ValueError):                                     # and a pair off the row's average
+        R.record_from_dict(dict(old, rows=[dict(old["rows"][0], cost_per_share_min_usd=30.0,
+                                                cost_per_share_max_usd=40.0), *old["rows"][1:]]))
+    assert R.record_from_dict(old) == back                              # anti-vacuity: the three rows still read
+
+
+# ── InsiderSpotlight ──────────────────────────────────────────────────────────
+
+def test_the_worked_example_is_a_valid_insider_spotlight():
+    """Owner decisions 2026-11-20 ("3 - 5 companies at once"): the insider spotlight is a LIST of companies, each row
+    one issuer's lead and its other insiders; the one-issuer record (with its revenue line) is retired."""
+    rec = insider_spotlight()
+    assert [f.name for f in fields(R.InsiderSpotlight)] == ["series", "window_start", "window_end", "companies"]
+    assert [f.name for f in fields(R.InsiderSpotlightCompany)] == ["lead", "others"]
+    row = rec.companies[0]
+    assert rec.lead is row.lead and rec.lead.role == "ceo" and [o.role for o in row.others] == ["director", "cfo"]
+    assert rec.lead.amount_usd == 2_001_650.0 and rec.lead.amount_usd / rec.lead.shares == 142.975
+    assert row.total_usd == 2_001_650.0 + 410_002.0 + 250_000.0 and row.shares == 14_000.0 + 2_900.0 + 2_000.0
+    assert (row.cost_per_share_min_usd, row.cost_per_share_max_usd) == (125.0, 143.85)   # over every person's lines
+    assert row.filing_dates == (date(2026, 11, 17), date(2026, 11, 18)) and row.company == co(*CTSO)
+    assert [r.company.symbol for r in rec.companies] == ["CTSO", "LTW", "PRSW"]
+    assert list(rec.companies) == sorted(rec.companies, key=R.spotlight_company_order)
+    assert R.record_from_dict(R.record_to_dict(rec)) == rec
+
+
+def _directors(n):
+    """``n`` valid directors of the worked example's issuer, in `spotlight_person_order`, each with its own cost."""
+    out = []
+    for i in range(n):
+        amount, shares = 400_000.0 - i * 1_000.0, 2_500.0
+        out.append(isp_director(amount=amount, shares=shares, cost=(amount / shares, amount / shares)))
+    return tuple(out)
+
+
+_LIST_NAMES = (("ADVW", "Adventure Works"), ("ALPN", "Alpine Ski House"), ("BLUY", "Blue Yonder"),
+               ("CNTR", "Contoso Retail"), ("FRTH", "Fourth Coffee"), ("GRPH", "Graphic Design Institute"),
+               ("HUMG", "Humongous Insurance"), ("LCRP", "Lucerne Publishing"), ("MRGN", "Margie's Travel"))
+
+
+def _list_rows(n, day=date(2026, 11, 18)):
+    """``n`` one-person rows of different issuers filed on `day`, in `spotlight_company_order` (totals descending)."""
+    rows = [isp_filler(sym, name, "director", 900_000.0 - 50_000.0 * i, 40.0, day)
+            for i, (sym, name) in enumerate(_LIST_NAMES[:n])]
+    return tuple(sorted(rows, key=R.spotlight_company_order))
+
+
+def test_insider_spotlight_boundaries_that_must_pass():
+    insider_spotlight(others=())                                                    # a single insider in the row
+    insider_spotlight(others=_directors(R.SPOTLIGHT_MAX_OTHERS))                    # SPOTLIGHT_MAX_OTHERS
+    insider_spotlight(window_start=date(2026, 11, 12))                              # exactly 7 days
+    insider_spotlight(window_start=date(2026, 11, 18), others=(isp_cfo(),))         # one day
+    insider_spotlight(others=(isp_director(), isp_director(amount=300_000.0, shares=2_000.0, cost=(150.0, 150.0))))
+    insider_spotlight(lead=isp_person(person="Jane Smith"), others=(isp_director(person="Ana Diaz"),))
+    insider_spotlight(others=(isp_director(amount=2_001_650.0, shares=14_000.0, cost=(142.10, 143.85)),))  # a tie
+    # owner decisions 2026-11-20: three (INSIDER_MIN_ROWS) to five (INSIDER_MAX_ROWS) companies
+    insider_spotlight(companies=_list_rows(R.INSIDER_MIN_ROWS))
+    insider_spotlight(companies=_list_rows(R.INSIDER_MAX_ROWS))
+    tie = (isp_filler("ZETA", "Zeta", "director", 200_000.0, 40.0, date(2026, 11, 18)),
+           isp_filler("ALFA", "Alfa", "director", 200_000.0, 40.0, date(2026, 11, 18)))
+    insider_spotlight(companies=(isp_row(), *sorted(tie, key=R.spotlight_company_order)))   # a total tie: by name
+
+
+def _row_named(row, person):
+    return R.InsiderSpotlightCompany(lead=replace(row.lead, person_name=person), others=row.others)
+
+
+@pytest.mark.parametrize("make", [
+    lambda: insider_spotlight(series="insider_buys"),
+    lambda: insider_spotlight(window_start=date(2026, 11, 19)),                     # runs backward
+    lambda: insider_spotlight(window_start=date(2026, 11, 11)),                     # 8 days
+    lambda: insider_spotlight(window_end=datetime(2026, 11, 18)),
+    lambda: insider_spotlight(lead=None),
+    lambda: insider_spotlight(lead=insider_week()),
+    lambda: insider_spotlight(others=[isp_director()]),                             # a list, not a tuple
+    lambda: insider_spotlight(others=_directors(R.SPOTLIGHT_MAX_OTHERS + 1)),        # one too many
+    lambda: insider_spotlight(others=(isp_director(company=("FBRK", "Fabrikam")),)),   # another issuer
+    lambda: insider_spotlight(others=(isp_director(company=("CTSO", "Contoso Group")),)),  # same symbol, other name
+    lambda: insider_spotlight(others=(isp_cfo(), isp_director())),                  # out of amount order
+    lambda: insider_spotlight(lead=isp_director(), others=(isp_person(),)),         # the lead is not the largest
+    lambda: insider_spotlight(lead=isp_person(person="Jane Smith"),
+                              others=(isp_director(person="JANE SMITH"),)),         # the same person twice
+    lambda: insider_spotlight(others=(isp_person(amount=500_000.0, shares=3_500.0, cost=(142.857, 142.858)),)),
+    lambda: insider_spotlight(lead=isp_cfo(amount=900_000.0, shares=6_000.0, cost=(150.0, 150.0)),
+                              others=(isp_cfo(),)),                                 # two CFOs
+    lambda: insider_spotlight(lead=isp_person(cost=None)),                          # the lead has no filed cost
+    lambda: insider_spotlight(others=(isp_director(cost=None),)),                   # an other has none
+    lambda: insider_spotlight(lead=isp_person(filings=(date(2026, 11, 19),),        # after the window
+                                              trades=(date(2026, 11, 17), date(2026, 11, 18)))),
+    lambda: insider_spotlight(others=(isp_director(filings=(date(2026, 11, 15),),   # before the window
+                                                   trades=(date(2026, 11, 13), date(2026, 11, 13))),)),
+    lambda: insider_spotlight(lead=isp_person(filings=(date(2026, 11, 15), date(2026, 11, 18)),
+                                              trades=(date(2026, 11, 13), date(2026, 11, 17)))),
+    # owner decisions 2026-11-20: the LIST's own checks
+    lambda: insider_spotlight(companies=_list_rows(2)),                              # two companies
+    lambda: insider_spotlight(companies=_list_rows(1)),                              # one company
+    lambda: insider_spotlight(companies=()),
+    lambda: insider_spotlight(companies=_list_rows(R.INSIDER_MAX_ROWS + 1)),        # six (final review 2026-11-26)
+    lambda: insider_spotlight(companies=list(_list_rows(3))),                       # a list, not a tuple
+    lambda: insider_spotlight(companies=(isp_row(), *_list_rows(3)[:2], isp_row().lead)),   # not a row
+    lambda: insider_spotlight(companies=tuple(reversed(_list_rows(3)))),            # out of total order
+    lambda: insider_spotlight(companies=(isp_row(), isp_row(), *isp_fillers(date(2026, 11, 18)))),  # one row twice
+    lambda: insider_spotlight(companies=(isp_row(), *isp_fillers(date(2026, 11, 18)),             # one name twice
+                                         isp_filler("LTWX", "Litware", "director", 100_000.0, 40.0, date(2026, 11, 18)))),
+    lambda: insider_spotlight(companies=(isp_row(), isp_filler("CTSO-B", "Contoso Class B", "director", 900_000.0,
+                                                               40.0, date(2026, 11, 18)),
+                                         *isp_fillers(date(2026, 11, 18)))),        # one issuer, two share classes
+    lambda: insider_spotlight(companies=(_row_named(isp_row(), "Jane Smith"),        # one person in two rows
+                                         _row_named(isp_fillers(date(2026, 11, 18))[0], "Jane Smith"),
+                                         isp_fillers(date(2026, 11, 18))[1])),
+    lambda: insider_spotlight(companies=(isp_row(), *isp_fillers(date(2026, 11, 19)))),   # a filler after the window
+], ids=lambda f: None)
+def test_invalid_insider_spotlights_raise(make):
+    with pytest.raises(ValueError):
+        make()
+
+
+def test_an_insider_spotlight_rows_people_carry_the_rows_total_and_never_a_garbage_one():
+    """A row's total is every person's amount (`math.fsum`); its total over the garbage bound is refused."""
+    row = isp_row()
+    assert row.total_usd == math.fsum(p.amount_usd for p in row.people) and row.people[0] is row.lead
+    big = R.INSIDER_MAX_AMOUNT_USD
+    with pytest.raises(ValueError):
+        R.InsiderSpotlightCompany(lead=isp_person(amount=big, shares=big / 140.0, cost=(140.0, 140.0)),
+                                  others=(isp_director(amount=big * 0.9, shares=big * 0.9 / 140.0,
+                                                       cost=(140.0, 140.0)),))
+
+
+def test_spotlight_person_order_is_amount_then_name_then_role():
+    a = isp_director(amount=300_000.0, shares=2_000.0, cost=(150.0, 150.0), person="Ana Diaz")
+    b = isp_director(amount=300_000.0, shares=2_000.0, cost=(150.0, 150.0), person="Ben Ruiz")
+    u = isp_director(amount=300_000.0, shares=2_000.0, cost=(150.0, 150.0))
+    big = isp_person()
+    assert sorted([b, a, big, u], key=R.spotlight_person_order) == [big, u, a, b]
+    insider_spotlight(lead=big, others=(u, a, b))
+    with pytest.raises(ValueError):
+        insider_spotlight(lead=big, others=(a, u, b))
+
+
+# ── ThirteenFSpotlight ────────────────────────────────────────────────────────
+
+def test_the_worked_example_is_a_valid_13f_spotlight():
+    rec = thirteen_f_spotlight()
+    mv = rec.moves[0]
+    assert (mv.move, mv.shares, mv.prev_shares) == ("decreased", 41_900_000.0, 60_000_000.0)
+    # owner feedback 2026-11-19: up to five holdings, the filing's eligible count and its own count of every change
+    assert [f.name for f in fields(R.ThirteenFSpotlight)] == [
+        "series", "filer_name", "filer_cik", "filer_symbol", "period", "period_end", "filed_on", "amended_on",
+        "moves", "eligible_moves", "filing_moves"]
+
+
+@pytest.mark.parametrize("kind, shares, prev, ok", [
+    ("decreased", 75.0, 100.0, True), ("decreased", 76.0, 100.0, False),       # the 25% / 24% boundary
+    ("increased", 125.0, 100.0, True), ("increased", 124.0, 100.0, False),
+    ("decreased", 3.0, 4.0, True),                                             # exactly a quarter, as written
+    ("decreased", 0.7500000000000001, 1.0, False),                             # a hair under 25%
+    ("increased", 300.0, 100.0, True), ("decreased", 1.0, 100.0, True),
+])
+def test_a_more_or_fewer_13f_spotlight_needs_a_25_percent_change(kind, shares, prev, ok):
+    make = lambda: thirteen_f_spotlight(move=f13s_move(kind, shares, prev))     # noqa: E731
+    assert R.thirteen_f_change_clear(shares, prev) is ok
+    if ok:
+        make()
+    else:
+        with pytest.raises(ValueError):
+            make()
+
+
+@pytest.mark.parametrize("shares, prev", [
+    (None, 100.0), (75.0, None), (0.0, 100.0), (75.0, 0.0), (-75.0, 100.0), (NAN, 100.0), (75.0, INF),
+    (True, 100.0), ("75", 100.0), (75.0, "100"),
+])
+def test_the_change_gate_never_judges_a_missing_or_junk_count(shares, prev):
+    assert R.thirteen_f_change_clear(shares, prev) is False
+
+
+def test_the_change_gate_never_raises_on_an_extreme_count():
+    assert R.thirteen_f_change_clear(1e300, 4e300) is True
+    assert R.thirteen_f_change_clear(1.7e308, 1.7e308) is False
+    assert R.thirteen_f_change_clear(5e-324, 1e-300) is True
+
+
+def test_13f_spotlight_kinds_that_must_pass():
+    thirteen_f_spotlight(move=move("NWT", "Northwind", "newly_reported", shares=1_000.0, value_usd=5e6,
+                                   listed_on=None))
+    thirteen_f_spotlight(move=move("NWT", "Northwind", "newly_reported", shares=1_000.0, value_usd=None,
+                                   listed_on=date(2026, 8, 3)))
+    thirteen_f_spotlight(move=_exit(prev_value_usd=3e9))
+    thirteen_f_spotlight(filer_symbol="BRK-B", amended_on=date(2026, 11, 13))
+
+
+@pytest.mark.parametrize("make", [
+    lambda: thirteen_f_spotlight(series="thirteen_f"),
+    lambda: thirteen_f_spotlight(filer_name=""), lambda: thirteen_f_spotlight(filer_name="Hot Hands Capital"),
+    lambda: thirteen_f_spotlight(filer_cik="1234567"), lambda: thirteen_f_spotlight(filer_cik="0000000000"),
+    lambda: thirteen_f_spotlight(filer_symbol="psh"), lambda: thirteen_f_spotlight(period="2026-Q5"),
+    lambda: thirteen_f_spotlight(period_end=date(2026, 9, 29)), lambda: thirteen_f_spotlight(filed_on=date(2026, 9, 30)),
+    lambda: thirteen_f_spotlight(amended_on=date(2026, 11, 12)), lambda: thirteen_f_spotlight(filed_on=datetime(2026, 11, 13)),
+    lambda: thirteen_f_spotlight(moves=None), lambda: thirteen_f_spotlight(moves=f13s_move()),
+    lambda: thirteen_f_spotlight(moves=()), lambda: thirteen_f_spotlight(moves=[f13s_move()]),
+    lambda: thirteen_f_spotlight(move=move("NWT", "Northwind", "newly_reported", shares=None, listed_on=None)),
+    lambda: thirteen_f_spotlight(move=move("NWT", "Northwind", "newly_reported", shares=0.0, listed_on=None)),
+    lambda: thirteen_f_spotlight(move=move("NWT", "Northwind", "newly_reported", listed_on=date(2026, 6, 30))),
+    lambda: thirteen_f_spotlight(move=move("NWT", "Northwind", "newly_reported", listed_on=date(2026, 10, 1))),
+    lambda: thirteen_f_spotlight(move=move("OXY", "Occidental", "no_longer_reported", shares=None, prev_shares=None,
+                                           value_usd=None, listed_on=None, prev_value_usd=3e9)),
+    lambda: thirteen_f_spotlight(move=move("OXY", "Occidental", "no_longer_reported", shares=None, prev_shares=0.0,
+                                           value_usd=None, listed_on=None, prev_value_usd=3e9)),
+    lambda: thirteen_f_spotlight(move=f13s_move("decreased", 46_000_000.0, 60_000_000.0)),   # 23.3%
+])
+def test_invalid_13f_spotlights_raise(make):
+    with pytest.raises(ValueError):
+        make()
+
+
+# ── owner feedback 2026-11-19: the 13F spotlight LIST (up to five holdings) ───────────────────────────────────────
+
+
+def _f13s_list_moves():
+    """Five holdings of every kind, in `thirteen_f_spotlight_order` (the largest dollar size first)."""
+    return (f13s_move("decreased", 41_900_000.0, 60_000_000.0, value_usd=3.1e9),             # $1.35B fewer
+            f13s_move("newly_reported", 5_600_000.0, 0.0, company=co("ADVW", "Adventure Works"), value_usd=1.24e9),
+            f13s_move("increased", 12_500_000.0, 8_000_000.0, company=co("LTW", "Litware"), value_usd=9e8),  # $324M
+            R.ThirteenFMove(company=co("WGB", "Woodgrove Bank"), move="no_longer_reported", shares=0.0,
+                            prev_shares=4_300_000.0, value_usd=None, listed_on=None, prev_value_usd=3.1e8),
+            f13s_move("decreased", 2_000_000.0, 3_000_000.0, company=co("CTSO", "Contoso"), value_usd=1.5e8))
+
+
+def test_a_13f_spotlight_holds_two_to_eight_holdings_in_the_one_order():
+    """news-v23 (owner 2026-11-19, "the range from 2 to 6 are okay"): the record holds two to eight (the roundup's
+    own cap): the picture draws six, the caption lists the rest; one holding is refused — no single-holding post."""
+    moves = _f13s_list_moves()
+    assert R.THIRTEEN_F_SPOTLIGHT_MAX_MOVES == R.THIRTEEN_F_MAX_MOVES == 8 and R.THIRTEEN_F_LIST_MIN_MOVES == 2
+    assert (R.THIRTEEN_F_LIST_ROWS, R.THIRTEEN_F_COVER_ROWS) == (6, 3)    # review 2026-11-20: three on the cover
+    assert list(moves) == sorted(moves, key=R.thirteen_f_spotlight_order)
+    rec = thirteen_f_spotlight(moves=moves, eligible_moves=5, filing_moves=31)
+    assert R.ledger_key(rec) == "news:thirteen_f_spotlight:0001234567:2026-Q3:NWT"          # the lead's symbol
+    assert R.thirteen_f_filer_key(R.ledger_key(rec)) == "news:thirteen_f:0001234567:2026-Q3"
+    assert R.record_from_dict(R.record_to_dict(rec)) == rec
+    for k in range(2, 6):
+        thirteen_f_spotlight(moves=moves[:k], eligible_moves=k)
+    with pytest.raises(ValueError, match="moves"):
+        thirteen_f_spotlight(moves=moves[:1], eligible_moves=1)
+    with pytest.raises(ValueError, match="moves"):
+        thirteen_f(moves=thirteen_f().moves[:1])
+    # the order: size first, then kind (new, gone, more, fewer), then symbol on a tie
+    tie = [f13s_move("decreased", 75.0, 100.0, company=co(sym, name), value_usd=3e6)      # $1M fewer, each
+           for sym, name in (("ZZZ", "Zeta"), ("AAA", "Alpha"))]
+    tie.append(f13s_move("newly_reported", 1_000.0, 0.0, company=co("MMM", "Mu"), value_usd=1e6))
+    assert [m.company.symbol for m in sorted(tie, key=R.thirteen_f_spotlight_order)] == ["MMM", "AAA", "ZZZ"]
+
+
+def test_the_13f_spotlight_order_reads_the_adapters_kind_rank():
+    from app.services.marketing import company_news_adapter as A
+    assert R._THIRTEEN_F_KIND_ORDER == A._KIND_RANK
+    assert A._spotlight_move_rank is R.thirteen_f_spotlight_order
+
+
+@pytest.mark.parametrize("make", [
+    lambda m: thirteen_f_spotlight(moves=m + tuple(f13s_move("decreased", 1.0, 2.0, company=co(f"TL{c}", f"Tail {c}"),
+                                                             value_usd=1.0) for c in "ABCD"),
+                                   eligible_moves=9),                                               # nine holdings
+    lambda m: thirteen_f_spotlight(moves=(m[1], m[0]), eligible_moves=2),                           # out of order
+    # a symbol twice under two names (`issuer_root` reads the symbol only, so the issuer check refuses it too)
+    lambda m: thirteen_f_spotlight(moves=(m[0], f13s_move("decreased", 1.0, 2.0, company=co("NWT", "Other Name"),
+                                                          value_usd=1.0)), eligible_moves=2),
+    lambda m: thirteen_f_spotlight(moves=(m[0], f13s_move("decreased", 1.0, 2.0, company=co("NWT-B", "Northwind B"),
+                                                          value_usd=1.0)), eligible_moves=2),       # one issuer twice
+    lambda m: thirteen_f_spotlight(moves=(m[0], f13s_move("decreased", 1.0, 2.0, company=co("NWTX", "Northwind"),
+                                                          value_usd=1.0)), eligible_moves=2),       # one name twice
+    lambda m: thirteen_f_spotlight(moves=m[:2], eligible_moves=1),                                  # fewer than shown
+    lambda m: thirteen_f_spotlight(moves=m[:2], eligible_moves=3),                                  # a cut under eight
+    lambda m: thirteen_f_spotlight(moves=m, eligible_moves=5, filing_moves=4),                      # changes < shown
+    # news-v23: one holding is refused whatever its counts (never a single-holding post)
+    lambda m: thirteen_f_spotlight(moves=m[:1], eligible_moves=True),
+    lambda m: thirteen_f_spotlight(moves=m[:1], eligible_moves=1, filing_moves=1),
+    lambda m: thirteen_f_spotlight(moves=m[:2], eligible_moves=2, filing_moves=True),              # a bool count
+    lambda m: thirteen_f_spotlight(moves=m, eligible_moves=5, filing_moves=5.0),
+    lambda m: thirteen_f_spotlight(moves=(m[0], f13s_move("increased", 124.0, 100.0, company=co("LTW", "Litware"),
+                                                          value_usd=1.0)), eligible_moves=2),       # a row under 25%
+    lambda m: thirteen_f_spotlight(moves=(m[0], R.ThirteenFMove(company=co("WGB", "Woodgrove Bank"),
+                                                                move="no_longer_reported", shares=0.0, prev_shares=0.0,
+                                                                value_usd=None, listed_on=None, prev_value_usd=1.0)),
+                                   eligible_moves=2),                                               # an exit of zero
+], ids=["nine", "order", "dup_symbol", "dup_issuer", "dup_name", "eligible_low", "cut_under_eight", "changes_low",
+        "one_holding", "one_holding_counted", "filing_bool", "changes_float", "row_under_floor", "exit_zero"])
+def test_an_invalid_13f_spotlight_list_raises(make):
+    with pytest.raises(ValueError):
+        make(_f13s_list_moves())
+
+
+def test_a_13f_spotlight_list_states_the_filings_counts_only_when_its_rows_are_every_change():
+    moves = _f13s_list_moves()
+    assert R.thirteen_f_spotlight_lists_every_change(thirteen_f_spotlight(moves=moves, eligible_moves=5,
+                                                                           filing_moves=5))
+    assert not R.thirteen_f_spotlight_lists_every_change(thirteen_f_spotlight(moves=moves, eligible_moves=5,
+                                                                               filing_moves=6))
+    assert not R.thirteen_f_spotlight_lists_every_change(thirteen_f_spotlight(moves=moves, eligible_moves=5,
+                                                                               filing_moves=None))
+    assert not R.thirteen_f_spotlight_lists_every_change(thirteen_f_spotlight(moves=moves[:2], eligible_moves=2,
+                                                                               filing_moves=None))
+
+
+def test_the_refactored_13f_filer_checks_still_hold_the_roundup():
+    """`_check_13f_filer` / `_check_13f_listing` are shared by both 13F records: the roundup refuses exactly what
+    it refused before (the long `test_invalid_records_raise` table) — spot-checked here on each filer field."""
+    for bad in (dict(filer_cik="1067983"), dict(filer_name="Hot Hands Capital"), dict(filer_symbol="PSH-L"),
+                dict(period="2026-Q5"), dict(period_end=date(2026, 9, 29)), dict(filed_on=date(2026, 9, 30)),
+                dict(amended_on=date(2026, 11, 1)),
+                dict(moves=(move(listed_on=date(2026, 6, 30)), move("KO", "Coca-Cola", listed_on=None)),
+                     counts=(("newly_reported", 2),))):
+        with pytest.raises(ValueError):
+            thirteen_f(**bad)
+    thirteen_f()
+
+
+# ── the one 13F move size ─────────────────────────────────────────────────────
+
+def test_thirteen_f_move_flow_is_the_templates_ranking():
+    """Ported from `news_templates._f13_move_value` (2026-11-15): one definition, the same results."""
+    assert R.thirteen_f_move_flow(move()) == 5_000_000.0                                      # new: all of it
+    assert R.thirteen_f_move_flow(f13s_move()) == pytest.approx(1.2e9 * 18_100_000 / 41_900_000)  # the change
+    assert R.thirteen_f_move_flow(f13s_move("increased", 125.0, 100.0, value_usd=250.0)) == 50.0
+    assert R.thirteen_f_move_flow(_exit(prev_value_usd=3e9)) == 3e9                           # the previous book
+    assert R.thirteen_f_move_flow(_exit()) is None
+    assert R.thirteen_f_move_flow(move(value_usd=None)) is None
+    assert R.thirteen_f_move_flow(f13s_move(value_usd=None)) is None
+
+
+# ── spotlight_window ──────────────────────────────────────────────────────────
+
+D = date
+
+
+@pytest.mark.parametrize("run, checked, newest, window", [
+    # C0 (2026-11-16): the window starts the day AFTER the last window an earlier insider spotlight checked
+    (D(2026, 11, 17), D(2026, 11, 12), D(2026, 11, 17), (D(2026, 11, 13), D(2026, 11, 16))),   # Tue: Fri..Mon
+    (D(2026, 11, 19), D(2026, 11, 16), D(2026, 11, 19), (D(2026, 11, 17), D(2026, 11, 18))),   # Thu: Tue..Wed
+    # a Saturday run: no Saturday filings, so the walk's newest is Friday and the window ends on Thursday ...
+    (D(2026, 11, 21), D(2026, 11, 18), D(2026, 11, 20), (D(2026, 11, 19), D(2026, 11, 19))),
+    # ... and Friday rolls into Tuesday's window
+    (D(2026, 11, 24), D(2026, 11, 19), D(2026, 11, 24), (D(2026, 11, 20), D(2026, 11, 23))),
+    # the second review's case: Thursday checked through Wednesday, the 13F-led Saturday checked NO Form 4 window —
+    # Tuesday starts on Thursday (the previous RUN's date would have started it on Friday and lost Thursday)
+    (D(2026, 11, 24), D(2026, 11, 18), D(2026, 11, 24), (D(2026, 11, 19), D(2026, 11, 23))),
+    # nothing checked within the cooldown: the week before
+    (D(2026, 11, 19), None, D(2026, 11, 19), (D(2026, 11, 12), D(2026, 11, 18))),
+    # an old checked window: the 7-day clamp (start >= run − 7)
+    (D(2026, 11, 21), D(2026, 11, 10), D(2026, 11, 21), (D(2026, 11, 14), D(2026, 11, 20))),
+    (D(2026, 11, 21), D(2026, 11, 13), D(2026, 11, 21), (D(2026, 11, 14), D(2026, 11, 20))),   # end + 1 == clamp
+    # the walk has passed exactly the window's first day: a one-day window
+    (D(2026, 11, 19), D(2026, 11, 15), D(2026, 11, 17), (D(2026, 11, 16), D(2026, 11, 16))),
+    # no new day proven yet: the newest filing is the day after the last checked day (quiet or behind: the adapter's
+    # `spotlight_feed_current` decides) — and a feed short of the week's start
+    (D(2026, 11, 19), D(2026, 11, 16), D(2026, 11, 17), None),
+    (D(2026, 11, 19), D(2026, 11, 18), D(2026, 11, 19), None),          # checked through the day before the run
+    (D(2026, 11, 19), None, D(2026, 11, 12), None),
+    # nothing proves the feed reached any day; a future filing date is junk, no proof
+    (D(2026, 11, 19), D(2026, 11, 16), None, None),
+    (D(2026, 11, 19), D(2026, 11, 16), D(2026, 11, 20), None),
+    # Thanksgiving week: the window is calendar days (the business-day rules live in the templates)
+    (D(2026, 11, 28), D(2026, 11, 24), D(2026, 11, 27), (D(2026, 11, 25), D(2026, 11, 26))),
+])
+def test_spotlight_window(run, checked, newest, window):
+    assert R.spotlight_window(run, checked, newest) == window
+
+
+def test_every_spotlight_window_spans_one_to_seven_days_and_never_passes_the_feed():
+    run = D(2026, 11, 19)
+    seen_none = seen_window = 0
+    for back in [None, *range(1, 12)]:
+        checked = None if back is None else run - timedelta(days=back)
+        for ahead in range(-10, 2):
+            newest = run + timedelta(days=ahead)
+            got = R.spotlight_window(run, checked, newest)
+            if got is None:
+                seen_none += 1
+                continue
+            seen_window += 1
+            start, end = got
+            assert 1 <= (end - start).days + 1 <= R.SPOTLIGHT_MAX_WINDOW_DAYS
+            assert start >= run - timedelta(days=R.SPOTLIGHT_MAX_WINDOW_DAYS) and end <= run - timedelta(days=1)
+            assert end < newest                                   # only days the walk has passed
+            if checked is not None:
+                assert start == max(run - timedelta(days=7), checked + timedelta(days=1))   # never a day checked twice
+            # a record built on the window validates against the same bounds
+            insider_spotlight(window_start=start, window_end=end, lead=isp_person(
+                filings=(end,), trades=(end - timedelta(days=1), end)), others=())
+    assert seen_none and seen_window                                # anti-vacuity: both outcomes reached
+
+
+def test_consecutive_spotlight_windows_never_skip_or_repeat_a_day():
+    """Chaining each window's end into the next call (what the recorded trail does), over eight weeks of Tue/Thu/Sat
+    runs — some 13F-led Saturdays checking no window — every day from the first window's start to the last window's
+    end is checked exactly once while the feed is current (its newest filing the run day itself)."""
+    checked = None
+    covered: list = []
+    d = D(2026, 11, 17)
+    while d < D(2027, 1, 12):
+        if d.weekday() in (1, 3, 5):
+            lead_13f = d.weekday() == 5 and d.day % 2 == 0          # some Saturdays post the 13F spotlight first
+            if not lead_13f:
+                got = R.spotlight_window(d, checked, d)
+                if got is not None:
+                    start, end = got
+                    covered.extend(start + timedelta(days=i) for i in range((end - start).days + 1))
+                    checked = end
+        d += timedelta(days=1)
+    assert covered == [covered[0] + timedelta(days=i) for i in range(len(covered))]   # contiguous, no repeat
+
+
+@pytest.mark.parametrize("args", [
+    (datetime(2026, 11, 19, 10), D(2026, 11, 17), D(2026, 11, 19)),
+    (D(2026, 11, 19), datetime(2026, 11, 17), D(2026, 11, 19)),
+    (D(2026, 11, 19), D(2026, 11, 17), datetime(2026, 11, 19, 9)),
+    ("2026-11-19", D(2026, 11, 17), D(2026, 11, 19)),
+    (None, D(2026, 11, 17), D(2026, 11, 19)),
+    (D(2026, 11, 19), "2026-11-17", D(2026, 11, 19)),
+    (D(2026, 11, 19), D(2026, 11, 17), 20261119),
+    (D(2026, 11, 19), D(2026, 11, 19), D(2026, 11, 19)),        # the checked window must end BEFORE the run
+    (D(2026, 11, 19), D(2026, 11, 20), D(2026, 11, 19)),
+])
+def test_spotlight_window_refuses_a_caller_bug(args):
+    with pytest.raises(ValueError):
+        R.spotlight_window(*args)
+
+
+@pytest.mark.parametrize("newest, run, current", [
+    (D(2026, 11, 19), D(2026, 11, 19), True),                  # filed today
+    (D(2026, 11, 17), D(2026, 11, 19), True),                  # two business days old
+    (D(2026, 11, 16), D(2026, 11, 19), False),                 # three: behind
+    (D(2027, 2, 12), D(2027, 2, 16), True),                    # Tue after Presidents' Day (Mon a holiday): Fri is current
+    (D(2027, 2, 11), D(2027, 2, 16), True),                    # Thu before it: Fri and Tue — still two
+    (D(2027, 2, 10), D(2027, 2, 16), False),                   # Wed before it: Thu, Fri, Tue — behind
+    (D(2026, 12, 24), D(2026, 12, 26), True),                  # Sat after the Christmas Friday: Thu is current
+    (D(2026, 11, 20), D(2026, 11, 24), True),                  # Fri → Tue: Mon, Tue
+    (D(2026, 11, 19), D(2026, 11, 24), False),                 # Thu → Tue: Fri, Mon, Tue
+    (None, D(2026, 11, 19), False),                            # nothing proves the feed reached any day
+    (D(2026, 11, 20), D(2026, 11, 19), False),                 # a future filing date is no proof
+])
+def test_spotlight_feed_current(newest, run, current):
+    assert R.spotlight_feed_current(newest, run) is current
+
+
+def test_spotlight_feed_current_refuses_a_caller_bug():
+    for args in ((datetime(2026, 11, 19, 9), D(2026, 11, 19)), ("2026-11-19", D(2026, 11, 19)),
+                 (D(2026, 11, 19), datetime(2026, 11, 19, 10))):
+        with pytest.raises(ValueError):
+            R.spotlight_feed_current(*args)
+
+
+def test_issuer_root_folds_share_classes_and_never_a_foreign_line():
+    import app.services.marketing.company_news_adapter as A
+
+    assert R.ISSUER_ROOT_FOREIGN_LETTERS == A.EARNINGS_FOREIGN_LETTERS             # pinned: one rule, two modules
+    for sym, root in (("GOOGL", "GOOG"), ("GOOG", "GOOG"), ("BRK-B", "BRK"), ("brk.a", "BRK"), ("BF-B", "BF"),
+                      ("LBRDA", "LBRD"), ("WAFDP", "WAFD"), ("CMPRF", "CMPRF"), ("TOYOY", "TOYOY"), ("NVDA", "NVDA"),
+                      (" cost ", "COST")):
+        assert R.issuer_root(sym) == root, sym
+        assert A._issuer_root(R.canonical_symbol(sym.strip()) or sym) == root, sym
+    for junk in (None, "", "  ", 7, "-B"):
+        assert R.issuer_root(junk) is None, junk
+
+
+# ── the spotlight ledger keys and their readers ───────────────────────────────
+
+def test_insider_spotlight_key_parts():
+    # owner decisions 2026-11-20: every company of the list, in row order; a one-issuer key (retired) reads as one
+    assert R.insider_spotlight_key_parts(R.ledger_key(insider_spotlight())) == (("CTSO", "LTW", "PRSW"), D(2026, 11, 16))
+    assert R.insider_spotlight_key_parts("news:insider_spotlight:BRK-B:2026-11-14") == (("BRK-B",), D(2026, 11, 14))
+    eight = "+".join(f"S{c}" for c in "ABCDEFGH")
+    assert R.insider_spotlight_key_parts(f"news:insider_spotlight:{eight}:2026-11-16")[0] == tuple(eight.split("+"))
+    longest = "+".join(f"ABCDE{c}" for c in "ABCDEFGH")                 # not canonical: read up to the bound, refused
+    assert len(f"news:insider_spotlight:{longest}:2026-11-16") <= R.INSIDER_SPOTLIGHT_REF_MAX_CHARS
+    for other in ("news:ceo_buys:2026-11-09", "news:insider_spotlight:ctso:2026-11-16",
+                  "news:insider_spotlight:CTSO+CTSO:2026-11-16", "news:insider_spotlight:CTSO+:2026-11-16",
+                  "news:insider_spotlight:+CTSO:2026-11-16", "news:insider_spotlight:CTSO+ltw:2026-11-16",
+                  f"news:insider_spotlight:{eight}+SI:2026-11-16", f"news:insider_spotlight:{longest}:2026-11-16",
+                  "news:insider_spotlight:CTSO:2026-13-01", "news:insider_spotlight:CTSO:20261116",
+                  "news:insider_spotlight:CTSO", "news:insider_spotlight:CTSO:2026-11-16:x",
+                  "news:insider_spotlight:RZLVW:2026-11-16", "money_moves:slug", "x" * 200, "", None, 5,
+                  "news:insider_spotlight:CTSO:２０２６-11-16", "news:insider_spotlight:CTSO:2026-11-16\n"):
+        assert R.insider_spotlight_key_parts(other) is None, other
+
+
+def test_thirteen_f_filer_key_is_one_key_per_filer_and_quarter_across_both_lanes():
+    roundup = thirteen_f(filer_cik="0001234567", filer_name="Fabrikam Capital", filer_symbol=None)
+    spot = thirteen_f_spotlight()
+    assert R.thirteen_f_filer_key(R.ledger_key(roundup)) == R.ledger_key(roundup) == "news:thirteen_f:0001234567:2026-Q3"
+    assert R.thirteen_f_filer_key(R.ledger_key(spot)) == R.ledger_key(roundup)
+    assert R.thirteen_f_filer_key(R.ledger_key(thirteen_f())) == "news:thirteen_f:0001067983:2026-Q3"
+    for other in ("news:thirteen_f:1067983:2026-Q3", "news:thirteen_f:0000000000:2026-Q3",
+                  "news:thirteen_f:0001067983:2026-Q5", "news:thirteen_f:0001067983:2026Q3",
+                  "news:thirteen_f:0001067983:2026-Q3:NWT", "news:thirteen_f_spotlight:0001234567:2026-Q3",
+                  "news:thirteen_f_spotlight:0001234567:2026-Q3:nwt", "news:thirteen_f_spotlight:0001234567:2026-Q3:N:W",
+                  "news:money_map:AAPL:2025", "news:insider_spotlight:CTSO:2026-11-16", "thirteen_f:0001067983:2026-Q3",
+                  "", None, 3, "x" * 200):
+        assert R.thirteen_f_filer_key(other) is None, other
+
+
+# ── news-v23: the several-company records (the restyle, owner 2026-11-19) ─────────────────────────────────────────
+
+
+def test_news_v23_the_post_bounds_are_two_to_three_and_two_to_four():
+    assert R.CONGRESS_MONTH_COMPANIES == (2, 3) and R.EARNINGS_DAY_COMPANIES == (2, 4)
+    one = congress()
+    with pytest.raises(ValueError):
+        congress_month(one)                                                             # one company: no post
+    nv, ct, aa, bb = (one, congress(company=co("CTSO", "Contoso"), members=2),
+                      congress(company=co("AAPL", "Apple"), members=2), congress(company=co("BBBB", "Bbbb"), members=2))
+    assert len(congress_month(nv, ct, aa).counts) == 3
+    with pytest.raises(ValueError):
+        congress_month(nv, ct, aa, bb)                                                  # four: over the most
+    reps = [earnings(company=co(s, n)) for s, n in (("COST", "Costco"), ("CTSO", "Contoso"), ("AAPL", "Apple"),
+                                                    ("MSFT", "Microsoft"), ("NVDA", "NVIDIA"))]
+    with pytest.raises(ValueError):
+        earnings_day(reps[0])
+    assert len(earnings_day(*reps[:4]).reports) == 4
+    with pytest.raises(ValueError):
+        earnings_day(*reps)
+
+
+@pytest.mark.parametrize("make", [
+    lambda: congress_month(congress(), congress(members=2)),                                       # same symbol
+    lambda: congress_month(congress(), congress(company=co("NVDX", "nvidia"), members=2)),         # same name
+    lambda: congress_month(congress(company=co("BRK-A", "Berkshire A")),
+                           congress(company=co("BRK-B", "Berkshire B"), members=2)),               # same issuer
+    lambda: earnings_day(earnings(), earnings(eps_actual=1.0, eps_estimate=0.9)),
+    lambda: earnings_day(earnings(company=co("GOOGL", "Alphabet A")), earnings(company=co("GOOG", "Alphabet C"))),
+    lambda: congress_month(congress(company=co("CTSO", "Contoso"), members=2), congress()),        # not ranked
+    lambda: congress_month(congress(), congress(company=co("CTSO", "Contoso"), members=2, month="2026-10")),
+    lambda: congress_month(congress(), congress(company=co("CTSO", "Contoso"), members=2),
+                           month="2026-10"),                                                       # not its month
+], ids=["symbol", "name", "issuer", "earnings_symbol", "earnings_issuer", "unranked", "count_month", "record_month"])
+def test_news_v23_a_several_company_record_never_holds_one_company_twice_or_out_of_order(make):
+    with pytest.raises(ValueError):
+        make()
+
+
+@pytest.mark.parametrize("ref, want", [
+    ("news:earnings:AAPL:2027-01-12", [("AAPL", date(2027, 1, 12))]),
+    ("news:earnings:AAPL:2027-01-12+BRK-B:2027-01-11", [("AAPL", date(2027, 1, 12)), ("BRK-B", date(2027, 1, 11))]),
+    ("news:earnings:AAPL:2027-01-12+", None),                 # an empty item
+    ("news:earnings:AAPL:2027-01-12+junk", None),             # an item without a day
+    ("news:earnings:AAPL:2027-02-30", None),                  # shaped like a day, not one
+    ("news:earnings:aapl:2027-01-12", None),                  # not canonical
+    ("news:earnings:AAPL:2027-01-12+MSFT:2027-1-2", None),
+    ("news:earnings:" + "+".join(f"AB{chr(65 + i)}:2027-01-12" for i in range(12)), None),     # over the cap
+    ("news:congress_count:2026-11", None), (None, None), (42, None),
+])
+def test_news_v23_earnings_ref_items_reads_back_exactly_what_ledger_key_writes(ref, want):
+    assert R.earnings_ref_items(ref) == want
+
+
+def test_news_v23_the_ledger_keys_of_the_several_company_records():
+    day = earnings_day()
+    assert R.ledger_key(day) == "news:earnings:COST:2027-01-12+CTSO:2027-01-12"
+    assert R.earnings_ref_items(R.ledger_key(day)) == [("COST", date(2027, 1, 12)), ("CTSO", date(2027, 1, 12))]
+    four = earnings_day(*[earnings(company=co(s, s.title())) for s in ("ABCDE", "FGHIJ", "KLMNO", "PQRST")])
+    assert len(R.ledger_key(four)) <= R.EARNINGS_REF_MAX_CHARS                         # the longest key still reads
+    assert R.earnings_ref_items(R.ledger_key(four)) is not None
+    month = congress_month()
+    assert R.ledger_key(month) == f"news:congress_count:{month.month}"
+
+
+
+# ── news-v23 phase 3: the weekly theme post — its angles, keys and records ──────────────────────────────────────
+
+def _tm(sym, name, value=None, seg=None, share=None, fy=None):
+    return R.ThemeMember(company=R.CompanyRef(symbol=sym, name=name), top_segment=seg, top_segment_share=share,
+                         fiscal_year=fy, market_value_usd=value)
+
+
+_TH_RUN = date(2026, 11, 25)
+
+
+def _big(values=(171e9, 152e9, 134e9, 98e9), **over):
+    syms = ["GEV", "NEE", "ETN", "CEG", "VRT", "PWR"]
+    base = dict(series="theme_explainer", slug="powering-machine", title="Power the Machine",
+                members=tuple(_tm(s, f"Company {s}", v) for s, v in zip(syms, values)), tickers_as_of=date(2026, 11, 18),
+                theme_size=16, angle="biggest", posted_on=_TH_RUN, values_as_of=date(2026, 11, 24))
+    base.update(over)
+    return R.ThemeExplainer(**base)
+
+
+
+def test_phase3_the_market_value_angle_says_its_own_source_and_never_the_vendor():
+    """The market-value angle's figures are not revenue breakdowns: its "Source:" label (the alt text's, the captions')
+    says what its picture footer burns. Fails without `THEME_ANGLE_SOURCE_LABELS` (it would say "company revenue
+    breakdowns" under a ranking by market value)."""
+    assert R.THEME_ANGLE_SOURCE_LABELS == {
+        "biggest": "company filings and market data; grouping by Caydex",
+        # 2026-11-20: the last three angles, each its family's source
+        "growth_profit": "company financial statements; grouping by Caydex",
+        "insiders": "SEC Form 4 filings; grouping by Caydex",
+        "congress": "congressional periodic transaction reports; grouping by Caydex"}
+    assert set(R.THEME_ANGLE_SOURCE_LABELS) <= set(R.THEME_BUILT_ANGLES)
+    assert R.source_label(_big()) == "company filings and market data; grouping by Caydex"
+    import re
+    vendor = re.compile(r"fmp|financial\s*modeling\s*prep|financialmodelingprep", re.I)
+    assert not [v for v in R.THEME_ANGLE_SOURCE_LABELS.values() if vendor.search(v)]
+
+def test_phase3_the_theme_angles_rotate_in_the_owners_order_and_wrap():
+    assert R.THEME_ANGLES == ("make_money", "biggest", "growth_profit", "insiders", "congress")
+    # every angle is built since 2026-11-20 (growth + profit, the insider scorecard, Congress)
+    assert R.THEME_BUILT_ANGLES == R.THEME_ANGLES
+    assert [R.next_theme_angle(a) for a in (None, "make_money", "biggest", "growth_profit", "insiders", "congress",
+                                            "nope")] == ["make_money", "biggest", "growth_profit", "insiders",
+                                                         "congress", "make_money", "make_money"]
+    assert (R.THEME_REPEAT_DAYS, R.THEME_ANGLE_MIN_COMPANIES, R.THEME_HISTORY_DAYS) == (28, 4, 84)
+    assert R.THEME_HISTORY_DAYS >= 70            # "the last ~10 weeks of theme keys"
+
+
+@pytest.mark.parametrize("ref, items", [
+    ("news:theme_explainer:silicon-rush:biggest:2026-11-25", ("silicon-rush", "biggest", date(2026, 11, 25))),
+    ("news:theme_explainer:cyber-wars:congress:2027-01-06", ("cyber-wars", "congress", date(2027, 1, 6))),
+    # every theme key before the angles: "how they make money" on its (member list's) date
+    ("news:theme_explainer:ai-chips:2026-11-01", ("ai-chips", "make_money", date(2026, 11, 1))),
+    ("news:theme_explainer:silicon-rush:charts:2026-11-25", None),          # an angle that is not one
+    ("news:theme_explainer:Silicon-Rush:biggest:2026-11-25", None),         # a slug outside the grammar
+    ("news:theme_explainer:silicon-rush:biggest:2026-02-30", None),         # shaped like a day, not one
+    ("news:theme_explainer:silicon-rush:biggest:2026-11-25:x", None),
+    ("news:theme_explainer:silicon-rush", None), ("news:money_map:AAPL:2025", None), (None, 1), (42, None),
+    ("news:theme_explainer:" + "a" * 200 + ":2026-11-01", None),
+])
+def test_phase3_theme_ref_items_reads_both_key_shapes_strictly(ref, items):
+    assert R.theme_ref_items(ref) == (None if items == 1 else items)
+
+
+def test_phase3_a_theme_records_key_names_the_theme_the_angle_and_the_run_date_and_reads_back():
+    rec = _big()
+    assert R.ledger_key(rec) == "news:theme_explainer:powering-machine:biggest:2026-11-25"
+    assert R.theme_ref_items(R.ledger_key(rec)) == ("powering-machine", "biggest", _TH_RUN)
+    back = R.record_from_fact_sheet(R.fact_sheet(rec, rejections={}, selection={}))
+    assert back == rec
+    # a fact sheet stored BEFORE the angles (no angle / posted_on / values_as_of / market value) reads back as a
+    # "how they make money" record keyed on its member list's date — exactly the key it was written with
+    old = R.record_to_dict(R.ThemeExplainer(
+        series="theme_explainer", slug="ai-chips", title="AI Chips",
+        members=tuple(_tm(s, f"Company {s}", seg="Data Center", share=0.5, fy="2025") for s in "ABCDEF"),
+        tickers_as_of=date(2026, 11, 1), theme_size=6))
+    for k in ("angle", "posted_on", "values_as_of"):
+        old.pop(k)
+    for m in old["members"]:
+        m.pop("market_value_usd")
+    rec_old = R.record_from_dict(old)
+    assert (rec_old.angle, rec_old.posted_on) == ("make_money", None)
+    assert R.ledger_key(rec_old) == "news:theme_explainer:ai-chips:2026-11-01"
+
+
+@pytest.mark.parametrize("over, why", [
+    (dict(angle="growth_profit"), "values_as_of"),             # a market value never rides another angle's post
+    (dict(angle="charts"), "angle"),
+    (dict(posted_on=None), "posted_on"),                                          # an angle names its run date
+    (dict(values_as_of=None), "members"),
+    (dict(values_as_of=date(2026, 11, 17)), "values_as_of"),                      # 8 days before the run
+    (dict(values_as_of=date(2026, 11, 26)), "values_as_of"),                      # after the run
+    (dict(tickers_as_of=date(2026, 11, 26)), "tickers_as_of"),
+    (dict(members=tuple(_tm(s, f"Company {s}", v) for s, v in zip("ABC", (3e9, 2e9, 1e9)))), "members"),  # < 4
+])
+def test_phase3_a_market_value_post_record_refuses_what_it_cannot_say(over, why):
+    with pytest.raises(ValueError, match=why):
+        _big(**over)
+
+
+def test_phase3_a_market_value_post_ranks_every_member_by_a_dated_value_the_largest_first():
+    assert [m.company.symbol for m in _big().members] == ["GEV", "NEE", "ETN", "CEG"]
+    with pytest.raises(ValueError, match="not ranked"):
+        _big(values=(152e9, 171e9, 134e9, 98e9))
+    with pytest.raises(ValueError, match="dated market value"):
+        _big(members=tuple(_tm(s, f"Company {s}", v) for s, v in zip("ABCD", (4e9, 3e9, None, 1e9))))
+    for bad in (0.0, -1e9, float("inf"), 60e12, True):
+        with pytest.raises(ValueError):
+            _tm("X", "Company X", bad)
+    # a "how they make money" record never carries market values
+    with pytest.raises(ValueError, match="market values"):
+        R.ThemeExplainer(series="theme_explainer", slug="ai-chips", title="AI Chips",
+                         members=tuple(_tm(s, f"Company {s}", 1e9 if s == "A" else None) for s in "ABCDEF"),
+                         tickers_as_of=date(2026, 11, 1), angle="make_money", posted_on=_TH_RUN)
+
+
+def test_phase3_the_earnings_window_is_eight_days_on_a_thursday_only():
+    week = [date(2026, 11, 23) + timedelta(days=i) for i in range(7)]
+    assert [R.earnings_window_days(d) for d in week] == [7, 7, 7, 8, 7, 7, 7]
+
+
+# ── news-v23 phase 3, the theme's last three angles (2026-11-20): growth + profit, the insider scorecard, Congress ──
+
+def _gp(sym, rev=200.0, prior=100.0, net=10.0, fy="2025", **kw):
+    return R.ThemeMember(company=R.CompanyRef(symbol=sym, name=f"Company {sym}"), top_segment=None,
+                         top_segment_share=None, fiscal_year=fy, revenue_usd=rev, prior_revenue_usd=prior,
+                         net_income_usd=net, **kw)
+
+
+def _growth(members=None, **over):
+    base = dict(series="theme_explainer", slug="silicon-rush", title="Silicon Rush",
+                members=members if members is not None else tuple(_gp(s) for s in "ABCD"),
+                tickers_as_of=date(2026, 11, 18), theme_size=21, angle="growth_profit", posted_on=_TH_RUN)
+    base.update(over)
+    return R.ThemeExplainer(**base)
+
+
+def _ins(sym, buys=0.0, sells=1e6):
+    return R.ThemeMember(company=R.CompanyRef(symbol=sym, name=f"Company {sym}"), top_segment=None,
+                         top_segment_share=None, fiscal_year=None, purchases_usd=buys, sales_usd=sells)
+
+
+def _insiders(members=None, **over):
+    ms = members if members is not None else (_ins("A", 2e6, 0.0), _ins("B", 1e6, 5e6), _ins("C", 0.0, 9e6),
+                                              _ins("D", 0.0, 1e6))
+    base = dict(series="theme_explainer", slug="cyber-wars", title="Cyber Wars", members=tuple(ms),
+                tickers_as_of=date(2026, 11, 18), theme_size=15, angle="insiders", posted_on=_TH_RUN,
+                window_start=_TH_RUN - timedelta(days=90), window_end=_TH_RUN - timedelta(days=1),
+                companies_checked=12)
+    base.update(over)
+    return R.ThemeExplainer(**base)
+
+
+def _cg(sym, n, name=None):
+    return R.ThemeMember(company=R.CompanyRef(symbol=sym, name=name or f"Company {sym}"), top_segment=None,
+                         top_segment_share=None, fiscal_year=None, congress_members=n)
+
+
+def _congress(members=None, **over):
+    ms = members if members is not None else (_cg("A", 6), _cg("B", 4), _cg("C", 3), _cg("D", 2))
+    base = dict(series="theme_explainer", slug="modern-battlefield", title="Modern Battlefield", members=tuple(ms),
+                tickers_as_of=date(2026, 11, 18), theme_size=16, angle="congress", posted_on=_TH_RUN, month="2026-10")
+    base.update(over)
+    return R.ThemeExplainer(**base)
+
+
+def test_phase3_the_last_three_angles_are_built_and_their_classes_and_bounds_are_pinned():
+    assert R.THEME_ANGLE_CLASSES == {"insiders": "C", "congress": "C"}
+    assert (R.THEME_GROWTH_MAX_ABS, R.THEME_GROWTH_YEAR_GAP_DAYS, R.THEME_STATEMENT_MAX_AGE_DAYS,
+            R.THEME_LOSS_MAX_RATIO, R.THEME_GROWTH_MAX_MEMBERS) == (5.0, (357, 378), 485, 10.0, 14)
+    assert (R.THEME_INSIDER_WINDOW_DAYS, R.THEME_TALLY_ROWS, R.CONGRESS_MAX_MEMBERS) == (90, 6, 535)
+    # a 52-week year ends 364 days after the last, a 53-week one 371, a calendar year 365 / 366
+    assert all(R.THEME_GROWTH_YEAR_GAP_DAYS[0] <= d <= R.THEME_GROWTH_YEAR_GAP_DAYS[1] for d in (364, 365, 366, 371))
+
+
+def test_phase3_growth_and_profit_are_ratios_of_the_record_never_a_guess():
+    m = _gp("A", rev=214.0, prior=100.0, net=120.0)
+    assert R.theme_growth(m) == pytest.approx(1.14) and R.theme_profit_per_100(m) == pytest.approx(56.07, abs=0.01)
+    assert R.theme_growth(_tm("X", "Company X")) is None and R.theme_profit_per_100(_tm("X", "Company X")) is None
+    loss = _gp("B", rev=100.0, prior=95.0, net=-17.0)
+    assert R.theme_profit_per_100(loss) == pytest.approx(-17.0) and R.theme_growth(loss) == pytest.approx(5 / 95)
+    rec = _growth()
+    assert R.ledger_key(rec) == "news:theme_explainer:silicon-rush:growth_profit:2026-11-25"
+    assert R.record_from_fact_sheet(R.fact_sheet(rec, rejections={}, selection={})) == rec
+    assert R.record_content_classes(rec) == frozenset({"F"})
+
+
+@pytest.mark.parametrize("make, why", [
+    (lambda: _gp("A", rev=0.0), "revenue_usd"),                                         # revenue not positive
+    (lambda: _gp("A", prior=-5.0), "prior_revenue_usd"),
+    (lambda: _gp("A", net=float("nan")), "net_income_usd"),
+    (lambda: _gp("A", net=None), "revenue_usd"),                                        # the trio, all or none
+    (lambda: _gp("A", fy=None), "revenue_usd"),                                         # the fiscal year with them
+    (lambda: _growth(members=tuple(_gp(s) for s in "ABC")), "members"),                 # < 4 companies
+    (lambda: _growth(members=tuple(_gp(s) for s in "ABCDEFGHIJKLMNO")), "at most 14"),  # past the post's cap
+    (lambda: _growth(members=(_gp("A", rev=700.0, prior=100.0),) + tuple(_gp(s) for s in "BCD")), "plausibility"),
+    (lambda: _growth(members=(_gp("A", rev=1.0, prior=1.0, net=-11.0),) + tuple(_gp(s) for s in "BCD")),
+     "implausible loss"),
+    (lambda: _growth(members=(_gp("A", net=250.0),) + tuple(_gp(s) for s in "BCD")), "above revenue"),
+    # another angle's facts never ride a growth post
+    (lambda: _growth(members=(_gp("A", congress_members=3),) + tuple(_gp(s) for s in "BCD")), "congress_members"),
+    (lambda: _growth(month="2026-10"), "month"),
+    (lambda: _growth(members=tuple(_tm(s, f"Company {s}") for s in "ABCD")), "both years"),
+])
+def test_phase3_a_growth_post_record_refuses_what_it_cannot_say(make, why):
+    with pytest.raises(ValueError, match=why):
+        make()
+
+
+def test_phase3_growth_at_the_bounds_is_kept_exactly_to_them():
+    # +500% exactly is kept (the bound is "above"), a loss of exactly 10x revenue too; net income equal to revenue too
+    _growth(members=(_gp("A", rev=600.0, prior=100.0, net=-6000.0), _gp("B", rev=100.0, prior=100.0, net=100.0),
+                     _gp("C", rev=1.0, prior=6.0, net=0.5), _gp("D")))
+
+
+def test_phase3_an_insider_scorecard_record_holds_its_window_its_checked_count_and_its_order():
+    rec = _insiders()
+    assert R.ledger_key(rec) == "news:theme_explainer:cyber-wars:insiders:2026-11-25"
+    assert R.record_from_fact_sheet(R.fact_sheet(rec, rejections={}, selection={})) == rec
+    assert R.record_content_classes(rec) == frozenset({"F", "C"})          # filings: class C must be on too
+    assert [m.company.symbol for m in sorted(rec.members, key=R.theme_insider_order_key)] == ["A", "B", "C", "D"]
+
+
+@pytest.mark.parametrize("make, why", [
+    (lambda: _ins("A", 0.0, 0.0), "at least one"),                       # a listed row has a purchase or a sale
+    (lambda: _ins("A", -1.0, 5.0), "purchases_usd"),
+    (lambda: _ins("A", None, 5.0), "both totals"),
+    (lambda: _insiders(window_start=None), "window_start"),
+    (lambda: _insiders(window_start=_TH_RUN - timedelta(days=89)), "90-day"),
+    (lambda: _insiders(window_start=_TH_RUN - timedelta(days=91), window_end=_TH_RUN - timedelta(days=2)),
+     "day before the run"),
+    (lambda: _insiders(companies_checked=3), "companies_checked"),       # fewer than the listed members
+    (lambda: _insiders(companies_checked=16), "companies_checked"),      # more than the theme holds
+    (lambda: _insiders(companies_checked=None), "companies_checked"),
+    (lambda: _insiders(members=(_ins("C", 0.0, 9e6), _ins("A", 2e6, 0.0), _ins("B", 1e6, 5e6), _ins("D"))),
+     "order"),                                                           # a sale-only row before the purchases
+    (lambda: _insiders(members=(_ins("A", 2e6, 0.0), _ins("B", 1e6, 5e6), _ins("D", 0.0, 1e6), _ins("C", 0.0, 9e6))),
+     "order"),                                                           # the sales not largest first
+    (lambda: _insiders(month="2026-10"), "month"),
+])
+def test_phase3_an_insider_scorecard_record_refuses_what_it_cannot_say(make, why):
+    with pytest.raises(ValueError, match=why):
+        make()
+
+
+def test_phase3_a_congress_theme_record_holds_counts_of_two_or_more_members_the_most_first():
+    rec = _congress()
+    assert R.ledger_key(rec) == "news:theme_explainer:modern-battlefield:congress:2026-11-25"
+    assert R.record_from_fact_sheet(R.fact_sheet(rec, rejections={}, selection={})) == rec
+    assert R.record_content_classes(rec) == frozenset({"F", "C"})
+    # ties by the NAME (theme_congress_defense.jpg: General Dynamics before Kratos, both 2)
+    tie = _congress(members=(_cg("PLTR", 6), _cg("LMT", 4), _cg("GD", 2, "General Dynamics"), _cg("KTOS", 2, "Kratos")))
+    assert [m.company.symbol for m in tie.members] == ["PLTR", "LMT", "GD", "KTOS"]
+
+
+@pytest.mark.parametrize("make, why", [
+    (lambda: _cg("A", 1), "congress_members"),                            # one member could be identified
+    (lambda: _cg("A", 536), "congress_members"),
+    (lambda: _cg("A", True), "congress_members"),
+    (lambda: _congress(month=None), "month"),
+    (lambda: _congress(month="2026-13"), "month"),
+    (lambda: _congress(month="2026-11"), "has not ended"),               # the run's own month
+    (lambda: _congress(members=(_cg("B", 4), _cg("A", 6), _cg("C", 3), _cg("D", 2))), "order"),
+    (lambda: _congress(members=(_cg("A", 6), _cg("B", 4), _cg("C", 3))), "members"),     # < 4 companies
+    (lambda: _congress(values_as_of=date(2026, 11, 24)), "values_as_of"),
+])
+def test_phase3_a_congress_theme_record_refuses_what_it_cannot_say(make, why):
+    with pytest.raises(ValueError, match=why):
+        make()
+
+
+def test_phase3_record_content_classes_is_the_series_class_plus_the_angles():
+    assert R.record_content_classes(_big()) == frozenset({"F"})
+    assert R.record_content_classes(theme()) == frozenset({"F"})
+    assert R.record_content_classes(object()) == frozenset()
+
+
+# ── phase 4 (2026-11-20): a walked-back segment fact names the company's newer fiscal year ──────────────────────────
+
+def _wb(sym="INTC", fy="2022", latest="2025", seg="Client Computing Group", share=0.55):
+    return R.ThemeMember(company=R.CompanyRef(symbol=sym, name=f"Company {sym}"), top_segment=seg,
+                         top_segment_share=share, fiscal_year=fy, latest_fiscal_year=latest)
+
+
+def test_p4_a_walked_back_fact_round_trips_and_an_older_sheet_reads_back_none():
+    """`ThemeMember.latest_fiscal_year` is ADDITIVE: a make_money record carries it through its fact sheet; a sheet
+    written before it (no key) reads back None — never a guess."""
+    members = (_wb(),) + tuple(_tm(s, f"Company {s}", seg="Line", share=0.5, fy="2025") for s in "ABCDE")
+    rec = R.ThemeExplainer(series="theme_explainer", slug="silicon-rush", title="Silicon Rush", members=members,
+                           tickers_as_of=date(2026, 11, 18), angle="make_money", posted_on=_TH_RUN)
+    sheet = R.fact_sheet(rec, rejections={}, selection={})
+    assert R.record_from_fact_sheet(sheet) == rec
+    assert sheet["record"]["members"][0]["latest_fiscal_year"] == "2025"
+    for m in sheet["record"]["members"]:
+        del m["latest_fiscal_year"]
+    back = R.record_from_fact_sheet(sheet)
+    assert all(m.latest_fiscal_year is None for m in back.members) and back.members[0].fiscal_year == "2022"
+
+
+@pytest.mark.parametrize("kw", [
+    dict(latest="2022"), dict(latest="2021"),              # not NEWER than the fact's own year
+    dict(latest="FY25"), dict(latest=2025), dict(latest=""),
+    dict(seg=None, share=None),                            # a year with no fact
+    dict(fy=None),
+])
+def test_p4_a_walked_back_fact_must_name_a_newer_fiscal_year(kw):
+    with pytest.raises(ValueError, match="latest_fiscal_year|fiscal_year"):
+        _wb(**kw)
+
+
+def test_p4_a_walked_back_fact_rides_only_the_make_money_post():
+    """Like every angle's own field, `latest_fiscal_year` never rides another angle's post."""
+    with pytest.raises(ValueError, match="latest_fiscal_year travels only"):
+        _big(members=tuple(R.ThemeMember(company=R.CompanyRef(symbol=s, name=f"Company {s}"), top_segment="Line",
+                                         top_segment_share=0.5, fiscal_year="2022", latest_fiscal_year="2025",
+                                         market_value_usd=v)
+                           for s, v in zip(("GEV", "NEE", "ETN", "CEG"), (171e9, 152e9, 134e9, 98e9))))

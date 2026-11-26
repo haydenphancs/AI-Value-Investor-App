@@ -5652,6 +5652,29 @@ day, ET):
   day after its report, so a Friday card stays until Monday noon;
 - `none` — the sheet asked about a ticker with nothing listed in the window.
 
+**The LIVE label** (owner, 2026-11-20: "LIVE all day until midnight") is not a status
+(`live_label`): a report wears it on its own day from the moment it turns `live` (03:00 ET, or earlier
+once a figure is in) to midnight ET, its results in or not, so a report in at 06:48 shows LIVE beside
+its figures all day. Only the badge reads it (`AlertResponse.earnings_live_label`,
+`EarningsLiveResponse.live_label`; iOS `showsLiveLabel` on the card, `showsLiveBadge` on the sheet);
+every poll, every "waiting" and every "checking" reads the status, so a finished report reads
+finished beside the label and nothing polls it as if its results were still to come. Its end needs
+one ask: a sheet left open asks once just after midnight ET (`label_end_seconds`, measured between
+instants so a clock-change day is right; a failed ask over a shown answer asks again on the 30 s
+retry for 20 asks, then at most every 5 min, never after the old answer's interval, which may count
+down to a midnight long passed), and the iOS round asks from 00:01 ET about a card
+still labelled (`TrackingViewModel.labelEndReports`), or a Friday card on a resumed app would stay
+LIVE until Monday's first feed build; an answer still labelled (a phone clock ahead of the
+server's) holds that card until the answer's own `poll_seconds`. FMP's leftover row (one report,
+two dates) never wears the label, whether it reads as the report before or holds figures of its own
+(`report_before`, else the service's own look at the trading day before): that company reported
+the day before. Which row is the report follows the push (`_the_report_before`): an earlier row
+this process saw land outside its own result window (a stale Friday row FMP filled on Monday
+morning beside Monday's true report) is the one the push skipped, so the later row keeps its label
+and its late read. Judged from this process's landings alone: after a restart, or when FMP fills the
+stale earlier row inside its own window after the true report was told, the true report shows no
+label and is not read late (residuals; figures and pushes are unaffected).
+
 A symbol draws ONE card from the days before today: its newest reported report, else the newest one
 still up (`newest_report`); the sheet opened with no date takes the same pick. The sheet asks again
 as `poll_seconds` says (`sheet_poll_seconds`): 30 s while `live`, 03:00 ET (or earlier once a figure
@@ -5661,7 +5684,8 @@ looking, 2 FMP calls, and folds any late FMP fill; such a fold moves `checked_at
 read FMP, never to the moment it folded, so the sheet's "updated" keeps moving after the loop's own
 reads stop at 22:00); 120 s while `reported` with a preliminary figure on show, during the hours FMP is
 still asked (`fmp_window_open`); 30 s for a record still wanting FMP whose day the loop has yet to
-load (`awaits_first_load`); null otherwise.
+load (`awaits_first_load`); once just after midnight ET for a report in on its own day, which takes its
+LIVE label off; null otherwise.
 A day nobody has read is never `none`, which iOS prints and stops asking on: it answers
 `upcoming`, or `awaiting` before today, with no figures and a 30 s recheck, and a calendar outage
 answers the same, never a 502. With `EARNINGS_LIVE_ENABLED` off the loop idles: the sheet returns
@@ -5734,14 +5758,15 @@ readable, the live days and the trading day before them (`sheet_days`, `restore_
 before anything decides. A restored figure is never a landing, and its filing is never read again
 by SEC or Gemini. A row is trusted only by the verifier that kept it (`FILING_VERIFIER_VERSION`):
 one of another version reads as no row, so the deploy that ships a verifier fix reads a filing of
-today still pending once more while the SEC watch is open. A record given back for a day past the
+today still pending, or complete with no filing held (read late), once more while the SEC watch is
+open. A record given back for a day past the
 live days puts one FMP look on the next round (`sheet_asked`), since the table holds no consensus.
 The table is migration `database/migrations/209_earnings_filing_cache.sql`, applied by the owner
 by hand (never by Claude) before the deploy and checked with the read-only VERIFY query in its
 header. The code tolerates either order: with the table missing, or a read failed, each restore
 logs a WARNING and tries again every 120 s, and a restart behaves as it did before the table (a
-report of today still pending has its filing read again while the SEC watch is open, and after
-22:00 ET waits for FMP). `EARNINGS_LIVE_FILINGS_ENABLED` off restores nothing. A filing read in the
+report of today still pending, or complete with no filing held (read late), has its filing read
+again while the SEC watch is open, and after 22:00 ET waits for FMP). `EARNINGS_LIVE_FILINGS_ENABLED` off restores nothing. A filing read in the
 minute before a deploy, its `earnings_live` push not yet sent, goes without one; `earnings_result`
 has the daily pass behind it.
 
@@ -5797,6 +5822,56 @@ costs a buzz outright are listed in `earnings_live_sender`'s docstring. With eit
   record was first seen, and a filing restored from the table are none, so a deploy never
   re-announces a morning's results in the afternoon. A filing's figure goes out on the next FMP
   tick, up to a minute after it verifies.
+- EPS lands on its own (2026-11-20): a record seen with no EPS at all lands when its first EPS
+  shows, even when a revenue came first (`eps_seen_pending`). Buckle pre-announces its quarter's
+  sales, so on 2026-11-20 its record was born holding them and its EPS landed with no push and no
+  log line until this rule. A held EPS is a figure, never a blank, and the same closures apply: a
+  release with a figure out before first sight, and a restored release that carries an EPS (one
+  whose EPS the verifier refused leaves FMP's EPS still to land; the ledger's key stops anyone
+  hearing twice). A release out before first sight with no figure (an outlook, a link) closes and
+  clears nothing, so FMP's first EPS still lands, even one held as a slip while the release came in.
+- A watched report's first figure or first EPS logs `EARNINGS_LIVE_LANDING` (INFO) with what each
+  metric shows and FMP's raw answer, `landed` on the one line per landing (the push's),
+  `first_seen_with_figure` for a figure in at first sight, `eps_after_landing` for an EPS after it.
+  FMP changing a figure it had already given on a landed watched report, or the consensus beside
+  one, logs `EARNINGS_LIVE_CHANGED` (WARNING, old -> new); FMP's first figure of a metric no
+  LANDING line carries (a revenue after the landing, or an EPS whose landing came from the
+  company's release or was closed) is `EARNINGS_LIVE_FMP_FIRST` (INFO), so what FMP first said is
+  always on record. A consensus moving before its figure and a zero the record's own rules take
+  off log no change. On 2026-11-20 FRO's first answer (revenue +31%, EPS +10%)
+  reached a phone and FMP restated it within two hours (revenue in line, EPS -12%), and no line
+  held a figure to check either by.
+- A result FMP changes after its push (owner, 2026-11-20: "Fix inbox text"): for each report a
+  push of this process told, each kind, the sender keeps every text the report's inbox rows may
+  hold (the push's, each correction's, and the record's own as each look saw it, since a held
+  row's wake writes the record's words). A look (the record's words changed, or rows were still
+  held at the last one) finds the texts the record now contradicts, a stated verdict or percent in
+  the card's words, and rewrites the rows past their buzz still holding one of them, marked
+  "Updated: " (`PushDispatchService.revise_sent_text`), the 16:00 ET pass's rows among them when
+  they hold such a text, with no second buzz and a WARNING. Each text's rows take their own merged
+  words: the record's for every metric the record states, the text's own for one it no longer
+  states (not out, or held), so a row never says "not out yet" or "being confirmed" of a figure
+  its phone showed, nor shows one its phone was spared, nor sets a row's own revenue verdict
+  beside an EPS that no longer bears it out (the revenue check, below). A metric that came in
+  later, or a figure stated with no verdict ("reported", a GAAP EPS, a revenue the check withholds)
+  that gains one, is news, not a correction; but a text a correction wrote is the sender's own, so
+  its "Updated: " rows follow the record whatever moves ("Follow FMP"), a withheld revenue verdict
+  coming back included. A row holding words the sender never saw is left as it is, and so is a held row (its wake reads the
+  record); one opened before its wake ends unread, so while any row is held the look is repeated
+  every 5 min (`HELD_RETRY_SECONDS`), the held rows read before the writes. A live push also follows
+  the report's result rows, which a wake makes of a held live row whose user turned Live Results
+  off, and every followed report's result rows a wake wrote in the live words (a surprise that no
+  longer clears 5% at the wake), a track of their own that reads and writes nothing until a wake
+  has written such a row. At most 20 looks with writes a round, those a record change owes first,
+  then held re-looks, longest due first, the rest next round; the first failed write ends the
+  round's corrections and waits 5 min, the texts it may have written kept first (a write can commit
+  and its call still fail).
+  `EARNINGS_LIVE_INBOX_CORRECTIONS_ENABLED` (on) turns them off. Residuals: process-local (every
+  deploy restarts the web process, and a restart forgets what was sent); a report no push of this
+  process told (the 16:00 ET pass's alone) is never followed; a row a wake wrote between two looks
+  holds words never seen and keeps them; a held row shows the push's words in the inbox until its
+  wake (opened before it, until the next look); `revise_sent_text` filters `notification_events` on
+  `dedup_key`, which no index leads with (a full scan per write: fine at today's size).
 - Who is told stays the dispatcher's call (preference, master switch, cap, quiet hours; §11.2).
   Both kinds carry `night_hold_by_default` (§11.5). The claim is taken for users who pass their
   toggle and cap, but a night-hold row held past the user's midnight meets its cap at the wake,
@@ -5813,7 +5888,24 @@ costs a buzz outright are listed in `earnings_live_sender`'s docstring. With eit
   consensus (beat, missed or in line, with a percentage when an honest one prints), or as
   "reported" when no honest verdict exists, and a figure a guard holds reads "being confirmed"
   (`live_copy`; `result_copy` states only an EPS beat or miss by its percentage). A held row's
-  text is decided at its wake (§11.5).
+  text is decided at its wake (§11.5). A revenue 25% or more off a consensus of $100M or more,
+  whose EPS does not move the same way by at least half as much, is told with no verdict,
+  "Revenue reported" (or the release's figure alone), since such a gap is more often FMP setting
+  one measure against a consensus on another than news (owner, 2026-11-20: "Add the check";
+  `_revenue_in_doubt`). A release's GAAP EPS neither raises that doubt nor settles it. Of the
+  season's 99 US reports with revenue 25%+ off a $100M+ consensus, 16 were read against the
+  company's own release: through the record the rule keeps all 9 real surprises (a release read
+  first with a GAAP EPS alone included), withholds 3 of the 7 mismatches (TFC, CNA, KKRT) and FRO's
+  first answer, finds NAVI's and APLD's already held by the revenue guard, and misses BEN and HGV,
+  whose EPS rose with the mismatched revenue. It fires on 34 of the season's 2,570 US reports with
+  a $100M+ consensus (1.3%; 0.7% of all). With no floor (as first built) it was 7.1% of all and
+  19.6% of reports under $100M, where a figure far from a tiny consensus is routine: the 2026-11-20
+  review found the owner had been told "about 1%" from the $100M+ group alone. The card and the
+  sheet still show FMP's numbers. The inbox corrections read such a revenue as a figure with no
+  verdict, and a doubt resting on an EPS the record holds states nothing, so a passing hold
+  corrects nothing. `EARNINGS_LIVE_REVENUE_CHECK_ENABLED` (on) turns it off; INFO
+  `EARNINGS_LIVE_REVENUE_WITHHELD` names each landing whose push went out so, after the send (a row
+  held for the night takes the record's words at its wake).
 
 **Wire.** `AlertResponse` gained eleven optional keys (`earnings_status`, `report_date`,
 `eps_actual`, `revenue_actual`, `eps_surprise_pct`, `revenue_surprise_pct`, `eps_basis`,
@@ -5917,6 +6009,39 @@ refuses it.
   minute's count, so some rounds read nothing, and those tickers are read about every 76–118 s. A ticker SEC's map lists under no company is FMP-only for the day, said once in the log, at
   WARNING for a ticker written as a US listing (letters alone), which has lost the fast path; one
   whose record shows foreign forms alone (20-F, 40-F, 6-K) rests 30 min between reads with no slot.
+  Late reads (owner, 2026-11-20: "Yes, read it once"): a report FMP completes before its release is
+  read moves to a second list (`late_filing_symbols`, `run_once(late=)`), since the release is the
+  only source of its outlook and its link (on 2026-11-20 FMP beat BJ's 8-K by 13 min and IESC's by
+  39 s, and no sheet showed either). It is read after every waiting ticker, in the slots and the
+  minute's room they leave (late reads count in the 25 a minute), never placed, at most every 5 min
+  in its company's windows and 15 outside, 06:00–22:00 ET on a day EDGAR is open (none on Columbus
+  or Veterans Day, whose releases are filed the next business day and are not read late), never a
+  ticker on foreign forms, never again once its release is read or restored, and at most one late
+  model call a round, a ticker's own walk of its filings included. While a waiting ticker reads at
+  the fast cadence as the call starts (judged then, after the read's own SEC reads), or will at any
+  moment the whole call could span (sampled at its start, its end and each window opening or
+  EDGAR's last minute between: `_busy_during`), that call is cut at 20 s
+  (`_LATE_MODEL_DEADLINE_SECONDS`): the waiting ticker's next read, which can still win a figure,
+  waits at most that for one that cannot. A cut spends no attempt; its filing is tried again in a
+  round that starts with no such ticker, or, once a twin of the issuer has read the release, at the
+  ticker's next late read (5 min in its windows, 15 outside), which then costs no call unless a
+  newer filing came after the cut (`_Watch.cut_on`); tried again, the call keeps the whole deadline
+  unless it is judged busy again as it starts (each such cut is paid for), so a release the model
+  needs longer for still gives its outlook in a calm stretch. A cut filing later settled another way
+  (not the release, or out of attempts) leaves nothing waiting. A company FMP beat costs one to three more
+  submissions reads, two document reads and one model call (about a cent); a complete row the day
+  after a report (FMP's leftover) is never read late. A release read late lands on a record holding
+  FMP's figures and its landing: it adds its outlook and link alone (its figures are dropped before
+  they reach the record, judged when the figure arrives from the record alone, so a report FMP
+  completed while its release was being read counts too, and one FMP put back on hold does not:
+  FMP's are confirmed and told, and a release figure beside them could move a stated verdict and
+  hold the report preliminary for good), and sends nothing. A release with no outlook, or whose
+  figures all failed verification, still leaves its link, which the table keeps and restores like
+  any other row; so does every release found, a waiting ticker's and a twin's served from the memo
+  included. A release with no figure at all out before first sight closes no landing. `EARNINGS_LIVE_LATE_READS_ENABLED` (on) turns the late list off; a release read
+  for a waiting report that FMP completes meanwhile is still treated as read late. Residual: a
+  report FMP puts back on hold after its late read shows "being confirmed" until FMP fixes it. The
+  walks above do not include late reads.
 - **Gemini**: one call per read of a filing, beside two document reads
   (`EARNINGS_LIVE_EXTRACT_MODEL`, gemini-3.8-flash, the owner's pick of 2026-11-19; no thinking
   budget, never cached; about $0.0085 a read, from $0.002 for a short release to $0.016 for a long
@@ -7635,6 +7760,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-11-14 | The report's Earnings Timeline (Future Forecast) plots ADJUSTED EPS on its reported years (owner: "Switch to adjusted", after a platform survey). A reported year's EPS is the sum of its four earnings-feed quarters (`_adjusted_annual_eps`: each with a comparable consensus and a computed surprise, exactly four distinct quarter ends inside the fiscal window, the last within 7 days of the year end, gaps 75–125 days so a 12/12/12/16-week calendar such as Costco's counts), so the first forecast year's EPS change and an EPS CAGR from the last reported year are measured; a year carries its GAAP figure (`eps_gaap_label`) only where the two differ by more than max(2%, $0.03), and iOS then labels the line "Adj. EPS" (legend and popup) — a GAAP-only reporter such as Apple keeps plain "EPS". No GAAP figure, no basis note and no "n/a" analyst line on a past year are shown (owner: "we don't need to show GAAP anymore", "Remove the note"). The whole company keeps the GAAP timeline (unchanged) unless it reports in USD and its LAST reported year's sum lands within max(25%, $0.10) of FMP's consensus row for that year; an older year without four comparable quarters is N/A, never GAAP. The earnings service reads 28 quarterly income rows (was 20; earnings payload 6, its daily price series still spans 20 quarters) so all five drawn years and the YoY anchor have their quarters; report chat calls the rate "adjusted EPS CAGR"; the PDF adds no note. Shipped 1.02 shows the adjusted figures labelled plain "EPS" with no note (reports are shared, so the payload cannot differ per client) | ORCL drew GAAP $5.83 → consensus $8.15 ("+40%", mostly two measures) with the FY2027E change blank; Yahoo, stockanalysis, Finviz, Zacks, TIKR, Seeking Alpha and Morningstar all measure it on the consensus's basis: 8.15 / 7.63 = +6.8% (the feed's 1.47+2.26+1.79+2.11). Measured on 58 cached collections: within a few percent of the consensus for nearly every large company; BRK-B (GAAP-like feed), NKE, CRMD, PL, PLUG, ROKU fail the check and keep GAAP. Accepted residuals: FMP's consensus rows for OLDER years are unreliable (FY2024 ORCL 3.99, CSCO 2.29, AVGO 2.23 beside true 5.56/3.73/4.86), so only the last year is checked; a broken older feed quarter passes (ServiceNow 2022–2024, split mis-adjusted: 2023 reads +971%) | GAAP history with a blank first-year change (the line still jumps); GAAP → consensus (+40%, shown by no platform); checking every year against its consensus (drops ORCL/CSCO/AVGO/STX FY2024 on FMP's bad rows); a quarter-to-quarter continuity check (flags real one-offs: LMT, META, INTC); the adjusted figure for the last year only (moves the jump one year back) |
 | 2026-11-14 | The Earnings Timeline's price line is drawn on fiscal YEAR-ENDS (owner: "Shift the price line", "no need to add anything", and the dashed reported/forecast divider removed). `EarningsTimelineChart.yearEndShift`: a close at fraction f of fiscal year i is drawn at column i − 0.5 + f, so each year's last day lands on its own bar and EPS dot (bars and dots never move apart: "revenue and eps go together"); the legacy calendar mapping shifts the same way; the line still starts at the first bar; the "Price shown to …" caption counts closes from the first year-end. iOS only — the wire and old builds are unchanged | The bar and dot sat at the column centre, i.e. mid-year on the chart's own time scale: ORCL's Nov 13 2026 close (46% into FY2027, Jun 2026 – May 2027) ended beside the FY2027 dot, read as "FY2027 is now", and a December filer's close ran PAST its in-progress 2026 dot. Every price-vs-earnings chart surveyed (FAST Graphs, GuruFocus, Zacks; Simply Wall St for fundamentals) puts a year's value at its year END. Now ORCL's price stops between the FY2026 and FY2027 bars, a December filer's just before its 2026 bar | EPS dots at the column edge with bars centred (owner: dots and bars must stay together); a "Nov 13" end marker, dashed forecast EPS, a "Price through …" caption (declined: "no need to add anything"); regrouping into calendar years (invents figures); a caption saying dots are mid-year |
 | 2026-11-14 | Report chat answers beyond the report (owner: "I need Cay AI be able answer things outside of the report too … for data like number, it should prefer what we have in the report"; decisions "Tools + web only", "On now, every chat", "Yes, add capex", "Fix it too", "Hide, say why"). `_REPORT_GROUNDING_RULE` gains a beyond-the-report branch (Caydex's data and tools, then a web search when one runs, memory only for stable background and never for a figure; the report's figure leads, a later-dated Caydex figure follows as current; the "not in what you were given" exit is scoped to the report); the voice trailer and the resolver's fenced tail are scoped the same way; an explicit ask no tier serves gets `_WEB_UNAVAILABLE_ASKED_RULE`; the automatic tier's topics add announced plans, investments, commitments, deals, partnerships, strategy and other recent facts; the web body says an announced plan is a dated event, not a past filed figure; `check_company_financials` gains operating cash flow and capital expenditure (growth payload 9); FMP's zero-filled FCF row is a gap (growth snapshot 8); banks, insurers, lenders and brokers get no OCF series, named "not meaningful". Every-chat and automatic web search are turned on by Railway variables (`CHAT_WEB_SEARCH_ALL_CHATS_ENABLED`, `CHAT_AUTO_WEB_SEARCH_MODE`), code defaults unchanged; the 7-day shadow week is skipped by the owner's decision. Production state is recorded only after the owner confirms the variables (OWNER_TASKS §2.1). 2026-11-15: both are on in production (owner, 2026-11-14: "On now, every chat (Recommended)"); the web service deployed at 18:43 UTC runs with `CHAT_WEB_SEARCH_ALL_CHATS_ENABLED` = true and `CHAT_AUTO_WEB_SEARCH_MODE` = on. The allowlist is unset, so the automatic tier is open to every signed-in caller with consent v3; its caps are the defaults (100 searches a day, 5 per account a day), inside chat's cap of 180 web searches a day | ORCL report chat, "Search for me, how much Oracle invest in data center?" → "The report does not provide specific dollar figures…": on the local backend (no Brave key) no search could run and nothing told the user; and in any build the report rule's only exit, the voice trailer and the fenced tail kept answers inside the report, while no Caydex tool carried capex | Remembered figures for outside-the-report numbers (reverses the 2026-10-09 company tier; owner chose "Tools + web only"); opening the report tier without an explicit ask (the 2026-10-02 decision and the pre-consent privacy text); a 7-day shadow week first; keeping operating cash flow for banks (rebuilds the FCF the card calls N/M) |
+| 2026-11-20 | Live earnings after the first report day (owner, that day: "Fix both now", "Fix inbox text", "LIVE all day until midnight", "Yes, read it once"): EPS lands on its own (`eps_seen_pending`); FMP's figures are logged at a watched report's landing (`EARNINGS_LIVE_LANDING`) and when FMP changes them after (`EARNINGS_LIVE_CHANGED`); a push FMP contradicts later has its inbox rows corrected, "Updated: …", with no second buzz (`revise_sent_text`); the LIVE label stays on a report's own day to midnight ET beside its results (`live_label`, a flag, not a status); a release FMP beat is still read once, late, for its outlook and link. After a review of that change the same day: corrections speak in the card's words, count "reported" turning into a verdict as news, wait while a stated metric is held, rewrite a row read before its wake, and stop at the first failed write; a late read keeps its outlook and link and drops its figures, makes one model call a round, cut at 20 s, and skips EDGAR's holidays; FMP's leftover row never wears the label; the logs name a restatement apart from a first fill; two switches, `EARNINGS_LIVE_INBOX_CORRECTIONS_ENABLED` and `EARNINGS_LIVE_LATE_READS_ENABLED`, both on. A second review of those fixes: a correction keeps the push's words for a figure now held (it no longer waits for it), and its retry writes only rows still holding what they held, never over a wake's words; a failed write waits 5 min; a late read's deadline doubles per failed try and its link-only row is restored; the strip is judged when the figure arrives; the label and the late list follow the push about a stale earlier row; the logs carry FMP's later revenue. A third review: a correction now rewrites only rows holding words the sender knows a row can hold, each in its own merged words (never a figure a woken row's phone was spared), and follows the report's result rows; a late read is cut at 20 s only while a waiting ticker is in its window and a cut waits for a calm round without spending an attempt; the strip is judged from the record when the figure arrives; a late read keeps its link even when every figure failed. A fourth review: a look keeps the texts it may have written before its write, and reads the held rows first; result rows a wake wrote in the live words are followed; a late call is judged busy over its whole span; every release found keeps its link; a release with no figure closes no landing. A fifth review: the live-words track reads and writes nothing until a wake writes such a row, and looks a record change owes go before held re-looks, longest due first; a late call is judged busy as it starts, after its own SEC reads, and a cut one is served from the memo once a twin has read its release; a release with no figure clears neither landing flag. Then, the owner's calls on the research ("Add the check", "Follow FMP", "Backend only"): a revenue 25%+ off consensus whose EPS does not move the same way by half as much goes in the live push with no verdict; corrections keep following FMP's newest answer; the web redeploys only for `/backend/**` changes (`watchPatterns`), so an iOS- or docs-only push no longer restarts it (a backend push, a variable change or a crash still does, and a restart forgets what was pushed). A sixth review, after the owner's "fix what you need to fix first": the revenue check gains its $100M floor (unfloored it withheld 7.1% of all US reports against the "about 1%" quoted) and lets a release's GAAP EPS neither raise nor settle it (4 of the 9 real surprises lost their verdict when the release came first); a passing EPS hold corrects nothing; a correction's own "Updated: " rows follow FMP; a correction never pairs a revenue verdict with an EPS that no longer bears it out; the WITHHELD line is written once, after the send; `EARNINGS_LIVE_REVENUE_CHECK_ENABLED`; a deleted held row marks nothing; a cut filing settled another way leaves nothing waiting | 2026-11-20 (BJ, BKE, FRO, IESC watched): BKE pre-announces quarterly sales, so its record was born holding a revenue and its EPS never landed (no push, no log line); FRO's first FMP answer set IFRS revenue against a TCE consensus and an off-basis EPS ("revenue +31%, EPS +10%"), restated within two hours to "EPS missed 12%", with no figure logged to check either; LIVE ended at the results, so a 06:54 MT look saw none; FMP beat every 8-K (BJ by 13 min, IESC by 39 s), so no sheet showed Guidance | A blanket "no % when revenue is 25%+ off consensus" rule (research: 9 of 16 such US reports were real surprises, so it would hide real news; the owner chose the EPS cross-check instead); a 2nd-FMP-answer confirmation delay (FRO's wrong answer stood 10+ min, so it would not have caught it); a server-only LIVE flip of the status (the app would say "is reporting" and poll every 30 s beside finished results); reading late releases every minute (no figure left to win, so a slot's minute is not spent) |
 
 ---
 

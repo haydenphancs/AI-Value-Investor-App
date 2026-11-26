@@ -8,7 +8,9 @@
 //
 
 import SwiftUI
+import Accessibility
 import AuthenticationServices
+import OSLog
 
 struct SignInView: View {
     @Environment(AppState.self) private var appState
@@ -16,21 +18,53 @@ struct SignInView: View {
 
     @State private var mode: Mode = .signIn
     @State private var email: String = ""
+    /// Kept ONLY here, in memory, for the life of this screen — never persisted. The code screen
+    /// needs it (confirming the address signs the user in with it), so it is not cleared while
+    /// that screen is up.
     @State private var password: String = ""
     @State private var displayName: String = ""
     @State private var errorMessage: String?
     @State private var isSubmitting = false
     @State private var showForgotPassword = false
+    /// Sign-up only: the new password can be shown while typing it (CC-07). Sign-in keeps the
+    /// plain secure field AutoFill fills.
+    @State private var showPassword = false
+    @FocusState private var focusedField: Field?
     /// Terms / Privacy, readable BEFORE an account exists. See `legalFooter`.
     @State private var legalDocument: SignInLegalDocument?
     /// Sign-in-wrap assent, shown under every sign-in / sign-up button. See `legalFooter`.
     static let assentLine = "By tapping Sign In or Create Account, or continuing with Apple or Google, you agree to the Terms of Use and acknowledge the Privacy Policy."
-    /// Set after a signup that needs email confirmation — the view then shows a
-    /// terminal "check your inbox" state instead of pretending the user is signed in.
-    @State private var pendingConfirmationMessage: String?
-    @State private var didResendConfirmation = false
+    /// Set when the address still needs confirming — after a sign-up, and when a sign-in is
+    /// refused with EMAIL_NOT_CONFIRMED. The code screen (`ConfirmEmailView`) then covers the
+    /// form: there is no session yet, so this view must not pretend the user is signed in.
+    @State private var pendingConfirmation: PendingConfirmation?
+    /// The Forgot-password sheet was opened from the code screen. See `forgotPasswordDismissed`.
+    @State private var forgotPasswordFromConfirmation = false
+
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "auth")
+    /// The fields' vertical inset (`labeled`). The show / hide button cancels it so its 44-pt
+    /// target fills the field's height instead of growing the field.
+    private static let fieldVerticalPadding: CGFloat = 12
+    /// Apple's minimum tap target.
+    private static let minTapTarget: CGFloat = 44
 
     enum Mode { case signIn, signUp }
+
+    private enum Field: Hashable { case displayName, email, password }
+
+    /// What the code screen needs. The address is captured when the screen opens, so editing
+    /// the form underneath can never change which account a code is checked against.
+    private struct PendingConfirmation {
+        let email: String
+        /// True right after a sign-up, when an email has just gone out: the code screen then
+        /// starts its resend cooldown. False on the sign-in path, which sends nothing.
+        let codeJustSent: Bool
+        /// The sign-up response's sentence ("…Already have an account? Sign in or reset your
+        /// password."), shown on the code screen. The server words it identically for a new, a
+        /// pending and an already-confirmed address, and it is the only hint an existing user
+        /// gets that no code is coming (IOS-CONF-2). nil on the sign-in path.
+        let signUpMessage: String?
+    }
 
     var body: some View {
         ZStack {
@@ -44,6 +78,7 @@ struct SignInView: View {
                     Text(mode == .signIn ? "Welcome back" : "Create account")
                         .font(AppTypography.titleLarge)
                         .foregroundColor(AppColors.textPrimary)
+                        .accessibilityAddTraits(.isHeader)
 
                     Text(mode == .signIn
                          ? "Sign in to access your research and credits."
@@ -57,6 +92,10 @@ struct SignInView: View {
                             TextField("", text: $displayName)
                                 .textContentType(.name)
                                 .autocapitalization(.words)
+                                .focused($focusedField, equals: .displayName)
+                                .submitLabel(.next)
+                                .onSubmit { focusedField = .email }
+                                .accessibilityLabel("Display name")
                         }
                     }
 
@@ -83,11 +122,14 @@ struct SignInView: View {
                             .keyboardType(.emailAddress)
                             .autocapitalization(.none)
                             .autocorrectionDisabled()
+                            .focused($focusedField, equals: .email)
+                            .submitLabel(.next)
+                            .onSubmit { focusedField = .password }
+                            .accessibilityLabel("Email")
                     }
 
                     labeled("Password") {
-                        SecureField("", text: $password)
-                            .textContentType(mode == .signIn ? .password : .newPassword)
+                        passwordField
                     }
 
                     // Sign-up ONLY. On sign-in the rules are irrelevant and actively harmful:
@@ -101,7 +143,8 @@ struct SignInView: View {
                     if let errorMessage {
                         Text(errorMessage)
                             .font(AppTypography.bodySmall)
-                            .foregroundColor(AppColors.bearish)
+                            .foregroundColor(AppColors.loss)
+                            .fixedSize(horizontal: false, vertical: true)
                             .padding(.top, 4)
                     }
 
@@ -109,7 +152,9 @@ struct SignInView: View {
                         HStack {
                             Spacer()
                             if isSubmitting {
-                                ProgressView().tint(AppColors.textOnAccent)
+                                ProgressView()
+                                    .tint(AppColors.textOnAccent)
+                                    .accessibilityLabel(mode == .signIn ? "Signing in" : "Creating account")
                             } else {
                                 Text(mode == .signIn ? "Sign In" : "Create Account")
                                     .font(AppTypography.bodyEmphasis)
@@ -166,10 +211,12 @@ struct SignInView: View {
                 }
                 .padding(.horizontal, 24)
             }
+            // The code screen is opaque, but VoiceOver would still walk the form beneath it.
+            .accessibilityHidden(pendingConfirmation != nil)
         }
-        .sheet(isPresented: $showForgotPassword) {
+        .sheet(isPresented: $showForgotPassword, onDismiss: forgotPasswordDismissed) {
             // Carry the typed email over so the user doesn't retype it.
-            ForgotPasswordView(initialEmail: email)
+            ForgotPasswordView(initialEmail: pendingConfirmation?.email ?? email)
         }
         .sheet(item: $legalDocument) { document in
             NavigationStack {
@@ -187,8 +234,24 @@ struct SignInView: View {
             }
         }
         .overlay {
-            if let message = pendingConfirmationMessage {
-                confirmationPrompt(message)
+            if let pending = pendingConfirmation {
+                ConfirmEmailView(
+                    email: pending.email,
+                    password: password,
+                    codeJustSent: pending.codeJustSent,
+                    signUpMessage: pending.signUpMessage,
+                    onForgotPassword: {
+                        forgotPasswordFromConfirmation = true
+                        showForgotPassword = true
+                    },
+                    onUseDifferentEmail: leaveConfirmation
+                )
+            }
+        }
+        // An error that appears silently is invisible to VoiceOver (CC-05).
+        .onChange(of: errorMessage) { _, message in
+            if let message, !message.isEmpty {
+                AccessibilityNotification.Announcement(message).post()
             }
         }
         // CLOSE ITSELF WHEN THE SESSION ARRIVES.
@@ -207,11 +270,61 @@ struct SignInView: View {
         // it. `.onChange` and not `.task`/`.onAppear`: it must fire on the TRANSITION, or a
         // view presented while already authenticated would dismiss itself instantly.
         //
-        // Sign-up that needs email confirmation deliberately does NOT dismiss — there is no
-        // session yet, so `isAuthenticated` stays false and the "check your inbox" overlay
-        // above remains, which is the whole point of that terminal state.
+        // An address that still needs confirming deliberately does NOT dismiss — there is no
+        // session yet, so `isAuthenticated` stays false and the code screen above remains.
+        // Confirming there signs the user in, which is what closes this view.
         .onChange(of: appState.auth.isAuthenticated) { _, isAuthenticated in
             if isAuthenticated { dismiss() }
+        }
+    }
+
+    // MARK: - Password field
+
+    /// Sign-in: one secure field, the one AutoFill fills. Sign-up: the same field with a show /
+    /// hide toggle, so a typo is not baked into a brand-new account's password (CC-07).
+    @ViewBuilder
+    private var passwordField: some View {
+        HStack(spacing: 8) {
+            Group {
+                if mode == .signUp && showPassword {
+                    TextField("", text: $password)
+                        .textContentType(.newPassword)
+                        .autocapitalization(.none)
+                        .autocorrectionDisabled()
+                } else {
+                    SecureField("", text: $password)
+                        .textContentType(mode == .signIn ? .password : .newPassword)
+                }
+            }
+            .focused($focusedField, equals: .password)
+            .submitLabel(.go)
+            .onSubmit(submit)
+            .accessibilityLabel("Password")
+
+            if mode == .signUp {
+                Button {
+                    let hadFocus = focusedField == .password
+                    showPassword.toggle()
+                    // The toggle swaps the SecureField for a TextField (or back), so the field
+                    // holding focus leaves the hierarchy and takes the keyboard with it. Writing
+                    // `.password` now is a no-op — it already reads `.password` — so focus is
+                    // re-asserted on the next main-actor turn, once the new field is mounted (PW-6).
+                    if hadFocus {
+                        Task { @MainActor in focusedField = .password }
+                    }
+                } label: {
+                    Image(systemName: showPassword ? "eye.slash" : "eye")
+                        .font(AppTypography.iconSmall)
+                        .foregroundColor(AppColors.textMuted)
+                        // The glyph alone was a ~14-pt target (PW-6). A button hit-tests what its
+                        // label draws, so the frame needs a shape to make all of it tappable.
+                        .frame(minWidth: Self.minTapTarget, minHeight: Self.minTapTarget)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+                .padding(.vertical, -Self.fieldVerticalPadding)
+                .accessibilityLabel(showPassword ? "Hide password" : "Show password")
+            }
         }
     }
 
@@ -265,6 +378,7 @@ struct SignInView: View {
                 Rectangle().fill(AppColors.textMuted.opacity(0.3)).frame(height: 1)
             }
             .padding(.vertical, 4)
+            .accessibilityHidden(true)
 
             SignInWithAppleButton(.continue) { request in
                 // Nonce is generated and hashed by the service; the raw value goes to the
@@ -284,6 +398,7 @@ struct SignInView: View {
                 HStack(spacing: 8) {
                     Image(systemName: "globe")
                         .font(AppTypography.iconSmall)
+                        .accessibilityHidden(true)
                     Text("Continue with Google")
                         .font(AppTypography.bodyEmphasis)
                 }
@@ -300,58 +415,39 @@ struct SignInView: View {
         }
     }
 
-    // MARK: - Email confirmation prompt
+    // MARK: - Email confirmation
 
-    @ViewBuilder
-    private func confirmationPrompt(_ message: String) -> some View {
-        ZStack {
-            AppColors.background.ignoresSafeArea()
+    /// Open the code screen for `address`. The form's error is cleared on the way in: the code
+    /// screen has its own, and a stale line under the password field would be waiting on return.
+    private func showConfirmation(for address: String, codeJustSent: Bool, signUpMessage: String? = nil) {
+        errorMessage = nil
+        focusedField = nil
+        pendingConfirmation = PendingConfirmation(
+            email: address, codeJustSent: codeJustSent, signUpMessage: signUpMessage
+        )
+    }
 
-            VStack(spacing: 16) {
-                Image(systemName: "envelope.badge.fill")
-                    .font(AppTypography.iconHero)
-                    .foregroundColor(AppColors.primaryBlue)
+    /// "Use a different email": back to the form in the mode it was left in, fields kept so a
+    /// mistyped address can be corrected in place.
+    private func leaveConfirmation() {
+        errorMessage = nil
+        pendingConfirmation = nil
+        focusedField = .email
+    }
 
-                Text("Confirm your email")
-                    .font(AppTypography.titleLarge)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Text(message)
-                    .font(AppTypography.body)
-                    .foregroundColor(AppColors.textSecondary)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Text(email)
-                    .font(AppTypography.bodyEmphasis)
-                    .foregroundColor(AppColors.textPrimary)
-
-                Button {
-                    pendingConfirmationMessage = nil
-                    mode = .signIn
-                    password = ""
-                } label: {
-                    Text("Back to Sign In")
-                        .font(AppTypography.bodyEmphasis)
-                        .foregroundColor(AppColors.textOnAccent)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(AppColors.primaryFill)
-                        .cornerRadius(AppCornerRadius.medium)
-                }
-                .padding(.top, 8)
-
-                // Without this, a lost or spam-filtered confirmation email leaves the
-                // account permanently unusable with no way forward.
-                Button(action: resendConfirmation) {
-                    Text(didResendConfirmation ? "Confirmation email sent" : "Resend confirmation email")
-                        .font(AppTypography.bodySmall)
-                        .foregroundColor(didResendConfirmation ? AppColors.textMuted : AppColors.primaryBlue)
-                }
-                .disabled(didResendConfirmation || isSubmitting)
-            }
-            .padding(.horizontal, 32)
-        }
+    /// The Forgot-password sheet closed. When it was opened from the code screen, a reset may
+    /// have replaced the password this view holds (and a recovery code also confirms the
+    /// address), so the code screen's "Sign in" would try a dead password. Back to the sign-in
+    /// form instead, address kept, password cleared for the new one. A reset abandoned halfway
+    /// costs a retyped password; signing in then routes straight back to the code screen.
+    private func forgotPasswordDismissed() {
+        guard forgotPasswordFromConfirmation else { return }
+        forgotPasswordFromConfirmation = false
+        pendingConfirmation = nil
+        errorMessage = nil
+        mode = .signIn
+        showPassword = false
+        password = ""
     }
 
     // MARK: - Social actions
@@ -367,6 +463,7 @@ struct SignInView: View {
             } catch SocialSignInError.cancelled {
                 // User backed out — not an error.
             } catch {
+                SocialSignInService.logFailure(error, provider: "apple")
                 errorMessage = friendlyError(error)
             }
         }
@@ -387,17 +484,7 @@ struct SignInView: View {
             } catch SocialSignInError.cancelled {
                 // User backed out — not an error.
             } catch {
-                errorMessage = friendlyError(error)
-            }
-        }
-    }
-
-    private func resendConfirmation() {
-        Task {
-            do {
-                try await appState.resendConfirmation(email: email)
-                didResendConfirmation = true
-            } catch {
+                SocialSignInService.logFailure(error, provider: "google")
                 errorMessage = friendlyError(error)
             }
         }
@@ -416,75 +503,101 @@ struct SignInView: View {
 
     private func toggleMode() {
         mode = (mode == .signIn ? .signUp : .signIn)
+        showPassword = false
         errorMessage = nil
     }
 
     private func submit() {
+        // `.onSubmit` on the password field reaches here too, so the button's own gate is
+        // repeated rather than assumed.
+        guard canSubmit, !isSubmitting else { return }
         errorMessage = nil
         isSubmitting = true
+        let submittedMode = mode
+        let address = email.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             defer { isSubmitting = false }
             do {
-                switch mode {
+                switch submittedMode {
                 case .signIn:
                     try await appState.signIn(email: email, password: password)
                 case .signUp:
                     let outcome = try await appState.signUp(
                         email: email, password: password, displayName: displayName
                     )
-                    // Confirmation required is the NORMAL path — there is no session yet,
-                    // so show the inbox prompt rather than dismissing as if signed in.
+                    // Confirmation required is the NORMAL path — there is no session yet, so
+                    // go to the code screen rather than dismissing as if signed in. The server's
+                    // sentence travels with it: for an address that already has an account it
+                    // is the only thing saying "sign in instead" (IOS-CONF-2).
                     if case .needsEmailConfirmation(let message) = outcome {
-                        pendingConfirmationMessage = message
+                        showConfirmation(for: address, codeJustSent: true, signUpMessage: message)
                     }
                 }
             } catch {
+                // The password checked out and only the ADDRESS is unconfirmed: the user needs
+                // the code screen, not a red line. Nothing is emailed from here — the old
+                // auto-resend rotated the code on every attempt, killing the one the user was
+                // about to type, and spent the hourly resend budget before they tapped anything.
+                // The code screen has an explicit "Send a new code".
+                if case .emailNotConfirmed = AppError.from(error) {
+                    showConfirmation(for: address, codeJustSent: false)
+                    return
+                }
+                // The code only — never the address or anything typed.
+                let action = submittedMode == .signIn ? "sign-in" : "sign-up"
+                let code = AppError.from(error).analyticsCode
+                Self.log.notice("email \(action, privacy: .public) failed: \(code, privacy: .public)")
                 errorMessage = friendlyError(error)
             }
         }
     }
 
+    /// One line of copy for any failure on this screen, through `AppError.from` like every
+    /// other screen (IOS-AUTH-07). The fallback names what the user was doing: a failed Create
+    /// Account used to read "Sign in failed", which suggested the account already existed.
     private func friendlyError(_ error: Error) -> String {
         // SocialSignInError FIRST — it is not an APIError, so without this arm it fell straight
         // past the `as? APIError` cast to the generic line at the bottom and its
-        // `errorDescription` was never read. That made the whole "surface the provider's own
-        // reason" change unobservable: Supabase with Google disabled returns
-        // `#error_description=Unsupported+provider`, the parser correctly threw
-        // `.provider("Unsupported provider…")`, and the user still saw "Sign in failed. Please
-        // try again." Same dead end for `.notConfigured("Supabase URL missing")` — a missing
-        // Info.plist key in a Release build looked identical to a wrong password.
+        // `errorDescription` was never read. The descriptions are fixed copy (SOC-06): the
+        // provider's raw reason goes to the log (`SocialSignInService.logFailure`), never here.
         //
         // `.cancelled` deliberately has a nil description and never reaches here: the callers
         // catch it separately as a non-error.
-        if let social = error as? SocialSignInError, let reason = social.errorDescription {
-            return reason
+        if let social = error as? SocialSignInError {
+            return social.errorDescription ?? genericFailure
         }
-        if let api = error as? APIError {
-            switch api {
-            case .authError(_, let message):
-                // A 401 carrying the structured contract — the backend's own `user_message`.
-                // MUST come before any fallback: `/auth/login`, `/auth/oauth` and
-                // `/auth/session-exchange` all return `AUTH_CREDENTIALS_INVALID` or
-                // `AUTH_PROVIDER_FAILED` now, and without this arm they fell through to
-                // `default:` and showed the useless generic line at the bottom of this function.
-                return message
-            case .unauthorized:
-                // Legacy shape only: a 401 whose body is not on the contract (an older backend,
-                // or a proxy's own response). It is no longer reachable from our auth routes —
-                // this used to hardcode "Email or password is incorrect", which is why a failed
-                // Apple sign-in accused the user of mistyping a password that flow never asks for.
-                return "We couldn't sign you in. Please try again."
-            case .businessError(_, let message):
-                return message
-            case .rateLimited:
-                return "Too many attempts. Please wait a minute and try again."
-            case .networkError:
-                return "Couldn't reach the server. Check your connection."
-            default:
-                break
-            }
+        let appError = AppError.from(error)
+        switch appError {
+        case .unauthorized, .tokenExpired:
+            // Legacy shape only: a 401 whose body is not on the contract (an older backend, or a
+            // proxy's own response). `AppError`'s own copy says "your session has expired",
+            // which is false on a form the user is signing in with.
+            return mode == .signIn
+                ? "We couldn't sign you in. Please try again."
+                : "We couldn't create your account. Please try again."
+        case .noConnection, .timeout:
+            return "Couldn't reach the server. Check your connection."
+        case .rateLimited(let seconds):
+            // In human units, from the bucket that refused (IOS-AUTH-04). Sign-in also points at
+            // recovery: the forgot-password route has its own limits.
+            let wait = AppError.waitPhrase(seconds: seconds)
+            return mode == .signIn
+                ? "Too many attempts. Please wait \(wait) and try again, or use Forgot password."
+                : "Too many attempts. Please wait \(wait) and try again."
+        case .unknown, .cancelled:
+            // A decode failure, a body off the contract, or an SDK's own text — none of it is
+            // written for users. The code is already in the log (`submit`).
+            return genericFailure
+        default:
+            let message = appError.message
+            return message.isEmpty ? genericFailure : message
         }
-        return "Sign in failed. Please try again."
+    }
+
+    private var genericFailure: String {
+        mode == .signIn
+            ? "Sign in failed. Please try again."
+            : "Couldn't create your account. Please try again."
     }
 
     @ViewBuilder
@@ -493,83 +606,15 @@ struct SignInView: View {
             Text(label)
                 .font(AppTypography.bodySmall)
                 .foregroundColor(AppColors.textSecondary)
+                // The field below carries the same name as its accessibility label, so
+                // VoiceOver reads it once, on the control.
+                .accessibilityHidden(true)
             content()
                 .padding(.horizontal, 14)
-                .padding(.vertical, 12)
+                .padding(.vertical, Self.fieldVerticalPadding)
                 .cardSurface(cornerRadius: AppCornerRadius.medium)
                 .foregroundColor(AppColors.textPrimary)
         }
-    }
-}
-
-
-// MARK: - Password rules
-
-/// The sign-up password rule, mirrored from the backend.
-///
-/// ⚠️ THIS MUST MATCH `_validate_password_strength` in `backend/app/schemas/auth.py`, which in
-/// turn mirrors the Supabase setting `Auth → Providers → Email → Password requirements`
-/// (lowercase, uppercase, digits and symbols; minimum 8). Pinned by
-/// `backend/tests/test_password_rule_parity.py`.
-///
-/// Checking it here is not belt-and-braces, it is the whole point: before this, the form
-/// enabled its button on `count >= 8`, so `abcdefgh` was submitted, accepted by our own API,
-/// and rejected by the identity provider at the last moment — for a rule the user had never
-/// been shown.
-///
-/// "Symbol" is any NON-ALPHANUMERIC character, matching the backend. Deliberately a superset of
-/// the provider's own symbol list, so this can never block a password the provider would take.
-enum PasswordRule {
-    static let minLength = 8
-
-    static func hasMinLength(_ p: String) -> Bool { p.count >= minLength }
-    static func hasUppercase(_ p: String) -> Bool { p.contains { $0.isUppercase } }
-    static func hasLowercase(_ p: String) -> Bool { p.contains { $0.isLowercase } }
-    static func hasDigit(_ p: String) -> Bool { p.contains { $0.isNumber } }
-    static func hasSymbol(_ p: String) -> Bool { p.contains { !$0.isLetter && !$0.isNumber } }
-
-    static func isSatisfied(_ p: String) -> Bool {
-        hasMinLength(p) && hasUppercase(p) && hasLowercase(p) && hasDigit(p) && hasSymbol(p)
-    }
-}
-
-/// The rule, shown as a live checklist rather than as an error after submitting.
-private struct PasswordRequirementsView: View {
-    let password: String
-
-    private var items: [(label: String, met: Bool)] {
-        [
-            ("At least \(PasswordRule.minLength) characters", PasswordRule.hasMinLength(password)),
-            ("An uppercase letter", PasswordRule.hasUppercase(password)),
-            ("A lowercase letter", PasswordRule.hasLowercase(password)),
-            ("A number", PasswordRule.hasDigit(password)),
-            ("A symbol", PasswordRule.hasSymbol(password)),
-        ]
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: AppSpacing.xxs) {
-            ForEach(items, id: \.label) { item in
-                HStack(spacing: AppSpacing.xs) {
-                    // `gain` is a TEXT-role token (4.5:1 in both appearances) — correct for a
-                    // glyph read as meaning. `textMuted` for unmet, NOT `loss`: nothing is
-                    // wrong yet, the user is still typing, and painting the whole list red on
-                    // an empty field reads as five errors before a single keystroke.
-                    Image(systemName: item.met ? "checkmark.circle.fill" : "circle")
-                        .font(AppTypography.iconXS)
-                        .foregroundColor(item.met ? AppColors.gain : AppColors.textMuted)
-                    Text(item.label)
-                        .font(AppTypography.caption)
-                        .foregroundColor(item.met ? AppColors.textSecondary : AppColors.textMuted)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "Password requirements. "
-            + items.map { "\($0.label): \($0.met ? "met" : "not met")" }.joined(separator: ", ")
-        )
     }
 }
 
@@ -577,4 +622,9 @@ private struct PasswordRequirementsView: View {
 private enum SignInLegalDocument: String, Identifiable {
     case terms, privacy
     var id: String { rawValue }
+}
+
+#Preview {
+    SignInView()
+        .environment(AppState())
 }

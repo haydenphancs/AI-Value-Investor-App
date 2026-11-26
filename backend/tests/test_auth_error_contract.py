@@ -32,7 +32,11 @@ from app.main import http_exception_handler
 # was silently exempt from every test in this file — the wire-shape check, the flat-scalar
 # check, the WWW-Authenticate check and the action check all iterate this list. Deriving it
 # means a new code is covered the moment it exists.
-_AUTH_CODES = [code for code in ErrorCode if code.value.startswith("AUTH_")]
+_AUTH_CODES = [code for code in ErrorCode if code.value.startswith("AUTH_")] + [
+    # Explicit EXTRAS, appended to the derivation rather than replacing it (TG-5): an auth-flow
+    # code without the AUTH_ prefix was silently exempt from every check in this file.
+    ErrorCode.EMAIL_NOT_CONFIRMED,
+]
 
 # Exactly what `APIErrorResponse.init(from:)` reads (Core/Services/APIClient.swift).
 _REQUIRED_KEYS = {"error_code", "message", "user_message"}
@@ -180,6 +184,21 @@ _EXPECTED_ACTIONS = {
     # the identical request eventually works — it never does until the account state changes.
     ErrorCode.AUTH_PASSWORD_NOT_SET: "fix_input",
     ErrorCode.AUTH_PASSWORD_ALREADY_SET: "fix_input",
+    # The emailed one-time code was refused (wrong, expired, used). The user is looking at the
+    # code field and the cure is a newer code — NOT retry_later (the same code is refused
+    # forever; the outage case is AUTH_UNAVAILABLE) and NOT sign_in (mid-flow, often signed out).
+    ErrorCode.AUTH_CODE_INVALID: "fix_input",
+    # /auth/confirm-email AFTER the code verified: the address is confirmed, the code is spent,
+    # and the sign-in or password write failed. `sign_in` — the one non-401 that offers it: the
+    # user is on the CODE screen, not a sign-in form, so it is not a circle, and signing in (with
+    # the password the app still holds) is what finishes the job. Never retry_later: resubmitting
+    # the dead code can only read AUTH_CODE_INVALID.
+    ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED: "sign_in",
+    # reset/set-password AFTER the code verified and the write failed (not a refused password):
+    # the field holds a dead code; the cure is a new one — fix_input, never retry_later.
+    ErrorCode.AUTH_CODE_USED: "fix_input",
+    # Sign-in refused until the address is confirmed: the action opens the confirmation step.
+    ErrorCode.EMAIL_NOT_CONFIRMED: "confirm_email",
 }
 
 
@@ -203,8 +222,16 @@ def test_only_session_failures_offer_sign_in():
     already on.
     """
     sign_in_codes = {c for c, a in _EXPECTED_ACTIONS.items() if a == "sign_in"}
-    for code in sign_in_codes:
+    # The ONE deliberate exception (C2): AUTH_CONFIRMED_SIGN_IN_FAILED is raised on the code
+    # screen after the address was confirmed — no session exists yet, the user is not on a
+    # sign-in form, and signing in is exactly the step that is left. It is NOT a 401 because no
+    # stored credential is involved (a 401 would walk iOS into its credential handling).
+    exempt = {ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED}
+    for code in sign_in_codes - exempt:
         assert _DEFAULT_STATUS[code] == 401, f"{code.value} offers sign_in but is not a 401"
+    for code in exempt:
+        assert _DEFAULT_STATUS[code] != 401
+        assert not (auth_error(code, message="m").headers or {}).get("WWW-Authenticate")
     assert ErrorCode.AUTH_CREDENTIALS_INVALID not in sign_in_codes
     assert ErrorCode.AUTH_PROVIDER_FAILED not in sign_in_codes
 
@@ -310,3 +337,78 @@ async def test_headers_survive_the_handler():
     exc = HTTPException(status_code=429, detail="slow down", headers={"Retry-After": "60"})
     response = await http_exception_handler(_request(), exc)
     assert response.headers.get("Retry-After") == "60"
+
+
+# ── AUTH_CODE_INVALID: the typed replacement for the bare-string "code invalid" 400s ───
+
+def test_the_code_invalid_contract():
+    """400 (never GoTrue's own 403, which would walk iOS into its auth handling for a typo),
+    fix_input, and copy that names the way forward — a NEWER code."""
+    body = auth_error(ErrorCode.AUTH_CODE_INVALID, message="m").detail
+    assert _DEFAULT_STATUS[ErrorCode.AUTH_CODE_INVALID] == 400
+    assert body["error_code"] == "AUTH_CODE_INVALID"
+    assert body["action"] == "fix_input"
+    assert "new code" in body["user_message"].lower()
+    assert not (auth_error(ErrorCode.AUTH_CODE_INVALID, message="m").headers or {}).get(
+        "WWW-Authenticate"
+    )
+
+
+# ── The two codes for "the code verified, and what came after it failed" (C2) ──────────
+
+
+def test_the_confirmed_sign_in_failed_contract():
+    """confirm-email after a GOOD code: the address IS confirmed and the code is spent. 503 by
+    default (the route passes 400 when the password was refused), action sign_in, copy that
+    opens "Your email is confirmed". Distinct from AUTH_UNAVAILABLE (a verify outage: the code is
+    still good, retry) — iOS branches on this code to lock the code field and promote Sign in."""
+    code = ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED
+    body = auth_error(code, message="m").detail
+    assert _DEFAULT_STATUS[code] == 503
+    assert body["error_code"] == "AUTH_CONFIRMED_SIGN_IN_FAILED"
+    assert body["action"] == "sign_in"
+    assert body["user_message"].startswith("Your email is confirmed")
+    refused = auth_error(code, message="m", status_code=400)
+    assert refused.status_code == 400 and refused.detail["action"] == "sign_in"
+    assert not (refused.headers or {}).get("WWW-Authenticate")
+
+
+def test_the_code_used_contract():
+    """reset / set-password after a GOOD code whose write failed (not a refused password): 503,
+    fix_input, and copy that says the code is gone and to send a new one."""
+    code = ErrorCode.AUTH_CODE_USED
+    body = auth_error(code, message="m").detail
+    assert _DEFAULT_STATUS[code] == 503
+    assert body["error_code"] == "AUTH_CODE_USED"
+    assert body["action"] == "fix_input"
+    assert body["user_message"] == (
+        "We couldn't set your new password, and that code has now been used. "
+        "Send a new code and try again."
+    )
+
+
+def test_a_spent_code_is_never_told_to_retry():
+    """The bug both codes close: after the code is spent, `retry_later` invites resubmitting it."""
+    for code in (ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED, ErrorCode.AUTH_CODE_USED):
+        assert _DEFAULT_ACTIONS[code] != "retry_later", code.value
+        assert "try again in a moment" not in _USER_MESSAGES[code].lower(), code.value
+
+
+def test_email_not_confirmed_copy_is_one_neutral_clause():
+    """Shipped builds APPEND their own sentence after this one, and the live email holds a
+    code AND a link — so the copy promises neither, keeps the word the client keys on, and stays
+    short enough that the appended sentence does not read as a repeat."""
+    msg = _USER_MESSAGES[ErrorCode.EMAIL_NOT_CONFIRMED]
+    assert "confirm" in msg.lower()
+    assert "link" not in msg.lower() and "code" not in msg.lower()
+    assert len(msg) <= 100, msg
+
+
+def test_auth_py_raises_no_bare_string_code_invalid_400():
+    """reset- and set-password raised `HTTPException(400, "That code is invalid or has
+    expired")` for EVERY verify_otp failure — outages included. They now go through the
+    classifier. Comment-stripped so the prose naming the old string cannot satisfy or fail it."""
+    src = (Path(__file__).resolve().parents[1] / "app" / "api" / "v1" / "endpoints" / "auth.py")
+    code = "\n".join(l.split("#", 1)[0] for l in src.read_text().splitlines())
+    assert "invalid or has expired" not in code
+    assert code.count("_otp_failure(e, route=") >= 3, "reset, set-password and confirm-email"

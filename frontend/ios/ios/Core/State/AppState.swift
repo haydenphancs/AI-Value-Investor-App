@@ -316,6 +316,13 @@ final class AppState {
             // CAYDEX-APPLE-IOS-S, 7 s). Awaited here, the splash stays live while it runs, and
             // every launch consumer below takes THIS value. `performRestore` reads again, off
             // main as well, on purpose (see there).
+            //
+            // FIRST, before that read: a fresh install drops the session tokens an EARLIER
+            // install left behind (they outlive the app), so a deleted-and-reinstalled app never
+            // silently signs the previous account back in (SEC-8). An update keeps its session;
+            // `purgeSessionLeftByAnEarlierInstall` says how it tells the two apart. Before the
+            // widget publish below on purpose — that publish is the trace it looks for.
+            await authService.purgeSessionLeftByAnEarlierInstall()
             let launchGeneration = credentialGeneration
             let launchToken = await authService.loadStoredToken()
             await primeStoredCredential(launchToken, readUnder: launchGeneration)
@@ -1643,6 +1650,7 @@ final class AppState {
         // A newer credential is about to be installed: invalidate any restore suspended
         // mid-flight, and stop a scheduled backoff firing into the middle of this.
         credentialGeneration &+= 1
+        let generation = credentialGeneration
         cancelRestoreBackoff()
         // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
         // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
@@ -1662,6 +1670,10 @@ final class AppState {
             let profile = try await authService.signIn(email: email, password: password)
             applyProfile(profile)
             await establishAuthenticatedSession(userId: profile.id)
+        } catch let adopted as SignedInProfileUnavailable {
+            // The password was accepted and the tokens stored; only the profile read failed.
+            await settleSessionWithoutProfile(adopted, generation: generation)
+            throw adopted.underlying
         } catch {
             // Status untouched: the caller was already `.unauthenticated` or `.restoring`, and
             // forcing `.unauthenticated` here would discard a `.restoring` credential that is
@@ -1683,6 +1695,7 @@ final class AppState {
         // A newer credential is about to be installed: invalidate any restore suspended
         // mid-flight, and stop a scheduled backoff firing into the middle of this.
         credentialGeneration &+= 1
+        let generation = credentialGeneration
         cancelRestoreBackoff()
         // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
         // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
@@ -1706,6 +1719,40 @@ final class AppState {
                 await establishAuthenticatedSession(userId: profile.id)
             }
             return outcome
+        } catch let adopted as SignedInProfileUnavailable {
+            // Confirmation disabled project-side, the session issued, the profile read failed.
+            await settleSessionWithoutProfile(adopted, generation: generation)
+            throw adopted.underlying
+        } catch {
+            throw error   // status untouched — see signIn
+        }
+    }
+
+    /// Confirm a new account's address with its emailed code and sign in with the password the
+    /// user just typed. Mirrors `signIn` step for step — it IS a sign-in: a newer credential is
+    /// about to be installed, so the restore machinery is fenced off first, and the profile is
+    /// adopted exactly as a password sign-in adopts it.
+    ///
+    /// Returns `.confirmedPendingConnection` rather than throwing when the server confirmed the
+    /// address and issued a session but the profile read then failed on the network: the
+    /// session is kept (`.restoring`, healed by the backoff), and the code is spent, so the
+    /// screen must say "confirmed" instead of inviting a retry that would fail as AUTH_CODE_INVALID.
+    func confirmEmail(
+        email: String, code: String, password: String
+    ) async throws -> EmailConfirmationOutcome {
+        credentialGeneration &+= 1
+        let generation = credentialGeneration
+        cancelRestoreBackoff()
+        do {
+            let profile = try await authService.confirmEmail(email: email, code: code, password: password)
+            applyProfile(profile)
+            await establishAuthenticatedSession(userId: profile.id)
+            return .signedIn
+        } catch let adopted as SignedInProfileUnavailable {
+            if await settleSessionWithoutProfile(adopted, generation: generation) {
+                return .confirmedPendingConnection
+            }
+            throw adopted.underlying
         } catch {
             throw error   // status untouched — see signIn
         }
@@ -1716,6 +1763,36 @@ final class AppState {
         try await authService.resendConfirmation(email: email)
     }
 
+    /// Settle a sign-in whose credential the server ACCEPTED — tokens in the Keychain, client
+    /// armed — but whose `/users/me` read then failed (IOS-AUTH-09, SOC-03).
+    ///
+    /// Left alone, that state was half signed in: every request carried the new Bearer while
+    /// the UI said signed out, and the next foreground or network-restored trigger signed the
+    /// user in without a word. So:
+    ///   • a TRANSIENT failure (offline, 5xx) enters the same `.restoring` window a launch uses
+    ///     — Keychain kept, client disarmed, a restore scheduled — and returns true. The user
+    ///     typed a correct password; a network blip must not cost them it.
+    ///   • an AUTH failure (the server refused the token it had just minted) undoes the
+    ///     adoption and leaves the user signed out — there is nothing left to restore.
+    ///
+    /// Guarded by the generation captured when the sign-in began: a sign-out or another sign-in
+    /// that landed during the profile read owns the session now, and this must not touch it.
+    /// (`enterRestoringWindow` re-checks it, and `discardAdoptedSession` checks the epoch too.)
+    @discardableResult
+    private func settleSessionWithoutProfile(
+        _ failure: SignedInProfileUnavailable, generation: UInt64
+    ) async -> Bool {
+        guard generation == credentialGeneration else { return false }
+        if AppError.from(failure.underlying).isAuthError {
+            if authService.discardAdoptedSession(epoch: failure.epoch) {
+                auth.status = .unauthenticated
+            }
+            return false
+        }
+        await enterRestoringWindow(generation: generation)
+        return true
+    }
+
     /// Complete a social sign-in from a provider handshake.
     ///
     /// Both provider paths converge here. Not subject to the email-confirmation gate: Apple
@@ -1724,6 +1801,7 @@ final class AppState {
         // A newer credential is about to be installed: invalidate any restore suspended
         // mid-flight, and stop a scheduled backoff firing into the middle of this.
         credentialGeneration &+= 1
+        let generation = credentialGeneration
         cancelRestoreBackoff()
         // NO `auth.status = .loading` here. `iosApp.swift` renders `SplashView()` for
         // `.loading`, so setting it swapped the ROOT view out mid-request — tearing down the
@@ -1747,8 +1825,18 @@ final class AppState {
             }
             applyProfile(profile)
             await establishAuthenticatedSession(userId: profile.id)
+        } catch let adopted as SignedInProfileUnavailable {
+            // The provider and our backend both accepted; only the profile read failed.
+            await settleSessionWithoutProfile(adopted, generation: generation)
+            throw adopted.underlying
         } catch {
-            auth.status = .unauthenticated
+            // Failed BEFORE any token was stored. This used to force `.unauthenticated` on
+            // every failure, which also discarded a `.restoring` user's still-good credential
+            // (the Keychain kept it, the UI forgot it). Like `signIn`: only a caller holding no
+            // credential at all is signed out here — which is what it already was.
+            if !authService.hasStoredToken {
+                auth.status = .unauthenticated
+            }
             throw error
         }
     }

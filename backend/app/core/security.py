@@ -8,6 +8,7 @@ from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
 from jose import JWTError, jwt
+from jose.exceptions import ExpiredSignatureError, JOSEError
 from passlib.context import CryptContext
 import secrets
 import logging
@@ -153,8 +154,14 @@ def decode_token(token: str) -> Optional[dict[str, Any]]:
             algorithms=[settings.ALGORITHM]
         )
         return payload
+    except ExpiredSignatureError:
+        # The ordinary end of every access token (and of an idle refresh token): the client
+        # refreshes, and each caller logs the outcome it acts on (`/auth/refresh` at INFO). A
+        # WARNING here doubled every lapsed session into a warning line (AUTH-BE-14).
+        logger.debug("Token decode failed: the token has expired")
+        raise
     except JWTError as e:
-        logger.warning(f"Token decode failed: {e}")
+        logger.warning("Token decode failed (%s: %s)", type(e).__name__, e)
         raise
 
 
@@ -351,11 +358,21 @@ _JWKS_MIN_REFETCH_INTERVAL = 60.0
 _jwks_lock: Optional[Any] = None   # asyncio.Lock, created lazily on the running loop
 
 
+def _supabase_auth_base() -> str:
+    """`{SUPABASE_URL}/auth/v1`, trailing slash normalised.
+
+    ONE derivation for both the JWKS URL and the expected `iss` claim, so the two can never
+    disagree: GoTrue stamps `iss` with the same external URL it serves its JWKS from. A project
+    that moves Auth to a custom domain changes both together (point `SUPABASE_URL` at it).
+    """
+    return f"{str(settings.SUPABASE_URL or '').rstrip('/')}/auth/v1"
+
+
 async def _fetch_jwks() -> dict[str, Any]:
     """Fetch and index the project's JWKS by `kid`. Returns {} on any failure."""
     import httpx  # noqa: PLC0415
 
-    url = f"{str(settings.SUPABASE_URL).rstrip('/')}/auth/v1/.well-known/jwks.json"
+    url = f"{_supabase_auth_base()}/.well-known/jwks.json"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(5.0, connect=3.0)) as client:
             resp = await client.get(url)
@@ -366,12 +383,13 @@ async def _fetch_jwks() -> dict[str, Any]:
     except Exception as e:
         # Non-fatal by design: return {} and let the caller fall through rather than raise.
         #
-        # ⚠️ No longer a real fallback for CURRENT tokens. The project's legacy HS256 signing
-        # key was REVOKED on 2026-08-15, so Supabase issues ES256 only — a JWKS outage means
-        # Supabase-issued tokens cannot be verified until it recovers. Survivable because this
-        # is not the primary path: `_user_id_from_token` tries the app's OWN `SECRET_KEY`
-        # access token first, and only social sign-in's session-exchange depends on this.
-        # Raising here would turn a transient JWKS blip into a 500 rather than a clean 401.
+        # The project's legacy HS256 signing key was REVOKED on 2026-08-15, so Supabase issues
+        # ES256 only, and the HS256 path is gone from `verify_supabase_token` (2026-11-26) — a
+        # JWKS outage means Supabase-issued tokens cannot be verified until it recovers. The
+        # ONLY consumer is `POST /auth/session-exchange`; app bearers are the app's own
+        # `SECRET_KEY` tokens and never touch the JWKS, so an outage here can never turn an
+        # ordinary expired app token into a 503. Raising here would turn a transient JWKS blip
+        # into a 500 rather than a clean 401.
         logger.warning("Supabase JWKS fetch failed (%s: %s)", type(e).__name__, e)
         return {}
 
@@ -413,70 +431,142 @@ def _reset_jwks_cache_for_tests() -> None:
     _JWKS_CACHE["fetched_at"] = 0.0
 
 
+# The ONE algorithm each JWK key type may verify. The key decides the algorithm, never the
+# token: a header claiming RS256 against the project's EC key is refused here, before python-jose
+# raises `JWKError` (a `JOSEError`, NOT a `JWTError`) on it — which used to escape as a 500 with an
+# ERROR + Sentry event per unauthenticated POST (SOC-02). Both families stay allowed because
+# Supabase can promote an RSA standby key; neither is hard-coded as "the" project algorithm.
+_ALG_FOR_KTY = {"EC": "ES256", "RSA": "RS256"}
+_SUPABASE_AUDIENCE = "authenticated"
+# A `kid` longer than this is not one Supabase mints (they are UUIDs); refusing it before the
+# JWKS lookup keeps a hostile header from being used as a cache key or a log line.
+_MAX_KID_LENGTH = 128
+
+
 async def verify_supabase_token(token: str) -> Optional[dict[str, Any]]:
     """
-    Verify a Supabase Auth JWT, accepting both asymmetric (ES256/RS256) and legacy HS256.
+    Verify a Supabase Auth JWT against the project's JWKS. Asymmetric ONLY (ES256 / RS256).
 
-    ⚠️ The algorithm decides WHICH key is used, and the two are never interchangeable. An
-    asymmetric token is verified ONLY against the JWKS public key; an HS256 token ONLY against
-    the shared secret. Passing a union of algorithms to a single `jwt.decode` is the classic
-    algorithm-confusion shape: an attacker re-signs chosen claims as HS256 using the *public*
-    key bytes as the HMAC secret, and a verifier that accepts either algorithm against either
-    key admits them as any user.
+    Returns the full payload (incl. `sub`, `iat`, `exp`, `is_anonymous`), or None. NEVER raises:
+    the one caller, `POST /auth/session-exchange`, is unauthenticated, and a raise there is an
+    off-contract 500 plus an ERROR/Sentry event an attacker can mint at will.
 
-    Measured, so the comment doesn't overstate it: **python-jose blocks that attack on its
-    own** — it refuses an asymmetric key as an HMAC secret ("Incorrect key type. Expected:
-    'oct', Received: EC") on both encode and decode. So the split here is defence in depth and
-    a guard against a future library swap, not the only thing standing in the way. It is still
-    the right shape, and `test_supabase_jwks_verification.py` pins it at the source level
-    because no behavioural test can tell a correct verifier from a permissive one while the
-    library is refusing the forgery underneath.
+    What a token must carry to pass — each one a hole that was open until 2026-11-26 (SOC-01):
 
-    Returns the payload, or None if the token is not valid.
+      * `alg` ES256 or RS256, and it must be the algorithm of the JWK its `kid` names
+        (`_ALG_FOR_KTY`). **HS256 is refused outright.** The project's legacy HS256 signing key
+        was REVOKED at Supabase on 2026-08-15, so no legitimate HS256 Supabase token can exist —
+        but this verifier still accepted any HS256 token signed with `SUPABASE_JWT_SECRET`, with
+        no `exp` and no `aud` (python-jose skips `aud` when the claim is absent and does not
+        require `exp` by default). That secret cannot be rotated at Supabase (only Revealed) and
+        sits in Railway and every developer `.env`, so it was a permanent master key:
+        `{"sub": "<victim uuid>"}` signed with it was accepted by session-exchange, and — until
+        the bearer fallback was removed from `dependencies._user_id_from_token` — as a bearer on
+        every authenticated route, surviving the victim's password reset. Nothing reads
+        `SUPABASE_JWT_SECRET` any more; the owner deletes it from Railway after this deploys.
+      * `exp`, `aud == "authenticated"`, `iss == {SUPABASE_URL}/auth/v1` and `sub`, all
+        REQUIRED (`require_*`), not merely checked when present.
+
+    ⚠️ The algorithm decides WHICH key is used, and it is never negotiable against it: one
+    `jwt.decode` per token with `algorithms=[alg]`, where `alg` already matched the JWK's key
+    type. Passing a union of algorithms to a single decode is the classic algorithm-confusion
+    shape (re-sign chosen claims as HS256 using the *public* key bytes as the HMAC secret).
+    python-jose also refuses an asymmetric key as an HMAC secret on its own, so behavioural
+    tests cannot tell a permissive verifier from a correct one;
+    `test_supabase_jwks_verification.py` pins the shape at the source level for that reason.
     """
+    if not isinstance(token, str) or not token:
+        return None
     try:
         header = jwt.get_unverified_header(token)
-    except JWTError as e:
-        logger.warning("Supabase token has an unreadable header: %s", e)
+    except JOSEError as e:
+        logger.warning("Supabase token has an unreadable header (%s: %s)", type(e).__name__, e)
+        return None
+    except Exception as e:  # noqa: BLE001 — never raise on an unauthenticated input
+        logger.warning(
+            "Supabase token header could not be parsed (%s: %s)",
+            type(e).__name__, e, exc_info=True,
+        )
         return None
 
-    alg = (header or {}).get("alg", "")
-    kid = (header or {}).get("kid")
+    if not isinstance(header, dict):
+        logger.warning("Supabase token header is not an object; refused")
+        return None
+    alg = header.get("alg")
+    kid = header.get("kid")
 
-    if alg in ("ES256", "RS256"):
-        if not kid:
-            logger.warning("Supabase token uses %s with no kid; cannot select a key", alg)
-            return None
+    if alg not in _ALG_FOR_KTY.values():
+        # HS256 (the revoked legacy key), `none`, and anything else.
+        logger.warning(
+            "Supabase token uses alg=%r — only ES256/RS256 against the project JWKS are "
+            "accepted (the legacy HS256 key was revoked 2026-08-15)",
+            alg if isinstance(alg, str) else type(alg).__name__,
+        )
+        return None
+    if not isinstance(kid, str) or not kid or len(kid) > _MAX_KID_LENGTH:
+        logger.warning("Supabase token uses %s with no usable kid; cannot select a key", alg)
+        return None
+
+    try:
         key = await _jwks_key_for(kid)
-        if not key:
-            logger.warning("No Supabase JWKS key matches kid=%s", kid)
-            return None
-        try:
-            return jwt.decode(token, key, algorithms=[alg], audience="authenticated")
-        except JWTError as e:
-            logger.warning("Supabase token verification failed (%s): %s", alg, e)
-            return None
+    except Exception as e:  # noqa: BLE001 — `_fetch_jwks` already swallows; this is the backstop
+        logger.warning(
+            "Supabase JWKS lookup raised (%s: %s) — token refused",
+            type(e).__name__, e, exc_info=True,
+        )
+        return None
+    if not isinstance(key, dict) or not key:
+        logger.warning("No Supabase JWKS key matches kid=%r", kid)
+        return None
+    expected_alg = _ALG_FOR_KTY.get(key.get("kty"))
+    if alg != expected_alg:
+        logger.warning(
+            "Supabase token header alg=%s does not match the JWK for kid=%r (kty=%r) — refused",
+            alg, kid, key.get("kty"),
+        )
+        return None
+    if key.get("alg") not in (None, alg) or key.get("use") not in (None, "sig"):
+        logger.warning(
+            "Supabase JWK kid=%r is not a %s signing key (alg=%r, use=%r) — refused",
+            kid, alg, key.get("alg"), key.get("use"),
+        )
+        return None
 
-    if alg == "HS256":
-        # Legacy path. Stays until the project revokes its legacy signing key; after that
-        # Supabase stops issuing HS256 tokens and this branch is simply never taken.
-        if not settings.SUPABASE_JWT_SECRET:
-            logger.error("SUPABASE_JWT_SECRET not configured; cannot verify a legacy token")
-            return None
-        try:
-            return jwt.decode(
-                token,
-                settings.SUPABASE_JWT_SECRET,
-                algorithms=["HS256"],
-                audience="authenticated",
-            )
-        except JWTError as e:
-            logger.warning("Supabase token verification failed (HS256): %s", e)
-            return None
+    issuer = _supabase_auth_base()
+    try:
+        payload = jwt.decode(
+            token,
+            key,
+            algorithms=[alg],
+            audience=_SUPABASE_AUDIENCE,
+            issuer=issuer,
+            options={
+                "require_exp": True,
+                "require_aud": True,
+                "require_iss": True,
+                "require_sub": True,
+            },
+        )
+    except JOSEError as e:
+        # JWTError, JWTClaimsError, ExpiredSignatureError and JWKError are all JOSEErrors.
+        # `iss` is not a secret: log what was expected so a custom-domain move is diagnosable.
+        logger.warning(
+            "Supabase token verification failed (%s, %s: %s; expected iss=%s)",
+            alg, type(e).__name__, e, issuer,
+        )
+        return None
+    except Exception as e:  # noqa: BLE001 — never raise on an unauthenticated input
+        logger.warning(
+            "Supabase token verification raised unexpectedly (%s, %s: %s) — refused",
+            alg, type(e).__name__, e, exc_info=True,
+        )
+        return None
 
-    # Anything else — including `none` — is refused rather than guessed at.
-    logger.warning("Supabase token uses unsupported alg=%r", alg)
-    return None
+    sub = payload.get("sub") if isinstance(payload, dict) else None
+    if not isinstance(sub, str) or not sub.strip():
+        logger.warning("Supabase token verified but carries no usable sub — refused")
+        return None
+    return payload
 
 
 # API Key Utilities

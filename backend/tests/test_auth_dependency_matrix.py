@@ -386,19 +386,154 @@ async def test_identity_only_user_still_resolves_a_good_token():
     assert user["id"] == _USER_ID
 
 
-# ── misconfiguration must not read as a bad credential ───────────────────────
+# ── no Supabase token is a bearer, and nothing environmental turns a 401 into a 503 ─────
+#
+# Inverted on 2026-11-26 (SOC-01 / SEC-2). This section used to pin the opposite: with
+# SUPABASE_JWT_SECRET unset, EVERY unverifiable bearer — an ordinary expired app token included —
+# answered 503 AUTH_UNAVAILABLE. iOS refreshes only on 401, so the owner could never delete that
+# variable without stranding every user whose token had expired, and the variable was the key to
+# a revoked-but-unrotatable master key. The Supabase bearer fallback is gone, so the answer for a
+# bad bearer is AUTH_TOKEN_INVALID whatever the environment holds, and a JWKS outage cannot
+# reach a bearer route at all.
+
+_LEGACY_SECRET = "legacy-shared-secret-for-tests-only-not-real"
+
+
+def _supabase_hs256(claims):
+    from jose import jwt as jose_jwt
+    return jose_jwt.encode(claims, _LEGACY_SECRET, algorithm="HS256")
+
+
+@pytest.fixture
+def _no_jwks(monkeypatch):
+    """Fails the test if any bearer dependency reaches for the Supabase JWKS."""
+    from app.core import security
+
+    calls = []
+
+    async def _fetch():
+        calls.append(1)
+        return {}
+
+    security._reset_jwks_cache_for_tests()
+    monkeypatch.setattr(security, "_fetch_jwks", _fetch)
+    yield calls
+    security._reset_jwks_cache_for_tests()
+    assert calls == [], "a bearer dependency consulted the Supabase JWKS"
+
+
+def _expired_access():
+    return create_access_token(
+        {"sub": _USER_ID, "email": "u@example.com"}, expires_delta=timedelta(seconds=-10)
+    )
+
+
+@pytest.mark.parametrize("secret", [None, _LEGACY_SECRET], ids=["secret-unset", "secret-set"])
+@pytest.mark.parametrize("token", ["not.a.jwt", "expired"], ids=["garbage", "expired-app-token"])
+@pytest.mark.asyncio
+async def test_an_unverifiable_bearer_is_INVALID_whatever_the_legacy_secret(
+    monkeypatch, _no_jwks, secret, token
+):
+    """The 401 that makes iOS refresh — never the 503 that made it keep a dead token."""
+    monkeypatch.setattr(deps.settings, "SUPABASE_JWT_SECRET", secret)
+    bearer = _expired_access() if token == "expired" else token
+    for call in (
+        lambda: get_current_user_id(credentials=_creds(bearer)),
+        lambda: get_current_user_or_guest(authorization=_bearer(bearer), supabase=_SB(_row())),
+        lambda: get_optional_user_id(authorization=_bearer(bearer)),
+        lambda: deps.get_widget_caller(credentials=_creds(bearer), x_widget_token=None),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            await call()
+        assert exc.value.status_code == 401
+        assert _code(exc.value) == "AUTH_TOKEN_INVALID"
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [{"sub": _USER_ID}, {"sub": _USER_ID, "aud": "authenticated", "exp": 4102444800}],
+    ids=["bare-sub-no-exp", "well-formed"],
+)
+@pytest.mark.asyncio
+async def test_a_token_signed_with_the_legacy_supabase_secret_is_no_bearer(
+    monkeypatch, _no_jwks, claims
+):
+    """THE master key (SOC-01): `{"sub": victim}` signed with the revoked legacy HS256 secret
+    used to authenticate as the victim on every route, forever, surviving their password reset.
+    The secret is still configured here — it must simply not matter."""
+    monkeypatch.setattr(deps.settings, "SUPABASE_JWT_SECRET", _LEGACY_SECRET)
+    forged = _supabase_hs256(claims)
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user_id(credentials=_creds(forged))
+    assert _code(exc.value) == "AUTH_TOKEN_INVALID"
+    with pytest.raises(HTTPException) as exc:
+        await get_current_user_or_guest(authorization=_bearer(forged), supabase=_SB(_row()))
+    assert _code(exc.value) == "AUTH_TOKEN_INVALID"
+    user = await get_identity_only_user(authorization=_bearer(forged))
+    assert user["id"] == GUEST_USER_ID, "the identity-only path must not resolve it either"
+
 
 @pytest.mark.asyncio
-async def test_unset_supabase_secret_reports_UNAVAILABLE_not_INVALID(monkeypatch):
-    """`verify_supabase_token` returns None when SUPABASE_JWT_SECRET is unset. Reporting that
-    as a bad credential would send every Supabase-issued user into a re-sign-in loop while the
-    real fault sat in the environment — so it answers AUTH_UNAVAILABLE (retryable, credential
-    preserved) instead."""
-    monkeypatch.setattr(deps.settings, "SUPABASE_JWT_SECRET", None)
-    with pytest.raises(HTTPException) as exc:
-        await get_current_user_or_guest(authorization=_bearer("not.a.jwt"), supabase=_SB(_row()))
-    assert exc.value.status_code == 503
-    assert _code(exc.value) == "AUTH_UNAVAILABLE"
+async def test_a_genuine_supabase_es256_session_token_is_no_bearer(monkeypatch):
+    """SEC-2: a VALID Supabase access token (as GoTrue's password grant would mint) is accepted
+    in exactly one place — the body of `/auth/session-exchange` — never as a bearer. As a bearer
+    it skipped password-change eviction entirely (`_decode_access_token` raised, the check failed
+    open), so a reset never evicted whoever held one."""
+    import time as _time
+    from jose import jwt as jose_jwt
+    from app.core import security
+
+    private_pem = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgevZzL1gdAFr88hb2\n"
+        "OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n"
+        "1RTwjmYSi9R/zpBnuQ4EiMnCqfMPWiZqB4QdbAd0E7oH50VpuZ1P087G\n"
+        "-----END PRIVATE KEY-----"
+    )
+    public_jwk = {
+        "kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig", "kid": "matrix-kid",
+        "x": "EVs_o5-uQbTjL3chynL4wXgUg2R9q9UU8I5mEovUf84",
+        "y": "kGe5DgSIycKp8w9aJmoHhB1sB3QTugfnRWm5nU_TzsY",
+    }
+    monkeypatch.setattr(security.settings, "SUPABASE_URL", "https://matrix.supabase.co")
+    security._reset_jwks_cache_for_tests()
+    security._JWKS_CACHE["keys"] = {"matrix-kid": public_jwk}
+    security._JWKS_CACHE["fetched_at"] = _time.monotonic()
+    try:
+        now = int(_time.time())
+        token = jose_jwt.encode(
+            {"sub": _USER_ID, "aud": "authenticated", "iss": "https://matrix.supabase.co/auth/v1",
+             "iat": now, "exp": now + 3600, "role": "authenticated"},
+            private_pem, algorithm="ES256", headers={"kid": "matrix-kid"},
+        )
+        # Control: the token IS valid — session-exchange would accept it.
+        assert (await security.verify_supabase_token(token))["sub"] == _USER_ID
+        with pytest.raises(HTTPException) as exc:
+            await get_current_user_id(credentials=_creds(token))
+        assert _code(exc.value) == "AUTH_TOKEN_INVALID"
+        with pytest.raises(HTTPException) as exc:
+            await get_current_user_or_guest(authorization=_bearer(token), supabase=_SB(_row()))
+        assert _code(exc.value) == "AUTH_TOKEN_INVALID"
+    finally:
+        security._reset_jwks_cache_for_tests()
+
+
+def test_the_bearer_dependencies_never_consult_supabase():
+    """Source guard, comment-stripped: the fallback must not come back by a quiet re-import."""
+    import inspect
+    import re as _re
+
+    src = inspect.getsource(deps)
+    code = "\n".join(line.split("#", 1)[0] for line in src.splitlines())
+    # Drop docstrings too: they explain the removed fallback by name.
+    code = _re.sub(r'"""[\s\S]*?"""', "", code)
+    assert "verify_supabase_token" not in code
+    assert "SUPABASE_JWT_SECRET" not in code
+    reject = inspect.getsource(deps._reject_unverifiable_token)
+    reject_code = _re.sub(r'"""[\s\S]*?"""', "", reject)
+    assert "AUTH_UNAVAILABLE" not in reject_code, (
+        "an unverifiable bearer must answer AUTH_TOKEN_INVALID, never a retryable 503"
+    )
 
 
 # ── AI generation is account-only ────────────────────────────────────────────

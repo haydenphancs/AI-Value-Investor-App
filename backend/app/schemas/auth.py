@@ -1,5 +1,8 @@
 """Auth request/response schemas matching frontend APIEndpoint.swift."""
 
+import string
+import unicodedata
+
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from typing import Optional
 
@@ -8,13 +11,38 @@ from typing import Optional
 # independent literals would drift and leave the unauthenticated route as the loose one.
 from app.schemas.user import DISPLAY_NAME_MAX_LENGTH
 
-# Minimum password length. NIST SP 800-63B guidance favours length over composition
-# rules, so there is deliberately no "must contain a symbol" requirement — those push
-# users toward predictable substitutions without adding real entropy.
+# ── The rule for a NEW password — GoTrue's own, exactly (2026-11-26) ───────────
+# Minimum length, counted in characters (GoTrue counts bytes, and a character is at least one
+# byte, so this can never be looser than the provider).
 PASSWORD_MIN_LENGTH = 8
-PASSWORD_MAX_LENGTH = 128  # bcrypt truncates past 72 bytes; cap well below any DoS range
+# GoTrue refuses a password over 72 BYTES of UTF-8 with a 400 `validation_failed` ("Password
+# cannot be longer than 72 characters" — verified against the live stack; bcrypt reads only 72
+# bytes). Counted in BYTES here because that is what it measures: one emoji is four, an
+# accented letter two, so a 40-character password can already be too long.
+PASSWORD_MAX_BYTES = 72
+# The four classes GoTrue checks, as the EXACT ASCII sets its "lowercase, uppercase letters,
+# digits and symbols" setting uses. The symbol set is GoTrue's 32-character list — which is
+# precisely ASCII punctuation (`string.punctuation`; pinned equal in the tests). Anything else
+# (a space inside the password, an accented letter, an emoji, a non-ASCII digit) is ALLOWED in
+# the password but counts toward NO class: GoTrue refuses "Aa1 bbbbbbbb" as weak, because its
+# only "symbol" is a space (verified live).
+PASSWORD_LOWERCASE = string.ascii_lowercase
+PASSWORD_UPPERCASE = string.ascii_uppercase
+PASSWORD_DIGITS = string.digits
+PASSWORD_SYMBOLS = "!@#$%^&*()_+-=[]{};':\"|<>?,./`~\\"
+_LOWER_SET = frozenset(PASSWORD_LOWERCASE)
+_UPPER_SET = frozenset(PASSWORD_UPPERCASE)
+_DIGIT_SET = frozenset(PASSWORD_DIGITS)
+_SYMBOL_SET = frozenset(PASSWORD_SYMBOLS)
+_CLASS_CHARS = _LOWER_SET | _UPPER_SET | _DIGIT_SET | _SYMBOL_SET
+
+#: The too-long refusal, worded for the person who typed 40 characters and an emoji.
+PASSWORD_TOO_LONG_MESSAGE = (
+    f"Password is too long: {PASSWORD_MAX_BYTES} bytes at most "
+    "(emoji and accented letters use more than one)."
+)
 # Ceiling on a password PRESENTED for verification (sign-in, current-password on change).
-# Generous — legacy accounts predate PASSWORD_MAX_LENGTH and must keep signing in — but
+# Generous — legacy accounts predate today's rule and must keep signing in — but
 # bounded: an unbounded field was JSON-encoded and forwarded to GoTrue synchronously ON
 # the event loop (`_BLOCKING_BY_DESIGN`), so a 2 MB "password" from an unauthenticated
 # caller stalled every other request for the whole upstream round trip.
@@ -23,79 +51,142 @@ SIGN_IN_SECRET_MAX_LENGTH = 1024
 # token a few dozen bytes. 8 KiB leaves room for any claim set without admitting a payload.
 TOKEN_MAX_LENGTH = 8192
 
+# One-time codes (signup confirmation, password recovery). The live project sends 8 digits; the
+# range is deliberately wider so a dashboard change to the OTP length never 422s every user.
+# The bounds apply to the DIGITS left after normalisation, not to the raw input: the raw field
+# is only bounded (OTP_RAW_MAX_LENGTH) so a pasted "1234 5678" or "1234-5678" still fits.
+OTP_MIN_DIGITS = 6
+OTP_MAX_DIGITS = 12
+OTP_RAW_MAX_LENGTH = 32
+_OTP_SEPARATORS = frozenset("-\u2010\u2011\u2012\u2013\u2014\u2212")
 
-#: Human-readable statement of the rule, used by the API error AND mirrored on the iOS sign-up
-#: form. One string so the two can never describe different rules to the same user.
+# ⚠️ SECRETS NEVER REPR (SEC-1). Every request model below is a local in its handler's frame,
+# and Sentry ships frame locals: a pydantic model is serialised as its repr, e.g.
+# "SignUpRequest(email='***@***', password='Hunter2!xyz')". The key-based scrubbers never see
+# a value hiding inside a repr string, so a GoTrue 429 on sign-up put plaintext passwords and
+# reset codes into Sentry. `repr=False` drops the field from __repr__/__str__ ONLY — it is
+# still validated, still readable as an attribute and still in `model_dump()`, so every call
+# that forwards it to GoTrue is unchanged. tests/test_auth_confirmation_and_oauth.py walks
+# every model in this file and fails on a secret that reprs.
+
+
+#: Human-readable statement of the rule, mirrored by the iOS checklist
+#: (`Views/Molecules/PasswordRequirementsView.swift`). One sentence so the two cannot describe
+#: different rules to the same user.
 PASSWORD_RULE_TEXT = (
-    f"Password must be at least {PASSWORD_MIN_LENGTH} characters and include an uppercase "
-    "letter, a lowercase letter, a number, and a symbol."
+    f"Password must be at least {PASSWORD_MIN_LENGTH} characters ({PASSWORD_MAX_BYTES} bytes at "
+    "most) and include an uppercase letter (A–Z), a lowercase letter (a–z), a number (0–9) and "
+    "a symbol such as ! @ # $. Spaces, accented letters and emoji don't count toward these."
 )
+
+
+def _normalize_otp_code(value: str) -> str:
+    """The digits of an emailed one-time code, normalised, or ValueError.
+
+    ONE rule for every route that takes a code (reset, set-password, confirm-email):
+      * whitespace anywhere and dashes are dropped — people paste "1234 5678" / "1234-5678";
+      * any Unicode DECIMAL digit becomes its ASCII digit — an Arabic-Indic or full-width
+        keyboard types "١٢٣٤٥٦٧٨", which GoTrue would compare as a different string and refuse
+        as an invalid code the user cannot see anything wrong with;
+      * anything else (letters, superscripts, punctuation) is refused here, before the code is
+        sent upstream;
+      * the DIGIT count must be OTP_MIN_DIGITS..OTP_MAX_DIGITS. The old rule bounded only the
+        raw length, so "1-2-3-" (6 characters, 3 digits) passed and reached GoTrue.
+    """
+    if not isinstance(value, str):
+        raise ValueError("Code must be the digits from your email.")
+    digits = []
+    for ch in value:
+        if ch.isspace() or ch in _OTP_SEPARATORS:
+            continue
+        if ch.isdecimal():
+            digits.append(str(unicodedata.decimal(ch)))
+            continue
+        raise ValueError("Code must be the digits from your email.")
+    cleaned = "".join(digits)
+    if not (OTP_MIN_DIGITS <= len(cleaned) <= OTP_MAX_DIGITS):
+        raise ValueError("Code must be the digits from your email.")
+    return cleaned
 
 
 def _validate_password_strength(value: str) -> str:
     """Shared password rule for every endpoint that SETS a password.
 
-    ⚠️ THIS MIRRORS A SUPABASE SETTING, and must never be STRICTER than it.
+    ⚠️ THIS IS GOTRUE'S RULE, EXACTLY — not a superset of it (reversed on purpose, 2026-11-26).
     Auth → Sign In/Providers → Email is configured with
     `Password requirements = lowercase, uppercase letters, digits and symbols` and
-    `Minimum password length = 8`. GoTrue enforces that server-side whatever we do here.
+    `Minimum password length = 8`, and GoTrue itself caps a password at 72 bytes.
 
-    Checking it here as well is not redundant — it is what stops the app ACCEPTING a password
-    the provider will refuse. Before this, iOS gated on `count >= 8` and this function checked
-    length only, so `abcdefgh` sailed through both and was rejected by GoTrue at the last
-    moment, for a rule the user had never been shown.
+    Checking it here is what stops the app ACCEPTING a password the provider will refuse, and
+    on two routes that is not a cosmetic difference: reset- and set-password run `verify_otp`
+    FIRST, which spends the single-use emailed code, and only then write the password. A
+    password we passed and GoTrue refused burned the code (PW-1), with three recovery emails an
+    hour per address — a few spaced passphrases ("Blue Sky 2025") locked recovery for an hour.
 
-    "Symbol" is deliberately ANY NON-ALPHANUMERIC character, which is a superset of GoTrue's
-    own symbol list. The asymmetry is the safety property: a superset can never reject
-    something the provider would have accepted (a false rejection the user cannot diagnose,
-    because our message would name a rule they appear to satisfy). The reverse — a password we
-    accept and GoTrue refuses, e.g. one whose only symbol is exotic — is still handled, and now
-    handled well: it surfaces as AUTH_PASSWORD_REJECTED carrying the provider's own reasons.
+    This used to define "symbol" as ANY non-alphanumeric character and "uppercase" as any
+    `isupper()`, a deliberate SUPERSET meant never to reject what GoTrue accepts. The cost of
+    that asymmetry turned out to be the worse one: a space, "€" or "É" passed here and failed
+    there, AFTER the code was spent. So the classes are now GoTrue's own ASCII sets
+    (`PASSWORD_LOWERCASE` / `_UPPERCASE` / `_DIGITS` / `_SYMBOLS`). Other characters are still
+    allowed inside a password; they just count toward no class, and the message says so.
+    The HIBP "pwned" refusal cannot be checked ahead of time, so the after-verify
+    AUTH_PASSWORD_REJECTED path stays.
 
-    ⚠️ Applies ONLY to endpoints that SET a password (sign-up, reset, change). `SignInRequest`
-    has no such validator and must never grow one: existing accounts predate this rule, and
-    enforcing it at sign-in would lock out every user whose password does not satisfy it —
-    turning a hardening change into an outage. A LENGTH ceiling does apply at sign-in
-    (`SIGN_IN_SECRET_MAX_LENGTH`), which is a different thing: it is far above anything
-    GoTrue/bcrypt can distinguish (72 bytes), so it cannot lock anyone out, and it turns a
+    Order: too short, too long (bytes), padded, then EVERY missing class in one message.
+
+    ⚠️ Applies ONLY to endpoints that SET a password (sign-up, reset, change, set-password, and
+    confirm-email's set-password branch — called there by hand, never on its schema).
+    `SignInRequest` has no such validator and must never grow one: existing accounts predate
+    this rule, and enforcing it at sign-in would lock out every user whose password does not
+    satisfy it. A LENGTH ceiling does apply at sign-in (`SIGN_IN_SECRET_MAX_LENGTH`), which is a
+    different thing: it is far above 72 bytes, so it cannot lock anyone out, and it turns a
     multi-megabyte "password" into a 422 with no upstream call.
     """
+    if not isinstance(value, str):
+        raise ValueError("Password must be text.")
     if len(value) < PASSWORD_MIN_LENGTH:
         raise ValueError(
             f"Password must be at least {PASSWORD_MIN_LENGTH} characters."
         )
-    if len(value) > PASSWORD_MAX_LENGTH:
-        raise ValueError(
-            f"Password must be {PASSWORD_MAX_LENGTH} characters or fewer."
-        )
+    # Characters first (cheap, and anything over 72 characters is over 72 bytes), so a
+    # 1 MiB body is never UTF-8 encoded just to be refused.
+    if len(value) > PASSWORD_MAX_BYTES or len(value.encode("utf-8", "surrogatepass")) > PASSWORD_MAX_BYTES:
+        raise ValueError(PASSWORD_TOO_LONG_MESSAGE)
     if value.strip() != value:
         raise ValueError("Password can't start or end with a space.")
 
     # Reported as ONE message naming every unmet class, not the first failure. Revealing them
     # one at a time makes the user resubmit repeatedly to discover a rule we already knew in
     # full — and each round trip costs a slot against the registration rate limiter.
+    present = set(value)
     missing = []
-    if not any(c.isupper() for c in value):
-        missing.append("an uppercase letter")
-    if not any(c.islower() for c in value):
-        missing.append("a lowercase letter")
-    if not any(c.isdigit() for c in value):
-        missing.append("a number")
-    if not any(not c.isalnum() for c in value):
-        missing.append("a symbol")
+    if not present & _UPPER_SET:
+        missing.append("an uppercase letter (A–Z)")
+    if not present & _LOWER_SET:
+        missing.append("a lowercase letter (a–z)")
+    if not present & _DIGIT_SET:
+        missing.append("a number (0–9)")
+    if not present & _SYMBOL_SET:
+        missing.append("a symbol such as ! @ # $")
     if missing:
-        raise ValueError("Password must include " + ", ".join(missing) + ".")
+        listed = missing[0] if len(missing) == 1 else ", ".join(missing[:-1]) + " and " + missing[-1]
+        message = f"Password must include {listed}."
+        # Only when it explains something: the password holds a character the user may think
+        # counts (a space, "É", "€", "٣") but GoTrue does not.
+        if present - _CLASS_CHARS:
+            message += " Spaces, accented letters and emoji don't count toward these."
+        raise ValueError(message)
     return value
 
 
 class SignInRequest(BaseModel):
     email: EmailStr
-    password: str = Field(max_length=SIGN_IN_SECRET_MAX_LENGTH)
+    password: str = Field(max_length=SIGN_IN_SECRET_MAX_LENGTH, repr=False)
 
 
 class SignUpRequest(BaseModel):
     email: EmailStr
-    password: str
+    password: str = Field(repr=False)
     # Same bound as `UpdateProfileRequest.display_name`, and imported from there so the two
     # cannot drift: this is the SAME column, reached by an UNAUTHENTICATED route, so leaving it
     # open here would make the bound on the authenticated one pointless.
@@ -118,18 +209,16 @@ class ResetPasswordRequest(BaseModel):
     """Finish a reset using the one-time code from the email."""
 
     email: EmailStr
-    # Supabase recovery OTP. 6 digits today; accept a small range rather than pinning an
-    # exact length so a provider-side change doesn't 422 every user.
-    code: str = Field(min_length=6, max_length=12)
-    new_password: str
+    # Supabase recovery OTP (8 digits as configured today). `_normalize_otp_code` enforces
+    # OTP_MIN_DIGITS..OTP_MAX_DIGITS digits rather than pinning one length, so a provider-side
+    # change doesn't 422 every user.
+    code: str = Field(min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False)
+    new_password: str = Field(repr=False)
 
     @field_validator("code")
     @classmethod
     def _code_digits(cls, v: str) -> str:
-        cleaned = v.strip().replace(" ", "").replace("-", "")
-        if not cleaned.isdigit():
-            raise ValueError("Code must be the digits from your email.")
-        return cleaned
+        return _normalize_otp_code(v)
 
     @field_validator("new_password")
     @classmethod
@@ -140,8 +229,8 @@ class ResetPasswordRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     """Change the password of an already signed-in user."""
 
-    current_password: str = Field(max_length=SIGN_IN_SECRET_MAX_LENGTH)
-    new_password: str
+    current_password: str = Field(max_length=SIGN_IN_SECRET_MAX_LENGTH, repr=False)
+    new_password: str = Field(repr=False)
 
     @field_validator("new_password")
     @classmethod
@@ -162,21 +251,42 @@ class SetPasswordRequest(BaseModel):
 
     # Same shape as ResetPasswordRequest.code — it IS a Supabase recovery OTP, obtained from the
     # unchanged `POST /auth/forgot-password`.
-    code: str = Field(min_length=6, max_length=12)
-    new_password: str
+    code: str = Field(min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False)
+    new_password: str = Field(repr=False)
 
     @field_validator("code")
     @classmethod
     def _code_digits(cls, v: str) -> str:
-        cleaned = v.strip().replace(" ", "").replace("-", "")
-        if not cleaned.isdigit():
-            raise ValueError("Code must be the digits from your email.")
-        return cleaned
+        return _normalize_otp_code(v)
 
     @field_validator("new_password")
     @classmethod
     def _password_strength(cls, v: str) -> str:
         return _validate_password_strength(v)
+
+
+class ConfirmEmailRequest(BaseModel):
+    """Confirm a password signup with the code from the Confirm-signup email, and sign in.
+
+    `password` is the one the user typed on the sign-up or sign-in form, held in memory by the
+    app across the code step. It is deliberately NOT strength-validated here: it may be the
+    account's EXISTING password, which can predate today's rule (the same reason
+    `SignInRequest` has no validator). It is checked against the rule only when it is about to
+    be WRITTEN — `/auth/confirm-email`'s set-password step (the stored password differs, or the
+    sign-in probe failed upstream).
+
+    `min_length=1` is not a strength rule: an empty password can never match a stored one nor be
+    set, and refusing it here (422) happens BEFORE the single-use code is spent.
+    """
+
+    email: EmailStr
+    code: str = Field(min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False)
+    password: str = Field(min_length=1, max_length=SIGN_IN_SECRET_MAX_LENGTH, repr=False)
+
+    @field_validator("code")
+    @classmethod
+    def _code_digits(cls, v: str) -> str:
+        return _normalize_otp_code(v)
 
 
 class MessageResponse(BaseModel):
@@ -200,8 +310,8 @@ class PasswordChangedResponse(BaseModel):
     """
 
     message: str
-    access_token: str
-    refresh_token: str
+    access_token: str = Field(repr=False)
+    refresh_token: str = Field(repr=False)
     user_id: str
 
 
@@ -220,8 +330,8 @@ class SignUpResponse(BaseModel):
 
     confirmation_required: bool
     message: str
-    access_token: Optional[str] = None
-    refresh_token: Optional[str] = None
+    access_token: Optional[str] = Field(default=None, repr=False)
+    refresh_token: Optional[str] = Field(default=None, repr=False)
     token_type: str = "bearer"
     user_id: Optional[str] = None
 
@@ -244,10 +354,10 @@ class OAuthSignInRequest(BaseModel):
     """
 
     provider: str = Field(pattern="^(apple|google)$")
-    id_token: str = Field(min_length=16, max_length=TOKEN_MAX_LENGTH)
+    id_token: str = Field(min_length=16, max_length=TOKEN_MAX_LENGTH, repr=False)
     # Apple's flow binds a nonce to the token to prevent replay. Required for Apple when the
     # client generated one; Supabase verifies the pairing.
-    nonce: Optional[str] = None
+    nonce: Optional[str] = Field(default=None, max_length=TOKEN_MAX_LENGTH, repr=False)
     # Apple only returns the display name on the FIRST authorization, so the client passes
     # it through for us to persist. Never used as an identity claim. Same bound as the
     # column's other writers: `get_current_user` re-reads this row on every request.
@@ -261,23 +371,24 @@ class SessionExchangeRequest(BaseModel):
     provider round-trip ends with Supabase's own JWT rather than a provider id_token.
     """
 
-    supabase_access_token: str = Field(min_length=16, max_length=TOKEN_MAX_LENGTH)
+    supabase_access_token: str = Field(min_length=16, max_length=TOKEN_MAX_LENGTH, repr=False)
 
 
 class RefreshTokenRequest(BaseModel):
-    refresh_token: str = Field(max_length=TOKEN_MAX_LENGTH)
+    refresh_token: str = Field(max_length=TOKEN_MAX_LENGTH, repr=False)
 
 
 class TokenResponse(BaseModel):
-    access_token: str
-    refresh_token: str
+    access_token: str = Field(repr=False)
+    refresh_token: str = Field(repr=False)
     token_type: str = "bearer"
     user_id: str
     # The install's lockout exemption for this address (`core.security.create_device_proof`).
     # Issued by the flows that VERIFIED a credential (password sign-in, provider sign-in,
-    # session exchange); absent on a refresh. Optional so an older client's decoder never
+    # session exchange); absent on a refresh and on `/auth/confirm-email` (an emailed code is
+    # not a verified credential, auth.md §3a). Optional so an older client's decoder never
     # sees a required key it does not know.
-    device_token: Optional[str] = None
+    device_token: Optional[str] = Field(default=None, repr=False)
 
 
 class AuthUserResponse(BaseModel):

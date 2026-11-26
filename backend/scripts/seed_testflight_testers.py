@@ -77,9 +77,9 @@ VALID_TIERS = ("free", "pro", "premium")   # mirrors the public.user_tier enum
 # Mirrors backend/app/schemas/auth.py::_validate_password_strength. Enforced here too because
 # GoTrue's own policy is configured per-project and can be relaxed — a password that fails the
 # BACKEND policy can still sign in, but can never be changed in-app, which strands the tester.
-PASSWORD_MIN_LENGTH = 8
-PASSWORD_MAX_LENGTH = 128
-BCRYPT_MAX_BYTES = 72
+# The password rule is the backend's own (app.schemas.auth._validate_password_strength):
+# GoTrue's exact ASCII classes and its 72-byte cap. Keeping a second copy here let it drift
+# (it still accepted a space as the only symbol, which GoTrue refuses — 2026-11-26).
 
 MAX_ORPHAN_PAGES = 20               # 20 x 200 = 4000 accounts scanned for stale testers
 ORPHAN_PAGE_SIZE = 200
@@ -87,21 +87,12 @@ ORPHAN_PAGE_SIZE = 200
 
 def password_problem(password: str) -> str | None:
     """Return a human-readable reason the password is unusable, or None if it is fine."""
-    if not PASSWORD_MIN_LENGTH <= len(password) <= PASSWORD_MAX_LENGTH:
-        return f"must be {PASSWORD_MIN_LENGTH}-{PASSWORD_MAX_LENGTH} characters"
-    if password.strip() != password:
-        return "has leading or trailing whitespace"
-    if not any(c.isupper() for c in password):
-        return "needs an uppercase letter"
-    if not any(c.islower() for c in password):
-        return "needs a lowercase letter"
-    if not any(c.isdigit() for c in password):
-        return "needs a digit"
-    if not any(not c.isalnum() for c in password):
-        return "needs a symbol"
-    # bcrypt hashes only the first 72 bytes and silently ignores the rest.
-    if len(password.encode("utf-8")) > BCRYPT_MAX_BYTES:
-        return f"is {len(password.encode('utf-8'))} bytes; bcrypt truncates at {BCRYPT_MAX_BYTES}"
+    from app.schemas.auth import _validate_password_strength
+
+    try:
+        _validate_password_strength(password)
+    except ValueError as e:
+        return str(e)
     return None
 
 

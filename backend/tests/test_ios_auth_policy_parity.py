@@ -141,7 +141,7 @@ def test_policies_are_not_all_one_value():
     assertion here would pass vacuously.
 
     All three values still occur after the account-only change, but only just: `.guestAllowed`
-    now has exactly ONE member (`trackEvents`) and `.public` has ten. That makes the set alone
+    now has exactly ONE member (`trackEvents`) and `.public` has eleven. That makes the set alone
     a weak canary — a parser that found three arms would satisfy it — so the count floor below
     is the half that actually holds.
     """
@@ -368,8 +368,14 @@ def test_no_route_takes_both_a_guest_and_a_strict_dependency():
     assert not overlap, f"routes with conflicting auth dependencies: {sorted(overlap)}"
 
 
-def test_the_public_surface_is_exactly_ten_cases():
+def test_the_public_surface_is_exactly_eleven_cases():
     """An allow-list, so re-opening a route requires editing this test and saying why.
+
+    Was `..._exactly_ten_cases` until 2026-11-26, when `confirmEmail` joined: confirming a new
+    account's address with its emailed code is what produces that account's FIRST session
+    (`POST /auth/confirm-email` → TokenResponse), so it is pre-session by construction. Without
+    it every new email/password account was stuck — the email carried a code and nothing in the
+    app could redeem one. It serves no FMP data and no user data before the code checks out.
 
     `getHoldersData` and `enrichStockNews` used to be pinned here — they took no backend auth
     dependency at all. They are FMP data, so they are now the plainest example of what the
@@ -378,9 +384,11 @@ def test_the_public_surface_is_exactly_ten_cases():
     policies = _policy_by_case(_swift_source())
     public = sorted(name for name, policy in policies.items() if policy == "public")
     assert public == sorted([
-        # The eight pre-session auth flows — gating any of them is an unbreakable loop.
+        # The nine pre-session auth flows — gating any of them is an unbreakable loop.
         "signIn", "signUp", "refreshToken", "forgotPassword", "resetPassword",
         "resendConfirmation", "oauthSignIn", "sessionExchange",
+        # Confirm a new account's email with its code; mints the account's first session.
+        "confirmEmail",
         # The two price catalogues: no FMP data, no user data, and the paywall renders
         # from them before an account exists.
         "getPlanCatalog", "getCreditPackCatalog",
@@ -406,10 +414,40 @@ def test_auth_flow_endpoints_are_public():
     policies = _policy_by_case(_swift_source())
     for name in (
         "signIn", "signUp", "refreshToken", "forgotPassword", "resetPassword",
-        "resendConfirmation", "oauthSignIn", "sessionExchange",
+        "resendConfirmation", "confirmEmail", "oauthSignIn", "sessionExchange",
         "getPlanCatalog", "getCreditPackCatalog",
     ):
         assert policies.get(name) == "public", f"{name} -> {policies.get(name)}"
+
+
+def _switch_arm_names(src: str, header: str, until: str) -> set[str]:
+    """Case names listed in the arm(s) of a `switch self` that `return true` — for the
+    `isAuthEndpoint` switch, whose shape is one multi-line `case …:` list then `return true`."""
+    start = src.index(header)
+    block = src[start:src.index(until, start)]
+    block = "\n".join(l for l in block.splitlines() if not l.strip().startswith("//"))
+    arm = block[block.index("case ."):block.index("return true")]
+    return set(re.findall(r"\.([A-Za-z_][A-Za-z0-9_]*)", arm))
+
+
+def test_confirm_email_skips_the_refresh_interceptor_and_the_device_proof():
+    """`confirmEmail` is an auth FLOW: a 401 there is a verdict on the request, never a cue to
+    refresh-and-replay (the code is single-use), so it sits in `isAuthEndpoint`. And it must NOT
+    attach the lockout exemption: the backend limits it per email WITHOUT the device-proof
+    relaxation, because its secret is an emailed code and a proof would widen the guessing
+    budget for it."""
+    src = _swift_source()
+    flows = _switch_arm_names(src, "nonisolated var isAuthEndpoint: Bool {", "// MARK: - Auth Policy")
+    assert "confirmEmail" in flows and "resetPassword" in flows, sorted(flows)
+    start = src.index("nonisolated var deviceProofEmail: String? {")
+    arm = src[start:src.index("nonisolated var authPolicy: AuthPolicy {", start)]
+    assert "resetPassword" in arm, "deviceProofEmail scan drifted"
+    assert "confirmEmail" not in arm, (
+        "confirmEmail attaches X-Device-Token — a device proof must never relax the per-email "
+        "limit on a route whose secret is an emailed code"
+    )
+    path = src[src.index("case .confirmEmail:", src.index("nonisolated var path: String")):]
+    assert path.split("\n", 2)[1].strip() == 'return "/api/v1/auth/confirm-email"', path[:120]
 
 
 # ── MUTATION_LOG — the account-only inversion ────────────────────────────────────────
@@ -423,6 +461,9 @@ def test_auth_flow_endpoints_are_public():
 #          test_the_guest_allowed_surface_is_only_analytics)  ✅
 #  2. `getThemeDetail` moved back to `.public`.
 #       -> test_the_public_surface_is_exactly_ten_cases FAILED  ✅
+#     (renamed `..._eleven_cases` on 2026-11-26 when `confirmEmail` joined; re-run then:
+#     `confirmEmail` moved to `.signInRequired` -> it FAILED, and so did
+#     test_auth_flow_endpoints_are_public  ✅)
 #  3. `_router_level_deps` stubbed to return an empty set — i.e. the scanner blind to
 #     router-level gating again, which is the state this file was in before today.
 #       -> test_the_guest_surface_is_only_analytics_and_admin FAILED on the strict floor

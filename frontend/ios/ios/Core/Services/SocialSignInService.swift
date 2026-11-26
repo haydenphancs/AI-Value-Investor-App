@@ -22,17 +22,28 @@
 import AuthenticationServices
 import CryptoKit
 import Foundation
+import OSLog
 
+/// Every case's on-screen copy is FIXED (SOC-06). The provider's own words — Supabase's
+/// `error_description`, an SDK's `localizedDescription` — go to the log through
+/// `SocialSignInService.logFailure`, never to the screen: they are raw developer strings
+/// ("The operation couldn't be completed. (com.google.GIDSignIn error -1.)"), and a
+/// configuration problem is not something the user can fix.
 enum SocialSignInError: LocalizedError {
     case cancelled
     case missingIdentityToken
     case malformedCallback
+    /// A missing build setting (Info.plist key, Supabase URL). `what` is for the log only.
     case notConfigured(String)
     /// The provider rejected the handshake and told us why. Carried rather than collapsed into
     /// `.malformedCallback`, because "provider disabled", "redirect URL not allow-listed" and
-    /// "user declined consent" are three different problems with three different fixes — and
-    /// all three used to render as the same shrug.
+    /// "user declined consent" are three different problems with three different fixes — the
+    /// reason is what the LOG needs to tell them apart.
     case provider(String)
+    /// Apple's or Google's own SDK failed for a reason other than the user cancelling: Apple
+    /// error 1000 (no Apple Account on the device, or a missing capability), a GIDSignIn
+    /// keychain error, a web-session failure. Domain and code are what the log needs.
+    case sdkFailure(provider: String, domain: String, code: Int)
 
     var errorDescription: String? {
         switch self {
@@ -40,12 +51,16 @@ enum SocialSignInError: LocalizedError {
             return nil   // user tapped cancel; never surfaced as an error
         case .missingIdentityToken:
             return "Apple didn't return a sign-in token. Please try again."
-        case .malformedCallback:
+        case .malformedCallback, .provider:
             return "That sign-in didn't complete. Please try again."
-        case .notConfigured(let what):
-            return "Sign-in isn't configured yet (\(what))."
-        case .provider(let reason):
-            return "That sign-in didn't complete: \(reason)"
+        case .notConfigured:
+            return "This sign-in option isn't available right now. Please use another way to sign in."
+        case .sdkFailure(let provider, _, _):
+            // Worded so it blames nobody: Apple's 1000 also covers a capability missing from
+            // the build, not only a device with no Apple Account.
+            return provider == "apple"
+                ? "Sign in with Apple didn't complete. Please try again, or use another way to sign in."
+                : "Google sign-in didn't complete. Please try again, or use another way to sign in."
         }
     }
 }
@@ -99,7 +114,10 @@ final class SocialSignInService: NSObject {
             if let authError = error as? ASAuthorizationError, authError.code == .canceled {
                 throw SocialSignInError.cancelled
             }
-            throw error
+            // Not rethrown raw: it reached the screen as "Sign in failed" (or an SDK sentence)
+            // with nothing in any log. Fixed copy on screen; domain and code to the log.
+            let ns = error as NSError
+            throw SocialSignInError.sdkFailure(provider: "apple", domain: ns.domain, code: ns.code)
 
         case .success(let authorization):
             guard
@@ -202,8 +220,11 @@ final class SocialSignInService: NSObject {
                 if let error {
                     let cancelled = (error as? ASWebAuthenticationSessionError)?.code
                         == .canceledLogin
+                    let ns = error as NSError
                     continuation.resume(
-                        throwing: cancelled ? SocialSignInError.cancelled : error
+                        throwing: cancelled
+                            ? SocialSignInError.cancelled
+                            : SocialSignInError.sdkFailure(provider: "google", domain: ns.domain, code: ns.code)
                     )
                     return
                 }
@@ -284,6 +305,44 @@ final class SocialSignInService: NSObject {
         return token
     }
 
+    // MARK: - Failure log
+
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "auth")
+
+    /// Log a social sign-in failure the user saw (every outcome but a cancel), so it can be
+    /// diagnosed from the log alone (SOC-06). Only the provider, an error domain / code or our
+    /// own error code, and for `.provider` the reason Supabase gave — scrubbed of addresses and
+    /// tokens and capped. NEVER the identity token, the nonce, the callback URL or its fragment
+    /// (which carries `access_token`), or the user's email.
+    static func logFailure(_ error: Error, provider: String) {
+        if let social = error as? SocialSignInError {
+            switch social {
+            case .cancelled:
+                return
+            case .missingIdentityToken:
+                log.error("social sign-in failed: provider=\(provider, privacy: .public) kind=missing_identity_token")
+            case .malformedCallback:
+                log.error("social sign-in failed: provider=\(provider, privacy: .public) kind=malformed_callback")
+            case .notConfigured(let what):
+                log.error("social sign-in failed: provider=\(provider, privacy: .public) kind=not_configured what=\(what, privacy: .public)")
+            case .provider(let reason):
+                let scrubbed = String(MonitoringConfig.redact(reason).prefix(200))
+                log.error("social sign-in failed: provider=\(provider, privacy: .public) kind=provider_rejected reason=\(scrubbed, privacy: .public)")
+            case .sdkFailure(let sdk, let domain, let code):
+                log.error("social sign-in failed: provider=\(sdk, privacy: .public) kind=sdk domain=\(domain, privacy: .public) code=\(code, privacy: .public)")
+            }
+            return
+        }
+        if error is APIError {
+            // Our backend refused (`/auth/oauth`, `/auth/session-exchange`); it logs the detail.
+            let code = AppError.from(error).analyticsCode
+            log.error("social sign-in failed: provider=\(provider, privacy: .public) kind=backend code=\(code, privacy: .public)")
+            return
+        }
+        let ns = error as NSError
+        log.error("social sign-in failed: provider=\(provider, privacy: .public) kind=other domain=\(ns.domain, privacy: .public) code=\(ns.code, privacy: .public)")
+    }
+
     // MARK: - Nonce helpers
 
     /// Cryptographically random nonce. `SecRandomCopyBytes` rather than `Int.random` —
@@ -341,7 +400,8 @@ extension SocialSignInService {
             if (error as NSError).code == GIDSignInError.canceled.rawValue {
                 throw SocialSignInError.cancelled
             }
-            throw SocialSignInError.provider(error.localizedDescription)
+            let ns = error as NSError
+            throw SocialSignInError.sdkFailure(provider: "google", domain: ns.domain, code: ns.code)
         }
 
         guard let idToken = result.user.idToken?.tokenString, !idToken.isEmpty else {

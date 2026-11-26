@@ -247,7 +247,8 @@ class ProfileViewModel: BaseViewModel {
             // performTask surfaces any failure via errorMessage instead of signing out.
             try await self?.apiClient.request(endpoint: .deleteAccount)
             self?.isDeleting = false
-            self?.appState?.signOut()
+            // Revokes this device's Google grant, then signs out (SOC-04).
+            self?.appState?.signOutAfterAccountDeletion()
         }
     }
 

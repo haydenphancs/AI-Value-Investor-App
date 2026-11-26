@@ -137,7 +137,8 @@ def test_sign_in_secrets_are_bounded_but_far_above_the_bcrypt_limit():
 def test_tokens_and_the_oauth_display_name_are_bounded():
     from pydantic import ValidationError
     from app.schemas.auth import (
-        OAuthSignInRequest, RefreshTokenRequest, SessionExchangeRequest, TOKEN_MAX_LENGTH,
+        OAUTH_DISPLAY_NAME_RAW_MAX_LENGTH, OAuthSignInRequest, RefreshTokenRequest,
+        SessionExchangeRequest, TOKEN_MAX_LENGTH,
     )
     from app.schemas.user import DISPLAY_NAME_MAX_LENGTH
 
@@ -147,9 +148,15 @@ def test_tokens_and_the_oauth_display_name_are_bounded():
         SessionExchangeRequest(supabase_access_token="t" * (TOKEN_MAX_LENGTH + 1))
     with pytest.raises(ValidationError):
         OAuthSignInRequest(provider="apple", id_token="t" * (TOKEN_MAX_LENGTH + 1))
+    # The provider's name: the PAYLOAD is bounded (refused past the raw bound), the STORED value
+    # is bounded by truncation (2026-11-26, SOC-05 hardening): refusing a 65-character Apple name
+    # 422'd the whole sign-in, and Apple sends the name only once.
     with pytest.raises(ValidationError):
         OAuthSignInRequest(provider="apple", id_token="t" * 32,
-                           display_name="n" * (DISPLAY_NAME_MAX_LENGTH + 1))
+                           display_name="n" * (OAUTH_DISPLAY_NAME_RAW_MAX_LENGTH + 1))
+    assert OAuthSignInRequest(provider="apple", id_token="t" * 32,
+                              display_name="n" * (DISPLAY_NAME_MAX_LENGTH + 1)
+                              ).display_name == "n" * DISPLAY_NAME_MAX_LENGTH
     assert OAuthSignInRequest(provider="apple", id_token="t" * 32,
                               display_name="Ada Lovelace").display_name == "Ada Lovelace"
 

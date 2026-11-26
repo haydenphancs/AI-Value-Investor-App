@@ -1182,6 +1182,8 @@ actor APIClient {
         "password", "current_password", "new_password",
         "token", "access_token", "refresh_token", "id_token", "identity_token",
         "code", "otp", "nonce",
+        // Sign in with Apple's single-use code (SOC-04): a whole-key match, like "code".
+        "authorization_code",
         "authorization", "api_key", "secret",
         "email", "audio_url", "avatar_url", "url",
         // Not a secret, but a ~120 KB base64 blob in the console buries every other logged

@@ -156,6 +156,8 @@ final class AuthService {
             responseType: AuthResponse.self
         )
 
+        // Not an Apple session: drop any Apple account link an earlier session left (SOC-04).
+        recordAppleIdentity(nil, accountId: response.userId)
         // Store tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         // A verified password earns this install its per-email lockout exemption.
@@ -185,6 +187,7 @@ final class AuthService {
             retryCount: 0
         )
 
+        recordAppleIdentity(nil, accountId: response.userId)
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1   // new session — invalidate any in-flight older-session refresh
         let epoch = sessionEpoch
@@ -215,6 +218,7 @@ final class AuthService {
             return .needsEmailConfirmation(message: response.message)
         }
 
+        recordAppleIdentity(nil, accountId: response.userId)
         saveTokens(accessToken: accessToken, refreshToken: refreshToken)
         sessionEpoch += 1
         let epoch = sessionEpoch
@@ -320,20 +324,34 @@ final class AuthService {
         )
     }
 
-    /// Sign in with a native provider identity token (Sign in with Apple).
+    /// Sign in with a native provider identity token (Sign in with Apple, native Google).
     ///
-    /// The token is verified by Supabase against Apple's public keys — the client is not
+    /// The token is verified by Supabase against the provider's public keys — the client is not
     /// trusted. `displayName` is passed through because Apple supplies the name only on the
-    /// very first authorization.
+    /// very first authorization — and for Apple it is kept in the Keychain until this request
+    /// succeeds (SOC-05, `AppleSignInStore.nameForSignIn`), so a failed first attempt no longer
+    /// loses it. `authorizationCode` (Apple) lets the backend keep a revocable token (SOC-04);
+    /// `appleUserID` becomes the session's account link for the credential-state check.
     func signInWithProvider(
-        provider: String, idToken: String, nonce: String?, displayName: String?
+        provider: String, idToken: String, nonce: String?, displayName: String?,
+        authorizationCode: String? = nil, appleUserID: String? = nil
     ) async throws -> UserProfile {
+        let isApple = provider == "apple"
+        // Both capped at the backend's 64-scalar limit: builds before 1.04 sent a longer
+        // provider name as-is and the backend 422'd the whole sign-in.
+        let name = isApple
+            ? await Self.appleNameForSignIn(received: displayName, appleUserID: appleUserID, keychain: keychain)
+            : AppleSignInStore.normalisedName(displayName)
         let response = try await apiClient.request(
             endpoint: .oauthSignIn(
-                provider: provider, idToken: idToken, nonce: nonce, displayName: displayName
+                provider: provider, idToken: idToken, nonce: nonce, displayName: name,
+                authorizationCode: isApple ? authorizationCode : nil
             ),
             responseType: AuthResponse.self
         )
+        // The server has the name now (it persists it before answering): nothing is pending.
+        if isApple { AppleSignInStore.clearPendingName(keychain: keychain) }
+        recordAppleIdentity(isApple ? appleUserID : nil, accountId: response.userId)
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1
         let epoch = sessionEpoch
@@ -350,6 +368,7 @@ final class AuthService {
             endpoint: .sessionExchange(supabaseAccessToken: supabaseToken),
             responseType: AuthResponse.self
         )
+        recordAppleIdentity(nil, accountId: response.userId)
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1
         let epoch = sessionEpoch
@@ -357,6 +376,21 @@ final class AuthService {
         let profile = try await adoptedSessionProfile(epoch: epoch)
         DeviceProofStore.remember(response.deviceToken, for: profile.email)
         return profile
+    }
+
+    /// Which Apple ID (if any) the session being adopted came in with — `AppleSignInStore`'s
+    /// account link, read by `AppState.checkAppleCredentialState` (SOC-04). EVERY sign-in path
+    /// calls this, just before `saveTokens`: an Apple sign-in records its Apple ID, every other
+    /// way in clears the link, so a link left by an earlier session can never sign out someone
+    /// who came in by email or Google. `clearToken()` drops it with the tokens at every session end.
+    private func recordAppleIdentity(_ appleUserID: String?, accountId: String?) {
+        guard let appleUserID, !appleUserID.isEmpty, let accountId, !accountId.isEmpty else {
+            AppleSignInStore.clearAccountLink(keychain: keychain)
+            return
+        }
+        AppleSignInStore.setAccountLink(
+            .init(appleUserID: appleUserID, accountId: accountId), keychain: keychain
+        )
     }
 
     /// The profile read that completes a sign-in whose tokens were just adopted. A failure is
@@ -437,6 +471,11 @@ final class AuthService {
     /// Sign out, part 2 — the network calls, sent with the ended token passed explicitly, after
     /// `beginSignOut()` has already ended the session locally. Best-effort throughout.
     func finishSignOut(_ handoff: SignOutHandoff) async {
+        // GoogleSignIn keeps its own signed-in state in the Keychain; the ended session must not
+        // leave it behind (SOC-04). Local and synchronous, so first — before the two round trips
+        // below, which a kill can cut short. A no-op when nobody signed in with Google here.
+        SocialSignInService.endGoogleSession()
+
         if let endedToken = handoff.endedToken {
             // Detach the APNs token with the ended session's credential — the call is
             // authenticated. Otherwise `device_tokens` keeps mapping this device to the account
@@ -530,6 +569,17 @@ final class AuthService {
         }.value
     }
 
+    /// The name to send with an Apple sign-in (SOC-05), resolved OFF the main actor: it is a
+    /// Keychain read (and, when Apple sent a name, a write). Kept below `keychainValueOffMain`
+    /// on purpose: that session-token reader stays the file's first detached read.
+    private static func appleNameForSignIn(
+        received: String?, appleUserID: String?, keychain: KeychainService
+    ) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            AppleSignInStore.nameForSignIn(received: received, appleUserID: appleUserID, keychain: keychain)
+        }.value
+    }
+
     /// Whether the Keychain holds an access token: the `storedTokenPresent` mirror, never a
     /// Keychain read. Unknown (before the launch read lands) answers false. Nothing is armed
     /// before that read, and the launch restore runs right after it, so no caller has a
@@ -601,6 +651,10 @@ final class AuthService {
         keychain.delete(Self.refreshTokenKey)
         keychainWrites &+= 1
         storedTokenPresent = false
+        // The Apple account link describes THIS session, so it ends with it (SOC-04) — on every
+        // path that ends one: sign-out, a dead credential, an undone adoption, the fresh-install
+        // purge (a link an earlier install left would otherwise outlive its session).
+        AppleSignInStore.clearAccountLink(keychain: keychain)
     }
 }
 

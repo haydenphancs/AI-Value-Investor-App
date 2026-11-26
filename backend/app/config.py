@@ -477,6 +477,19 @@ class Settings(BaseSettings):
     # Settings rather than literals so a rename or a second bundle (staging) is a config change.
     APPLE_TEAM_ID: str = "WG697LVCS9"
     APPLE_BUNDLE_ID: str = "com.phan.caydex"
+
+    # ── Sign in with Apple: token revocation (SOC-04, 2026-11-26) ──────────────
+    # Account deletion revokes the user's Sign in with Apple grant (Apple's account-deletion
+    # guidance). That needs Apple's REST API (`integrations/apple_id.py`), which authenticates
+    # with an ES256 client_secret signed by a Sign in with Apple `.p8` key — a DIFFERENT key
+    # from APNs' unless that key was created with both services ticked. Team id is
+    # APPLE_TEAM_ID, client id is APPLE_BUNDLE_ID (the native app's identity tokens carry it as
+    # `aud`). With either value unset the feature is OFF: `/auth/oauth` stores no Apple refresh
+    # token and `DELETE /users/me` logs a WARNING that the grant was not revoked — sign-in and
+    # deletion themselves are unaffected. Set the key to the `.p8` file's CONTENTS (a one-line
+    # value with literal `\n` escapes is accepted). Owner task: OWNER_TASKS.md.
+    APPLE_SIGN_IN_KEY_ID: Optional[str] = None
+    APPLE_SIGN_IN_PRIVATE_KEY: Optional[str] = None
     # StoreKit product id → tier. The product ids must match App Store Connect exactly.
     # Kept in config rather than the DB so a typo can't silently grant the wrong tier.
     IAP_PRODUCT_PRO_MONTHLY: str = "com.phan.caydex.pro.monthly"

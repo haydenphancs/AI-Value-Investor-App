@@ -155,6 +155,9 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # Only the backend reads or writes it, as service_role. 205 also adds the origin / finding
     # columns to trillion_club_stakes, whose grants (175) it does not touch.
     "205": ("trillion_club_stake_findings",),
+    # 213: Sign in with Apple refresh tokens, kept only so account deletion can revoke the grant
+    # (SOC-04). A credential; read and written only by the backend, as service_role.
+    "213": ("apple_sign_in_grants",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

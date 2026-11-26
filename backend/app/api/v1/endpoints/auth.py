@@ -1,19 +1,22 @@
 """
 Authentication Endpoints — Supabase Auth Proxy
-Frontend: POST /auth/login, /auth/register, /auth/refresh, /auth/logout
+Frontend: POST /auth/login, /auth/register, /auth/confirm-email, /auth/refresh, /auth/logout
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from jose import JWTError
+from jose.exceptions import ExpiredSignatureError
 from supabase import Client
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from app.database import (
     get_admin_client, get_auth_client, get_supabase, resolve_admin_client,
     run_gotrue,
 )
-from app.dependencies import get_current_user_id
+from app.dependencies import forward_client_ip_to_gotrue, get_current_user_id
 from app.core.security import (
     create_access_token, create_device_proof, create_refresh_token, decode_token,
     rate_limiter, trusted_client_ip, verify_device_proof, verify_supabase_token,
@@ -24,16 +27,31 @@ from app.schemas.auth import (
     SignInRequest, SignUpRequest, RefreshTokenRequest,
     TokenResponse, AuthUserResponse,
     ForgotPasswordRequest, ResetPasswordRequest, ChangePasswordRequest,
-    SetPasswordRequest,
+    SetPasswordRequest, ConfirmEmailRequest,
     MessageResponse, PasswordChangedResponse, SignUpResponse, ResendConfirmationRequest,
     OAuthSignInRequest, SessionExchangeRequest,
+    PASSWORD_TOO_LONG_MESSAGE, _validate_password_strength,
 )
 from app.utils.supabase_async import sb_exec
 import asyncio
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter()
+# Every route here may call Supabase Auth through `run_gotrue`. Router-level, so a route added
+# tomorrow forwards the caller's trusted address too (SEC-7): GoTrue then rate-limits per USER
+# instead of on the one Railway egress address every user shares. Never raises.
+router = APIRouter(dependencies=[Depends(forward_client_ip_to_gotrue)])
+
+
+class _IdentityStoreUnavailable(Exception):
+    """A `public.users` read failed, so a security check could not be answered.
+
+    Raised (never swallowed) by the checks that guard a token-MINTING path — `/auth/refresh`
+    and `/auth/session-exchange` — which turn it into 503 AUTH_UNAVAILABLE. That status is
+    retryable and iOS keeps its credential on it (APIClient's 5xx arm), so "a Supabase blip
+    must not log everyone out" still holds; what changed is that a blip no longer MINTS.
+    Internal to this module: it never reaches `classify_exception`.
+    """
 
 
 def _auth_of(auth_client, supabase: Client) -> Client:
@@ -55,6 +73,27 @@ def _auth_of(auth_client, supabase: Client) -> Client:
     return auth_client if hasattr(auth_client, "auth") else supabase
 
 
+def _issued_before_password_change(issued_at: Any, changed_at: Any) -> bool:
+    """Pure comparison: was a token with this `iat` minted before `password_changed_at`?
+
+    Shared by `/auth/refresh` (our own tokens) and `/auth/session-exchange` (a Supabase JWT),
+    so the two can never disagree about the boundary. Raises ValueError/TypeError on a value
+    that cannot be read; callers on a minting path treat that as "cannot prove fresh".
+    """
+    if not changed_at:
+        return False
+    changed_dt = datetime.fromisoformat(str(changed_at).replace("Z", "+00:00"))
+    if changed_dt.tzinfo is None:
+        changed_dt = changed_dt.replace(tzinfo=timezone.utc)
+    # `iat` is a POSIX timestamp (int or float).
+    issued_dt = datetime.fromtimestamp(float(issued_at), tz=timezone.utc)
+    # Whole-second comparison — `iat` has no sub-second resolution, while
+    # `password_changed_at` is stamped with microseconds, so a token minted in the same
+    # second as the change floors below it and would be rejected despite being newer.
+    # Mirrors dependencies._reject_if_password_changed_since_issue; see the note there.
+    return issued_dt < changed_dt.replace(microsecond=0)
+
+
 def is_token_stale_after_password_change(
     payload: dict, user_id: Optional[str], supabase: Client
 ) -> bool:
@@ -64,40 +103,43 @@ def is_token_stale_after_password_change(
     and validates them on signature + expiry only, so without this a password reset leaves
     every previously issued token valid.
 
-    Fails OPEN (returns False) on a missing column, missing row, or DB error: a transient
-    Supabase blip must not log out every user. The trade-off is deliberate — this is a
-    containment measure layered on top of normal token expiry, not the primary auth gate.
+    FAILS CLOSED (SEC-4): a read or parse error raises `_IdentityStoreUnavailable`, which the
+    refresh path answers with 503 AUTH_UNAVAILABLE. It used to return False ("allowing the
+    token"), and on `/auth/refresh` that was not a harmless blip: the refresh then MINTED a new
+    pair whose `iat` post-dates the stamp, so one transient read failure laundered a pre-reset
+    refresh token into a permanent post-reset session — and refresh allows 60 tries a minute.
+    A 503 is retryable and iOS keeps its credential on it, so a blip still logs nobody out.
+
+    A row with no stamp, or NO ROW, is "not stale": existence is `_app_user_row_exists`'s
+    question, asked first. `limit(1)` rather than `single()` for exactly that reason —
+    `single()` raises on zero rows, which would read as an outage.
     """
     issued_at = payload.get("iat")
     if not user_id or issued_at is None:
         return False
     try:
-        row = (
+        result = (
             supabase.table("users")
             .select("password_changed_at")
             .eq("id", user_id)
-            .single()
+            .limit(1)
             .execute()
         )
-        changed_at = (row.data or {}).get("password_changed_at")
-        if not changed_at:
-            return False
-        changed_dt = datetime.fromisoformat(str(changed_at).replace("Z", "+00:00"))
-        if changed_dt.tzinfo is None:
-            changed_dt = changed_dt.replace(tzinfo=timezone.utc)
-        # `iat` is a POSIX timestamp (int or float).
-        issued_dt = datetime.fromtimestamp(float(issued_at), tz=timezone.utc)
-        # Whole-second comparison — `iat` has no sub-second resolution, while
-        # `password_changed_at` is stamped with microseconds, so a token minted in the same
-        # second as the change floors below it and would be rejected despite being newer.
-        # Mirrors dependencies._reject_if_password_changed_since_issue; see the note there.
-        return issued_dt < changed_dt.replace(microsecond=0)
+        rows = result.data or []
+        if isinstance(rows, dict):  # a client that answered with the bare object
+            rows = [rows]
+        changed_at = rows[0].get("password_changed_at") if rows else None
+        return _issued_before_password_change(issued_at, changed_at)
     except Exception as e:
-        logger.warning(
-            "password_changed_at check failed for user=%s (%s: %s) — allowing the token",
-            user_id, type(e).__name__, e,
+        logger.error(
+            "password_changed_at check unavailable for user=%s (%s: %s) — refusing to mint "
+            "(fail closed)", user_id, type(e).__name__, e,
         )
-        return False
+        raise _IdentityStoreUnavailable(f"{type(e).__name__}: {e}") from e
+
+
+#: The stamp is retried once (inside the worker thread, so the sleep never blocks the loop).
+_STAMP_RETRY_DELAY_SECONDS = 0.25
 
 
 def _mark_password_changed(supabase: Client, user_id: str) -> None:
@@ -105,18 +147,36 @@ def _mark_password_changed(supabase: Client, user_id: str) -> None:
 
     Best-effort by necessity: the password itself has already been changed by the time we
     get here, and failing the whole request would tell the user their reset didn't work
-    when it did. Logged at ERROR because the security property silently degrades.
+    when it did. So it is RETRIED once (a transient PostgREST blip is the common failure), and
+    a second failure is logged at ERROR because the security property silently degrades: old
+    sessions stay valid until they expire.
+
+    Runs via `asyncio.to_thread` at every call site, so the short sleep is off the event loop.
     """
-    try:
-        supabase.table("users").update(
-            {"password_changed_at": datetime.now(timezone.utc).isoformat()}
-        ).eq("id", user_id).execute()
-    except Exception as e:
-        logger.error(
-            "Password changed for user=%s but stamping password_changed_at FAILED "
-            "(%s: %s) — old sessions will remain valid until they expire",
-            user_id, type(e).__name__, e,
-        )
+    last: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            supabase.table("users").update(
+                {"password_changed_at": datetime.now(timezone.utc).isoformat()}
+            ).eq("id", user_id).execute()
+            if attempt > 1:
+                logger.warning(
+                    "password_changed_at stamp for user=%s succeeded on retry", user_id
+                )
+            return
+        except Exception as e:
+            last = e
+            if attempt == 1:
+                logger.warning(
+                    "password_changed_at stamp for user=%s failed (%s: %s) — retrying once",
+                    user_id, type(e).__name__, e,
+                )
+                time.sleep(_STAMP_RETRY_DELAY_SECONDS)
+    logger.error(
+        "Password changed for user=%s but stamping password_changed_at FAILED twice "
+        "(%s: %s) — old sessions will remain valid until they expire",
+        user_id, type(last).__name__, last,
+    )
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -146,7 +206,6 @@ async def sign_in(
         (f"login:ip:{client_ip}", 10, 60),
         _per_email_check("login", email_key, 10, 900, req),
         detail="Too many login attempts. Please try again later.",
-        retry_after="60",
     )
     try:
         auth_response = await run_gotrue(
@@ -280,7 +339,6 @@ async def sign_up(
         (f"register:ip:{client_ip}", 5, 60),
         (f"register:email:{email_key}", 5, 3600),
         detail="Too many registration attempts. Please try again later.",
-        retry_after="60",
     )
     try:
         auth_response = await run_gotrue(
@@ -296,24 +354,29 @@ async def sign_up(
 
         user = auth_response.user
         if not user:
+            logger.error("Sign up returned no user object and raised nothing")
             raise HTTPException(status_code=400, detail="Registration failed")
 
-        # DB trigger auto-creates public.users row.
-        # Update display_name (trigger may not copy it from metadata).
-        (await sb_exec(
-            supabase.table("users").update({
-            "display_name": request.display_name,
-            }).eq("id", str(user.id))
-        ))
+        # NO post-signup `users.display_name` UPDATE any more (AUTH-BE-04). The signup trigger
+        # (`handle_new_auth_user`) already copies `raw_user_meta_data->>'display_name'` into the
+        # row it creates, so for a genuinely new account the UPDATE was redundant — and for an
+        # address that already sat UNCONFIRMED, GoTrue returns that EXISTING user unchanged, so
+        # the UPDATE let any unauthenticated caller overwrite the pending owner's profile name.
 
         # The confirmation gate. `email_confirmed_at` is set by Supabase only once the
         # address is verified; absent means "unconfirmed", so no tokens are issued.
+        #
+        # The copy is identical for a new address, a pending one and an already-confirmed one
+        # (GoTrue answers the last with an obfuscated user and sends nothing): it must never
+        # reveal which. Neutral about the email's contents (it carries a code AND a link), and
+        # it names the way out for someone who already has an account.
         if not getattr(user, "email_confirmed_at", None):
             logger.info("Registration pending email confirmation for user=%s", user.id)
             return SignUpResponse(
                 confirmation_required=True,
                 message=(
-                    "Check your email to confirm your address, then sign in."
+                    "Check your email to confirm your address. Already have an account? "
+                    "Sign in or reset your password."
                 ),
             )
 
@@ -341,12 +404,77 @@ async def sign_up(
         # failure on this route, and it would tell a user whose only mistake was reusing a
         # breached password that registration is broken, at the exact moment they are deciding
         # whether to bother.
-        if _is_password_rejected(e):
-            logger.info("Registration rejected: password refused by the provider")
+        #
+        # `_is_password_refused`, not only `_is_password_rejected`: GoTrue refuses a password
+        # over 72 bytes with `validation_failed`, not `weak_password`, which used to fall to the
+        # bare "Registration failed" below. Our own validator refuses it first now; this is the
+        # backstop for a provider rule that drifts from ours.
+        if _is_password_refused(e):
+            logger.info(
+                "Registration rejected: password refused by the provider (code=%s)", _gotrue_code(e),
+            )
             raise auth_error(
                 ErrorCode.AUTH_PASSWORD_REJECTED,
-                message="sign_up rejected the password",
+                message=f"sign_up rejected the password (code={_gotrue_code(e)})",
+                user_message=_password_refused_copy(e),
                 details=_optional_details(reasons=_password_rejection_reasons(e)),
+            )
+
+        # CLASSIFY the rest by GoTrue's typed `.code` / `.status` first (AUTH-BE-08, SB-6).
+        # Every one of these used to become a bare 400 "Registration failed" logged at ERROR:
+        # no reason for the user, no retry hint, and a Sentry event per user-caused failure.
+        gt_code, gt_status = _gotrue_code(e), _gotrue_status(e)
+        if gt_code == "email_address_invalid":
+            # GoTrue refused the ADDRESS itself (a domain it will not mail). The user's to fix.
+            logger.info("Registration rejected: the provider refused the email address")
+            raise auth_error(
+                ErrorCode.INVALID_INPUT,
+                message="sign_up: email_address_invalid",
+                user_message="That email address can't be used. Please check it and try again.",
+                status_code=400,
+            )
+        if gt_code == "over_email_send_rate_limit":
+            # The confirmation email could not be SENT: the project's email budget is spent,
+            # or this address was mailed moments ago. Keyed on the CODE, never on a bare 429:
+            # a per-IP `over_request_rate_limit` (shared Railway egress) must not be told
+            # anything about an email. WARNING with the code so a spent budget is greppable;
+            # never the address.
+            logger.warning(
+                "GOTRUE_EMAIL_RATE_LIMITED route=register status=%s code=%s",
+                gt_status, gt_code,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_UNAVAILABLE,
+                message="sign_up: over_email_send_rate_limit",
+                user_message=_CONFIRMATION_SEND_FAILED,
+            )
+        kind = _classify_gotrue_failure(e)
+        if kind == "rate_limited":
+            # GoTrue's per-IP request limit. Every call leaves from the Railway egress, so a
+            # trip here degrades sign-up for EVERYONE (SEC-7): ERROR, with the marker.
+            logger.error(
+                "GOTRUE_RATE_LIMITED route=register status=%s code=%s (%s)",
+                gt_status, gt_code, type(e).__name__,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_UNAVAILABLE,
+                message="sign_up: provider rate limit",
+                user_message="We couldn't create your account right now. Please try again in a few minutes.",
+            )
+        if _is_gotrue_outage(e):
+            # A GoTrue 5xx (SMTP "Error sending confirmation email" is a 500), a 502-504 or a
+            # transport failure. GoTrue rolls the new user back when the send fails, so "try
+            # again" is the true instruction. Untyped exceptions and 4xx configuration codes
+            # (signup_disabled, …) fall through to the generic fallback below WITH a stack
+            # trace: those need a person, not a retry.
+            logger.warning(
+                "Registration upstream failure (confirmation email not sent): %s status=%s code=%s",
+                type(e).__name__, gt_status, gt_code,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_UNAVAILABLE,
+                message=f"sign_up upstream failure: {type(e).__name__}",
+                user_message=_CONFIRMATION_SEND_FAILED,
             )
         logger.error(f"Sign up failed: {type(e).__name__}: {e}", exc_info=True)
         raise HTTPException(status_code=400, detail="Registration failed")
@@ -372,8 +500,44 @@ async def refresh_token(
             detail="Too many refresh attempts. Please try again shortly.",
             headers={"Retry-After": "60"},
         )
+    # Decode FIRST and classify the decode failure on its own (AUTH-BE-14). Every lapsed
+    # 7-day refresh used to land in the generic handler below as `logger.error` — a Sentry
+    # event per user per week — and was answered AUTH_TOKEN_INVALID ("invalid") when the
+    # truth is "expired". `decode_token` re-raises JWTError, and ExpiredSignatureError is a
+    # JWTError subclass, so the order of these two clauses is load-bearing.
     try:
         payload = decode_token(request.refresh_token)
+    except ExpiredSignatureError:
+        logger.info("Refresh rejected: the refresh token has expired")
+        raise auth_error(
+            ErrorCode.AUTH_SESSION_EXPIRED,
+            message="refresh token expired",
+            # The stock AUTH_SESSION_EXPIRED copy talks about a PASSWORD change; that is not
+            # what happened here.
+            user_message="Your session has ended. Please sign in again.",
+        )
+    except JWTError as e:
+        logger.warning("Refresh rejected: token could not be verified (%s)", type(e).__name__)
+        raise auth_error(
+            ErrorCode.AUTH_TOKEN_INVALID,
+            message=f"refresh token could not be decoded: {type(e).__name__}",
+        )
+    except Exception as e:
+        logger.error(
+            "Refresh token decode failed unexpectedly: %s: %s", type(e).__name__, e,
+            exc_info=True,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_TOKEN_INVALID,
+            message=f"refresh token could not be decoded: {type(e).__name__}",
+        )
+    if not isinstance(payload, dict):
+        logger.warning("Refresh rejected: decoder returned no payload")
+        raise auth_error(
+            ErrorCode.AUTH_TOKEN_INVALID, message="refresh token decoded to no payload",
+        )
+
+    try:
         if payload.get("type") != "refresh":
             # The enum comment for AUTH_TOKEN_INVALID names this case explicitly.
             raise auth_error(
@@ -383,12 +547,20 @@ async def refresh_token(
 
         user_id = payload.get("sub")
         email = payload.get("email")
+        if not user_id:
+            raise auth_error(
+                ErrorCode.AUTH_TOKEN_INVALID, message="refresh token carries no subject",
+            )
 
         # The account must still exist. Without this, a token whose `public.users` row is
         # missing refreshes successfully forever while every real route 401s — see
         # `_app_user_row_exists`. AUTH_ACCOUNT_NOT_FOUND is one of the three codes iOS is
         # allowed to clear a credential on, so this ENDS the loop instead of feeding it.
-        if user_id and not (await asyncio.to_thread(_app_user_row_exists, supabase, user_id)):
+        # FAIL CLOSED on a read error (SEC-4): a refresh MINTS, so "could not check" must
+        # never mean "allowed" here — it is a retryable 503 instead.
+        if not (await asyncio.to_thread(
+            _app_user_row_exists, supabase, user_id, fail_closed=True,
+        )):
             logger.warning("Refresh rejected: no public.users row for user=%s", user_id)
             raise auth_error(
                 ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
@@ -398,7 +570,7 @@ async def refresh_token(
         # A refresh token minted BEFORE the last password change must not mint new access
         # tokens — otherwise a reset doesn't evict a thief and they keep access for the
         # full 7-day refresh lifetime. This is the check that actually caps the window;
-        # see migration 105.
+        # see migration 105. Fails closed too (raises `_IdentityStoreUnavailable`).
         if (await asyncio.to_thread(is_token_stale_after_password_change, payload, user_id, supabase)):
             logger.info(
                 "Refresh rejected for user=%s: token predates last password change",
@@ -422,11 +594,21 @@ async def refresh_token(
         )
     except HTTPException:
         raise
-    except Exception as e:
-        logger.error(f"Token refresh failed: {e}")
+    except _IdentityStoreUnavailable:
+        # Already logged at ERROR where it happened, with the user id.
         raise auth_error(
-            ErrorCode.AUTH_TOKEN_INVALID,
-            message=f"refresh token could not be decoded: {type(e).__name__}",
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="refresh: users read failed; refusing to mint (fail closed)",
+        )
+    except Exception as e:
+        # Past the decode, so this is OURS (a token mint, a thread failure) — never the
+        # caller's token. 503 keeps the client's credential; the stack goes to Sentry.
+        logger.error(
+            "Token refresh failed unexpectedly: %s: %s", type(e).__name__, e, exc_info=True,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"refresh failed unexpectedly: {type(e).__name__}",
         )
 
 
@@ -461,7 +643,6 @@ async def resend_confirmation(
         (f"resend:ip:{client_ip}", 5, 3600),
         (f"resend:email:{email_key}", 3, 3600),
         detail="Too many requests. Please try again later.",
-        retry_after="3600",
     )
 
     try:
@@ -483,6 +664,274 @@ async def resend_confirmation(
             "If that address needs confirming, we've sent a new confirmation email. "
             "Check your inbox, including spam."
         )
+    )
+
+
+# Said once the signup code is SPENT (the address IS confirmed) but we could not finish. Every
+# one travels as AUTH_CONFIRMED_SIGN_IN_FAILED (action sign_in) and opens "Your email is
+# confirmed": "try again" would re-submit a dead code and read "invalid".
+#: The sign-in after the confirm failed (or resolved another account): sign in.
+_CONFIRMED_SIGN_IN_FAILED = (
+    "Your email is confirmed, but we couldn't sign you in just now. Please sign in."
+)
+#: The stored password DIFFERED and the replacement was refused (our rule or GoTrue's).
+_CONFIRMED_PASSWORD_REFUSED = (
+    "Your email is confirmed, but that password can't be used. "
+    "Use Forgot password to choose a new one."
+)
+#: The password could not be written (or, after an upstream sign-in failure, it is not known
+#: whether the typed password is the stored one): sign in, or recover it.
+_CONFIRMED_FINISH_FAILED = (
+    "Your email is confirmed, but we couldn't finish signing you in. "
+    "Please sign in, or use Forgot password if your password doesn't work."
+)
+#: Confirmed, but the app row the trigger should have made is missing (see `_app_user_row_exists`).
+_CONFIRMED_ACCOUNT_NOT_READY = (
+    "Your email is confirmed, but your account isn't ready yet. Please sign in again in a moment."
+)
+
+
+def _confirmed_but_failed(
+    user_message: str, *, message: str, status_code: int = 503,
+    details: Optional[dict] = None,
+) -> HTTPException:
+    """The one shape of every `/auth/confirm-email` failure AFTER `verify_otp` succeeded."""
+    return auth_error(
+        ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED,
+        message=message, user_message=user_message, status_code=status_code, details=details,
+    )
+
+
+@router.post("/confirm-email", response_model=TokenResponse)
+async def confirm_email(
+    request: ConfirmEmailRequest,
+    req: Request,
+    supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
+):
+    """Confirm a password signup with the emailed code, then sign the caller in.
+
+    THE MISSING HALF OF SIGNUP (AUTH-BE-01/02, TG-1). The Confirm-signup email carries an
+    8-digit `{{ .Token }}`, and until this route nothing could redeem it: the only
+    `verify_otp` calls were `type="recovery"`, so every new email/password account was stuck
+    at EMAIL_NOT_CONFIRMED.
+
+    Steps, in an order that each matters:
+      1. Per-IP, then per-email limiter — the plain email key, deliberately NO device-proof
+         relaxation (`_per_email_check`): the per-email bucket is what bounds guessing a code
+         for one address, and a proof proves a past PASSWORD, not this mailbox.
+      2. `verify_otp(type="signup")` — NEVER "email": GoTrue's "email" type also accepts a
+         RECOVERY token, which would turn any reset code into a passwordless sign-in. Never
+         "recovery" either. On the isolated auth client through `run_gotrue`.
+      3. `sign_in_with_password` with the password the user typed. Confirming the mailbox
+         alone must NOT sign anyone in (SEC-6): GoTrue keeps the FIRST registrant's password
+         on an unconfirmed address, so "verify and mint" would hand a squatter's pre-registered
+         account to the mailbox owner with the squatter's password still on it.
+      4. If the stored password differs — the user re-registered with a new one (CC-03), or a
+         squatter registered first (SEC-6) — OR the sign-in in step 3 failed UPSTREAM (a GoTrue
+         429 / outage, BE-AUTH-03), whoever just proved the mailbox SETS it: the password is
+         checked against our rule, written on the ADMIN client, and `password_changed_at` is
+         stamped. That is the capability `/reset-password` already grants a mailbox owner;
+         nothing new is exposed. The squatter's password stops working. Never after a policy
+         answer ("Email not confirmed", a typed 4xx such as `email_provider_disabled`).
+      5. Mint app tokens — after `_app_user_row_exists`, and WITHOUT a device proof: an emailed
+         code is not a verified credential in auth.md §3a's sense (the proof stays minted only
+         by password sign-in, provider sign-in and session exchange).
+
+    Once step 2 succeeds the code is SPENT and the address IS confirmed, so every failure after
+    it is AUTH_CONFIRMED_SIGN_IN_FAILED (action `sign_in`, copy opening "Your email is
+    confirmed"): 400 when a differing password was refused, else 503. Never AUTH_UNAVAILABLE —
+    that one means "your code is still good, try again", and iOS must be able to tell the two
+    apart (BE-AUTH-04). The three verify ANOMALIES (no user, another address, still
+    unconfirmed) stay AUTH_CODE_INVALID: nothing proves the address is confirmed, so the copy
+    could not truthfully say it is.
+    """
+    client_ip = trusted_client_ip(req)
+    email_key = request.email.strip().lower()
+
+    _enforce_credential_limits(
+        (f"confirm:ip:{client_ip}", 20, 3600),
+        (f"confirm:email:{email_key}", 10, 3600),
+        detail="Too many attempts. Please wait a while, then try again.",
+    )
+
+    # 2. Verify the signup code — this is what confirms the address.
+    try:
+        verified = await run_gotrue(
+            _auth_of(auth_client, supabase).auth.verify_otp,
+            {"email": email_key, "token": request.code, "type": "signup"},
+        )
+    except Exception as e:
+        raise _otp_failure(e, route="confirm-email")
+
+    user = getattr(verified, "user", None)
+    user_id = str(getattr(user, "id", "") or "")
+    if not user_id:
+        logger.warning("confirm-email: verify_otp returned no user — treating the code as refused")
+        raise auth_error(
+            ErrorCode.AUTH_CODE_INVALID, message="confirm-email: verify_otp returned no user",
+        )
+    # Belt and braces: the code was verified FOR this address, so the user GoTrue returns must
+    # be this address, now confirmed. Either one false is an upstream anomaly, and the cost of
+    # trusting it is a session on the wrong account — refuse, loudly.
+    verified_email = str(getattr(user, "email", "") or "").strip().lower()
+    if verified_email != email_key:
+        logger.error(
+            "confirm-email: verified user=%s does not carry the requested address — refusing",
+            user_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_CODE_INVALID,
+            message="confirm-email: verified user's email does not match the request",
+        )
+    if not getattr(user, "email_confirmed_at", None):
+        logger.error(
+            "confirm-email: verify_otp succeeded but user=%s is still unconfirmed — refusing",
+            user_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_CODE_INVALID,
+            message="confirm-email: user still unconfirmed after a successful verify",
+        )
+    logger.info("confirm-email: address confirmed for user=%s", user_id)
+
+    # 3. Prove the password. `run_gotrue` re-asserts service_role on the auth client inside the
+    #    lock, so the SIGNED_IN that verify_otp just emitted cannot leak into this call.
+    #
+    #    Three outcomes lead on to step 4 (the mailbox owner SETS the typed password):
+    #      * the stored password DIFFERS (a refused credential) — CC-03 / SEC-6;
+    #      * GoTrue was RATE-LIMITED or DOWN (BE-AUTH-03). The code is already spent, so
+    #        refusing here used to leave a squatter's or stale password live on a now-confirmed
+    #        account. The caller proved the mailbox, so writing their password is the
+    #        capability `/reset-password` grants anyway, and harmless when it already matched.
+    #      Everything else — "Email not confirmed", a typed 4xx policy answer
+    #      (`email_provider_disabled`, a banned user …), a sign-in resolving ANOTHER account —
+    #      is an answer about this account, and we never mint past one: sign in instead.
+    password_matches = False
+    probe_failed_upstream = False
+    try:
+        signed_in = await run_gotrue(
+            _auth_of(auth_client, supabase).auth.sign_in_with_password,
+            {"email": email_key, "password": request.password},
+        )
+        signed_in_id = str(getattr(getattr(signed_in, "user", None), "id", "") or "")
+        if signed_in_id != user_id:
+            logger.error(
+                "confirm-email: sign-in resolved user=%s but the code confirmed user=%s",
+                signed_in_id or "<none>", user_id,
+            )
+            raise _confirmed_but_failed(
+                _CONFIRMED_SIGN_IN_FAILED,
+                message="confirm-email: sign-in resolved a different user",
+            )
+        password_matches = True
+    except HTTPException:
+        raise
+    except Exception as e:
+        if _is_rejected_credential(e):
+            logger.info(
+                "confirm-email: stored password differs for user=%s — the mailbox owner sets it",
+                user_id,
+            )
+        elif not _is_email_not_confirmed(e) and _is_upstream_failure(e):
+            probe_failed_upstream = True
+            if _classify_gotrue_failure(e) == "rate_limited":
+                logger.error(
+                    "GOTRUE_RATE_LIMITED route=confirm-email verb=sign_in_with_password "
+                    "user=%s status=%s code=%s — setting the typed password instead",
+                    user_id, _gotrue_status(e), _gotrue_code(e),
+                )
+            else:
+                logger.error(
+                    "confirm-email: sign-in after a successful confirm failed upstream for "
+                    "user=%s: %s: %s (status=%s code=%s) — setting the typed password instead",
+                    user_id, type(e).__name__, e, _gotrue_status(e), _gotrue_code(e),
+                )
+        else:
+            logger.error(
+                "confirm-email: sign-in after a successful confirm was refused for user=%s: "
+                "%s: %s (status=%s code=%s)",
+                user_id, type(e).__name__, e, _gotrue_status(e), _gotrue_code(e),
+            )
+            raise _confirmed_but_failed(
+                _CONFIRMED_SIGN_IN_FAILED,
+                message=f"confirm-email: sign-in refused after confirm: {type(e).__name__} "
+                        f"(code={_gotrue_code(e)})",
+            )
+
+    # 4. The caller who just proved the mailbox sets the password they typed.
+    if not password_matches:
+        # After a DIFFERING password a refusal is the password's fault (400, "that password
+        # can't be used"). After an upstream sign-in failure we never learned whether the typed
+        # password is the stored one — it may be a perfectly good legacy password the rule
+        # cannot WRITE — so every failure says "sign in, or use Forgot password" (503: the root
+        # cause is ours).
+        if probe_failed_upstream:
+            refused_copy, refused_status = _CONFIRMED_FINISH_FAILED, 503
+        else:
+            refused_copy, refused_status = _CONFIRMED_PASSWORD_REFUSED, 400
+        try:
+            _validate_password_strength(request.password)
+        except ValueError as ve:
+            logger.info(
+                "confirm-email: the typed password fails the strength rule for user=%s "
+                "(after an upstream sign-in failure: %s)", user_id, probe_failed_upstream,
+            )
+            raise _confirmed_but_failed(
+                refused_copy, status_code=refused_status,
+                message=f"confirm-email: replacement password refused: {ve}",
+            )
+        # ADMIN client, mandatorily: verify_otp and the sign-in attempt above both ran on the
+        # auth client, and `auth.admin.*` must never run where a sign-in can rewrite the header.
+        try:
+            await run_gotrue(
+                resolve_admin_client(admin_client, auth_client, supabase).auth.admin.update_user_by_id,
+                user_id, {"password": request.password},
+            )
+        except Exception as e:
+            if _is_password_refused(e):
+                logger.info(
+                    "confirm-email: replacement password refused by the provider for user=%s "
+                    "(code=%s)", user_id, _gotrue_code(e),
+                )
+                raise _confirmed_but_failed(
+                    refused_copy, status_code=refused_status,
+                    message=f"confirm-email: admin.update_user_by_id rejected the password "
+                            f"(code={_gotrue_code(e)})",
+                    details=_optional_details(reasons=_password_rejection_reasons(e)),
+                )
+            logger.error(
+                "confirm-email: setting the password failed for user=%s: %s: %s "
+                "(status=%s code=%s)",
+                user_id, type(e).__name__, e, _gotrue_status(e), _gotrue_code(e),
+            )
+            raise _confirmed_but_failed(
+                _CONFIRMED_FINISH_FAILED,
+                message=f"confirm-email: admin.update_user_by_id failed: {type(e).__name__}",
+            )
+        # Evict anything minted under the old password, BEFORE minting ours (iat >= stamp).
+        (await asyncio.to_thread(_mark_password_changed, supabase, user_id))
+        auth_methods_service.invalidate(user_id)
+        logger.info(
+            "confirm-email: password set by the mailbox owner for user=%s (after an upstream "
+            "sign-in failure: %s)", user_id, probe_failed_upstream,
+        )
+
+    # 5. Mint — only for an id with an app row (see `_app_user_row_exists`).
+    if not (await asyncio.to_thread(_app_user_row_exists, supabase, user_id)):
+        logger.error(
+            "confirm-email: no public.users row for confirmed user=%s — refusing to mint "
+            "(check the handle_new_auth_user trigger for this account)", user_id,
+        )
+        raise _confirmed_but_failed(
+            _CONFIRMED_ACCOUNT_NOT_READY,
+            message=f"confirm-email: no public.users row for {user_id}",
+        )
+
+    logger.info("confirm-email: signed in user=%s", user_id)
+    return _issue_app_tokens_for(
+        user_id, getattr(user, "email", None) or email_key, device_proof=False,
     )
 
 
@@ -515,7 +964,12 @@ _REJECTED_CREDENTIAL_MARKERS = (
 
 
 def _is_rejected_credential(exc: Exception) -> bool:
-    """True when the provider rejected the supplied password, as opposed to failing."""
+    """True when the provider rejected the supplied password, as opposed to failing.
+
+    gotrue's typed `.code == "invalid_credentials"` first (API version 2024-01-01 sends it),
+    the wording markers as the fallback for an untyped or older error shape."""
+    if _gotrue_code(exc) == "invalid_credentials":
+        return True
     return any(marker in str(exc).lower() for marker in _REJECTED_CREDENTIAL_MARKERS)
 
 
@@ -529,6 +983,30 @@ _WEAK_PASSWORD_MARKERS = (
 )
 
 
+def _weak_password_error_types() -> tuple:
+    """`AuthWeakPasswordError` from the SDK production actually runs, then any successor.
+
+    supabase 2.16 builds its auth client from **gotrue** (2.12), not `supabase_auth` — the
+    latter is a stray local install that no requirement pins, so the old
+    `from supabase_auth.errors import ...` checked a class production never raises and would
+    simply be absent on Railway (AUTH-BE-13). gotrue first; supabase_auth kept only so a future
+    SDK move keeps working. Each import is independent: one missing never hides the other.
+    """
+    found = []
+    for module in ("gotrue.errors", "supabase_auth.errors"):
+        try:
+            mod = __import__(module, fromlist=["AuthWeakPasswordError"])
+            cls = getattr(mod, "AuthWeakPasswordError", None)
+            if isinstance(cls, type):
+                found.append(cls)
+        except Exception as e:  # ImportError, or an SDK that fails on import
+            logger.debug("weak-password class not importable from %s (%s)", module, type(e).__name__)
+    return tuple(found)
+
+
+_WEAK_PASSWORD_ERROR_TYPES = _weak_password_error_types()
+
+
 def _is_password_rejected(exc: Exception) -> bool:
     """True when the provider refused to SET the supplied password.
 
@@ -538,33 +1016,218 @@ def _is_password_rejected(exc: Exception) -> bool:
 
     THREE LAYERS, TYPED FIRST, and the order is deliberate:
 
-      1. `AuthWeakPasswordError` — a real class in supabase_auth 2.27, carrying `.reasons`.
-         Raised by the USER-facing calls (`sign_up`, `update_user`).
-      2. `.code == "weak_password"` — the ADMIN call `admin.update_user_by_id`, which
-         `change_password` uses, surfaces a plain `AuthApiError` whose `code` carries the same
-         string rather than the typed subclass. Miss this and the change-password half is
-         vacuously unhandled while the signup half looks fine.
+      1. `AuthWeakPasswordError` — gotrue's class (supabase_auth's as a fallback), carrying
+         `.reasons`. gotrue's shared `helpers.handle_exception` builds it for ANY response whose
+         code is `weak_password` — the user calls (`sign_up`) AND the admin call
+         (`admin.update_user_by_id`) alike.
+      2. `.code == "weak_password"` — any other AuthError shape carrying the same string (an
+         SDK that stops building the subclass). Without it, a future SDK change would leave the
+         change/reset/set-password halves vacuously unhandled while signup looked fine.
       3. Wording match, mirroring `_REJECTED_CREDENTIAL_MARKERS`.
 
     Layer 3 alone would not be safe to rely on: an exception whose `str()` is empty defeats
     every marker list, which is exactly how a Gemini timeout classifier failed in this repo.
 
-    ⚠️ `supabase_auth.errors.ErrorCode` is a `Literal` type alias, NOT an enum with members.
+    ⚠️ gotrue's `ErrorCode` is a `Literal` type alias, NOT an enum with members.
     Compare the string; `ErrorCode.weak_password` does not exist.
     """
-    try:
-        from supabase_auth.errors import AuthWeakPasswordError
-
-        if isinstance(exc, AuthWeakPasswordError):
-            return True
-    except ImportError:  # pragma: no cover - SDK moved; fall through to the softer checks
-        pass
+    if _WEAK_PASSWORD_ERROR_TYPES and isinstance(exc, _WEAK_PASSWORD_ERROR_TYPES):
+        return True
 
     code = getattr(exc, "code", None)
     if isinstance(code, str) and code.strip().lower() == "weak_password":
         return True
 
     return any(marker in str(exc).lower() for marker in _WEAK_PASSWORD_MARKERS)
+
+
+def _is_password_validation_failure(exc: BaseException) -> bool:
+    """GoTrue refused the PASSWORD's shape with `validation_failed` rather than `weak_password`.
+
+    The one known case: over 72 bytes → 400 `validation_failed`, "Password cannot be longer than
+    72 characters" (verified against the live stack). `_validate_password_strength` refuses that
+    first now, so this is the backstop for a provider rule that drifts from ours. Typed code AND
+    the word "password" — `validation_failed` also covers unrelated fields (an email format), and
+    `_GOTRUE_CODE_REJECTED_CODES` uses it for a refused one-time code."""
+    return _gotrue_code(exc) == "validation_failed" and "password" in str(exc).lower()
+
+
+def _is_password_refused(exc: BaseException) -> bool:
+    """Either way GoTrue can refuse a NEW password: weak/pwned, or a password-shaped
+    `validation_failed` (too long). The user's action is the same — choose a different one."""
+    return _is_password_rejected(exc) or _is_password_validation_failure(exc)
+
+
+def _password_refused_copy(exc: BaseException) -> Optional[str]:
+    """The too-long sentence when GoTrue's refusal was the 72-byte cap; else None, which keeps
+    AUTH_PASSWORD_REJECTED's stock copy (the provider never says WHICH rule a weak one broke)."""
+    if _is_password_validation_failure(exc) and "longer than" in str(exc).lower():
+        return PASSWORD_TOO_LONG_MESSAGE
+    return None
+
+
+def _is_email_not_confirmed(exc: BaseException) -> bool:
+    """GoTrue's "Email not confirmed" sign-in refusal: the typed code, or `/login`'s wording
+    match for an untyped shape."""
+    return _gotrue_code(exc) == "email_not_confirmed" or "not confirmed" in str(exc).lower()
+
+
+def _is_upstream_failure(exc: BaseException) -> bool:
+    """GoTrue was rate-limited or DOWN — it said nothing about this account.
+
+    True for: a 429 / rate-limit code; `AuthRetryableError` / `AuthUnknownError` (transport,
+    502-504, an unparseable edge page); any 5xx; an UNTYPED exception the classifier calls
+    unavailable (no status, no code — e.g. a transport error the SDK did not wrap).
+
+    False for every typed 4xx, INCLUDING the ones `_classify_gotrue_failure` files as
+    "unavailable" because they are our configuration (`email_provider_disabled`,
+    `signup_disabled`, `bad_jwt`, …): those are a policy ANSWER, and `/auth/confirm-email`
+    must never mint past one (BE-AUTH-03 caveat). False for a refused credential and for
+    "Email not confirmed" too — callers test those first."""
+    kind = _classify_gotrue_failure(exc)
+    if kind == "rate_limited":
+        return True
+    if kind != "unavailable":
+        return False
+    names = _mro_names(exc)
+    if "AuthRetryableError" in names or "AuthUnknownError" in names:
+        return True
+    status_code = _gotrue_status(exc)
+    if status_code is not None:
+        return status_code >= 500
+    return _gotrue_code(exc) is None
+
+
+# ── GoTrue failure classification ─────────────────────────────────────────────
+#
+# gotrue's `handle_exception` turns EVERY failure of a verb into a typed AuthError:
+#   * transport errors and HTTP 502/503/504 → `AuthRetryableError` (status 0 or the 5xx);
+#   * an error body it cannot parse (e.g. an edge 520 HTML page) → `AuthUnknownError`;
+#   * anything else → `AuthApiError` / a subclass with `.status` and `.code`.
+# That signal was there and ignored: reset- and set-password laundered all of it into
+# "That code is invalid or has expired" (AUTH-BE-05), and sign-up into "Registration failed".
+# Matched by class NAME across the MRO so gotrue and a future supabase_auth both count.
+
+#: GoTrue's rate-limit codes. Matched with status 429 — either is enough.
+_GOTRUE_RATE_LIMIT_CODES = frozenset({
+    "over_request_rate_limit", "over_email_send_rate_limit", "over_sms_send_rate_limit",
+})
+#: A one-time code the PROVIDER refused as wrong / expired / used — the user's half.
+_GOTRUE_CODE_REJECTED_CODES = frozenset({
+    "otp_expired", "validation_failed", "user_not_found",
+})
+#: 4xx codes that mean OUR configuration or credentials are broken, not the user's input.
+_GOTRUE_OURS_4XX_CODES = frozenset({
+    "bad_jwt", "not_admin", "no_authorization", "otp_disabled", "email_provider_disabled",
+    "request_timeout", "hook_timeout", "hook_timeout_after_retry", "unexpected_failure",
+    "signup_disabled", "email_address_not_authorized",
+})
+#: Wording fallback for an UNTYPED exception only (a test fake, a future SDK shape).
+_CODE_REJECTED_MARKERS = ("expired", "invalid")
+
+
+def _mro_names(exc: BaseException) -> set:
+    return {c.__name__ for c in type(exc).__mro__}
+
+
+def _is_gotrue_outage(exc: BaseException) -> bool:
+    """A typed GoTrue failure that is the provider being DOWN: transport / 502-504
+    (`AuthRetryableError`), an unparseable error page (`AuthUnknownError`), or any 5xx."""
+    names = _mro_names(exc)
+    if "AuthRetryableError" in names or "AuthUnknownError" in names:
+        return True
+    status_code = _gotrue_status(exc)
+    return "AuthError" in names and status_code is not None and status_code >= 500
+
+
+def _gotrue_code(exc: BaseException) -> Optional[str]:
+    code = getattr(exc, "code", None)
+    return code.strip().lower() if isinstance(code, str) and code.strip() else None
+
+
+def _gotrue_status(exc: BaseException) -> Optional[int]:
+    status_code = getattr(exc, "status", None)
+    return status_code if isinstance(status_code, int) and not isinstance(status_code, bool) else None
+
+
+def _classify_gotrue_failure(exc: BaseException) -> str:
+    """'rate_limited' | 'unavailable' | 'rejected' for an exception a GoTrue verb raised.
+
+    Typed signals first, in this order; wording only for an exception with no type signal:
+      * AuthRetryableError / AuthUnknownError            → unavailable
+      * status 429 or a rate-limit code                  → rate_limited
+      * status ≥ 500                                     → unavailable
+      * a code naming a refused one-time code            → rejected
+      * a code naming OUR misconfiguration (bad_jwt, …)  → unavailable
+      * any other 4xx                                    → rejected (about the submitted value)
+      * untyped: "expired"/"invalid" in the message      → rejected, else unavailable
+    """
+    names = _mro_names(exc)
+    if "AuthRetryableError" in names or "AuthUnknownError" in names:
+        return "unavailable"
+    code, status_code = _gotrue_code(exc), _gotrue_status(exc)
+    if status_code == 429 or code in _GOTRUE_RATE_LIMIT_CODES:
+        return "rate_limited"
+    if status_code is not None and status_code >= 500:
+        return "unavailable"
+    if code in _GOTRUE_CODE_REJECTED_CODES:
+        return "rejected"
+    if code in _GOTRUE_OURS_4XX_CODES:
+        return "unavailable"
+    if status_code is not None and 400 <= status_code < 500:
+        return "rejected"
+    if any(marker in str(exc).lower() for marker in _CODE_REJECTED_MARKERS):
+        return "rejected"
+    return "unavailable"
+
+
+def _otp_failure(
+    exc: BaseException, *, route: str, user_id: Optional[str] = None,
+    unavailable_message: Optional[str] = None,
+) -> HTTPException:
+    """The HTTPException for a failed `verify_otp`, classified — and logged — once, here.
+
+    The user's half (a wrong, expired or used code) is 400 AUTH_CODE_INVALID at INFO: a typo
+    is not an incident, and an ERROR would be a Sentry event per typo. Ours (outage, 5xx,
+    429) is 503 AUTH_UNAVAILABLE at ERROR — the code is usually still good, so the user is told
+    to try again rather than to burn the resend budget on a new one. A 429 carries the
+    greppable GOTRUE_RATE_LIMITED marker (every call leaves from the one Railway egress, so it
+    is everyone's problem). Never the email, never the code.
+    """
+    kind = _classify_gotrue_failure(exc)
+    code, status_code = _gotrue_code(exc), _gotrue_status(exc)
+    who = f" user={user_id}" if user_id else ""
+    if kind == "rejected":
+        level = logging.INFO if (code in _GOTRUE_CODE_REJECTED_CODES or code is None) else logging.WARNING
+        logger.log(
+            level, "%s: one-time code refused%s (%s status=%s code=%s)",
+            route, who, type(exc).__name__, status_code, code,
+        )
+        return auth_error(
+            ErrorCode.AUTH_CODE_INVALID,
+            message=f"{route}: verify_otp refused the code (code={code})",
+        )
+    if kind == "rate_limited":
+        logger.error(
+            "GOTRUE_RATE_LIMITED route=%s verb=verify_otp%s status=%s code=%s",
+            route, who, status_code, code,
+        )
+    else:
+        logger.error(
+            "%s: verify_otp failed upstream%s: %s: %s (status=%s code=%s)",
+            route, who, type(exc).__name__, exc, status_code, code,
+        )
+    return auth_error(
+        ErrorCode.AUTH_UNAVAILABLE,
+        message=f"{route}: verify_otp upstream failure ({kind}): {type(exc).__name__}",
+        user_message=unavailable_message
+        or "We couldn't check your code just now. Please try again in a moment.",
+    )
+
+
+_CONFIRMATION_SEND_FAILED = (
+    "We couldn't send your confirmation email right now. Please try again in a few minutes."
+)
 
 
 def _optional_details(**kwargs) -> Optional[dict]:
@@ -588,9 +1251,14 @@ def _password_rejection_reasons(exc: Exception) -> Optional[str]:
 def _enforce_credential_limits(
     *checks: tuple[str, int, int],
     detail: str,
-    retry_after: str,
 ) -> None:
     """Evaluate credential limiters IN ORDER, raising 429 on the FIRST denial.
+
+    `Retry-After` is the WINDOW OF THE CHECK THAT DENIED (IOS-AUTH-04), not one number per
+    route. Login used to send "60" for both its 60-second per-IP bucket and its 15-minute
+    per-email bucket, so a user locked out per-email waited the minute they were told to and
+    was refused again; register sent "60" for a one-hour bucket. The limiter is a sliding
+    window, so the window is an honest upper bound on the wait.
 
     The short-circuit is a security property, not tidiness. `rate_limiter.is_allowed` INSERTS
     and LRU-touches its key *before* deciding, so the old shape —
@@ -617,7 +1285,8 @@ def _enforce_credential_limits(
             key, max_requests=max_requests, window_seconds=window_seconds, protected=True
         ):
             raise HTTPException(
-                status_code=429, detail=detail, headers={"Retry-After": retry_after}
+                status_code=429, detail=detail,
+                headers={"Retry-After": str(int(window_seconds))},
             )
 
 
@@ -642,8 +1311,13 @@ def _per_email_check(
     return (f"{bucket}:email:{email_key}", max_requests, window_seconds)
 
 
-def _app_user_row_exists(supabase: Client, user_id: str) -> bool:
+def _app_user_row_exists(supabase: Client, user_id: str, *, fail_closed: bool = False) -> bool:
     """Does this id have a `public.users` row?
+
+    `fail_closed=True` (the `/auth/refresh` path, SEC-4) raises `_IdentityStoreUnavailable` on a
+    read error instead of answering True: a refresh MINTS, so "could not check" must not mean
+    "exists". The sign-in paths keep failing open — there a blip would fail a user who just
+    proved a credential, and the check only guards the missing-row loop, not an eviction.
 
     The signup trigger (`handle_new_auth_user`) creates it, but it swallows its own failures,
     and an aborted account deletion can leave the same shape. When the row is missing, minting
@@ -661,8 +1335,14 @@ def _app_user_row_exists(supabase: Client, user_id: str) -> bool:
         result = supabase.table("users").select("id").eq("id", user_id).limit(1).execute()
         return bool(result.data)
     except Exception as e:
-        # Fail OPEN on a transport error — a Supabase blip must not lock out every refresh.
-        # Only a definitive "no row" is treated as a missing account.
+        if fail_closed:
+            logger.error(
+                "users existence check unavailable for user=%s: %s: %s — refusing to mint "
+                "(fail closed)", user_id, type(e).__name__, e,
+            )
+            raise _IdentityStoreUnavailable(f"{type(e).__name__}: {e}") from e
+        # Fail OPEN on a transport error on the sign-in paths. Only a definitive "no row" is
+        # treated as a missing account there.
         logger.warning(
             "users existence check unavailable for user=%s: %s: %s — allowing",
             user_id, type(e).__name__, e,
@@ -670,14 +1350,20 @@ def _app_user_row_exists(supabase: Client, user_id: str) -> bool:
         return True
 
 
-def _issue_app_tokens_for(user_id: str, email: Optional[str]) -> TokenResponse:
-    """Mint the app's own JWTs for an authenticated Supabase user (a provider sign-in or a
-    session exchange — both verified a credential, so both earn the device proof)."""
+def _issue_app_tokens_for(
+    user_id: str, email: Optional[str], *, device_proof: bool = True,
+) -> TokenResponse:
+    """Mint the app's own JWTs for an authenticated Supabase user.
+
+    A provider sign-in, a session exchange and a password change all VERIFIED a credential, so
+    they earn the device proof (auth.md §3a). `/auth/confirm-email` passes
+    `device_proof=False`: an emailed code proves the mailbox, not a password, and §3a mints the
+    lockout exemption only after a credential was verified."""
     access_token = create_access_token(data={"sub": user_id, "email": email})
     refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
     return TokenResponse(
         access_token=access_token, refresh_token=refresh_token, user_id=user_id,
-        device_token=create_device_proof(email) if email else None,
+        device_token=create_device_proof(email) if (email and device_proof) else None,
     )
 
 
@@ -777,9 +1463,14 @@ async def oauth_sign_in(
             "tokens (check the handle_new_auth_user trigger for this account)",
             request.provider, user_id,
         )
+        # 503 AUTH_UNAVAILABLE with session-exchange's copy, not 401 AUTH_ACCOUNT_NOT_FOUND
+        # (SOC-12): that told someone who was IN THE MIDDLE of signing in to "sign in again",
+        # and it is one of the codes iOS may clear a credential on. No token was issued here,
+        # so there is nothing to clear; the condition is ours (a trigger failure), not theirs.
         raise auth_error(
-            ErrorCode.AUTH_ACCOUNT_NOT_FOUND,
-            message=f"no public.users row for {user_id}",
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"oauth: no public.users row for verified user {user_id}",
+            user_message="Your account isn't ready yet. Please try again.",
         )
 
     (await asyncio.to_thread(_ensure_display_name, supabase, user_id, request.display_name))
@@ -809,26 +1500,55 @@ async def session_exchange(
             headers={"Retry-After": "60"},
         )
 
-    payload = await verify_supabase_token(request.supabase_access_token)
-    if not payload or not payload.get("sub"):
+    # Defence in depth around the verifier (SOC-02): a token whose header names an algorithm
+    # its JWK cannot use made python-jose raise JWKError — a JOSEError, NOT a JWTError — which
+    # escaped as an off-contract 500 and a Sentry event per forged POST. Whatever the verifier
+    # raises, it is a token we could not verify.
+    try:
+        payload = await verify_supabase_token(request.supabase_access_token)
+    except Exception as e:
+        logger.warning(
+            "session-exchange rejected: verifier raised %s — treating as unverifiable",
+            type(e).__name__,
+        )
+        payload = None
+    if not isinstance(payload, dict) or not payload.get("sub"):
         logger.warning("session-exchange rejected: Supabase token failed verification")
         raise auth_error(
             ErrorCode.AUTH_PROVIDER_FAILED,
             message="supabase access token failed signature verification",
         )
 
+    # An ANONYMOUS Supabase session (if anonymous sign-ins are ever enabled) is aud
+    # "authenticated" like any other, so it verifies. It proves no identity at all and must
+    # never become a Caydex session (SEC-2).
+    if payload.get("is_anonymous") is True:
+        logger.warning("session-exchange rejected: anonymous Supabase session")
+        raise auth_error(
+            ErrorCode.AUTH_PROVIDER_FAILED,
+            message="supabase access token belongs to an anonymous session",
+        )
+
     user_id = str(payload["sub"])
     email = payload.get("email")
 
     # The DB trigger creates public.users on auth.users insert. Confirm it landed rather
-    # than minting tokens for an id with no app-level row.
+    # than minting tokens for an id with no app-level row — and, in the SAME read, fetch the
+    # password stamp. `limit(1)` so a missing row is an empty list, not an exception.
     try:
-        row = (await sb_exec(supabase.table("users").select("id").eq("id", user_id).single()))
-        if not (row.data or {}).get("id"):
+        row = (await sb_exec(
+            supabase.table("users").select("id, password_changed_at").eq("id", user_id).limit(1)
+        ))
+        rows = row.data or []
+        if isinstance(rows, dict):
+            rows = [rows]
+        if not rows or not (rows[0] or {}).get("id"):
             raise ValueError("no public.users row")
+        changed_at = rows[0].get("password_changed_at")
     except Exception as e:
         logger.error(
-            "session-exchange: no app user row for verified Supabase user=%s (%s: %s)",
+            "session-exchange: users read failed or no app user row for verified Supabase "
+            "user=%s (%s: %s) — refusing (fail closed)",
             user_id, type(e).__name__, e,
         )
         # 503 AUTH_UNAVAILABLE, not a bare-string 500. iOS's `case 500...599` arm tries
@@ -844,6 +1564,33 @@ async def session_exchange(
             user_message="Your account isn't ready yet. Please try again.",
         )
 
+    # A Supabase JWT minted BEFORE the account's last password change must not become a fresh
+    # Caydex session (SEC-2). Otherwise a thief holding a still-unexpired Supabase access token
+    # (they last up to an hour) POSTs it here after the victim's reset and gets app tokens with
+    # `iat = now` — which pass every later eviction check, so the reset did nothing. FAIL
+    # CLOSED: an `iat` we cannot read, or a stamp we cannot parse, is not "fresh".
+    if changed_at:
+        try:
+            stale = _issued_before_password_change(payload.get("iat"), changed_at)
+        except (TypeError, ValueError, OverflowError, OSError) as e:
+            logger.error(
+                "session-exchange: cannot compare iat with password_changed_at for user=%s "
+                "(%s) — refusing (fail closed)", user_id, type(e).__name__,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_PROVIDER_FAILED,
+                message="supabase token iat unreadable against password_changed_at",
+            )
+        if stale:
+            logger.warning(
+                "session-exchange rejected for user=%s: Supabase token predates the last "
+                "password change", user_id,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_PROVIDER_FAILED,
+                message="supabase access token predates users.password_changed_at",
+            )
+
     logger.info("Session exchange succeeded for user=%s", user_id)
     return _issue_app_tokens_for(user_id, email)
 
@@ -855,8 +1602,9 @@ async def session_exchange(
 #
 # Flow chosen: Supabase's recovery OTP, verified in-app. The alternative — Supabase's
 # emailed magic link — needs either a hosted redirect page or Universal Links with an
-# Associated Domains entitlement, neither of which exists yet. A 6-digit code the user
-# types into the app needs no hosting and no deep-link plumbing.
+# Associated Domains entitlement, neither of which exists yet. A one-time code (8 digits as
+# the project is configured; the schema accepts 6-12) that the user types into the app needs
+# no hosting and no deep-link plumbing.
 #
 # REQUIRES A ONE-TIME SUPABASE DASHBOARD CHANGE: the "Reset Password" email template must
 # include `{{ .Token }}`. The default template only has `{{ .ConfirmationURL }}`, and with
@@ -866,6 +1614,20 @@ _GENERIC_RESET_MESSAGE = (
     "If an account exists for that email, we've sent password reset instructions. "
     "Check your inbox, including spam."
 )
+
+#: AUTH_PASSWORD_REJECTED after the single-use code was already spent (reset, set-password).
+#: "Send a new code" — the words on the button both screens show.
+_PASSWORD_REJECTED_NEEDS_NEW_CODE = (
+    "That password can't be used. Send a new code, then choose a different password."
+)
+
+
+def _code_used(message: str) -> HTTPException:
+    """Reset / set-password: the recovery code VERIFIED (so it is spent) and the write after it
+    failed for a reason that is not the password itself (PW-4). AUTH_CODE_USED carries the
+    stock copy — "…that code has now been used. Send a new code and try again." — so iOS clears
+    the dead code instead of resubmitting it (which could only read AUTH_CODE_INVALID)."""
+    return auth_error(ErrorCode.AUTH_CODE_USED, message=message)
 
 
 @router.post("/forgot-password", response_model=MessageResponse)
@@ -897,7 +1659,6 @@ async def forgot_password(
         # victim's OWN reset email for the hour.
         _per_email_check("forgot", email_key, 3, 3600, req),
         detail="Too many reset requests. Please try again later.",
-        retry_after="3600",
     )
 
     try:
@@ -926,8 +1687,9 @@ async def reset_password(
 ):
     """Complete a reset with the emailed code, then set the new password.
 
-    A 6-digit code is only ~1M possibilities, so this is rate-limited per email AND per IP
-    independently of Supabase's own limits. Without it, the code is brute-forceable.
+    The code is short (8 digits as configured: ~100M possibilities; the schema accepts 6-12),
+    so this is rate-limited per email AND per IP independently of Supabase's own limits.
+    Without it, a short code is brute-forceable.
 
     On success `password_changed_at` is stamped, which invalidates tokens an attacker may
     already hold (migration 105) — the reason someone resets a password is often that
@@ -939,29 +1701,26 @@ async def reset_password(
     _enforce_credential_limits(
         (f"reset:ip:{client_ip}", 10, 3600),
         _per_email_check("reset", email_key, 10, 3600, req),
-        detail="Too many attempts. Please request a new code and try again later.",
-        retry_after="3600",
+        detail="Too many attempts. Please wait a while, then send a new code and try again.",
     )
 
-    # 1. Verify the OTP. This is what proves control of the mailbox.
+    # 1. Verify the OTP. This is what proves control of the mailbox. Classified (AUTH-BE-05):
+    #    a refused code is 400 AUTH_CODE_INVALID, an outage/429 a retryable 503 — never the
+    #    old blanket "That code is invalid or has expired" for a GoTrue outage.
     try:
         verified = await run_gotrue(
             _auth_of(auth_client, supabase).auth.verify_otp,
             {"email": email_key, "token": request.code, "type": "recovery"},
         )
     except Exception as e:
-        logger.info("Password reset OTP verification failed (%s)", type(e).__name__)
-        raise HTTPException(
-            status_code=400,
-            detail="That code is invalid or has expired. Request a new one.",
-        )
+        raise _otp_failure(e, route="reset-password")
 
     user = getattr(verified, "user", None)
     if not user or not getattr(user, "id", None):
-        raise HTTPException(
-            status_code=400,
-            detail="That code is invalid or has expired. Request a new one.",
-        )
+        # verify_otp did not raise, so GoTrue accepted — and consumed — the code; only the
+        # answer is unusable. Ours, and the code is gone: AUTH_CODE_USED, at ERROR.
+        logger.error("reset-password: verify_otp succeeded but returned no user")
+        raise _code_used("reset-password: verify_otp returned no user")
     user_id = str(user.id)
 
     # 2. Set the new password with the admin API — on the ADMIN client, which nothing ever
@@ -977,21 +1736,31 @@ async def reset_password(
             user_id, {"password": request.new_password},
         )
     except Exception as e:
+        # THEIRS first (AUTH-BE-03, SB-5). GoTrue refuses a password our validator accepts —
+        # a breached one once leaked-password protection is on (the validator now mirrors
+        # GoTrue's character sets and 72-byte cap exactly, so "pwned" is the expected case).
+        # The code above is SINGLE-USE and already spent, so the copy must say a NEW code is
+        # needed, because the form still holds the dead one.
+        if _is_password_rejected(e):
+            logger.info("reset-password: new password refused by the provider for user=%s", user_id)
+            raise auth_error(
+                ErrorCode.AUTH_PASSWORD_REJECTED,
+                message="reset-password: admin.update_user_by_id rejected the new password",
+                user_message=_PASSWORD_REJECTED_NEEDS_NEW_CODE,
+                details=_optional_details(reasons=_password_rejection_reasons(e)),
+            )
+        # OURS — an outage, a 429, a `validation_failed` (e.g. a provider rule that drifted from
+        # ours) — but the code is spent all the same, so NOT the retryable AUTH_UNAVAILABLE this
+        # used to be ("Please try again" could only ever be answered "That code is invalid").
+        # Typed, never a bare-string 5xx: iOS's 5xx arm decodes `APIErrorResponse` first.
         logger.error(
-            "Password update failed after a VERIFIED reset code for user=%s: %s: %s",
-            user_id, type(e).__name__, e,
+            "Password update failed after a VERIFIED reset code for user=%s: %s: %s "
+            "(status=%s code=%s)",
+            user_id, type(e).__name__, e, _gotrue_status(e), _gotrue_code(e),
         )
-        # 503 AUTH_UNAVAILABLE, not a bare-string 500. iOS's `case 500...599` arm tries
-        # `APIErrorResponse` first and otherwise falls back to `.serverError`, whose copy is
-        # hardcoded and generic — so a string detail here means the specific sentence below
-        # is written, serialised, and then THROWN AWAY, and the failure arrives with no
-        # machine-readable code. `AUTH_UNAVAILABLE` is already handled by the shipped app
-        # (`.authUnavailable`, action `retry_later`) and, critically, does NOT clear the
-        # stored credential — the token is fine; the identity-store operation is not.
-        raise auth_error(
-            ErrorCode.AUTH_UNAVAILABLE,
-            message="password update failed after a verified reset code",
-            user_message="We couldn't set your new password. Please try again.",
+        raise _code_used(
+            f"reset-password: admin.update_user_by_id failed after a verified code: "
+            f"{type(e).__name__} (code={_gotrue_code(e)})"
         )
 
     # 3. Evict sessions issued before this moment.
@@ -1090,7 +1859,6 @@ async def change_password(
         (f"changepw:ip:{client_ip}", 10, 3600),
         (f"changepw:user:{user_id}", 5, 900),
         detail="Too many password change attempts. Please try again later.",
-        retry_after="900",
     )
 
     if request.new_password == request.current_password:
@@ -1157,11 +1925,17 @@ async def change_password(
         # fallback (only the 4xx arm does), so the wording never reached iOS at all — the user
         # saw a generic transient server error and was invited to retry the one password that
         # can never be accepted.
-        if _is_password_rejected(e):
-            logger.info("change-password: new password refused by the provider for user=%s", user_id)
+        # `_is_password_refused`: a too-long password is GoTrue's `validation_failed`, not
+        # `weak_password` (the validator refuses it first; this is the backstop).
+        if _is_password_refused(e):
+            logger.info(
+                "change-password: new password refused by the provider for user=%s (code=%s)",
+                user_id, _gotrue_code(e),
+            )
             raise auth_error(
                 ErrorCode.AUTH_PASSWORD_REJECTED,
-                message="admin.update_user_by_id rejected the new password",
+                message=f"admin.update_user_by_id rejected the new password (code={_gotrue_code(e)})",
+                user_message=_password_refused_copy(e),
                 details=_optional_details(reasons=_password_rejection_reasons(e)),
             )
         logger.error(
@@ -1234,7 +2008,6 @@ async def set_password(
         (f"setpw:ip:{client_ip}", 10, 3600),
         (f"setpw:user:{user_id}", 5, 900),
         detail="Too many attempts. Please try again later.",
-        retry_after="900",
     )
 
     # From the token's subject, never the body — otherwise the OTP check below could be aimed at
@@ -1287,20 +2060,21 @@ async def set_password(
             {"email": email, "token": request.code, "type": "recovery"},
         )
     except Exception as e:
-        logger.info(
-            "set-password: OTP verification failed for user=%s (%s)", user_id, type(e).__name__
-        )
-        raise HTTPException(
-            status_code=400,
-            detail="That code is invalid or has expired. Request a new one.",
-        )
+        # Classified exactly like reset-password (AUTH-BE-05).
+        raise _otp_failure(e, route="set-password", user_id=user_id)
 
     verified_user = getattr(verified, "user", None)
     verified_id = str(getattr(verified_user, "id", "") or "")
+    if not verified_id:
+        # verify_otp did not raise, so the code was accepted — and consumed. Same as reset.
+        logger.error("set-password: verify_otp succeeded but returned no user for user=%s", user_id)
+        raise _code_used("set-password: verify_otp returned no user")
     # Belt and braces. The email came from this user's own row, so a code that verifies against
     # it should always resolve to this user — but the consequence of being wrong is writing a
-    # password into somebody else's account, so it is checked rather than assumed.
-    if not verified_id or verified_id != str(user_id):
+    # password into somebody else's account, so it is checked rather than assumed. Kept
+    # AUTH_FORBIDDEN (not AUTH_CODE_USED): "send a new code and try again" would only repeat an
+    # anomaly nobody can explain, and it must stand out in the logs as a security refusal.
+    if verified_id != str(user_id):
         logger.error(
             "set-password: OTP resolved to a DIFFERENT user (token subject=%s, otp=%s)",
             user_id, verified_id or "<none>",
@@ -1322,26 +2096,25 @@ async def set_password(
         )
     except Exception as e:
         if _is_password_rejected(e):
+            logger.info("set-password: new password refused by the provider for user=%s", user_id)
+            # The recovery code was spent by verify_otp above — same copy as reset-password.
             raise auth_error(
                 ErrorCode.AUTH_PASSWORD_REJECTED,
                 message="admin.update_user_by_id rejected the new password",
+                user_message=_PASSWORD_REJECTED_NEEDS_NEW_CODE,
                 details=_optional_details(reasons=_password_rejection_reasons(e)),
             )
         logger.error(
-            "set-password: admin update failed for user=%s: %s: %s",
-            user_id, type(e).__name__, e, exc_info=True,
+            "set-password: admin update failed after a VERIFIED code for user=%s: %s: %s "
+            "(status=%s code=%s)",
+            user_id, type(e).__name__, e, _gotrue_status(e), _gotrue_code(e), exc_info=True,
         )
-        # 503 AUTH_UNAVAILABLE, not a bare-string 500. iOS's `case 500...599` arm tries
-        # `APIErrorResponse` first and otherwise falls back to `.serverError`, whose copy is
-        # hardcoded and generic — so a string detail here means the specific sentence below
-        # is written, serialised, and then THROWN AWAY, and the failure arrives with no
-        # machine-readable code. `AUTH_UNAVAILABLE` is already handled by the shipped app
-        # (`.authUnavailable`, action `retry_later`) and, critically, does NOT clear the
-        # stored credential — the token is fine; the identity-store operation is not.
-        raise auth_error(
-            ErrorCode.AUTH_UNAVAILABLE,
-            message="set-password: admin.update_user_by_id failed",
-            user_message="We couldn't set your password. Please try again.",
+        # AUTH_CODE_USED (503, fix_input), not AUTH_UNAVAILABLE: the code is spent, so "Please
+        # try again" could only be answered "That code is invalid" (PW-4). It does NOT clear the
+        # stored credential (503, not 401) — the caller's session is fine.
+        raise _code_used(
+            f"set-password: admin.update_user_by_id failed after a verified code: "
+            f"{type(e).__name__} (code={_gotrue_code(e)})"
         )
 
     (await asyncio.to_thread(_mark_password_changed, supabase, user_id))

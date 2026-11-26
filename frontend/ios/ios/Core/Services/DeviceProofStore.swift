@@ -40,13 +40,40 @@ nonisolated enum DeviceProofStore {
         lock.lock(); defer { lock.unlock() }
         var proofs = load()
         proofs[normalised] = proof
-        // Bound the map: a device that cycles through many accounts keeps the newest few.
-        if proofs.count > maxEntries {
-            for dropped in proofs.keys.sorted().prefix(proofs.count - maxEntries) where dropped != normalised {
-                proofs.removeValue(forKey: dropped)
-            }
+        save(bounded(proofs, keeping: normalised))
+    }
+
+    /// Bound the map AFTER the insert: a device that cycles through many accounts keeps the
+    /// newest few, oldest ISSUE first (CC-08).
+    ///
+    /// This used to drop `keys.sorted()` — the alphabetically FIRST addresses — and skip the
+    /// drop when the new address sorted first, so the map could sit one over its limit. On a
+    /// shared iPad, the account whose email sorts first lost its exemption every time any other
+    /// account signed in: during a lockout attack on that address, its own device got 429.
+    ///
+    /// The address just remembered is never evicted. Ties (and unreadable proofs, which sort
+    /// oldest) break on the address so the result does not depend on dictionary order.
+    static func bounded(_ proofs: [String: String], keeping kept: String) -> [String: String] {
+        let overflow = proofs.count - maxEntries
+        guard overflow > 0 else { return proofs }
+        var out = proofs
+        let oldestFirst = proofs
+            .filter { $0.key != kept }
+            .map { (issuedAt: issuedAt(of: $0.value), email: $0.key) }
+            .sorted { ($0.issuedAt, $0.email) < ($1.issuedAt, $1.email) }
+        for entry in oldestFirst.prefix(overflow) {
+            out.removeValue(forKey: entry.email)
         }
-        save(proofs)
+        return out
+    }
+
+    /// The proof's issue time — the `<iat>` of `v1.<iat>.<digest>.<sig>`
+    /// (`core/security.py::create_device_proof`). The format is otherwise opaque here; a proof
+    /// this cannot read counts as the oldest, so it is the first to go.
+    static func issuedAt(of proof: String) -> Int {
+        let parts = proof.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2, let iat = Int(parts[1]) else { return Int.min }
+        return iat
     }
 
     static func normalise(_ email: String) -> String {

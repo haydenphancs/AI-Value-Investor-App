@@ -70,6 +70,31 @@ enum SignUpOutcome: Sendable {
     case signedIn(UserProfile)
 }
 
+/// What confirming an address with its emailed code ended in (`AppState.confirmEmail`).
+enum EmailConfirmationOutcome: Sendable {
+    /// Confirmed and signed in.
+    case signedIn
+    /// Confirmed, and the server handed back a session, but the profile read after it failed on
+    /// the network. The session is kept and the app keeps retrying (`.restoring`); the code is
+    /// spent, so the screen must not ask for it again.
+    case confirmedPendingConnection
+}
+
+/// Thrown by a sign-in whose credential the server ACCEPTED — tokens stored in the Keychain,
+/// client armed — when the `/users/me` read that follows then failed.
+///
+/// Without it the caller saw only the network error, and the half-finished session stayed
+/// behind: the client kept sending the new Bearer while the UI said signed out, and the next
+/// heal trigger signed the user in without telling them (IOS-AUTH-09, SOC-03). `AppState` turns
+/// it into the `.restoring` path (Keychain kept, client disarmed, restore scheduled) or, when
+/// the server refused the token it had just minted, undoes the adoption — then rethrows
+/// `underlying`, so screens only ever see the ordinary error.
+struct SignedInProfileUnavailable: Error {
+    let underlying: Error
+    /// `sessionEpoch` right after the adoption: the undo is skipped if anything moved it since.
+    let epoch: Int
+}
+
 // MARK: - Auth Service
 
 /// Handles authentication and token management
@@ -117,44 +142,56 @@ final class AuthService {
     /// Sign in with email and password.
     /// Stores the tokens, arms the API client, then fetches the canonical profile
     /// from `GET /users/me` (the token body does not carry the user object).
+    ///
+    /// EMAIL_NOT_CONFIRMED is rethrown UNCHANGED. This used to catch it, silently re-send the
+    /// confirmation email (`try?`, no log) and append "We've just sent you a fresh confirmation
+    /// link" to the backend's own sentence. That printed the same message twice, claimed a send
+    /// that GoTrue often skipped, rotated the code in the user's inbox on every attempt — so the
+    /// email they were about to use died — and spent the 3-an-hour resend budget before they
+    /// tapped anything. `SignInView` now routes the error to the code screen, which has an
+    /// explicit "Send a new code".
     func signIn(email: String, password: String) async throws -> UserProfile {
-        let response: AuthResponse
-        do {
-            response = try await apiClient.request(
-                endpoint: .signIn(email: email, password: password),
-                responseType: AuthResponse.self
-            )
-        } catch APIError.businessError(let code, let message) where code == "EMAIL_NOT_CONFIRMED" {
-            // A DEAD END until now. The backend correctly distinguishes "unconfirmed" from
-            // "wrong password" — but the sign-in screen only renders `errorMessage`, and there
-            // is no resend affordance anywhere on it. A user whose confirmation email expired,
-            // went to spam, or was opened on another device was told to confirm their address
-            // with no way to obtain a new link, and with the correct password in hand. The
-            // account is unreachable.
-            //
-            // Close the loop here rather than in the view (SignInView is off-limits): the
-            // password already verified, so re-sending is safe and is what the user would tap
-            // if the button existed. Backend rate limits (`resend:ip:` 5/hr + `resend:email:`)
-            // cap it, so a retry loop cannot become a mail-bomb.
-            let resent = (try? await resendConfirmation(email: email)) != nil
-            throw APIError.businessError(
-                code: code,
-                message: resent
-                    ? "\(message) We've just sent you a fresh confirmation link — check your inbox, then sign in again."
-                    : message
-            )
-        }
+        let response = try await apiClient.request(
+            endpoint: .signIn(email: email, password: password),
+            responseType: AuthResponse.self
+        )
 
         // Store tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         // A verified password earns this install its per-email lockout exemption.
         DeviceProofStore.remember(response.deviceToken, for: email)
         sessionEpoch += 1   // new session — invalidate any in-flight older-session refresh
+        let epoch = sessionEpoch
 
         // Update API client
         await apiClient.setAuthToken(response.accessToken)
 
-        return try await fetchCurrentUser()
+        return try await adoptedSessionProfile(epoch: epoch)
+    }
+
+    /// Confirm a new account's address with the code from the "Confirm signup" email, and sign
+    /// in with the password the user just typed (`POST /auth/confirm-email`).
+    ///
+    /// Token adoption is EXACTLY `signIn`'s — persist, bump the epoch, arm the client, then read
+    /// the profile — because this is a sign-in: the server answers with the same
+    /// `TokenResponse`. No device proof: the server never mints one on this route (the code,
+    /// not a verified password, is what got the caller here), so there is nothing to remember.
+    ///
+    /// `retryCount: 0`: the code is single-use. A lost response is not repeated automatically.
+    func confirmEmail(email: String, code: String, password: String) async throws -> UserProfile {
+        let response = try await apiClient.request(
+            endpoint: .confirmEmail(email: email, code: code, password: password),
+            responseType: AuthResponse.self,
+            retryCount: 0
+        )
+
+        saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
+        sessionEpoch += 1   // new session — invalidate any in-flight older-session refresh
+        let epoch = sessionEpoch
+
+        await apiClient.setAuthToken(response.accessToken)
+
+        return try await adoptedSessionProfile(epoch: epoch)
     }
 
     /// Sign up with email and password.
@@ -180,12 +217,11 @@ final class AuthService {
 
         saveTokens(accessToken: accessToken, refreshToken: refreshToken)
         sessionEpoch += 1
+        let epoch = sessionEpoch
         await apiClient.setAuthToken(accessToken)
-        return .signedIn(try await fetchCurrentUser())
+        return .signedIn(try await adoptedSessionProfile(epoch: epoch))
     }
 
-    /// Re-send the signup confirmation email. Fire-and-forget by design: the backend never
-    /// reveals whether the address needs confirming, so there is nothing to branch on.
     /// Change the signed-in user's password AND adopt the credentials the server hands back.
     ///
     /// Lives here rather than in the view because it is a session transition, not a form submit:
@@ -239,7 +275,8 @@ final class AuthService {
 
     /// Create a FIRST password for a signed-in account that has none (Apple/Google sign-in).
     ///
-    /// The `code` is the 6-digit recovery OTP from `POST /auth/forgot-password`. The session
+    /// The `code` is the emailed recovery code from `POST /auth/forgot-password` (its length is
+    /// a Supabase setting — 8 digits today — so nothing here assumes one). The session
     /// alone is deliberately not sufficient on the server: without the code, a stolen access
     /// token would be enough to take permanent ownership of the account.
     ///
@@ -272,6 +309,10 @@ final class AuthService {
         return response.message
     }
 
+    /// Re-send the signup confirmation email (a new code). Only ever on the user's explicit tap
+    /// on the code screen. The backend answers the same 200 whether or not the address still
+    /// needs confirming — it never reveals which addresses have accounts — so there is nothing
+    /// to branch on, and the screen's copy must not claim an email was definitely sent.
     func resendConfirmation(email: String) async throws {
         _ = try await apiClient.request(
             endpoint: .resendConfirmation(email: email),
@@ -295,8 +336,9 @@ final class AuthService {
         )
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1
+        let epoch = sessionEpoch
         await apiClient.setAuthToken(response.accessToken)
-        let profile = try await fetchCurrentUser()
+        let profile = try await adoptedSessionProfile(epoch: epoch)
         // The address is only known once the profile is back; the proof is bound to it.
         DeviceProofStore.remember(response.deviceToken, for: profile.email)
         return profile
@@ -310,10 +352,36 @@ final class AuthService {
         )
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1
+        let epoch = sessionEpoch
         await apiClient.setAuthToken(response.accessToken)
-        let profile = try await fetchCurrentUser()
+        let profile = try await adoptedSessionProfile(epoch: epoch)
         DeviceProofStore.remember(response.deviceToken, for: profile.email)
         return profile
+    }
+
+    /// The profile read that completes a sign-in whose tokens were just adopted. A failure is
+    /// wrapped in `SignedInProfileUnavailable`, so `AppState` knows a session now exists and
+    /// can settle it (`.restoring`, or undo) instead of leaving it half signed in.
+    private func adoptedSessionProfile(epoch: Int) async throws -> UserProfile {
+        do {
+            return try await fetchCurrentUser()
+        } catch {
+            throw SignedInProfileUnavailable(underlying: error, epoch: epoch)
+        }
+    }
+
+    /// Undo a sign-in whose tokens were adopted but whose profile read was REFUSED (an auth
+    /// error on a token the server had just minted, e.g. the account vanished in between).
+    /// Clears the session tokens and disarms the client, the local half of sign-out — unless a
+    /// newer session transition (a sign-out, another sign-in) moved the epoch since, in which
+    /// case that session owns the Keychain and nothing is touched. The device proof is NOT
+    /// cleared: a verified password earned it (auth.md §3a). Returns whether it undid anything.
+    func discardAdoptedSession(epoch: Int) -> Bool {
+        guard epoch == sessionEpoch else { return false }
+        sessionEpoch += 1
+        self.clearToken()
+        _ = apiClient.disarmAuthToken()
+        return true
     }
 
     /// Fetch the current user's canonical profile (`GET /users/me`).
@@ -469,6 +537,55 @@ final class AuthService {
     var hasStoredToken: Bool {
         storedTokenPresent ?? false
     }
+
+    // MARK: - Fresh install
+
+    /// Set in the app's own UserDefaults on the first launch that runs this check. UserDefaults
+    /// go with the app when it is deleted; Keychain items do not.
+    private static let installMarkerKey = "auth.install-marker.v1"
+
+    /// Delete session tokens an EARLIER install of the app left in the Keychain (SEC-8).
+    ///
+    /// Keychain items outlive the app. A user who deleted Caydex believing that signed them
+    /// out, then handed the phone on, had the next install restore their session — portfolio,
+    /// chats, credits — for as long as the refresh token lived. Called first thing in the
+    /// launch Task, before the one launch read.
+    ///
+    /// ONLY the two session tokens, through `clearToken()`. Never `KeychainService.deleteAll`,
+    /// never `DeviceProofStore` (the lockout exemption is meant to survive, auth.md §3a) and
+    /// never `GuestIdentity` (the install id is meant to survive a reinstall). The widget token
+    /// lives in the App Group container, which iOS deletes with the app.
+    ///
+    /// An UPDATE must not sign anyone out, and an update from a build that predates this marker
+    /// also arrives without it. So a missing marker counts as a fresh install only when the App
+    /// Group holds no trace of an earlier launch either: every build since 2026-08-28 publishes
+    /// the widget's base URL there on every launch, and that container is deleted with the app.
+    /// If the App Group cannot be opened at all, this cannot tell, and keeps the session —
+    /// signing every user out on an update is the worse failure.
+    func purgeSessionLeftByAnEarlierInstall() async {
+        let markerKey = Self.installMarkerKey
+        let decision = await Task.detached(priority: .userInitiated) { () -> InstallKind in
+            if UserDefaults.standard.bool(forKey: markerKey) { return .seenBefore }
+            guard let group = WidgetSharedDefaults.store else { return .unknown }
+            return group.string(forKey: WidgetAPIConfig.baseURLOverrideKey) == nil ? .fresh : .updated
+        }.value
+
+        switch decision {
+        case .seenBefore:
+            return
+        case .fresh:
+            Self.log.notice("fresh install: clearing any session tokens an earlier install left in the Keychain")
+            self.clearToken()
+        case .updated:
+            Self.log.info("install marker missing but this install has run before (an update) — session kept")
+        case .unknown:
+            Self.log.warning("install marker missing and the App Group is unreadable — cannot tell a fresh install from an update; session kept")
+        }
+        // After the clear, so a kill between the two re-runs the check rather than skipping it.
+        UserDefaults.standard.set(true, forKey: Self.installMarkerKey)
+    }
+
+    nonisolated private enum InstallKind: Sendable { case seenBefore, fresh, updated, unknown }
 
     /// Save tokens to keychain
     private func saveTokens(accessToken: String, refreshToken: String) {

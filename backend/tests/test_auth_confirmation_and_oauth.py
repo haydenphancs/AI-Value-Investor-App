@@ -14,21 +14,37 @@ Two things pinned here:
    already proven would be pointless friction. The exemption is asserted here so it can't be
    "tidied up" into consistency later.
 
-No network / Supabase — fakes throughout, and the shared rate limiter is reset per test.
+3. **A signup can actually be confirmed** (`/auth/confirm-email`, 2026-11-26). The live
+   Confirm-signup email carries an 8-digit code and, until this route, nothing could redeem it,
+   so every new email/password account was stuck at EMAIL_NOT_CONFIRMED while this suite was
+   green (TG-1). Pinned below: the OTP type is "signup" and never "email"/"recovery"; a refused
+   code is a typed 400 with no tokens; both limiters run before GoTrue; an outage is a 503; a
+   DIFFERENT stored password is replaced by the mailbox owner's (CC-03, SEC-6) and stamped; no
+   device proof is minted.
+
+No network / Supabase — fakes throughout, and the shared rate limiter is reset per test. GoTrue
+failures are built by gotrue's own `handle_exception`, the path a real answer takes.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import warnings
 
+import httpx
 import pytest
 from fastapi import HTTPException
+
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", DeprecationWarning)  # gotrue announces its own rename
+    from gotrue.helpers import handle_exception
 
 from app.api.error_response import ErrorCode
 from app.api.v1.endpoints import auth as auth_ep
 from app.core.security import rate_limiter
 from app.schemas.auth import (
+    ConfirmEmailRequest,
     OAuthSignInRequest,
     ResendConfirmationRequest,
     SessionExchangeRequest,
@@ -53,8 +69,53 @@ def _clear_rate_limiter():
 
 
 class _FakeRequest:
-    def __init__(self, ip="203.0.113.44"):
+    def __init__(self, ip="203.0.113.44", headers=None):
         self.client = type("C", (), {"host": ip})()
+        self.headers = {k.lower(): v for k, v in (headers or {}).items()}
+
+
+def _gotrue_error(status: int, body: dict | None = None, *, text: str | None = None) -> Exception:
+    """The exception gotrue itself raises for this GoTrue answer (its own `handle_exception`)."""
+    req = httpx.Request("POST", "https://example.supabase.co/auth/v1/x")
+    if text is not None:
+        resp = httpx.Response(status, text=text, request=req)
+    else:
+        resp = httpx.Response(
+            status, json=body or {}, request=req,
+            headers={"X-Supabase-Api-Version": "2024-01-01"},
+        )
+    return handle_exception(httpx.HTTPStatusError("http error", request=req, response=resp))
+
+
+def _gotrue_transport_error() -> Exception:
+    return handle_exception(httpx.ConnectError("connection refused"))
+
+
+# Failure modes by flag, built through the real SDK mapper.
+_SIGNUP_ERRORS = {
+    "signup_email_rate": lambda: _gotrue_error(
+        429, {"code": "over_email_send_rate_limit", "msg": "email rate limit exceeded"}),
+    "signup_ip_rate": lambda: _gotrue_error(
+        429, {"code": "over_request_rate_limit", "msg": "Request rate limit reached"}),
+    "signup_smtp": lambda: _gotrue_error(
+        500, {"code": "unexpected_failure", "msg": "Error sending confirmation email"}),
+    "signup_down": _gotrue_transport_error,
+    "signup_bad_gateway": lambda: _gotrue_error(502, {"msg": "bad gateway"}),
+    "signup_edge_html": lambda: _gotrue_error(520, text="<html>origin error</html>"),
+    "signup_invalid_email": lambda: _gotrue_error(
+        400, {"code": "email_address_invalid", "msg": "Email address is invalid"}),
+    "signup_disabled": lambda: _gotrue_error(
+        422, {"code": "signup_disabled", "msg": "Signups not allowed for this instance"}),
+    "signup_weak": lambda: _gotrue_error(422, {
+        "code": "weak_password", "msg": "Password is known to be weak",
+        "weak_password": {"reasons": ["pwned"]}}),
+    # GoTrue's 72-byte cap: `validation_failed`, NOT weak_password (verified on the live stack).
+    "signup_too_long": lambda: _gotrue_error(
+        400, {"code": "validation_failed", "msg": "Password cannot be longer than 72 characters"}),
+    # The same code about ANOTHER field must not be read as a password refusal.
+    "signup_validation_email": lambda: _gotrue_error(
+        400, {"code": "validation_failed", "msg": "Unable to validate email address: invalid format"}),
+}
 
 
 class _FakeUser:
@@ -64,21 +125,80 @@ class _FakeUser:
         self.email_confirmed_at = "2026-07-30T00:00:00Z" if confirmed else None
 
 
+class _FakeAdmin:
+    def __init__(self, log, fail):
+        self._log, self._fail = log, fail
+
+    def update_user_by_id(self, uid, attrs):
+        self._log.append(("admin_attempt", uid))
+        if "admin_weak" in self._fail:
+            raise _SIGNUP_ERRORS["signup_weak"]()
+        if "admin_too_long" in self._fail:
+            raise _SIGNUP_ERRORS["signup_too_long"]()
+        if "admin_down" in self._fail:
+            raise _gotrue_error(403, {"code": "not_admin", "msg": "User not allowed"})
+        if "admin_outage" in self._fail:
+            raise _gotrue_transport_error()
+        self._log.append(("admin.update_user_by_id", uid, dict(attrs)))
+
+
 class _FakeAuth:
     def __init__(self, log, user, fail):
         self._log, self._user, self._fail = log, user, fail
+        self.admin = _FakeAdmin(log, fail)
 
     def sign_up(self, payload):
         if "signup" in self._fail:
             raise RuntimeError("signup failed")
+        for flag, build in _SIGNUP_ERRORS.items():
+            if flag in self._fail:
+                raise build()
         self._log.append(("sign_up", payload["email"]))
         return type("R", (), {"user": self._user})()
 
+    def verify_otp(self, params):
+        self._log.append(("verify_otp", params.get("email"), params.get("type"), params.get("token")))
+        if "otp_expired" in self._fail:
+            raise _gotrue_error(403, {"code": "otp_expired", "msg": "Token has expired or is invalid"})
+        if "otp_outage" in self._fail:
+            raise _gotrue_transport_error()
+        if "otp_5xx" in self._fail:
+            raise _gotrue_error(500, {"code": "unexpected_failure", "msg": "Database error"})
+        if "otp_429" in self._fail:
+            raise _gotrue_error(429, {"code": "over_request_rate_limit", "msg": "rate limited"})
+        if "otp_nouser" in self._fail:
+            return type("R", (), {"user": None})()
+        if "otp_wrong_email" in self._fail:
+            return type("R", (), {"user": _FakeUser(True, email="someone.else@example.com")})()
+        if "otp_unconfirmed" in self._fail:
+            return type("R", (), {"user": _FakeUser(False)})()
+        return type("R", (), {"user": _FakeUser(True)})()
+
     def sign_in_with_password(self, creds):
+        self._log.append(("sign_in_attempt", creds["email"]))
         if "not_confirmed" in self._fail:
             raise RuntimeError("Email not confirmed")
         if "signin" in self._fail:
             raise RuntimeError("bad credentials")
+        if "signin_typed" in self._fail:
+            raise _gotrue_error(400, {"code": "invalid_credentials", "msg": "Invalid login credentials"})
+        if "signin_429" in self._fail:
+            raise _gotrue_error(429, {"code": "over_request_rate_limit", "msg": "rate limited"})
+        if "signin_transport" in self._fail:
+            raise _gotrue_transport_error()
+        if "signin_5xx" in self._fail:
+            raise _gotrue_error(500, {"code": "unexpected_failure", "msg": "Database error"})
+        if "signin_edge_html" in self._fail:
+            raise _gotrue_error(520, text="<html>origin error</html>")
+        # POLICY answers about this account — never a reason to set a password and mint.
+        if "signin_typed_unconfirmed" in self._fail:
+            raise _gotrue_error(400, {"code": "email_not_confirmed", "msg": "Email not confirmed"})
+        if "signin_provider_disabled" in self._fail:
+            raise _gotrue_error(400, {"code": "email_provider_disabled", "msg": "Email logins are disabled"})
+        if "signin_banned" in self._fail:
+            raise _gotrue_error(400, {"code": "user_banned", "msg": "User is banned"})
+        if "signin_other_user" in self._fail:
+            return type("R", (), {"user": _FakeUser(True, uid="99999999-0000-4000-8000-000000000000")})()
         # A failure that is OURS, not the caller's — deliberately worded so it does NOT match
         # `_is_rejected_credential`, which is the only thing separating a wrong password from
         # an identity-provider outage.
@@ -495,3 +615,741 @@ async def test_session_exchange_never_trusts_the_sub_before_verification(monkeyp
         )
     assert seen == ["verified"]
     assert sb.log == [], "no DB access before the signature check passes"
+
+
+# ── 6. Confirm a signup with the emailed code (/auth/confirm-email) ───────────
+
+_CODE = "9818-0778"          # the shape of the code in the reported email, as a user pastes it
+_CODE_DIGITS = "98180778"
+
+
+def _confirm(email=_EMAIL, code=_CODE, password=_PASSWORD) -> ConfirmEmailRequest:
+    return ConfirmEmailRequest(email=email, code=code, password=password)
+
+
+def _kinds(sb) -> list[str]:
+    return [e[0] for e in sb.log]
+
+
+@pytest.mark.asyncio
+async def test_confirm_email_verifies_a_SIGNUP_code_then_signs_in():
+    """(a) The type is "signup" — never "email" (GoTrue's "email" also matches a RECOVERY token,
+    turning a reset code into a passwordless sign-in) and never "recovery". The email reaches
+    GoTrue lowercased and the code as digits only."""
+    sb = FakeSupabase()
+    out = await auth_ep.confirm_email(_confirm(email="New.User@Example.com"), _FakeRequest(), sb)
+
+    verify = [e for e in sb.log if e[0] == "verify_otp"]
+    assert verify == [("verify_otp", _EMAIL, "signup", _CODE_DIGITS)]
+    assert _kinds(sb).index("verify_otp") < _kinds(sb).index("sign_in_with_password")
+    assert out.access_token and out.refresh_token and out.user_id == _USER_ID
+
+
+@pytest.mark.asyncio
+async def test_confirm_email_never_mints_a_device_proof():
+    """An emailed code proves the mailbox, not a password: auth.md §3a mints the lockout
+    exemption only after a VERIFIED CREDENTIAL — on both the match and the replace paths."""
+    for fail in ((), ("signin",)):
+        rate_limiter.clear()
+        out = await auth_ep.confirm_email(_confirm(), _FakeRequest(), FakeSupabase(fail=fail))
+        assert out.device_token is None
+
+
+@pytest.mark.asyncio
+async def test_a_matching_password_changes_nothing():
+    sb = FakeSupabase()
+    await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    assert "admin.update_user_by_id" not in _kinds(sb)
+    assert not [e for e in sb.log if e[0] == "update"], "no stamp when no password changed"
+
+
+def test_confirm_email_source_pins_the_signup_type():
+    """Comment-stripped and brace-bound to the handler: the only verify_otp type it may send."""
+    import inspect
+
+    src = inspect.getsource(auth_ep.confirm_email)
+    code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
+    assert '"type": "signup"' in code
+    assert '"type": "email"' not in code and '"type": "recovery"' not in code
+    assert "device_proof=False" in code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", ["otp_expired", "otp_nouser", "otp_wrong_email", "otp_unconfirmed"])
+async def test_a_refused_code_is_a_typed_400_with_no_tokens(fail, caplog):
+    """(b)(c) A wrong/expired code — and a verify answer that is anomalous (no user, another
+    address, still unconfirmed) — never reaches the sign-in, never mints."""
+    sb = FakeSupabase(fail=(fail,))
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    assert ei.value.status_code == 400
+    assert ei.value.detail["error_code"] == "AUTH_CODE_INVALID"
+    assert ei.value.detail["action"] == "fix_input"
+    assert "sign_in_attempt" not in _kinds(sb) and "admin.update_user_by_id" not in _kinds(sb)
+    if fail == "otp_expired":
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], "a typo is not an incident"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_email_and_a_wrong_code_answer_identically():
+    """(e) GoTrue answers both with otp_expired; the body must not become an account oracle."""
+    bodies = []
+    for email, ip in ((_EMAIL, "198.51.100.71"), ("nobody@example.com", "198.51.100.72")):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.confirm_email(
+                _confirm(email=email), _FakeRequest(ip), FakeSupabase(fail=("otp_expired",)),
+            )
+        bodies.append((ei.value.status_code, ei.value.detail))
+    assert bodies[0] == bodies[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail, marker", [
+    ("otp_outage", None), ("otp_5xx", None), ("otp_429", "GOTRUE_RATE_LIMITED"),
+])
+async def test_an_upstream_failure_is_a_retryable_503(fail, marker, caplog):
+    """(f) Ours, not theirs: the code is probably still good, so the user is told to retry —
+    not to burn the resend budget on a new one. ERROR (Sentry), never the email or the code."""
+    sb = FakeSupabase(fail=(fail,))
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    assert ei.value.status_code == 503
+    assert ei.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+    assert "sign_in_attempt" not in _kinds(sb)
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors
+    if marker:
+        assert any(marker in m for m in errors)
+    for m in (r.getMessage() for r in caplog.records):
+        assert _EMAIL not in m and _CODE_DIGITS not in m and _PASSWORD not in m
+
+
+@pytest.mark.asyncio
+async def test_confirm_email_limiter_order_and_per_email_budget():
+    """(d) Per-IP FIRST, then per-email, both before GoTrue. Ten attempts per address an hour
+    from ANY number of addresses; the eleventh never reaches verify_otp."""
+    sb = FakeSupabase(fail=("otp_expired",))
+    for i in range(10):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.confirm_email(_confirm(), _FakeRequest(f"198.51.100.{i}"), sb)
+        assert ei.value.status_code == 400
+    calls_before = len([e for e in sb.log if e[0] == "verify_otp"])
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.confirm_email(_confirm(), _FakeRequest("198.51.100.200"), sb)
+    assert ei.value.status_code == 429
+    assert ei.value.headers["Retry-After"] == "3600"
+    assert len([e for e in sb.log if e[0] == "verify_otp"]) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_a_denied_ip_never_inserts_the_per_email_key():
+    for i in range(20):
+        with pytest.raises(HTTPException):
+            await auth_ep.confirm_email(
+                _confirm(email=f"u{i}@example.com"), _FakeRequest("203.0.113.99"),
+                FakeSupabase(fail=("otp_expired",)),
+            )
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.confirm_email(
+            _confirm(email="victim@example.com"), _FakeRequest("203.0.113.99"), FakeSupabase(),
+        )
+    assert ei.value.status_code == 429
+    assert not [k for k in rate_limiter._protected if k == "confirm:email:victim@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_a_device_proof_does_not_relax_the_confirm_limiter():
+    """A proof proves a past PASSWORD for the address, not this mailbox: the per-email bucket
+    that bounds code guessing must apply to it like to anyone."""
+    from app.core.security import create_device_proof
+
+    proof = create_device_proof(_EMAIL)
+    sb = FakeSupabase(fail=("otp_expired",))
+    for i in range(10):
+        with pytest.raises(HTTPException):
+            await auth_ep.confirm_email(
+                _confirm(), _FakeRequest(f"198.51.100.{i}", {"X-Device-Token": proof}), sb,
+            )
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.confirm_email(
+            _confirm(), _FakeRequest("198.51.100.250", {"X-Device-Token": proof}), sb,
+        )
+    assert ei.value.status_code == 429
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", ["signin", "signin_typed"])
+async def test_a_different_stored_password_is_replaced_by_the_mailbox_owner(fail):
+    """CC-03 (re-registered with a new password) and SEC-6 (a squatter registered first): GoTrue
+    kept the FIRST password. Whoever proved the mailbox sets theirs — on the ADMIN client — and
+    the stamp evicts anything minted under the old one, BEFORE our tokens are minted."""
+    sb = FakeSupabase(fail=(fail,))
+    out = await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    kinds = _kinds(sb)
+    assert ("admin.update_user_by_id", _USER_ID, {"password": _PASSWORD}) in sb.log
+    assert ("update", "users", ["password_changed_at"]) in sb.log
+    assert kinds.index("verify_otp") < kinds.index("sign_in_attempt") \
+        < kinds.index("admin.update_user_by_id") < kinds.index("update")
+    assert out.access_token and out.user_id == _USER_ID and out.device_token is None
+
+
+_CONFIRMED_PREFIX = "Your email is confirmed"
+
+
+def _assert_confirmed_but_failed(exc: HTTPException, status: int) -> dict:
+    """The ONE shape of every confirm-email failure after a good code (C2, BE-AUTH-04): a code of
+    its own (never the retryable AUTH_UNAVAILABLE a still-good code gets), action `sign_in`,
+    copy opening "Your email is confirmed", and no WWW-Authenticate (no stored credential is
+    involved, so iOS must never clear one)."""
+    detail = exc.detail
+    assert exc.status_code == status, (exc.status_code, detail)
+    assert detail["error_code"] == "AUTH_CONFIRMED_SIGN_IN_FAILED", detail
+    assert detail["action"] == "sign_in"
+    assert detail["user_message"].startswith(_CONFIRMED_PREFIX), detail["user_message"]
+    assert not (exc.headers or {}).get("WWW-Authenticate")
+    return detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("password, why", [
+    ("abc", "too short"),
+    ("Blue Sky 2025", "its only 'symbol' is a space (GoTrue refuses it)"),
+    ("Élan2025€", "no ASCII capital, a non-ASCII symbol"),
+    ("Aa1!" + "😀" * 18, "76 bytes: over GoTrue's 72-byte cap"),
+])
+async def test_a_replacement_password_must_meet_the_rule(password, why, caplog):
+    """The existing password is never strength-checked (it may predate the rule), but one we
+    are about to WRITE is — against GoTrue's exact rule (C1), BEFORE the admin call. The stored
+    password DIFFERED, so the refusal is the password's: 400, "that password can't be used",
+    Forgot password named."""
+    sb = FakeSupabase(fail=("signin",))
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.confirm_email(_confirm(password=password), _FakeRequest(), sb)
+    detail = _assert_confirmed_but_failed(ei.value, 400)
+    assert detail["user_message"] == auth_ep._CONFIRMED_PASSWORD_REFUSED, why
+    assert "Forgot password" in detail["user_message"]
+    assert "admin_attempt" not in _kinds(sb), f"the write was attempted: {why}"
+    assert not [e for e in sb.log if e[0] == "update"]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    if len(password) > 5:  # "abc" is too short to search for without false hits
+        for r in caplog.records:
+            assert password not in r.getMessage(), "the typed password reached a log line"
+
+
+@pytest.mark.asyncio
+async def test_a_legacy_weak_password_that_MATCHES_still_signs_in():
+    """The schema must not strength-validate: an account created under an older rule would be
+    confirmable but never sign-in-able through this route."""
+    out = await auth_ep.confirm_email(_confirm(password="abc"), _FakeRequest(), FakeSupabase())
+    assert out.access_token
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admin_fail, reasons", [
+    ("admin_weak", {"reasons": "pwned"}),
+    # GoTrue's 72-byte cap is `validation_failed`, not weak_password: still the password's fault.
+    ("admin_too_long", {}),
+])
+async def test_a_provider_refused_replacement_is_typed(admin_fail, reasons):
+    sb = FakeSupabase(fail=("signin", admin_fail))
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    detail = _assert_confirmed_but_failed(ei.value, 400)
+    assert detail["user_message"] == auth_ep._CONFIRMED_PASSWORD_REFUSED
+    assert detail["details"] == reasons
+    assert not [e for e in sb.log if e[0] == "update"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admin_fail", ["admin_down", "admin_outage"])
+async def test_a_failed_password_write_is_a_503_that_says_the_email_is_confirmed(admin_fail, caplog):
+    sb = FakeSupabase(fail=("signin", admin_fail))
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    detail = _assert_confirmed_but_failed(ei.value, 503)
+    assert detail["user_message"] == auth_ep._CONFIRMED_FINISH_FAILED
+    assert "Forgot password" in detail["user_message"] and "sign in" in detail["user_message"]
+    assert not [e for e in sb.log if e[0] == "update"], "no stamp: nothing changed"
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR], "an outage reaches Sentry"
+
+
+# ── After a good code, a sign-in probe that fails UPSTREAM falls through to SET (C3, BE-AUTH-03)
+
+_UPSTREAM_SIGN_IN_FAILURES = [
+    pytest.param("signin_429", "GOTRUE_RATE_LIMITED", id="429"),
+    pytest.param("signin_transport", None, id="transport"),
+    pytest.param("signin_5xx", None, id="5xx"),
+    pytest.param("signin_edge_html", None, id="edge-520-html"),
+    pytest.param("outage", None, id="untyped"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail, marker", _UPSTREAM_SIGN_IN_FAILURES)
+async def test_an_upstream_sign_in_failure_sets_the_typed_password_and_mints(fail, marker, caplog):
+    """The code is spent and the address confirmed; refusing here used to leave a squatter's or
+    stale FIRST password live on the account (BE-AUTH-03). The caller proved the mailbox, so
+    their typed password is written — the `/reset-password` capability, harmless if it already
+    matched — stamped, and they are signed in. No device proof: still only an emailed code."""
+    sb = FakeSupabase(fail=(fail,))
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        out = await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    kinds = _kinds(sb)
+    assert ("admin.update_user_by_id", _USER_ID, {"password": _PASSWORD}) in sb.log
+    assert ("update", "users", ["password_changed_at"]) in sb.log
+    assert kinds.index("verify_otp") < kinds.index("sign_in_attempt") \
+        < kinds.index("admin.update_user_by_id") < kinds.index("update")
+    assert out.access_token and out.user_id == _USER_ID and out.device_token is None
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors, "the upstream failure still reaches Sentry"
+    if marker:
+        assert any(marker in m for m in errors)
+    for r in caplog.records:
+        m = r.getMessage()
+        assert _EMAIL not in m and _CODE_DIGITS not in m and _PASSWORD not in m
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail, marker", _UPSTREAM_SIGN_IN_FAILURES)
+@pytest.mark.parametrize("admin_fail", ["admin_down", "admin_outage", "admin_weak", "admin_too_long"])
+async def test_an_upstream_sign_in_failure_whose_write_also_fails_names_forgot_password(
+    fail, marker, admin_fail,
+):
+    """Only when the write fails too: 503 with the "sign in, or use Forgot password" copy —
+    never "that password can't be used", because after an upstream failure nobody learned
+    whether the typed password is the stored one. Nothing stamped, nothing minted."""
+    sb = FakeSupabase(fail=(fail, admin_fail))
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    detail = _assert_confirmed_but_failed(ei.value, 503)
+    assert detail["user_message"] == auth_ep._CONFIRMED_FINISH_FAILED
+    assert not [e for e in sb.log if e[0] == "update"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail, _marker", _UPSTREAM_SIGN_IN_FAILURES)
+async def test_an_upstream_sign_in_failure_with_a_legacy_password_says_sign_in_not_refused(
+    fail, _marker,
+):
+    """A legacy password the rule cannot WRITE may still be the right one for sign-in: after an
+    upstream failure it is never called refused (that copy would send a user with a working
+    password to Forgot password). 503 "sign in, or use Forgot password", and no write."""
+    sb = FakeSupabase(fail=(fail,))
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.confirm_email(_confirm(password="abc"), _FakeRequest(), sb)
+    detail = _assert_confirmed_but_failed(ei.value, 503)
+    assert detail["user_message"] == auth_ep._CONFIRMED_FINISH_FAILED
+    assert "admin_attempt" not in _kinds(sb)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [
+    "signin_other_user",          # the sign-in resolved ANOTHER account
+    "not_confirmed",              # untyped "Email not confirmed" (the wording /login matches)
+    "signin_typed_unconfirmed",   # GoTrue's typed email_not_confirmed
+    "signin_provider_disabled",   # a 4xx the classifier files as OURS ("unavailable") — policy
+    "signin_banned",              # an unclassified 4xx about this account
+])
+async def test_a_policy_answer_after_the_code_is_spent_says_sign_in_and_never_mints(fail, caplog):
+    """An ANSWER about this account is never a reason to set a password and mint past it (the
+    C3 caveat: never on not_confirmed, never on a typed 4xx). The address IS confirmed and the
+    code is dead, so it is AUTH_CONFIRMED_SIGN_IN_FAILED — "sign in" — and nothing is written."""
+    sb = FakeSupabase(fail=(fail,))
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.confirm_email(_confirm(), _FakeRequest(), sb)
+    detail = _assert_confirmed_but_failed(ei.value, 503)
+    assert detail["user_message"] == auth_ep._CONFIRMED_SIGN_IN_FAILED
+    assert "sign in" in detail["user_message"].lower()
+    assert "admin_attempt" not in _kinds(sb)
+    assert not [e for e in sb.log if e[0] == "update"]
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_confirm_email_checks_the_app_row_before_minting():
+    """(g) Same guard as /oauth: tokens for an id with no public.users row authenticate against
+    nothing and loop the client forever."""
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.confirm_email(_confirm(), _FakeRequest(), FakeSupabase(row={}))
+    detail = _assert_confirmed_but_failed(ei.value, 503)
+    assert detail["user_message"] == auth_ep._CONFIRMED_ACCOUNT_NOT_READY
+
+
+@pytest.mark.asyncio
+async def test_a_spent_code_and_a_still_good_code_are_told_apart_by_code_not_copy():
+    """BE-AUTH-04: a verify OUTAGE (code still good → retry) and a failure after the code was
+    spent (→ sign in) used to share 503 AUTH_UNAVAILABLE / retry_later, differing only in
+    free text iOS cannot branch on."""
+    with pytest.raises(HTTPException) as before:
+        await auth_ep.confirm_email(_confirm(), _FakeRequest(), FakeSupabase(fail=("otp_outage",)))
+    rate_limiter.clear()
+    with pytest.raises(HTTPException) as after:
+        await auth_ep.confirm_email(_confirm(), _FakeRequest(), FakeSupabase(fail=("signin_other_user",)))
+    assert before.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+    assert before.value.detail["action"] == "retry_later"
+    assert after.value.detail["error_code"] == "AUTH_CONFIRMED_SIGN_IN_FAILED"
+    assert after.value.detail["action"] == "sign_in"
+
+
+def test_confirm_email_raises_no_retryable_code_after_the_verify():
+    """Source guard, comment-stripped and bounded to the code AFTER `_otp_failure(...)`: once the
+    code is spent, nothing may raise AUTH_UNAVAILABLE (retry_later) or AUTH_PASSWORD_REJECTED
+    (iOS would keep the dead code), and every helper used names the confirmed code."""
+    import inspect
+
+    src = inspect.getsource(auth_ep.confirm_email)
+    code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
+    after = code[code.index('_otp_failure(e, route="confirm-email")'):]
+    assert "ErrorCode.AUTH_UNAVAILABLE" not in after
+    assert "ErrorCode.AUTH_PASSWORD_REJECTED" not in after
+    assert after.count("_confirmed_but_failed(") >= 6, "a post-verify failure lost its typed shape"
+    helper = "\n".join(
+        l.split("#", 1)[0] for l in inspect.getsource(auth_ep._confirmed_but_failed).splitlines()
+    )
+    assert "ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED" in helper
+
+
+def test_every_confirmed_copy_opens_with_the_confirmation():
+    for name in ("_CONFIRMED_SIGN_IN_FAILED", "_CONFIRMED_PASSWORD_REFUSED",
+                 "_CONFIRMED_FINISH_FAILED", "_CONFIRMED_ACCOUNT_NOT_READY"):
+        assert getattr(auth_ep, name).startswith(_CONFIRMED_PREFIX), name
+    assert "Forgot password" in auth_ep._CONFIRMED_PASSWORD_REFUSED
+    assert "Forgot password" in auth_ep._CONFIRMED_FINISH_FAILED
+    assert auth_ep._CONFIRMED_SIGN_IN_FAILED.endswith("Please sign in.")
+
+
+# ── `_is_upstream_failure`: the line between "GoTrue was down" and "GoTrue answered" ──
+
+@pytest.mark.parametrize("build, expected", [
+    (lambda: _gotrue_error(429, {"code": "over_request_rate_limit", "msg": "x"}), True),
+    (lambda: _gotrue_error(400, {"code": "over_request_rate_limit", "msg": "x"}), True),
+    (_gotrue_transport_error, True),
+    (lambda: _gotrue_error(502, {"msg": "bad gateway"}), True),
+    (lambda: _gotrue_error(500, {"code": "unexpected_failure", "msg": "db"}), True),
+    (lambda: _gotrue_error(520, text="<html>edge</html>"), True),
+    (lambda: RuntimeError("upstream gateway timeout"), True),       # untyped, no status/code
+    (lambda: _gotrue_error(400, {"code": "invalid_credentials", "msg": "Invalid login credentials"}), False),
+    (lambda: _gotrue_error(400, {"code": "email_not_confirmed", "msg": "Email not confirmed"}), False),
+    (lambda: _gotrue_error(400, {"code": "email_provider_disabled", "msg": "disabled"}), False),
+    (lambda: _gotrue_error(403, {"code": "bad_jwt", "msg": "bad"}), False),
+    (lambda: _gotrue_error(422, {"code": "signup_disabled", "msg": "x"}), False),
+    (lambda: _gotrue_error(400, {"code": "user_banned", "msg": "banned"}), False),
+    (lambda: _gotrue_error(404, {"code": "user_not_found", "msg": "x"}), False),
+    (lambda: RuntimeError("Token has expired or is invalid"), False),  # untyped, "rejected" words
+])
+def test_is_upstream_failure(build, expected):
+    assert auth_ep._is_upstream_failure(build()) is expected
+
+
+def test_an_untyped_not_confirmed_reads_as_upstream_so_it_is_tested_first():
+    """Documents WHY confirm-email tests `_is_email_not_confirmed` before `_is_upstream_failure`:
+    the untyped wording carries no status, so on its own it would read as an outage."""
+    e = RuntimeError("Email not confirmed")
+    assert auth_ep._is_email_not_confirmed(e) and auth_ep._is_upstream_failure(e)
+    import inspect
+
+    src = "\n".join(l.split("#", 1)[0] for l in inspect.getsource(auth_ep.confirm_email).splitlines())
+    assert "not _is_email_not_confirmed(e) and _is_upstream_failure(e)" in src
+
+
+@pytest.mark.parametrize("bad", [
+    {"code": "1-2-3-"}, {"code": "abcdefgh"}, {"code": ""}, {"password": ""},
+    {"password": "x" * 1025}, {"email": "not-an-email"},
+])
+def test_confirm_email_schema_refuses_malformed_input_before_any_upstream_call(bad):
+    with pytest.raises(ValueError):
+        ConfirmEmailRequest(**{"email": _EMAIL, "code": _CODE, "password": _PASSWORD, **bad})
+
+
+# ── 7. Register: no profile write for a pending address; failures classified ──
+
+@pytest.mark.asyncio
+async def test_register_writes_nothing_to_public_users():
+    """AUTH-BE-04: the trigger copies display_name from metadata. The old UPDATE also ran for an
+    address already pending under SOMEONE ELSE (GoTrue returns that real user unchanged), so any
+    unauthenticated caller could rewrite the pending owner's profile name."""
+    sb = FakeSupabase(confirmed=False)
+    await auth_ep.sign_up(
+        SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="Attacker Text"),
+        _FakeRequest(), sb,
+    )
+    assert not [e for e in sb.log if e[0] == "update"]
+
+
+@pytest.mark.asyncio
+async def test_register_copy_is_neutral_and_names_the_way_out():
+    out = await auth_ep.sign_up(
+        SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+        _FakeRequest(), FakeSupabase(confirmed=False),
+    )
+    assert "link" not in out.message.lower()
+    assert "sign in" in out.message.lower() and "reset" in out.message.lower()
+
+
+_SEND_FAILED = "couldn't send your confirmation email"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag, status, code, copy, level", [
+    ("signup_email_rate", 503, "AUTH_UNAVAILABLE", _SEND_FAILED, logging.WARNING),
+    ("signup_smtp", 503, "AUTH_UNAVAILABLE", _SEND_FAILED, logging.WARNING),
+    ("signup_down", 503, "AUTH_UNAVAILABLE", _SEND_FAILED, logging.WARNING),
+    ("signup_bad_gateway", 503, "AUTH_UNAVAILABLE", _SEND_FAILED, logging.WARNING),
+    ("signup_edge_html", 503, "AUTH_UNAVAILABLE", _SEND_FAILED, logging.WARNING),
+    ("signup_ip_rate", 503, "AUTH_UNAVAILABLE", "couldn't create your account", logging.ERROR),
+    ("signup_invalid_email", 400, "INVALID_INPUT", "email address can't be used", logging.INFO),
+    ("signup_weak", 400, "AUTH_PASSWORD_REJECTED", None, logging.INFO),
+    # GoTrue's 72-byte cap answers `validation_failed`; it used to fall to "Registration failed".
+    ("signup_too_long", 400, "AUTH_PASSWORD_REJECTED", "72 bytes at most", logging.INFO),
+])
+async def test_register_classifies_provider_failures(flag, status, code, copy, level, caplog):
+    """AUTH-BE-08 / SB-6: each of these was a bare 400 "Registration failed" at ERROR."""
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.sign_up(
+                SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+                _FakeRequest(), FakeSupabase(fail=(flag,)),
+            )
+    assert ei.value.status_code == status
+    assert ei.value.detail["error_code"] == code
+    if copy:
+        assert copy in ei.value.detail["user_message"]
+    own = [r for r in caplog.records if r.name == "app.api.v1.endpoints.auth"]
+    assert max(r.levelno for r in own) == level, [(r.levelname, r.getMessage()) for r in own]
+    assert not any(_EMAIL in r.getMessage() for r in own), "the address must never be logged"
+    if flag == "signup_email_rate":
+        assert any("GOTRUE_EMAIL_RATE_LIMITED" in r.getMessage() for r in own)
+    if flag == "signup_ip_rate":
+        assert any("GOTRUE_RATE_LIMITED" in r.getMessage() for r in own)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", [
+    "signup", "signup_disabled",
+    # `validation_failed` about a field that is NOT the password is not a password refusal.
+    "signup_validation_email",
+])
+async def test_register_keeps_the_generic_fallback_for_what_needs_a_person(flag, caplog):
+    """Untyped exceptions (our bugs) and 4xx configuration codes keep the literal fallback, with
+    a stack trace at ERROR — they need a person, not a retry."""
+    with caplog.at_level(logging.INFO, logger="app.api.v1.endpoints.auth"):
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.sign_up(
+                SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+                _FakeRequest(), FakeSupabase(fail=(flag,)),
+            )
+    assert ei.value.status_code == 400 and ei.value.detail == "Registration failed"
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR and r.exc_info]
+
+
+@pytest.mark.asyncio
+async def test_register_per_email_denial_says_3600():
+    """IOS-AUTH-04: Retry-After is the window of the bucket that denied (it said "60")."""
+    for i in range(5):
+        await auth_ep.sign_up(
+            SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+            _FakeRequest(f"198.51.100.{100 + i}"), FakeSupabase(confirmed=False),
+        )
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.sign_up(
+            SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+            _FakeRequest("198.51.100.199"), FakeSupabase(confirmed=False),
+        )
+    assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "3600"
+
+
+@pytest.mark.parametrize("password, named", [
+    ("Aa1 bbbbbbbb", "a symbol"),            # a space is NOT a symbol to GoTrue (verified live)
+    ("Blue Sky 2025", "a symbol"),
+    ("Abcdefg1€", "a symbol"),                # € is not in GoTrue's 32-character list
+    ("Élan2025!", "an uppercase letter"),     # É is not A–Z
+    ("abcdefgh1!", "an uppercase letter"),
+    ("A" * 80, "72 bytes"),                   # GoTrue refuses > 72 bytes
+    ("Aa1!" + "é" * 35, "72 bytes"),          # 39 characters, 74 bytes
+])
+def test_register_refuses_what_gotrue_would_refuse_before_any_upstream_call(password, named):
+    """C1: the sign-up schema is GoTrue's own rule, so the 422 (with the reason) comes from us
+    BEFORE GoTrue is called — never an after-the-fact AUTH_PASSWORD_REJECTED with no reason."""
+    with pytest.raises(ValueError) as ei:
+        SignUpRequest(email=_EMAIL, password=password, display_name="N")
+    assert named in str(ei.value)
+
+
+# ── 8. Social sign-in: a missing app row is OURS (SOC-12) ─────────────────────
+
+@pytest.mark.asyncio
+async def test_oauth_missing_app_row_is_a_retryable_503_not_sign_in_again():
+    """Was 401 AUTH_ACCOUNT_NOT_FOUND "Please sign in again" — said to someone mid-sign-in, and a
+    code iOS may clear a credential on. No token was issued; the fault is a trigger's."""
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.oauth_sign_in(
+            OAuthSignInRequest(provider="apple", id_token="x" * 40),
+            _FakeRequest(), FakeSupabase(row={}),
+        )
+    assert ei.value.status_code == 503
+    assert ei.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+    assert ei.value.detail["user_message"] == "Your account isn't ready yet. Please try again."
+
+
+# ── 9. Session exchange: anonymous, pre-reset and unverifiable tokens (SEC-2, SOC-02) ──
+
+@pytest.mark.asyncio
+async def test_session_exchange_refuses_an_anonymous_session(monkeypatch):
+    monkeypatch.setattr(auth_ep, "verify_supabase_token",
+                        _async_returning({"sub": _USER_ID, "is_anonymous": True}))
+    sb = FakeSupabase()
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.session_exchange(
+            SessionExchangeRequest(supabase_access_token="t" * 40), _FakeRequest(), sb,
+        )
+    assert ei.value.status_code == 401
+    assert ei.value.detail["error_code"] == "AUTH_PROVIDER_FAILED"
+    assert sb.log == []
+
+
+@pytest.mark.asyncio
+async def test_session_exchange_turns_a_raising_verifier_into_a_401_not_a_500(monkeypatch):
+    """SOC-02: python-jose's JWKError (a JOSEError, not a JWTError) escaped as an off-contract
+    500 with a Sentry event per forged POST."""
+    async def _raises(_t):
+        raise RuntimeError("JWKError: alg mismatch")
+    monkeypatch.setattr(auth_ep, "verify_supabase_token", _raises)
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.session_exchange(
+            SessionExchangeRequest(supabase_access_token="t" * 40), _FakeRequest(), FakeSupabase(),
+        )
+    assert ei.value.status_code == 401 and ei.value.detail["error_code"] == "AUTH_PROVIDER_FAILED"
+
+
+def _stamp(offset_seconds: float) -> tuple[float, str]:
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc).replace(microsecond=500_000)
+    return now.timestamp(), (now + timedelta(seconds=offset_seconds)).isoformat()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("iat_shift, refused", [
+    (-3600, True),    # a Supabase token minted an hour BEFORE the reset
+    (0, False),       # minted in the same second as the stamp: whole-second comparison
+    (+60, False),     # minted after the reset
+])
+async def test_session_exchange_refuses_a_token_minted_before_the_password_change(
+    monkeypatch, iat_shift, refused,
+):
+    """SEC-2: a thief's still-unexpired Supabase JWT, exchanged AFTER the victim's reset, used to
+    become fresh app tokens (iat=now) that pass every later eviction check."""
+    now_ts, stamp = _stamp(0)
+    monkeypatch.setattr(auth_ep, "verify_supabase_token", _async_returning(
+        {"sub": _USER_ID, "email": _EMAIL, "iat": int(now_ts + iat_shift)}))
+    sb = FakeSupabase(row={"id": _USER_ID, "password_changed_at": stamp})
+    if refused:
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.session_exchange(
+                SessionExchangeRequest(supabase_access_token="t" * 40), _FakeRequest(), sb,
+            )
+        assert ei.value.status_code == 401
+        assert ei.value.detail["error_code"] == "AUTH_PROVIDER_FAILED"
+    else:
+        out = await auth_ep.session_exchange(
+            SessionExchangeRequest(supabase_access_token="t" * 40), _FakeRequest(), sb,
+        )
+        assert out.access_token
+
+
+@pytest.mark.asyncio
+async def test_session_exchange_fails_closed_on_a_missing_iat_once_a_password_changed(monkeypatch):
+    _, stamp = _stamp(0)
+    monkeypatch.setattr(auth_ep, "verify_supabase_token",
+                        _async_returning({"sub": _USER_ID, "email": _EMAIL}))
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.session_exchange(
+            SessionExchangeRequest(supabase_access_token="t" * 40), _FakeRequest(),
+            FakeSupabase(row={"id": _USER_ID, "password_changed_at": stamp}),
+        )
+    assert ei.value.detail["error_code"] == "AUTH_PROVIDER_FAILED"
+
+
+# ── 10. No secret ever reprs (SEC-1) ──────────────────────────────────────────
+
+def _every_auth_model_with_secrets():
+    """(model, kwargs, secret values) for every schema in app/schemas/auth.py that holds one."""
+    from app.schemas import auth as s
+
+    pw, code = "Hunter2!xyzA", "12345678"
+    return [
+        (s.SignInRequest, {"email": _EMAIL, "password": pw}, [pw]),
+        (s.SignUpRequest, {"email": _EMAIL, "password": pw, "display_name": "V"}, [pw]),
+        (s.ResetPasswordRequest, {"email": _EMAIL, "code": code, "new_password": pw}, [code, pw]),
+        (s.ChangePasswordRequest, {"current_password": "Old-pass-1!", "new_password": pw},
+         ["Old-pass-1!", pw]),
+        (s.SetPasswordRequest, {"code": code, "new_password": pw}, [code, pw]),
+        (s.ConfirmEmailRequest, {"email": _EMAIL, "code": code, "password": pw}, [code, pw]),
+        (s.RefreshTokenRequest, {"refresh_token": "rt-SECRET-123"}, ["rt-SECRET-123"]),
+        (s.OAuthSignInRequest, {"provider": "apple", "id_token": "idtok-" + "S" * 30,
+                                "nonce": "nonce-SECRET"}, ["idtok-" + "S" * 30, "nonce-SECRET"]),
+        (s.SessionExchangeRequest, {"supabase_access_token": "sbat-" + "S" * 30}, ["sbat-" + "S" * 30]),
+        (s.TokenResponse, {"access_token": "AT-SECRET", "refresh_token": "RT-SECRET",
+                           "user_id": "u", "device_token": "DT-SECRET"},
+         ["AT-SECRET", "RT-SECRET", "DT-SECRET"]),
+        (s.PasswordChangedResponse, {"message": "m", "access_token": "AT-SECRET",
+                                     "refresh_token": "RT-SECRET", "user_id": "u"},
+         ["AT-SECRET", "RT-SECRET"]),
+        (s.SignUpResponse, {"confirmation_required": False, "message": "m",
+                            "access_token": "AT-SECRET", "refresh_token": "RT-SECRET"},
+         ["AT-SECRET", "RT-SECRET"]),
+    ]
+
+
+@pytest.mark.parametrize("model, kwargs, secrets", _every_auth_model_with_secrets(),
+                         ids=lambda v: getattr(v, "__name__", None) or "")
+def test_no_auth_model_reprs_a_secret(model, kwargs, secrets):
+    """Sentry ships frame locals, and serialises an unknown object — a pydantic model — as its
+    repr. A GoTrue 429 on sign-up put "SignUpRequest(email=…, password='Hunter2!…')" into
+    Sentry. `repr=False` drops the field from __repr__/__str__ only; model_dump still has it."""
+    from sentry_sdk.utils import safe_repr
+
+    inst = model(**kwargs)
+    for rendered in (repr(inst), str(inst), safe_repr(inst)):
+        for secret in secrets:
+            assert secret not in rendered, f"{model.__name__} reprs a secret: {rendered}"
+    dumped = json.dumps(inst.model_dump())
+    for secret in secrets:
+        assert secret in dumped, "the value must still be forwarded upstream / to the client"
+
+
+def test_the_secret_walk_covers_every_secret_field_in_the_module():
+    """Anti-vacuity: a new secret-looking field added to app/schemas/auth.py without
+    repr=False fails here, not in Sentry."""
+    import re
+
+    from app.schemas import auth as s
+
+    secret_name = re.compile(r"(password|code|token|nonce)$")
+    for name in dir(s):
+        model = getattr(s, name)
+        if not (isinstance(model, type) and issubclass(model, s.BaseModel) and model is not s.BaseModel):
+            continue
+        if model.__module__ != s.__name__:
+            continue
+        for field_name, field in model.model_fields.items():
+            if secret_name.search(field_name) and field_name != "token_type":
+                assert field.repr is False, f"{model.__name__}.{field_name} would repr its value"
+
+
+def test_every_auth_route_forwards_the_callers_address_to_gotrue():
+    """SEC-7, router-level so a new route is covered by default: each /api/v1/auth route
+    resolves `forward_client_ip_to_gotrue` before its handler runs."""
+    from app.dependencies import forward_client_ip_to_gotrue
+    from app.main import app
+
+    routes = [r for r in app.routes if getattr(r, "path", "").startswith("/api/v1/auth/")]
+    assert len(routes) >= 12, [r.path for r in routes]
+    missing = [r.path for r in routes
+               if forward_client_ip_to_gotrue not in [d.call for d in r.dependant.dependencies]]
+    assert not missing, missing

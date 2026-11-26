@@ -117,10 +117,12 @@ def test_sign_in_secrets_are_bounded_but_far_above_the_bcrypt_limit():
     422 with no upstream call."""
     from pydantic import ValidationError
     from app.schemas.auth import (
-        ChangePasswordRequest, SignInRequest, SIGN_IN_SECRET_MAX_LENGTH, PASSWORD_MAX_LENGTH,
+        ChangePasswordRequest, SignInRequest, SIGN_IN_SECRET_MAX_LENGTH, PASSWORD_MAX_BYTES,
     )
 
-    assert SIGN_IN_SECRET_MAX_LENGTH > PASSWORD_MAX_LENGTH > 72
+    # A NEW password is capped at GoTrue's own 72 bytes; a PRESENTED one only far above it.
+    assert PASSWORD_MAX_BYTES == 72
+    assert SIGN_IN_SECRET_MAX_LENGTH > 10 * PASSWORD_MAX_BYTES
     ok = SignInRequest(email="a@b.co", password="x" * SIGN_IN_SECRET_MAX_LENGTH)
     assert len(ok.password) == SIGN_IN_SECRET_MAX_LENGTH
     with pytest.raises(ValidationError):

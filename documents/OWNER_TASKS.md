@@ -105,6 +105,77 @@ admin recomputes, and marketing script generation.
 
 ### 2.1 Do now / verify once
 
+- [ ] **Email sign-up confirmation: deploy, paste both email templates, then the app** (2026-11-26). Your report: a new email/password account could never get in, and the app said to click a link the email did not have. Your decisions: "Local stack (Recommended)", "Code + link (Recommended)", "Own sessions (Recommended)". Plan `~/.claude/plans/double-check-how-we-cosmic-quilt-of-e5102dae-410b-43a8-8dd3-3cbda23259a7.md`, branch `claude/signin-confirmation-fix`, **not committed yet**.
+  - **Why it broke:** Supabase's **Confirm signup** template held the reset email's wording and an 8-digit code with no link (subject "Confirm Your Signup"). No backend route and no app screen could use a sign-up code. The app also re-sent that email on every sign-in attempt, and each send replaced the previous code. Every email/password sign-up since about 2026-10-05 dead-ended. Apple and Google sign-in were unaffected.
+  - The 2026-10-05 tick for "`{{ .Token }}` in the reset-password template" (under "Old launch items" below) is superseded by step 2.
+
+  In this order:
+  1. **Deploy the backend** (Railway web service; Claude pushes only when you ask). It adds:
+     - `POST /api/v1/auth/confirm-email` (code + password → signed in);
+     - the `https://caydexinvest.com/auth/confirm` page that the new email's link opens on 1.0–1.03;
+     - three error codes for emailed codes:
+       - `AUTH_CODE_INVALID`: a wrong or expired code;
+       - `AUTH_CONFIRMED_SIGN_IN_FAILED`: the sign-up code worked and the address is confirmed, but signing in afterwards failed. The app then offers Sign in and Forgot password;
+       - `AUTH_CODE_USED`: a reset or set-password code worked, but the new password could not be saved, so a new code is needed;
+     - one password rule for every new password, the same as Supabase's. It needs at least 8 characters and at most 72 bytes, plus an ASCII lowercase letter, an ASCII uppercase letter, a digit and a symbol from Supabase's own list. A space, an accented letter or an emoji counts as none of them. Before this, the app and the backend accepted passwords that Supabase then refused, after the reset code had already been used up;
+     - the sign-in hardening, including sending each caller's own address to Supabase (it only takes effect after step 3);
+     - the token in the email's link is masked in the backend's access log.
+
+     Old app versions keep working. **Check:** open `https://caydexinvest.com/auth/confirm` in a browser. You should see the "This link has expired or was already used" page. There is no token in that address, so nothing is used up.
+  2. **Supabase dashboard.** `documents/legal/supabase-email-templates/README.md` says exactly where each setting is, and every value is in `documents/legal/LAUNCH_CHECKLIST.md` §5b(a).
+     - Authentication → Emails → Templates → **Confirm signup**: subject `Confirm your Caydex email`, body = all of `documents/legal/supabase-email-templates/confirm-signup.html`.
+     - **Reset Password**: subject `Reset your Caydex password`, body = all of `documents/legal/supabase-email-templates/reset-password.html`.
+     - Authentication → URL Configuration → **Site URL** = `https://caydexinvest.com`.
+     - Sign In / Providers → Email:
+       - **Confirm email** must be ON.
+       - Read **Email OTP Length** (8 expected; 6–10 all work) and **Email OTP Expiration**, and write both into §5b(a).
+     - Authentication → **Rate Limits**: set three limits and write the values into §5b(a). Until step 3's switch is ON, every sign-in reaches Supabase from Railway's one address, so the per-IP limits are one bucket shared by all users. Size them for that:
+       - emails sent per hour: the SMTP plan's real capacity. This limit covers the whole project, with or without step 3;
+       - sign-ups and sign-ins: raised to cover all users together, until step 3;
+       - token verifications: the same.
+     - **Then check both emails** (today's app build is fine):
+       1. Register a fresh address in the app and read the email. The subject is `Confirm your Caydex email`, and it has a code AND a "Confirm my email" link. Tap the link, press the button, and the page says "Your email is confirmed".
+       2. Run Forgot password on that address and read that email. The subject is `Reset your Caydex password`, and it has a code and no link.
+       3. Delete the test account afterwards (Settings → Delete Account).
+  3. **Turn on IP Address Forwarding in Supabase, but only AFTER step 1's deploy is live.** Supabase → Authentication → Rate Limits → **IP Address Forwarding** → ON. The Management API does the same: `PATCH https://api.supabase.com/v1/projects/<project ref>/config/auth` with `{"security_sb_forwarded_for_enabled": true}`, using your own access token, which never goes into a chat. The project ref is in `documents/legal/LAUNCH_CHECKLIST.md` §5b, kept out of git.
+     - **Why:** every Supabase Auth call leaves from Railway's one address, so Supabase's per-IP limits are one bucket shared by every user. A burst of junk sign-ins from one attacker address could make every real user's sign-in fail with "try again later". Since step 1, the backend sends each caller's own address to Supabase in an `Sb-Forwarded-For` header, on sign-in, sign-up, codes and resends but never on admin calls. Supabase ignores that header until this switch is ON.
+     - **It needs a secret key:** `SUPABASE_SERVICE_ROLE_KEY` on Railway (the key the backend already uses) must start with `sb_secret_`. It has since the 2026-08-15 rotation. Look at the first characters only and never copy it anywhere. Supabase ignores the header on a publishable key or an old JWT-style key.
+     - **It assumes Railway's edge is the only proxy** in front of the backend, because the backend trusts the last address Railway's edge added. If you ever put a CDN or proxy in front of `caydexinvest.com` (Cloudflare's proxied mode, for example), tell Claude first: every user would again share a few proxy addresses.
+     - **Check it took effect:** reload the Rate Limits page and confirm the switch is still ON (or a `GET` on the same Management API address shows `"security_sb_forwarded_for_enabled": true`). Then confirm the key starts with `sb_secret_`. You need both: Supabase does not promise that its Auth logs show the forwarded address, so there is no on-screen proof beyond these two.
+     - **Then re-size step 2's limits:** once the switch is ON, the sign-up/sign-in and token-verification limits apply per user, so you may lower them back to per-user values (Supabase's defaults are 30 per 5 minutes each) and update §5b(a). Keep emails per hour at the SMTP plan's capacity: that limit covers the whole project. Do not loosen the backend's own per-IP and per-email limits at the same time.
+     - **If you ever turn it OFF again,** raise those two limits again first, because they become one shared bucket.
+  4. **Delete `SUPABASE_JWT_SECRET` from the Railway web service, but only AFTER step 1's deploy is live.**
+     - **Why it can go:** the new code no longer reads it. It refuses outright a Supabase token signed with that legacy secret (the secret was revoked 2026-08-15), and only `/auth/session-exchange` accepts a Supabase token at all.
+     - **Why not before the deploy:** while this variable is missing, the old code answers an expired or bad token with 503 instead of 401. The app would then keep retrying instead of refreshing.
+     - **Before you delete it,** make sure its exact value stays in Railway's variable history or your password manager. A rollback needs it (see **Rollback** below). Never put it in the repo, a document or a chat.
+     - A variable change redeploys.
+  5. **Apple Hide My Email relay.** In Apple Developer → Certificates, IDs & Profiles → Services → **Sign in with Apple for Email Communication**, register the SMTP sender's domain and its exact From address (Resend). SPF and DKIM must pass.
+     - **Test** with a real Hide My Email account: Settings → Set a password → the code arrives.
+     - **Without it,** `@privaterelay.appleid.com` users get no Caydex email at all, and the app still says the code was sent.
+  6. **Remove `caydex://auth-callback`** from Supabase → Authentication → URL Configuration → Redirect URLs, once you agree the web fallback is unused.
+     - **Why:** every shipped build has a real `GIDClientID`, so Google sign-in is native. Another app could claim the `caydex://` scheme and receive the tokens.
+     - **Check:** Continue with Google must still work on the phone.
+     - `backend/scripts/verify_social_signin.sh` step 3 will then say "NOT allow-listed". That is expected.
+  7. **Users stuck since about 2026-10-05.** Find them in Studio (read-only): `SELECT id, email, created_at FROM auth.users WHERE email_confirmed_at IS NULL ORDER BY created_at DESC;`
+     - **After steps 1–2,** what to tell them depends on their app version:
+       - **The new build (the one with the code screen):** sign in, tap **Send a new code** on the code screen, then enter the code from the NEWEST email. On this build signing in sends nothing by itself, and their old code expired long ago.
+       - **1.0–1.03:** sign in again, which re-sends the email. Then tap the link in the NEWEST email and sign in. Each new email replaces the earlier ones, so an older email's link says "expired". The link keeps the password the address was FIRST registered with. If their password does not work afterwards, they use Forgot password.
+       - **Either way:** at most 3 emails per address per hour, and each one replaces the last. Tell them to ask once, wait for it and check spam, rather than tapping again.
+     - **Before that, or if one writes to you:** tell them to use **Forgot password?** with the same email. The reset code should also confirm the address and set the password in one step. That is GoTrue's behaviour, not our code, and it is unverified until Claude records the local-stack check here, so try it on a test address first.
+     - **For one person who wrote to you from that address,** you can instead confirm them by hand (**⚠️ PROD**, one row): `UPDATE auth.users SET email_confirmed_at = now() WHERE id = '<their id>' AND email_confirmed_at IS NULL;`. They then sign in with the password they chose. Never do this in bulk: confirming an address keeps whatever password its FIRST registrant set, and that may not be the address's owner.
+  8. **Final check on your phone, in production,** once you have archived and installed the next build (the one with the code screen):
+     - a fresh sign-up (a plus-address) → the code screen → enter the code → you are in;
+     - on a 1.03 install, sign up and use the link instead → "Your email is confirmed" → sign in;
+     - Forgot password → the code works.
+
+     Delete the test accounts afterwards.
+
+  **Rollback** (redeploying a backend commit older than this change):
+  - **Before the redeploy,** put `SUPABASE_JWT_SECRET` back on Railway with its EXACT former value, never a placeholder. The old code trusts any HS256 token signed with whatever that variable holds, so a guessable value would let anyone sign in as any user. An empty one makes it answer expired tokens with 503, so the app never refreshes. Take the value from Railway's variable history or your password manager.
+  - **Do NOT re-paste the old Confirm signup template.** It is the broken one (reset wording, no link), and an old backend cannot use a sign-up code under either template.
+  - **IP Address Forwarding** can stay ON: an old backend sends no address, so Supabase falls back to Railway's one address by itself. If you lowered step 2's limits in step 3, raise them again before the redeploy.
+  - **What breaks:** a rolled-back backend has no `/auth/confirm` page, so the email's link fails and new email sign-ups dead-end again until this change is redeployed. The new build's code screen cannot confirm against it either.
+
 - [x] **Crypto snapshots: refresh LINK, TRX and MATIC once the launch-date fix is live** — ✅ done 2026-11-19: the fix shipped as PR #78 (`a5459498`, Railway `e13c99ee`); your read-only check found only MATIC stored, giving its April 26, 2019 token sale as the mainnet launch, and you deleted MATIC's rows (LINK and TRX had none). It rebuilds on the next MATIC view. Original entry (2026-11-19, branch `claude/index-crypto-fact-fixes`): Their profiles' `launch_date` held a token-sale date (LINK's September 2017 ICO; Chainlink's mainnet is May 30, 2019). The AI snapshot prompt reads that field and `crypto_snapshots` keeps the answer forever, so rows written before the fix keep the wrong year. Only AFTER the fix is deployed (earlier, they regenerate from the old date):
   1. In Studio, read-only: `SELECT symbol, paragraphs FROM public.crypto_snapshots WHERE symbol IN ('LINK', 'TRX', 'MATIC') AND category = 'Origin and Technology';` No rows → nothing to do.
   2. For each symbol whose text gives the sale as its launch (LINK or TRX in 2017, MATIC in April 2019), delete that symbol's rows, e.g. `DELETE FROM public.crypto_snapshots WHERE symbol = 'LINK';`. The next view of that coin writes new ones (one Gemini call per coin).
@@ -753,8 +824,9 @@ admin recomputes, and marketing script generation.
   4. **Judge accuracy (optional, costs a little):** `cd backend && ./venv/bin/python -m scripts.eval_chat --coverage` prints how often the refund judge agrees with the eval grader, every disagreement, and any of the fixed example replies it gets wrong (e.g. a price-target ask put first beside questions that were answered must count as answered). If it disagrees often or misses an example, set `CHAT_UNANSWERED_REFUND_MODE=shadow` (a variable change redeploys) and read the `CHAT_UNANSWERED` lines before turning it back `on`.
   **Rollback:** `CHAT_UNANSWERED_REFUND_MODE=off`.
 - [ ] **Old launch items with no "done" record** (`documents/legal/LAUNCH_CHECKLIST.md`):
-  - [x] Supabase SMTP → Resend, plus `{{ .Token }}` in the reset-password template — confirmed by you 2026-10-05, before the release
-  - [x] publish the Google OAuth consent screen — confirmed "In production" 2026-10-05
+  - [x] Supabase SMTP → Resend — confirmed by you 2026-10-05, before the release
+  - [ ] ~~`{{ .Token }}` in the reset-password template — confirmed by you 2026-10-05~~ — **SUPERSEDED 2026-11-26** by step 2 of "Email sign-up confirmation" at the top of §2.1. On 2026-11-26 the sign-up email (subject "Confirm Your Signup") arrived with the reset wording and a code but no link. The reset copy had gone into the **Confirm signup** template, and the checklist never said what Confirm signup should hold. Whether **Reset Password** itself held `{{ .Token }}` is unproven. Both templates are now files in `documents/legal/supabase-email-templates/`, pasted whole.
+  - [x] publish the Google OAuth consent screen — confirmed "In production" 2026-10-05 (ticked in `documents/legal/LAUNCH_CHECKLIST.md` §5b(e) and the runbook on 2026-11-26)
   - [x] re-shoot `02-ai-research-personas.png` — done 2026-10-08 as `documents/legal/screenshots/6.9-v2/03-research.png` (the 1.01 set)
   - [ ] revoke the old sandbox APNs key `7YPQRK276L`
 
@@ -878,6 +950,13 @@ admin recomputes, and marketing script generation.
   - Add its table to `scripts/schema_curation.py` in the same change.
   - After changing functions, run `scripts/check_function_grants.py` (read-only).
   - Before trusting a "PENDING" note, check production.
+- **Anything changed on Supabase → Authentication → Emails** (added 2026-11-26): a template, the SMTP settings, the sender, or the Email OTP length. The dashboard keeps no history, and the 2026-11-26 sign-up dead end came from a template pasted into the wrong slot.
+  1. Paste templates only from `documents/legal/supabase-email-templates/` (its `README.md` gives the subjects), never by hand.
+  2. Register a fresh address in the app **and** run Forgot password on it.
+  3. Read both emails: Confirm signup = `Confirm your Caydex email` with a code and a "Confirm my email" link; Reset = `Reset your Caydex password` with a code and no link. Use both codes in the app.
+  4. Delete the test account (Settings → Delete Account).
+
+  `backend/tests/test_auth_email_template_doc_parity.py` checks the repo files only, never the dashboard.
 - **Learn article or lesson changed:**
   1. `CLONE_MODE=block ./venv_clone/bin/python scripts/clone_learn_audio.py {moneymoves|journey} <name> --canonical`
   2. `verify_learn_voice.py`

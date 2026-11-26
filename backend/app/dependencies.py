@@ -12,7 +12,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import Client
 import logging
 
-from app.database import get_supabase
+from app.database import bind_gotrue_client_ip, get_supabase
 from jose import JWTError
 
 from app.core.security import (
@@ -20,7 +20,6 @@ from app.core.security import (
     decode_widget_token,
     rate_limiter,
     trusted_client_ip,
-    verify_supabase_token,
 )
 from app.api.error_response import ErrorCode, auth_error
 from app.config import settings
@@ -63,6 +62,33 @@ def _route_of(request: Optional[Request]) -> str:
         return "<no-request>"
 
 
+async def forward_client_ip_to_gotrue(request: Request) -> None:
+    """Bind the caller's trusted address for every GoTrue call this request makes (SEC-7).
+
+    Attach to a router whose handlers call Supabase Auth (`run_gotrue`):
+    `APIRouter(dependencies=[Depends(forward_client_ip_to_gotrue)])`. `run_gotrue` then sends
+    it as `Sb-Forwarded-For`, so GoTrue's per-IP limits bucket each user instead of the one
+    Railway egress address every user shares (see the block above `run_gotrue` in
+    `app/database.py` — including the owner switch that makes Supabase honour it).
+
+    ⚠️ Must stay `async def`. FastAPI runs a SYNC dependency in a threadpool with a COPY of the
+    context, so a contextvar set there never reaches the endpoint; an async dependency runs in
+    the request's own task, whose context the handler shares. Never `yield` here either.
+
+    The address is `trusted_client_ip` — the rightmost X-Forwarded-For entry, appended by
+    Railway's edge — never a value the caller chose. Never raises: a bad address forwards
+    nothing (GoTrue falls back to the connection address), it never fails the request.
+    """
+    try:
+        bind_gotrue_client_ip(trusted_client_ip(request))
+    except Exception as e:  # noqa: BLE001 — forwarding is best-effort, never a reason to fail sign-in
+        logger.warning(
+            "auth: could not bind the caller's address for GoTrue (%s: %s) — its per-IP limits "
+            "fall back to the backend's egress address for this request",
+            type(e).__name__, e,
+        )
+
+
 def _bearer_from_header(authorization: Optional[str]) -> Optional[str]:
     """The token out of an `Authorization` header, or None when there isn't a usable one.
 
@@ -81,56 +107,54 @@ def _bearer_from_header(authorization: Optional[str]) -> Optional[str]:
 
 
 async def _user_id_from_token(token: str) -> Optional[str]:
-    """Resolve a bearer token to a user id, trying app-minted then Supabase-issued.
+    """Resolve a bearer token to a user id. ONLY the app's own access tokens qualify.
 
-    Returns None when neither verifier accepts it. Callers decide what that means — the strict
-    dependencies 401, the identity-only one degrades to guest.
+    Returns None when the token is not a valid app access token. Callers decide what that
+    means — the strict dependencies 401, the identity-only one degrades to guest.
 
-    `async` because `verify_supabase_token` may have to fetch Supabase's JWKS to verify an
-    ES256 token. Doing that synchronously would block the event loop on an outbound HTTP call
-    inside an auth dependency — i.e. on essentially every request.
+    ⚠️ **No Supabase-token fallback, and none may come back (SOC-01 / SEC-2, 2026-11-26).** This
+    used to fall back to `verify_supabase_token`, so every authenticated route also accepted a
+    Supabase-issued JWT as a bearer. Three things were wrong with that:
+      * an HS256 token signed with the revoked-but-unrotatable legacy `SUPABASE_JWT_SECRET`
+        (no `exp`, no `aud` needed) was a permanent bearer for any account;
+      * a Supabase JWT fails `_decode_access_token` inside `_reject_if_password_changed_since_issue`,
+        which fails OPEN — so password-change eviction never applied to that whole token class;
+      * nothing needed it: iOS sends a Supabase token in exactly one place, the BODY of
+        `POST /auth/session-exchange` (AuthService.exchangeSupabaseSession), which swaps it for
+        app tokens at once, and no shipped version ever sent one as a bearer (session-exchange
+        predates 1.0). That route is now the ONLY place a Supabase token is accepted.
+
+    Still `async` so the callers and the event-loop tests keep one shape; there is no I/O left.
     """
     try:
         payload = _decode_access_token(token)
-        user_id = payload.get("sub")
-        if user_id:
-            return user_id
-    except Exception:
-        pass
+    except JWTError:
+        return None  # `decode_token` / `_decode_access_token` already logged why
+    except Exception as e:  # noqa: BLE001 — an unverifiable bearer is a 401, never a 500
+        logger.warning(
+            "auth: bearer token could not be decoded (%s: %s) — treated as unverifiable",
+            type(e).__name__, e,
+        )
+        return None
 
-    try:
-        payload = await verify_supabase_token(token)
-        if payload:
-            user_id = payload.get("sub")
-            if user_id:
-                return user_id
-    except Exception:
-        pass
-
+    user_id = payload.get("sub") if isinstance(payload, dict) else None
+    if isinstance(user_id, str) and user_id:
+        return user_id
+    logger.warning("auth: app access token verified but carries no usable sub — refused")
     return None
 
 
 def _reject_unverifiable_token(token: str, *, route: str) -> None:
-    """Raise the right 401 for a bearer token that no verifier accepted.
+    """Raise 401 AUTH_TOKEN_INVALID for a bearer token that no verifier accepted.
 
-    Splits out one case that is NOT the caller's fault: `verify_supabase_token` returns None
-    when `SUPABASE_JWT_SECRET` is unset (core/security.py logs "not configured"). Under the old
-    silent-guest behaviour that misconfiguration was invisible; now it would 401 every
-    Supabase-issued token, and reporting a config error as a bad credential would send users to
-    re-sign-in over and over while the real fault sat in the environment. So it answers
-    AUTH_UNAVAILABLE (503, retryable, credential preserved) instead.
+    Always that code. It used to answer 503 AUTH_UNAVAILABLE whenever `SUPABASE_JWT_SECRET` was
+    unset — for EVERY unverifiable token, including an ordinary expired app token — which is
+    why the owner could not delete that variable: iOS refreshes only on 401, so the 503 would
+    have stranded every user whose access token had expired. With the Supabase fallback gone
+    from `_user_id_from_token` no bearer depends on Supabase or on that secret at all, so there
+    is nothing environmental left to report here. A JWKS outage likewise must never turn an
+    expired app token into a 503; it now only affects `/auth/session-exchange`.
     """
-    if not settings.SUPABASE_JWT_SECRET:
-        logger.error(
-            "auth: token rejected on %s and SUPABASE_JWT_SECRET is NOT CONFIGURED — "
-            "reporting AUTH_UNAVAILABLE, not a bad credential; check the environment",
-            route,
-        )
-        raise auth_error(
-            ErrorCode.AUTH_UNAVAILABLE,
-            message=f"Identity verification unavailable on {route}",
-        )
-
     logger.warning("auth: unverifiable bearer token on %s", route)
     raise auth_error(
         ErrorCode.AUTH_TOKEN_INVALID,
@@ -166,10 +190,11 @@ def _decode_access_token(token: str) -> dict:
     either forged or from a mint that forgot to declare itself.
 
     Supabase-issued tokens never reach the `type` check — they fail the `SECRET_KEY` signature
-    inside `decode_token` and fall through to the JWKS path unchanged.
+    inside `decode_token` — and since 2026-11-26 there is no JWKS fallback behind this: a bearer
+    that is not an app access token is simply unverifiable (see `_user_id_from_token`).
 
     Raises `JWTError` (same as `decode_token`) so every existing call site's `except` behaves
-    unchanged: the caller falls through to the Supabase-token path and then to 401.
+    unchanged: the caller answers 401.
     """
     payload = decode_token(token)
     if not isinstance(payload, dict):
@@ -291,7 +316,13 @@ def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
         payload = _decode_access_token(token)
         issued_at = payload.get("iat") if payload else None
         if issued_at is None:
-            return  # Supabase-issued token, or a token without iat — not our concern here.
+            # Unreachable for a token that got this far: `create_access_token` always stamps
+            # `iat`, and no Supabase token is accepted as a bearer any more.
+            logger.warning(
+                "access token for user=%s carries no iat — password-change eviction skipped",
+                user_row.get("id"),
+            )
+            return
         changed_dt = datetime.fromisoformat(str(changed_at).replace("Z", "+00:00"))
         if changed_dt.tzinfo is None:
             changed_dt = changed_dt.replace(tzinfo=timezone.utc)

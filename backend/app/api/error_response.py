@@ -244,6 +244,36 @@ class ErrorCode(str, Enum):
     # password was wrong.
     EMAIL_NOT_CONFIRMED = "EMAIL_NOT_CONFIRMED"
 
+    # The one-time code the user typed (signup confirmation, password reset, set-password) was
+    # refused by the identity provider: wrong, expired, or already used. These routes used to
+    # raise a bare-string 400 "That code is invalid or has expired" — and raised it for EVERY
+    # failure, so a GoTrue outage or 429 told a user holding a perfectly good code that it was
+    # wrong, and sent them to burn the 3-per-hour resend budget on a new one (AUTH-BE-05). The
+    # outage half is now AUTH_UNAVAILABLE; this code is only ever the user's half.
+    #
+    # 400, not 401/403: GoTrue answers a bad OTP with 403 `otp_expired`, and forwarding that
+    # status would walk iOS into its auth handling for a typo. `fix_input`: the user is looking
+    # at the code field. Never in `triggersTokenRefresh`, never clears a credential.
+    AUTH_CODE_INVALID = "AUTH_CODE_INVALID"
+
+    # The two below are the failures that happen AFTER `verify_otp` SUCCEEDED — the single-use
+    # code is spent, so retrying the same request can only ever read AUTH_CODE_INVALID. They
+    # used to be AUTH_UNAVAILABLE (503, retry_later) with only the free-text copy differing, so
+    # iOS could not tell "your code is still good, try again" (a verify outage) from "your code
+    # is gone" and kept the dead code in the field (BE-AUTH-04, PW-4).
+    #
+    # `/auth/confirm-email` only. The address IS confirmed by then (the copy always opens "Your
+    # email is confirmed"), but the sign-in or the password write after it failed. Action
+    # `sign_in` — the one 503/400 that offers it: the user is on the CODE screen, not a sign-in
+    # form, so it is not a circle, and signing in is exactly what finishes the job. 503 by
+    # default; 400 when the password itself was refused (the copy then names Forgot password).
+    AUTH_CONFIRMED_SIGN_IN_FAILED = "AUTH_CONFIRMED_SIGN_IN_FAILED"
+    # `/auth/reset-password` and `/auth/set-password` only: the recovery code verified (and is
+    # now spent) but the password write failed for a reason that is not the password itself.
+    # A REFUSED password stays AUTH_PASSWORD_REJECTED. `fix_input`: the cure is a new code in the
+    # field; NOT retry_later, which would resubmit the dead one.
+    AUTH_CODE_USED = "AUTH_CODE_USED"
+
     # The five below are deliberately DISTINCT rather than one AUTH_FAILED, because iOS must
     # react differently to each and only two of them may destroy a stored credential. Collapsing
     # them is how "tapped Follow while signed out" became "your session expired" — and how a
@@ -407,9 +437,25 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
         "The uploaded narration could not be found in the media bucket; re-upload it."
     ),
     ErrorCode.LEARN_NARRATOR_LEDGER_ERROR: "The Learn ledger could not be updated; retry.",
+    # ONE clause, and neutral about what the email holds. The live email carries a code (for
+    # this app) AND a link (for 1.02/1.03, which have no code screen), so "link" was a promise
+    # half the users could not keep. Shipped builds also APPEND their own sentence after this
+    # one (AuthService.signIn), so anything longer reads twice. "confirm" must stay: the client
+    # and test_login_unconfirmed_returns_its_own_error_code both key on it.
     ErrorCode.EMAIL_NOT_CONFIRMED: (
-        "Please confirm your email address first. Check your inbox for the "
-        "confirmation link \u2014 including your spam folder."
+        "Your email isn't confirmed yet. Open the confirmation email we sent you (check spam)."
+    ),
+    ErrorCode.AUTH_CODE_INVALID: (
+        "That code is invalid or has expired. Check the newest email from us, or send a new code."
+    ),
+    # The fallback only: `/auth/confirm-email` always sends the per-case sentence, and every one
+    # of them opens the same way.
+    ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED: (
+        "Your email is confirmed, but we couldn't sign you in just now. Please sign in."
+    ),
+    ErrorCode.AUTH_CODE_USED: (
+        "We couldn't set your new password, and that code has now been used. "
+        "Send a new code and try again."
     ),
     ErrorCode.TICKER_NOT_FOUND: (
         "We couldn't find that ticker symbol. Check the spelling and try again."
@@ -596,6 +642,15 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
 # Suggested user action per code (optional, shown as a button label / hint).
 _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.EMAIL_NOT_CONFIRMED: "confirm_email",
+    # fix_input: the user is looking at the code field; the cure is a different (newer) code.
+    # NOT sign_in (they are mid-flow, often signed out by design) and NOT retry_later (the same
+    # code is refused forever — the outage case is AUTH_UNAVAILABLE, not this).
+    ErrorCode.AUTH_CODE_INVALID: "fix_input",
+    # sign_in: the address is confirmed and the code is spent; signing in (with the password the
+    # app still holds) is what finishes. The user is on the code screen, so it is not a circle.
+    ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED: "sign_in",
+    # fix_input: the field holds a dead code; the cure is a new one. NOT retry_later.
+    ErrorCode.AUTH_CODE_USED: "fix_input",
     ErrorCode.TICKER_NOT_FOUND: "check_symbol",
     ErrorCode.FMP_RATE_LIMITED: "retry_later",
     ErrorCode.FMP_UNAVAILABLE: "retry_later",
@@ -671,6 +726,14 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
 # Default HTTP status per code (endpoints may override).
 _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.EMAIL_NOT_CONFIRMED: 403,
+    # 400, not GoTrue's own 403: a 401/403 here would reach iOS's auth handling for a typo.
+    ErrorCode.AUTH_CODE_INVALID: 400,
+    # 503 by default (ours: the sign-in / write after a good code failed); the route passes 400
+    # when the password itself was refused. Never 401: no stored credential is involved.
+    ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED: 503,
+    # 503: ours — the code was good and the write failed. Never 401 (set-password's caller is
+    # signed in and their session is fine).
+    ErrorCode.AUTH_CODE_USED: 503,
     ErrorCode.TICKER_NOT_FOUND: 404,
     ErrorCode.INVALID_PERSONA: 400,
     ErrorCode.INVALID_INPUT: 400,

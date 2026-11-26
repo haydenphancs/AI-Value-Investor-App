@@ -206,14 +206,22 @@ def test_sentry_http_breadcrumbs_and_frame_vars_never_carry_the_fmp_key():
 
 def test_the_sentry_init_declares_the_sdk_scrubber_as_a_belt():
     """`EventScrubber(recursive=True)` blanks denylisted KEYS client-side, so a nested
-    `params={'apikey': …}` is caught even if the value-based walk above regresses."""
-    import inspect
-    import app.main as main_mod
+    `params={'apikey': …}` is caught even if the value-based walk above regresses. Its
+    `pii_denylist` must be `sentry_pii_denylist()` (the SDK default PLUS our address keys —
+    TOKSEC-2); brace-bound to the one `sentry_sdk.init(...)` call by AST."""
+    import ast
+    from pathlib import Path
 
-    init = inspect.getsource(main_mod)
-    init = init[init.index("sentry_sdk.init("):]
-    init = init[:init.index("\n    )\n")]
-    assert "event_scrubber=EventScrubber(recursive=True)" in init
+    tree = ast.parse((Path(__file__).resolve().parents[1] / "app" / "main.py").read_text())
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr == "init" and isinstance(n.func.value, ast.Name) and n.func.value.id == "sentry_sdk"]
+    assert len(calls) == 1
+    scrubber = {k.arg: k.value for k in calls[0].keywords}.get("event_scrubber")
+    assert isinstance(scrubber, ast.Call) and ast.unparse(scrubber.func) == "EventScrubber"
+    kw = {k.arg: ast.unparse(k.value) for k in scrubber.keywords}
+    assert kw.get("recursive") == "True"
+    assert kw.get("pii_denylist") == "sentry_pii_denylist()"
+    assert not scrubber.args and "send_default_pii" not in kw and "denylist" not in kw
 
 
 def test_sentry_never_receives_a_plaintext_password():
@@ -573,3 +581,443 @@ def test_a_frame_holding_a_web_source_under_any_name_keeps_no_locals():
         module="app.api.v1.endpoints.chat", function="_persist_turn",
         vars={"ai_msg": "{'rich_content': {'sources': [{'kind': 'news', 'title': 'x'}]}}"}))
     assert "news" in str(_vars(plain))
+
+
+# ── SEC-1: auth request models never reach Sentry through frame locals (2026-11-26) ──────
+#
+# The leak, reproduced offline before the fix: sentry-sdk serialises a pydantic model as its REPR
+# under the local's name — `request: "SignUpRequest(email='***@***', password='Hunter2!x', …)"` —
+# and neither the key-based scrubbers (`request` is not a credential key) nor the value regexes
+# (a quote right after `password=`, and no separator before `password` in `new_password=`) touched
+# it. Any `logger.error(..., exc_info=True)` in an auth handler (a GoTrue 429 on sign-in, an email
+# quota error on sign-up, a 5xx on change-password) stored the plaintext password in Sentry.
+#
+# These tests run the REAL pipeline sentry-sdk 2.x runs before `before_send`: frame capture with
+# locals (`event_from_exception`), `EventScrubber(recursive=True)` (main.py's), `serialize`, then
+# our `scrub_sentry_event`. Every model in `app.schemas.auth` is built with a sentinel in every
+# field (`model_construct`: no validators, so a model added tomorrow is covered unchanged).
+
+_SECRET_FIELD_NAMES = {
+    # Every credential field the auth schemas carry today, by hand — the generic rule must
+    # classify each one as secret, or this list catches it.
+    "password", "new_password", "current_password", "code", "refresh_token", "access_token",
+    "id_token", "nonce", "supabase_access_token", "device_token",
+}
+_MUST_SURVIVE_FIELD_NAMES = {"display_name", "provider", "user_id", "message", "tier", "avatar_url"}
+
+
+def _is_secret_field(name: str) -> bool:
+    from app.log_redaction import _is_secret_field_name
+
+    return name in _SECRET_FIELD_NAMES or _is_secret_field_name(name)
+
+
+def _auth_model_instances():
+    """[(class name, instance, {field: sentinel})] for every pydantic model in schemas/auth."""
+    from pydantic import BaseModel
+    import app.schemas.auth as schemas
+
+    out = []
+    for name, cls in sorted(vars(schemas).items()):
+        if not (isinstance(cls, type) and issubclass(cls, BaseModel)):
+            continue
+        if cls.__module__ != schemas.__name__:
+            continue
+        values = {
+            field: (f"S3CRET-{name}-{field}" if _is_secret_field(field) else f"plain-{name}-{field}")
+            for field in cls.model_fields
+        }
+        out.append((name, cls.model_construct(**values), values))
+    assert {"SignInRequest", "SignUpRequest", "ResetPasswordRequest", "ChangePasswordRequest",
+            "SetPasswordRequest", "RefreshTokenRequest", "OAuthSignInRequest",
+            "SessionExchangeRequest", "TokenResponse"} <= {n for n, _, _ in out}
+    return out
+
+
+def _through_sentry(module_name: str, frame_locals: dict, *, sdk_scrubber=None,
+                    ours: bool = True) -> dict:
+    """Raise inside a function whose frame belongs to `module_name` and holds `frame_locals`
+    (as named parameters, i.e. real locals), and return the event as `before_send` would see
+    it after our scrubber. `sdk_scrubber` replaces the SDK scrubber main.py configures (default:
+    the bare `EventScrubber(recursive=True)`); `ours=False` stops before `scrub_sentry_event`, to
+    test the SDK layer alone."""
+    import sys
+    from sentry_sdk.consts import DEFAULT_OPTIONS
+    from sentry_sdk.scrubber import EventScrubber
+    from sentry_sdk.serializer import serialize
+    from sentry_sdk.utils import event_from_exception
+
+    namespace = {"__name__": module_name}
+    params = ", ".join(frame_locals)
+    exec(  # noqa: S102 — builds a frame whose f_globals["__name__"] is the module under test
+        compile(
+            f"def handler({params}):\n    raise RuntimeError('AuthApiError: 429 rate limited')\n",
+            f"/srv/app/{module_name.replace('.', '/')}.py", "exec",
+        ),
+        namespace,
+    )
+    try:
+        namespace["handler"](**frame_locals)
+    except RuntimeError:
+        exc_info = sys.exc_info()
+    options = dict(DEFAULT_OPTIONS)
+    options.update(include_local_variables=True, include_source_context=False)
+    event, _hint = event_from_exception(exc_info, client_options=options)
+    (sdk_scrubber or EventScrubber(recursive=True)).scrub_event(event)
+    event = serialize(
+        event, max_request_body_size="never", max_value_length=options["max_value_length"],
+    )
+    return scrub_sentry_event(event) if ours else event
+
+
+def _frame_of(event: dict, module_name: str) -> dict:
+    frames = event["exception"]["values"][0]["stacktrace"]["frames"]
+    matching = [f for f in frames if f.get("module") == module_name]
+    assert matching, f"no frame for {module_name} in {[f.get('module') for f in frames]}"
+    return matching[-1]
+
+
+def test_an_auth_handler_frame_keeps_no_locals_for_any_auth_model():
+    """The handler frame itself: every model, its secrets AND its other fields gone (the frame
+    keeps function and line; the exception value and the log line carry the diagnosis)."""
+    for name, model, values in _auth_model_instances():
+        event = _through_sentry(
+            "app.api.v1.endpoints.auth",
+            {"request": model, "req": "<starlette Request>", "user_id": "u-123"},
+        )
+        frame = _frame_of(event, "app.api.v1.endpoints.auth")
+        assert list(frame["vars"]) == ["auth_handler"], (name, frame["vars"])
+        assert frame["function"] == "handler" and frame["lineno"]
+        blob = str(event)
+        for field, sentinel in values.items():
+            if _is_secret_field(field):
+                assert sentinel not in blob, f"{name}.{field} reached Sentry"
+
+
+def test_an_auth_model_in_any_other_frame_loses_its_credential_values():
+    """The handler is not the only frame holding the model: an exception escaping it carries
+    FastAPI's `run_endpoint_function` frame, whose `values` local is `{'request': <model>}`. In
+    a frame outside the auth module the locals stay (triage), but every credential-named field
+    inside a repr is blanked — independently of `Field(repr=False)` on the schema."""
+    for name, model, values in _auth_model_instances():
+        event = _through_sentry(
+            "fastapi.routing",
+            {"values": {"request": model, "req": "<starlette Request>"}, "response": model},
+        )
+        frame = _frame_of(event, "fastapi.routing")
+        blob = str(frame["vars"])
+        for field, sentinel in values.items():
+            if _is_secret_field(field):
+                assert sentinel not in blob, f"{name}.{field} reached Sentry via fastapi.routing"
+            elif field in _MUST_SURVIVE_FIELD_NAMES and f"{field}=" in blob:
+                assert sentinel in blob, f"{name}.{field} was over-redacted"
+        whole = str(event)
+        assert not any(s in whole for f, s in values.items() if _is_secret_field(f)), name
+
+
+def test_the_hand_listed_credential_fields_are_all_classified_secret():
+    """If the generic rule ever stops covering a field the auth schemas really carry, the
+    pipeline tests above would still pass on THEIR classification — this pins the rule itself."""
+    from app.log_redaction import _is_secret_field_name
+
+    for field in _SECRET_FIELD_NAMES:
+        assert _is_secret_field_name(field), field
+    for field in _MUST_SURVIVE_FIELD_NAMES | {"error_code", "status_code", "token_type_hint_x"}:
+        if field == "token_type_hint_x":
+            assert _is_secret_field_name(field)  # any `token` segment is a credential name
+            continue
+        assert not _is_secret_field_name(field), field
+
+
+def test_a_frame_in_the_auth_module_is_found_by_its_path_too():
+    """sentry-sdk can omit `module`; the path still identifies the auth handler."""
+    out = scrub_sentry_event(_frame_event(
+        abs_path="/app/backend/app/api/v1/endpoints/auth.py", function="register",
+        vars={"request": "SignUpRequest(email='x', password='Hunter2!xyz', display_name='V')"}))
+    assert "Hunter2!xyz" not in str(out)
+    assert list(_vars(out)) == ["auth_handler"]
+
+
+def test_frame_field_redaction_keeps_diagnostic_codes():
+    """`error_code=` / `status_code=` are what diagnoses an event — never redacted, and a quoted
+    value Sentry truncated (no closing quote) is still blanked to its end."""
+    out = scrub_sentry_event(_frame_event(
+        module="app.services.some_service", function="f",
+        vars={
+            "exc": "HTTPException(status_code=401, detail={'error_code': 'AUTH_REQUIRED'})",
+            "err": "AuthError(error_code='AUTH_CODE_INVALID', code='482913')",
+            "long": "ResetPasswordRequest(email='x', new_password='abcdefgh...",
+            "nested": "{'note': \"see password='p@ss-in-a-note'\"}",
+        }))
+    v = _vars(out)
+    assert "status_code=401" in v["exc"] and "'error_code': 'AUTH_REQUIRED'" in v["exc"]
+    assert "error_code='AUTH_CODE_INVALID'" in v["err"] and "482913" not in v["err"]
+    assert "abcdefgh" not in v["long"]
+    assert "p@ss-in-a-note" not in v["nested"]
+
+
+def test_log_lines_are_not_widened_to_redact_codes():
+    """FRAME-scoped on purpose: an operational log line keeps its `code=` / `error_code=` values
+    (widening the global value regex to `\\w*code=` would blank every one of them)."""
+    line = "verify_otp refused: code='otp_expired' error_code=AUTH_CODE_INVALID status_code=400"
+    assert redact_secrets(line) == line
+
+
+# ── The email link's token_hash (BE-AUTH-01, TOKSEC-1) and the user's address (TOKSEC-2) ──────
+#
+# The Confirm-signup email links to `/auth/confirm?token_hash=<56 hex>&type=signup`. Until it is
+# redeemed (or expires) that hash is a LIVE single-use credential: GoTrue's public `/verify`
+# turns it into a session. `token=` never matched `token_hash=` (the name runs on), so the
+# query-string rule, Sentry's `request.query_string` and the POST handler's locals all kept it.
+
+_HASH = "a1" * 28  # 56 hex, the shape GoTrue's sha224 token hash has
+
+
+def test_a_token_hash_query_value_is_redacted_everywhere_the_global_rule_reaches():
+    line = f'127.0.0.1:5000 - "GET /auth/confirm?token_hash={_HASH}&type=signup HTTP/1.1" 200'
+    out = redact_secrets(line)
+    assert _HASH not in out and "token_hash=***&type=signup" in out, out
+    # The bare query string (no `?`), the form body's repr, and the dict / JSON reprs.
+    assert _HASH not in redact_secrets(f"token_hash={_HASH}&type=signup")
+    assert _HASH not in redact_secrets(f"bytearray(b'token_hash={_HASH}&type=signup')")
+    assert _HASH not in redact_secrets(f"{{'token_hash': '{_HASH}', 'type': 'signup'}}")
+    assert _HASH not in redact_secrets(f'{{"token_hash": "{_HASH}"}}')
+    # A Supabase implicit-flow fragment's refresh token (not a JWT, so no other rule saw it).
+    frag = "https://caydexinvest.com/#access_token=x&refresh_token=r3fr3shT0k3nV4lu3&type=signup"
+    assert "r3fr3shT0k3nV4lu3" not in redact_secrets(frag)
+    assert "type=signup" in redact_secrets(frag)
+
+
+def test_the_widened_rule_still_spares_lookalike_names():
+    """`token(?:_hash)?` must not swallow `token_type=`, nor `sort_token_hash_x=`-style names
+    without a separator before them, nor an operational `code=`."""
+    for keep in ("token_type=bearer", "x_token_hash=abc", "code=otp_expired",
+                 "error_code=AUTH_CODE_INVALID", "hash=deadbeef"):
+        assert redact_secrets(f"note {keep} end") == f"note {keep} end", keep
+
+
+def test_redact_query_string_blanks_every_secret_name_and_keeps_the_rest():
+    from app.log_redaction import redact_query_string
+
+    q = (f"token_hash={_HASH}&type=signup&code=12345678&key=K3Y&api-key=AK&apikey=AK2"
+         f"&token%5Fhash={_HASH}&otp=999&nonce=n1&symbol=AAPL&q=&flag&token_hash={_HASH}"
+         "&id.token=itok&email=someone@example.com")
+    out = redact_query_string(q)
+    for leaked in (_HASH, "12345678", "K3Y", "AK", "AK2", "999", "n1", "itok", "someone@example.com"):
+        assert f"={leaked}&" not in out + "&" and leaked not in out.split("&"), (leaked, out)
+    assert _HASH not in out and "12345678" not in out and "K3Y" not in out and "itok" not in out
+    assert "type=signup" in out and "symbol=AAPL" in out
+    assert "q=" in out.split("&") and "flag" in out.split("&"), "empty / bare params are kept as-is"
+    assert out.count("token_hash=***") == 2 and "token%5Fhash=***" in out
+    # `&amp;` left undecoded by a mail client still splits the hash off on its own.
+    assert _HASH not in redact_query_string(f"token_hash={_HASH}&amp;type=signup")
+    # Non-str input and a pathological one never raise.
+    assert redact_query_string(None) == "None"
+    assert redact_query_string("&&&==&=") == "&&&==&="
+
+
+def test_redact_query_string_and_request_target_fail_closed(monkeypatch):
+    import app.log_redaction as lr
+
+    def boom(_name):
+        raise RuntimeError("classifier broke")
+
+    monkeypatch.setattr(lr, "_is_secret_query_name", boom)
+    assert lr.redact_query_string(f"token_hash={_HASH}") == "***"
+    out = lr.redact_request_target(f"/auth/confirm?token_hash={_HASH}&type=signup")
+    assert _HASH not in out and out.startswith("/auth/confirm?")
+
+
+def test_redact_request_target_keeps_the_path_and_handles_full_urls():
+    from app.log_redaction import redact_request_target
+
+    assert redact_request_target("/api/v1/stocks/AAPL/overview") == "/api/v1/stocks/AAPL/overview"
+    out = redact_request_target(f"https://caydexinvest.com/auth/confirm?token_hash={_HASH}&type=signup")
+    assert out == "https://caydexinvest.com/auth/confirm?token_hash=***&type=signup"
+    assert redact_request_target("/x?") == "/x?"
+    assert redact_request_target(b"/raw?token_hash=" + _HASH.encode()).count(_HASH) == 0
+
+
+def test_scrub_sentry_event_redacts_the_request_url_and_query_string():
+    """sentry-sdk's ASGI integration attaches the query string to EVERY event raised inside a
+    request, `send_default_pii` or not. It was scrubbed only for transactions."""
+    from app.log_redaction import scrub_sentry_transaction
+
+    def ev():
+        return {"request": {"url": f"https://caydexinvest.com/auth/confirm?token_hash={_HASH}",
+                            "query_string": f"token_hash={_HASH}&type=signup&code=12345678",
+                            "method": "GET"},
+                "exception": {"values": [{"type": "RuntimeError", "value": "boom"}]}}
+
+    for scrub in (scrub_sentry_event, scrub_sentry_transaction):
+        out = scrub(ev())
+        assert _HASH not in str(out) and "12345678" not in str(out), scrub.__name__
+        assert out["request"]["query_string"] == "token_hash=***&type=signup&code=***"
+        assert out["request"]["url"].endswith("/auth/confirm?token_hash=***")
+        assert out["request"]["method"] == "GET"
+
+
+def test_logentry_params_are_redacted():
+    """LoggingIntegration ships the unformatted template plus `params` = `record.args`."""
+    out = scrub_sentry_event({"logentry": {
+        "message": "fetch failed: %s", "params": [f"GET /x?apikey={_FMP_KEY}", "AAPL"]}})
+    assert _FMP_KEY not in str(out) and out["logentry"]["params"][1] == "AAPL"
+    out = scrub_sentry_event({"logentry": {"message": "%s", "params": (f"token_hash={_HASH}",)}})
+    assert _HASH not in str(out)
+
+
+def test_a_list_under_a_credential_key_loses_every_leaf():
+    """`parse_qs` gives `{'token_hash': ['<hex>']}`: the old walk blanked a credential key's value
+    only when it was NOT a list, so the hash rode through (TOKSEC-1)."""
+    out = scrub_sentry_event(_frame_event(
+        module="starlette.requests", function="form",
+        vars={"form": {"token_hash": [_HASH], "type": ["signup"]},
+              "code": ["12345678", 12345678, None, True],
+              "secret": ("tuple-secret", ["nested-secret", {"inner": "deep-secret"}]),
+              "tokens": [{"kind": "access", "value": "dict-in-list-secret"}],
+              "values": ["plain-a", "plain-b"]}))
+    v = _vars(out)
+    blob = str(v)
+    for leaked in (_HASH, "12345678", "tuple-secret", "nested-secret", "deep-secret", "dict-in-list-secret"):
+        assert leaked not in blob, leaked
+    assert v["form"]["type"] == ["signup"], "a non-credential list keeps its values"
+    assert v["code"][2] is None and v["code"][3] is True, "None / bools carry no secret"
+    assert v["values"] == ["plain-a", "plain-b"]
+
+
+def test_an_email_confirm_page_frame_keeps_no_locals():
+    """The POST handler holds the unredeemed hash four ways: the bare local, the raw `body`, its
+    decoded `text`, and the `parse_qs` dict of lists. Run through the REAL SDK pipeline."""
+    from urllib.parse import parse_qs
+
+    text = f"token_hash={_HASH}&type=signup"
+    event = _through_sentry("app.api.email_confirm_page", {
+        "body": bytearray(text.encode()), "text": text, "form": parse_qs(text),
+        "token_hash": _HASH, "client_ip": "203.0.113.9",
+    })
+    frame = _frame_of(event, "app.api.email_confirm_page")
+    assert list(frame["vars"]) == ["auth_handler"], frame["vars"]
+    assert frame["function"] == "handler" and frame["lineno"]
+    assert _HASH not in str(event) and "203.0.113.9" not in str(event)
+
+
+def test_the_same_locals_in_any_other_frame_lose_the_hash_value_by_value():
+    """Outside the credential modules the locals stay for triage, but every copy of the hash goes:
+    the parse_qs list (key rule), the body's repr and the text (the widened query rule)."""
+    from urllib.parse import parse_qs
+
+    text = f"token_hash={_HASH}&type=signup"
+    event = _through_sentry("starlette.requests", {
+        "body": bytearray(text.encode()), "text": text, "form": parse_qs(text), "chunks": [text.encode()],
+    })
+    frame = _frame_of(event, "starlette.requests")
+    assert _HASH not in str(event), frame["vars"]
+    assert "type" in str(frame["vars"]["form"]), "the rest of the frame survives"
+
+
+def test_sentry_pii_denylist_keeps_the_sdk_defaults_and_adds_the_address_keys():
+    """`pii_denylist=` REPLACES the SDK's default list; ours must start from it."""
+    from sentry_sdk.scrubber import DEFAULT_DENYLIST, DEFAULT_PII_DENYLIST, EventScrubber
+
+    from app.log_redaction import sentry_pii_denylist
+
+    lst = sentry_pii_denylist()
+    assert set(DEFAULT_PII_DENYLIST) <= set(lst)
+    assert {"sb-forwarded-for", "client_ip"} <= set(lst)
+    assert len(lst) == len(set(lst)), "no duplicates"
+    assert sentry_pii_denylist() is not sentry_pii_denylist(), "a fresh list (the SDK extends it)"
+    scrubber = EventScrubber(recursive=True, pii_denylist=sentry_pii_denylist())
+    for key in [*DEFAULT_DENYLIST, *DEFAULT_PII_DENYLIST, "sb-forwarded-for", "client_ip"]:
+        assert key.lower() in scrubber.denylist, key
+
+
+def test_the_forwarded_address_never_reaches_sentry_from_a_gotrue_frame():
+    """TOKSEC-2: the SDK's `_request` frame copies GoTrue's shared headers dict — with our
+    `Sb-Forwarded-For` — into its own `headers` local, and `run_gotrue` keeps `client_ip`. Each
+    layer must catch it ALONE: the SDK scrubber main.py builds, and our own `scrub_sentry_event`
+    (against the bare default scrubber, as if main.py regressed)."""
+    from sentry_sdk.scrubber import EventScrubber
+
+    from app.log_redaction import sentry_pii_denylist
+
+    ip = "203.0.113.9"
+    headers = {"Authorization": "Bearer sb_secret_abcdefghijklmnop", "apiKey": "sb_secret_x",
+               "Sb-Forwarded-For": ip, "X-Client-Info": "gotrue-py/2.9"}
+    frames = [("gotrue._sync.gotrue_base_api", {"method": "POST", "url": "token", "headers": dict(headers)}),
+              ("app.database", {"verb": "<bound method sign_in>", "client_ip": ip, "owner": "<GoTrue>"})]
+    for module, local_vars in frames:
+        sdk_only = _through_sentry(
+            module, local_vars,
+            sdk_scrubber=EventScrubber(recursive=True, pii_denylist=sentry_pii_denylist()), ours=False)
+        assert ip not in str(sdk_only), (module, "SDK layer")
+        ours_only = _through_sentry(module, local_vars)  # bare default SDK scrubber + ours
+        assert ip not in str(ours_only), (module, "our layer")
+        frame = _frame_of(ours_only, module)
+        if module.startswith("gotrue"):
+            assert "gotrue-py/2.9" in str(frame["vars"]["headers"]), "other headers survive"
+    # And the SDK's bare default list really does miss it (the reason both exist — not vacuous).
+    bare = _through_sentry(frames[0][0], frames[0][1], ours=False)
+    assert ip in str(bare)
+
+
+# ── decode_token: an expired token is routine, not a warning (AUTH-BE-14 caveat) ──────────────
+
+def test_decode_token_logs_an_expired_token_at_debug_and_a_bad_one_at_warning(caplog):
+    """Every access token ends by expiring; `/auth/refresh` logs that outcome itself at INFO, so a
+    WARNING here doubled every lapsed session. A forged or malformed token stays a WARNING."""
+    from datetime import datetime, timedelta, timezone
+
+    import pytest
+    from jose import JWTError, jwt
+    from jose.exceptions import ExpiredSignatureError
+
+    from app.config import settings
+    from app.core.security import decode_token
+
+    expired = jwt.encode(
+        {"sub": "u-1", "type": "access", "exp": datetime.now(timezone.utc) - timedelta(minutes=5)},
+        settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    forged = jwt.encode({"sub": "u-1", "type": "access"}, "not-the-secret", algorithm="HS256")
+
+    with caplog.at_level(logging.DEBUG, logger="app.core.security"):
+        with pytest.raises(ExpiredSignatureError):
+            decode_token(expired)
+    expired_records = [r for r in caplog.records if r.name == "app.core.security"]
+    assert expired_records and all(r.levelno == logging.DEBUG for r in expired_records), (
+        [(r.levelname, r.getMessage()) for r in expired_records])
+    assert expired not in caplog.text
+
+    caplog.clear()
+    for bad in (forged, "not.a.jwt", ""):
+        with caplog.at_level(logging.DEBUG, logger="app.core.security"):
+            with pytest.raises(JWTError) as info:
+                decode_token(bad)
+        assert not isinstance(info.value, ExpiredSignatureError)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 3 and all("Token decode failed" in r.getMessage() for r in warnings)
+    assert forged not in caplog.text
+
+
+def test_the_address_key_names_match_what_run_gotrue_actually_uses():
+    """The scrub is BY NAME, so a rename in `database.run_gotrue` (its local, or the header it
+    writes) would silently reopen TOKSEC-2. Pin the pairing to the source."""
+    import ast
+    import inspect
+
+    import app.database as database
+    from app.log_redaction import _PII_KEYS, SENTRY_PII_DENYLIST_EXTRA
+
+    header = database.GOTRUE_FORWARDED_FOR_HEADER.lower()
+    assert header in _PII_KEYS and header in SENTRY_PII_DENYLIST_EXTRA
+    tree = ast.parse(inspect.getsource(database.run_gotrue))
+    assigned = {t.id for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                for t in n.targets if isinstance(t, ast.Name)}
+    reads_contextvar = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                        and "_gotrue_client_ip" in ast.unparse(n.value)]
+    assert reads_contextvar, "run_gotrue no longer reads the bound address"
+    for node in reads_contextvar:
+        for target in node.targets:
+            assert isinstance(target, ast.Name) and target.id in _PII_KEYS, (
+                f"run_gotrue holds the address as {ast.unparse(target)!r}: add it to _PII_KEYS "
+                "and SENTRY_PII_DENYLIST_EXTRA")
+    assert "client_ip" in assigned and "client_ip" in SENTRY_PII_DENYLIST_EXTRA

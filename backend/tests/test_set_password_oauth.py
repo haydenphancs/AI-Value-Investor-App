@@ -45,6 +45,8 @@ class _AuthAdmin:
         self._outer = outer
 
     def update_user_by_id(self, user_id, payload):
+        if self._outer.admin_raises is not None:
+            raise self._outer.admin_raises
         self._outer.admin_updates.append((user_id, payload))
         return type("R", (), {"user": type("U", (), {"id": user_id})()})()
 
@@ -116,6 +118,7 @@ class _SB:
         self.rpc_raises = rpc_raises
         self.otp_raises = False
         self.otp_user_id = _USER_ID
+        self.admin_raises = None
         if methods == "absent":
             self.rpc_data = {"has_password": False, "providers": ["apple"]}
         elif methods == "present":
@@ -326,13 +329,73 @@ async def test_set_password_refuses_an_otp_resolving_to_a_different_account(stor
 
 @pytest.mark.asyncio
 async def test_set_password_refuses_an_otp_with_no_user(store):
+    """verify_otp did not raise, so the code was consumed: AUTH_CODE_USED (send a new code), and
+    nothing is written."""
     sb = _SB(store, methods="absent")
     sb.otp_user_id = None
     with pytest.raises(HTTPException) as exc:
         await _set(sb)
 
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 503
+    assert exc.value.detail["error_code"] == "AUTH_CODE_USED"
     assert sb.admin_updates == []
+    assert not store.get("password_changed_at")
+
+
+def _gotrue(status, body):
+    import warnings
+
+    import httpx
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        from gotrue.helpers import handle_exception
+    req = httpx.Request("PUT", "https://example.supabase.co/auth/v1/admin/users/x")
+    resp = httpx.Response(status, json=body, request=req,
+                          headers={"X-Supabase-Api-Version": "2024-01-01"})
+    return handle_exception(httpx.HTTPStatusError("http error", request=req, response=resp))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raised", [
+    pytest.param(lambda: RuntimeError("upstream gateway timeout"), id="untyped"),
+    pytest.param(lambda: _gotrue(503, {"msg": "unavailable"}), id="503"),
+    pytest.param(lambda: _gotrue(429, {"code": "over_request_rate_limit", "msg": "x"}), id="429"),
+    pytest.param(lambda: _gotrue(400, {"code": "validation_failed",
+                                       "msg": "Password cannot be longer than 72 characters"}),
+                 id="validation_failed"),
+])
+async def test_a_failed_write_after_a_verified_code_is_code_used_and_keeps_the_session(store, raised):
+    """PW-4: the code is spent, so "Please try again" (AUTH_UNAVAILABLE) could only be answered
+    "invalid code". AUTH_CODE_USED, 503 — never a 401, the caller's session is fine — and no
+    stamp, no tokens."""
+    sb = _SB(store, methods="absent")
+    sb.admin_raises = raised()
+    with pytest.raises(HTTPException) as exc:
+        await _set(sb)
+
+    detail = exc.value.detail
+    assert exc.value.status_code == 503
+    assert detail["error_code"] == "AUTH_CODE_USED" and detail["action"] == "fix_input"
+    assert "Send a new code" in detail["user_message"]
+    assert not (exc.value.headers or {}).get("WWW-Authenticate")
+    assert not store.get("password_changed_at")
+
+
+@pytest.mark.asyncio
+async def test_a_refused_password_after_a_verified_code_stays_password_rejected(store):
+    sb = _SB(store, methods="absent")
+    sb.admin_raises = _gotrue(422, {"code": "weak_password", "msg": "Password is known to be weak",
+                                    "weak_password": {"reasons": ["pwned"]}})
+    with pytest.raises(HTTPException) as exc:
+        await _set(sb)
+
+    detail = exc.value.detail
+    assert exc.value.status_code == 400 and detail["error_code"] == "AUTH_PASSWORD_REJECTED"
+    assert detail["user_message"] == (
+        "That password can't be used. Send a new code, then choose a different password."
+    )
+    assert detail["details"] == {"reasons": "pwned"}
 
 
 @pytest.mark.asyncio

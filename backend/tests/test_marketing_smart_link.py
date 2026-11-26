@@ -2682,12 +2682,18 @@ _ROOT_ROUTES = {
     "/terms": "Terms of Use; static legal page",
     "/support": "App Store-required Support URL; static page",
     "/marketing/telegram/webhook": "Telegram review callbacks; secret-header verified; no data returned",
+    "/auth/confirm": "the Confirm-signup email's link: GET is a static button page (no upstream "
+                     "call), POST redeems the token server-side; code-owned copy only, no data, "
+                     "no script (app/api/email_confirm_page.py)",
 }
 #: The ONLY root routes that may accept a write, each with the one method it takes. The review
 #: bot's webhook is a POST because Telegram delivers updates that way; it is gated by Telegram's
 #: secret-token header (401/403 before the body is read) and answers `{"ok": true}` only.
+#: `/auth/confirm` takes a POST because the email link's GET must not consume the single-use
+#: token (mail scanners prefetch links); the POST is per-IP limited and answers a static page.
 _ROOT_WRITE_ROUTES = {
     "/marketing/telegram/webhook": {"POST"},
+    "/auth/confirm": {"POST"},
 }
 #: FastAPI's own pages, mounted only when settings.DEBUG (app/main.py FastAPI(...)): they would
 #: publish the whole API schema, so they must never exist in production.

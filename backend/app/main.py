@@ -37,7 +37,13 @@ from app.integrations.bluesky import close_bluesky_client
 from app.integrations.brave_search import close_brave_search_client
 from app.integrations.upload_post import close_upload_post_client
 from app.integrations.uspto import close_uspto_client
-from app.log_redaction import scrub_sentry_event, scrub_sentry_transaction, SecretRedactingFilter
+from app.log_redaction import (
+    SecretRedactingFilter,
+    install_uvicorn_log_redaction,
+    scrub_sentry_event,
+    scrub_sentry_transaction,
+    sentry_pii_denylist,
+)
 from app.utils.supabase_async import sb_exec
 from app.services.marketing import review_service, smart_link
 from starlette.responses import Response as PlainResponse
@@ -53,6 +59,12 @@ logger = logging.getLogger(__name__)
 # side is scrubbed separately in _sentry_before_send below.
 for _handler in logging.getLogger().handlers:
     _handler.addFilter(SecretRedactingFilter())
+# ...and uvicorn's OWN loggers, which never reach those root handlers (`propagate: False`). The
+# access log writes every request's full path WITH its query string — the Confirm-signup email's
+# `GET /auth/confirm?token_hash=<hex>` included, a live single-use credential (BE-AUTH-01). The
+# uvicorn CLI (Dockerfile CMD and Procfile alike) configures its logging BEFORE it imports this
+# module, so the handlers exist here; the lifespan repeats the call for a server configured later.
+install_uvicorn_log_redaction()
 
 # ── Sentry flood cap ───────────────────────────────────────────────────────
 # One upstream incident must not spend the month's error quota.
@@ -197,14 +209,17 @@ if settings.SENTRY_DSN and settings.ENVIRONMENT == "production":
         # locals, breadcrumb data and `extra` and blanks every denylisted KEY (`apikey`,
         # `token`, `password`, …) — `recursive=True` so a nested `params={'apikey': K}` in a
         # frame's vars is caught even if the value-based regex walk ever regresses.
-        event_scrubber=EventScrubber(recursive=True),
+        # `pii_denylist` adds the end user's address under OUR names (`client_ip`, GoTrue's
+        # `Sb-Forwarded-For` header copied into the SDK's `_request` frame — TOKSEC-2). The
+        # argument REPLACES the SDK's default PII list, so `sentry_pii_denylist()` starts from it.
+        event_scrubber=EventScrubber(recursive=True, pii_denylist=sentry_pii_denylist()),
         # `send_default_pii=False` does NOT cover request bodies — it gates only cookies.
         # `StarletteRequestExtractor.extract_request_info` attaches the parsed JSON body to
         # every event unconditionally (integrations/starlette.py: `request_info["data"] =
         # json`), and the only thing that suppresses it is this option. Without it, a failed
         # sign-up — `auth.py` logs `logger.error(..., exc_info=True)`, which
         # LoggingIntegration turns into an event — shipped
-        # `{"email": ..., "password": "<plaintext>"}` to Sentry. Same for the 6-digit
+        # `{"email": ..., "password": "<plaintext>"}` to Sentry. Same for the emailed
         # password-reset code. These events are logger-driven and the stack is what
         # diagnoses them, so the body was never adding diagnostic value.
         max_request_body_size="never",
@@ -285,6 +300,9 @@ _HOME_WARM_GATE: Optional[_WarmGate] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _HOME_WARM_GATE
+    # Again here (idempotent): a server that configured uvicorn's logging AFTER importing this
+    # module (`uvicorn.run(app_object)`) replaced the handlers the import-time call filtered.
+    install_uvicorn_log_redaction()
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
     logger.info(f"Environment: {settings.ENVIRONMENT}")
     problem = _web_concurrency_problem(os.environ)
@@ -2778,6 +2796,17 @@ async def smart_link_bare(request: Request):
     """Bare `/go` counts as campaign "other". A separate handler, so no query parameter can
     ever stand in for the path segment."""
     return _smart_link_redirect(request, "")
+
+
+# ── Email confirmation page (the Confirm-signup email's link) ──────────────────
+#
+# `GET /auth/confirm` draws a static "Confirm my email" button (no upstream call, so a mail
+# scanner's prefetch spends nothing); `POST /auth/confirm` redeems the token server-side and
+# discards the Supabase session. A ROOT route on caydexinvest.com, outside /api/v1: it serves
+# no data. Everything about it lives in `app/api/email_confirm_page.py`.
+from app.api.email_confirm_page import router as email_confirm_router  # noqa: E402
+
+app.include_router(email_confirm_router)
 
 
 # ── Telegram review-bot webhook (SYSTEM_DESIGN_GUIDELINES §12.9) ───────────────

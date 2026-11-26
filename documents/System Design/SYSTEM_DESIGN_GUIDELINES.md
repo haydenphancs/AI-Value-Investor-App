@@ -8157,7 +8157,7 @@ defer the render); the opening-card band at y 240; any palette but blueprints; e
 ### 12.22 The restyle: one look, list posts, the weekly theme (news-v23, 2026-11-19/20)
 
 Owner, 2026-11-19, on the approved mocks: "that's perfect!!! i love these style." and "good. now, build all. i need
-exactly these styles, colors, words". Built 2026-11-19/20 on the same unmerged branch as §12.19-§12.21, not deployed,
+exactly these styles, colors, words". Built 2026-11-19/20 on the same branch as §12.19-§12.21 (merged with main 2026-11-26), not deployed,
 in ONE set of version bumps: TEMPLATE_VERSION news-v23, `CARD_RENDER_VERSION` cards/v6, `RENDER_STAGE_VERSION`
 render/v7 (production is on news-v21, cards/v4, render/v5). No migration of its own and no new switch. The binding spec
 and the approved mocks (each with the script that drew it) live outside the repo, in the plans folder's

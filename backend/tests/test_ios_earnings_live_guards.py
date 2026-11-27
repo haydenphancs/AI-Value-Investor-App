@@ -846,7 +846,9 @@ def test_the_sheet_poll_stops_when_the_server_stops_asking():
         "FMP confirms a reported report must not turn into the retry's 30 s; after a failed ask "
         "the retry's 30 s for `maxFailedLoads` asks, then 5 min at most"
     )
-    assert "private static let staleAnswerRetrySeconds = 300" in vm, (
+    # The number itself, read whole (the seventh 2026-11-26 review: a substring let 3000 pass).
+    stale = re.search(r"private static let staleAnswerRetrySeconds = (\d+)\b", vm)
+    assert stale and int(stale.group(1)) == 300, (
         "past the bound the answer's own interval may count down to a moment long passed")
     assert "tatus" not in vm, (
         "the server's cadence alone decides: an `upcoming` or `awaiting` answer on a day nobody "
@@ -1014,7 +1016,9 @@ def test_the_poll_builds_the_feed_only_while_a_price_can_move():
     2026-11-11: live earnings cost only for the watched companies, on their report day). The
     feed is built only while `shouldRefreshPrices` says a price can move; otherwise the poll asks
     each LIVE card on screen (`filteredAlerts`: a card for another group is not on screen)
-    through its own route, every 30 s, so a LIVE card still keeps up with the server."""
+    through its own route, every 30 s, so a LIVE card still keeps up with the server. In price
+    hours a build that fails leaves the list as it was, so a card still wearing yesterday's LIVE
+    label is asked about through its own route while the feed keeps failing (2026-11-26 review)."""
     timer = _norm(_body(_code(_TRACKING_VM), "func startPriceRefreshTimer() {"))
     assert timer == (
         "{ priceRefreshTask?.cancel() priceRefreshTask = Task { [weak self] in "
@@ -1022,7 +1026,8 @@ def test_the_poll_builds_the_feed_only_while_a_price_can_move():
         "guard !Task.isCancelled else { break } guard let self = self else { break } "
         "let assets = self.trackedAssets "
         "if MarketHoursUtil.shouldRefreshPrices( assetTypes: assets.map(\\.assetType), "
-        "symbols: assets.map(\\.ticker) ) { await self.loadTrackingFeed() } "
+        "symbols: assets.map(\\.ticker) ) { let built: Bool = await self.loadTrackingFeed() "
+        "if !built, !self.labelEndReports().isEmpty { await self.refreshLiveEarningsCards() } } "
         "else if self.filteredAlerts.contains(where: \\.isLiveEarnings) "
         "|| !self.labelStartReports().isEmpty "
         "|| !self.labelEndReports().isEmpty { "
@@ -1188,7 +1193,8 @@ def test_an_answer_still_labelled_holds_its_card_to_the_servers_midnight():
         "let seconds: Int = max(answer.pollSeconds ?? Self.labelEndFallbackSeconds, 1) "
         "labelEndNotBefore[report.id] = now.addingTimeInterval(TimeInterval(seconds)) "
     )
-    assert "private static let labelEndFallbackSeconds: Int = 300" in vm
+    fallback = re.search(r"private static let labelEndFallbackSeconds: Int = (\d+)\b", vm)
+    assert fallback and int(fallback.group(1)) == 300, "read whole: a substring let 3000 pass"
     for declared in ("private var labelEndScope = -1",
                      "private var labelEndNotBefore: [String: Date] = [:]"):
         assert declared in vm, declared
@@ -2078,7 +2084,8 @@ def test_a_failed_first_load_keeps_trying_and_the_sheet_says_so():
     assert next_poll.index("if let live") < next_poll.index("Self.noAnswerRetrySeconds"), (
         "a real answer must rule before the retry is even considered"
     )
-    assert "private static let noAnswerRetrySeconds = 30" in vm
+    retry = re.search(r"private static let noAnswerRetrySeconds = (\d+)\b", vm)
+    assert retry and int(retry.group(1)) == 30, "read whole: a substring let 300 pass"
     assert "fallback" not in next_poll.lower(), (
         "a status guessed from the Tracking card would poll a finished report for ever"
     )

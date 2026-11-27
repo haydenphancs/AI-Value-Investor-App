@@ -1760,7 +1760,14 @@ class TrackingViewModel: ObservableObject {
                     assetTypes: assets.map(\.assetType),
                     symbols: assets.map(\.ticker)
                 ) {
-                    await self.loadTrackingFeed()
+                    // A feed build that fails leaves every card as it was, one still wearing
+                    // yesterday's LIVE label included, for as long as the feed keeps failing
+                    // (2026-11-26 review): those cards are then asked about through their own
+                    // routes, which take the label off, and leave the list once answered.
+                    let built: Bool = await self.loadTrackingFeed()
+                    if !built, !self.labelEndReports().isEmpty {
+                        await self.refreshLiveEarningsCards()
+                    }
                 } else if self.filteredAlerts.contains(where: \.isLiveEarnings)
                             || !self.labelStartReports().isEmpty
                             || !self.labelEndReports().isEmpty {
@@ -1846,7 +1853,9 @@ class TrackingViewModel: ObservableObject {
     /// day until midnight"). The label stays on a report whose results are in until midnight ET,
     /// and the round asks only about cards whose results are still to come, with no feed build
     /// before 04:00 (and none on a closed day), so a resumed tab would keep a Friday card LIVE
-    /// until Monday's first build. Each is asked about until an answer takes the label off: that
+    /// until Monday's first build. In price hours the feed build takes the label off, and while
+    /// that build keeps failing the timer asks these cards too: a failed build leaves the list as
+    /// it was. Each is asked about until an answer takes the label off: that
     /// answer is written onto the card, which leaves this list. The phone's clock only picks when
     /// to ask (`MarketHoursUtil.liveLabelEndAskDayKey`); the answer says whether the label stands.
     /// An answer still labelled (a phone clock running ahead of the server's) holds that card

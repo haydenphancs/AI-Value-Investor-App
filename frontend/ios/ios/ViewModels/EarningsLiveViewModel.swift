@@ -5,8 +5,9 @@
 //  ViewModel for one report's live results (`EarningsLiveResultsCard`): polls
 //  `GET /api/v1/tracking/earnings/{ticker}/live` for as long as the server asks. `poll_seconds`
 //  is 30 s while the report is LIVE, 120 s while FMP can still confirm a reported report's
-//  preliminary figures, and null otherwise, so the client never polls a report that has
-//  finished, or one that has not started.
+//  preliminary figures, the time to just after midnight ET for a report in on its own day (one
+//  ask, to take its LIVE label off), and null otherwise, so the client never polls a report that
+//  has finished, or one that has not started.
 //
 //  With no answer yet there is no `poll_seconds` to read, so a failed first load asks again by
 //  itself every 30 s, on either route: a dropped connection at 16:00 ET must not freeze the

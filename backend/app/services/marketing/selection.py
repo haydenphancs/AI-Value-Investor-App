@@ -78,8 +78,9 @@ from typing import Any, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 # FMP-free (the settings object only, as smart_link reads it): the posting days are read at call time.
 from app.config import settings
-# Pure (pydantic only): the class switch's parse, read by the spotlight lane's open check.
-from app.schemas.marketing import NEWS_CLASSES, parse_content_classes
+# Pure (pydantic only): the class switch's parse, read by the spotlight lane's open check; the replaceable series
+# (migration 215, `replacement_chain`).
+from app.schemas.marketing import NEWS_CLASSES, REPLACEABLE_SERIES, parse_content_classes
 from app.services.daily_rotation import pick_for_day
 # Pure (no FMP, no I/O): the SEC's 13F due dates on the federal business-day calendar.
 from app.services.trillion_club.rules import previous_quarter, sec_13f_due_date
@@ -508,6 +509,7 @@ class DayPlan:
     #: rest | monday | tuesday[_congress][_13f] | {wednesday,thursday,friday}_{earnings,off} | saturday | sunday
     #: (lesson_only: `plan_for`'s guard, unreachable while every weekday has a branch there)
     #: | spotlight | spotlight_13f | spotlight_13f_lead (`spotlight_plan_for`)
+    #: | replacement (REPLACEMENT_PLAN_REASON: a replacement run's own plan, `replacement_chain` — migration 215)
     reason: str = "rest"
 
 
@@ -924,3 +926,38 @@ def spotlight_chain_now(d: date) -> SpotlightChain:
     else:
         news_series = parse_news_series(raw)
     return spotlight_chain(d, classes=classes, news_series=news_series)
+
+
+# ── Replacement runs (migration 215, owner decision 2026-11-27: "Full replacement … Max 2 replacements a day. Money
+# Map posts only … off until you switch it on") ─────────────────────────────────────────────────────────────────────
+
+
+#: The `DayPlan.reason` of a replacement run's selection (`script_service._select_replacement`): the run builds
+#: `replacement_chain` — never the day's calendar (`plan_for` / `spotlight_plan_for`), never the lesson.
+REPLACEMENT_PLAN_REASON = "replacement"
+
+
+def replacement_on() -> bool:
+    """The "🔄 Next company" master switch NOW: True only when MARKETING_REPLACE_ENABLED is exactly True (a pydantic bool
+    in production; anything else — a patched string, None — is off). Read at call time by the review bot's offer and
+    tap, the claim of a replacement that has not started (`run_service.replacement_claim_problem`), the web's expiry
+    step and `run_service.create_posts` of a replacement run. Restoring the original ("↩ Post {SYM} after all") never
+    reads it."""
+    return settings.MARKETING_REPLACE_ENABLED is True
+
+
+def replacement_chain(classes: FrozenSet[str], news_series: FrozenSet[str]) -> Tuple[str, ...]:
+    """A replacement run's chain: the replaceable series (Money Map) narrowed by `enabled_chain` to `classes` and the
+    per-series switch `news_series`, then SKIP — ``("money_map", SKIP)``, or ``(SKIP,)`` when Money Map is switched off
+    (class F off, or money_map not in MARKETING_NEWS_SERIES ∩ the shipped series). Never the lesson and never the day's
+    calendar: a replacement only ever posts Money Map, and finds nothing rather than falling to a lesson. Pure."""
+    return enabled_chain(REPLACEABLE_SERIES + (SKIP,), classes, shipped=news_series)
+
+
+def replacement_chain_now() -> Tuple[str, ...]:
+    """`replacement_chain` on the switches in force NOW (MARKETING_CONTENT_CLASSES, and MARKETING_NEWS_SERIES read only
+    while a news class is on, exactly as the kick reads it). ``(SKIP,)`` means a replacement could never post: the
+    tap is refused before the request (`run_service.request_replacement`, outcome `money_map_off`). Never raises."""
+    classes = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
+    news_series = frozenset() if classes == frozenset({"A"}) else parse_news_series(settings.MARKETING_NEWS_SERIES)
+    return replacement_chain(classes, news_series)

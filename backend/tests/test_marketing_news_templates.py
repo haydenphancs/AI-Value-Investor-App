@@ -58,6 +58,7 @@ import re
 import string
 import subprocess
 import sys
+import types
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
@@ -5163,7 +5164,7 @@ def test_series_specs_cover_every_series_and_every_shipped_one():
 def test_refusal_codes_and_the_exception():
     assert T.REFUSAL_CODES == ("record_invalid", "stale_source", "too_few_rows", "implausible_figures",
                                "slot_rejected", "congress_name", "placement", "script_shape",
-                               "too_few_outlets", "image_spec_invalid")
+                               "too_few_outlets", "image_spec_invalid", "costs_undivided")
     e = T.NewsTemplateRefused("x")          # the classifier walk constructs every class with one arg
     assert e.code == "x" and e.detail == "" and isinstance(e, ValueError)
     assert set(T._REFUSAL_OF.values()) <= set(T.REFUSAL_CODES)
@@ -6085,7 +6086,10 @@ def test_every_region_name_that_needs_the_article_gets_it_in_running_text(first,
                                      lambda: amazon(gross_profit_usd=None),
                                      lambda: costco(gross_profit_usd=None, operating_profit_usd=None),
                                      lambda: rivian(gross_profit_usd=-1_000_000.0),
-                                     lambda: rivian(gross_profit_usd=-5_700_000_000.0, operating_profit_usd=None)],
+                                     # owner 2026-11-27: with NO operating line this loss year is never posted
+                                     # (`costs_undivided`) — the gross-loss sentence is read on a split bar instead
+                                     lambda: rivian(gross_profit_usd=-5_700_000_000.0,
+                                                    operating_profit_usd=-5_750_000_000.0)],
                          ids=["costco", "rivian_gross_loss", "comcast_no_gross", "coca_cola", "mcdonalds", "amazon",
                               "apple", "amazon_no_gross", "costco_no_cost_lines", "tiny_gross_loss",
                               "gross_loss_near_revenue"])
@@ -6650,15 +6654,18 @@ def test_outlier_records_compose_cleanly_or_refuse_with_a_known_code():
         except T.NewsTemplateRefused as e:
             assert e.code in T.REFUSAL_CODES
             assert (e.code == "record_invalid") == repeated, (e.code, repeated)
+            # owner decision 2026-11-27: exactly the loss years whose costs bar cannot be split (the generator's Money
+            # Maps carry no operating line, so every loss year among them is one)
+            assert (e.code == "costs_undivided") == R.money_map_costs_undivided(rec), (e.code, rec)
             outcomes[e.code] = outcomes.get(e.code, 0) + 1
             continue
         assert not repeated
         assert T.validate_package(out, record=rec) == []
         assert T.revalidate(_jsonb(out), fact_sheet=_jsonb(sheet(rec)), run_date=run_date) == []
         outcomes["ok"] = outcomes.get("ok", 0) + 1
-    assert outcomes.get("ok", 0) >= 35, outcomes
-    # only all-Congress weeks and weeks naming one person twice are refused
-    assert set(outcomes) <= {"ok", "too_few_rows", "record_invalid"}, outcomes
+    assert outcomes.get("ok", 0) >= 30, outcomes
+    # only all-Congress weeks, weeks naming one person twice and undivided-cost loss years are refused
+    assert set(outcomes) <= {"ok", "too_few_rows", "record_invalid", "costs_undivided"}, outcomes
 
 
 def _repeats_a_person(rec):
@@ -13054,18 +13061,81 @@ def test_loss_the_costs_bar_is_at_most_twice_revenue_and_a_bigger_loss_is_refuse
     # news-v24 (owner 2026-11-27): the operating line is there, so the +$110M of other INCOME is known — the undivided
     # bar is below the statement's costs and expenses too, and says so (no note: a note explains a hatched part)
     (dict(gross_profit_usd=None), "Costs, after other items", "costs after other items"),
-    # no operating line: nothing tells whether other items were income — the approved label stays
-    (dict(operating_profit_usd=None), "Costs and expenses", "costs and expenses"),
-    (dict(gross_profit_usd=None, operating_profit_usd=None), "Costs and expenses", "costs and expenses"),
-], ids=["no_gross", "no_operating", "neither"])
+    # exactly ZERO other items and no gross line: the undivided bar IS the statement's own costs and expenses
+    (dict(gross_profit_usd=None, net_income_usd=-3_960_000_000.0), "Costs and expenses", "costs and expenses"),
+], ids=["no_gross", "no_gross_other_zero"])
 def test_loss_without_both_statement_lines_the_costs_bar_is_one_undivided_piece(kw, label, named):
     out = compose(rivian(**kw), THU)
     c = out["image_spec"]["costs"]
-    assert c["parts"] == [] and "note" not in c and c["total"] == {"label": label, "value": "$9.7B", "ratio": 1.0}
+    figures = {"no_gross": ("$9.7B", "$3.9B"), "zero": ("$9.8B", "$4B")}["zero" if "net_income_usd" in kw else "no_gross"]
+    assert c["parts"] == [] and "note" not in c and c["total"] == {"label": label, "value": figures[0], "ratio": 1.0}
     assert out["image_post"]["paragraphs"][1] == (f"A second set of bars compares revenue, $5.8B, with {named}, "
-                                                  "$9.7B. The part of the costs bar past revenue is the net loss, $3.9B.")
+                                                  f"{figures[0]}. The part of the costs bar past revenue is the net "
+                                                  f"loss, {figures[1]}.")
     assert out["opening_card"]["costs"] == c
     assert T.validate_package(out, record=rivian(**kw)) == []
+
+
+# ── owner decision 2026-11-27: a loss year whose costs bar cannot be split, and whose interest, tax and other items
+# were a COST (or cannot be told), is never posted ────────────────────────────────────────────────────────────────────
+#
+# The open call: "a loss year whose other items were a COST with no gross line (one undivided bar incl. interest and
+# tax, labelled "Costs and expenses")". The owner: "i don't think we need to post for these companies. so, post the
+# other one". The adapter refuses such a record at the read (`money_map_costs_undivided`, the walk moves on); the
+# template refuses it too (``costs_undivided``), one predicate for both (`R.money_map_costs_undivided`).
+
+
+@pytest.mark.parametrize("kw, refused", [
+    (dict(gross_profit_usd=None, net_income_usd=-4_060_000_000.0), True),     # the owner's case: −$100M other COST
+    (dict(operating_profit_usd=None), True),                                  # no operating line: cannot tell
+    (dict(gross_profit_usd=None, operating_profit_usd=None), True),           # neither line
+    # both lines, but operating income at or above gross profit (no positive operating-expenses part): undivided
+    (dict(gross_profit_usd=-3_000_000_000.0, operating_profit_usd=-3_000_000_000.0,
+          net_income_usd=-3_100_000_000.0), True),
+    (dict(gross_profit_usd=None), False),                                     # other INCOME: "after other items"
+    (dict(gross_profit_usd=None, net_income_usd=-3_960_000_000.0), False),    # exactly zero: the 10-K's own total
+    (dict(), False),                                                          # Rivian: the bar is split
+    (dict(net_income_usd=-4_060_000_000.0), False),                           # split, other a cost: its own third part
+    (dict(gross_profit_usd=None, operating_profit_usd=None, net_income_usd=500_000_000.0), False),   # a profit year
+], ids=["no_gross_other_cost", "no_operating", "neither", "operating_at_gross", "no_gross_other_income",
+        "no_gross_other_zero", "split", "split_other_cost", "profit_no_lines"])
+def test_owner_1127_an_undivided_costs_bar_holding_other_costs_is_never_posted(kw, refused):
+    """Refused exactly when the costs bar would be one piece AND interest, tax and other items were a cost or cannot be
+    told; every other loss year (and every profit year) composes. The predicate is the template's own arithmetic, so it
+    agrees with `_money_map_costs` on whether the bar has parts. Mutation-checked by hand (2026-11-27): the predicate
+    returning False always fails the four refused rows; dropping its ``op is None`` arm fails no_operating and neither;
+    reading a ZERO other as a cost fails no_gross_other_zero; skipping the split check fails split_other_cost."""
+    rec = rivian(**kw)
+    assert R.money_map_costs_undivided(rec) is refused
+    if refused:
+        with pytest.raises(T.NewsTemplateRefused) as e:
+            compose(rec, THU)
+        assert e.value.code == "costs_undivided" and "costs bar" in e.value.detail
+        # `revalidate` (create_posts) refuses a day built before the rule the same way
+        return
+    out = compose(rec, THU)
+    if rec.net_income_usd < 0:
+        c = out["image_spec"]["costs"]
+        ni = T._dec(rec.net_income_usd)
+        op = None if rec.operating_profit_usd is None else T._dec(rec.operating_profit_usd)
+        # the predicate and the drawing agree: a bar with NO parts is kept only for other income or exactly zero
+        if not c["parts"]:
+            assert op is not None and ni - op >= 0
+
+
+def test_owner_1127_the_rule_reads_junk_figures_as_absent_lines_and_never_raises():
+    """A record-like object with a bool, NaN, inf or string figure: the line reads as absent (fail closed when it is the
+    operating line), never an exception — the predicate runs on the adapter's read before any template."""
+    ns = types.SimpleNamespace
+    base = dict(revenue_usd=5.8e9, gross_profit_usd=None, operating_profit_usd=-3.96e9, net_income_usd=-4.06e9)
+    assert R.money_map_costs_undivided(ns(**base)) is True
+    assert R.money_map_costs_undivided(ns(**{**base, "net_income_usd": -3.85e9})) is False    # other income
+    for junk in (True, float("nan"), float("inf"), "-3.96e9"):
+        assert R.money_map_costs_undivided(ns(**{**base, "operating_profit_usd": junk,
+                                                 "net_income_usd": -3.85e9})) is True      # cannot tell: refused
+        assert R.money_map_costs_undivided(ns(**{**base, "net_income_usd": junk})) is False    # no net line: no card
+    assert R.money_map_costs_undivided(ns()) is False
+    assert R.money_map_costs_undivided(None) is False
 
 
 # ── news-v24 (owner decision 2026-11-27): the costs bar's label on an other-INCOME year ─────────────────────────────

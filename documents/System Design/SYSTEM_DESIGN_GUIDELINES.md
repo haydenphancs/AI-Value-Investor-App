@@ -8094,7 +8094,9 @@ web that carries it deploys (that web filters every run read on `lane`). Plan
   posts are keyed `<run_date>:spotlight:<platform>:<format>` (the first ten characters stay the date for every reader)
   and its assets live under `<run_date>/spotlight/`; `register_asset` and `create_posts` refuse to adopt another
   run's row on the same path or key. `marketing_scripts.lane` copies the run's lane in one place
-  (`run_service.insert_script`).
+  (`run_service.insert_script`). Since migration 215 (§12.25, built, not deployed) the key is UNIQUE (`run_date`,
+  `lane`, `replacement`): a (day, lane) holds its own run (replacement 0, everything above unchanged) and at most two
+  owner-requested replacements a day over both lanes, of which at most one run per (day, lane) ever publishes.
 - **Its own claim route**, `POST /api/v1/internal/marketing/lanes/spotlight/claim`, with the same body and answer as
   `POST /api/v1/internal/marketing/runs/claim`. Not a field on that route: its request model ignores unknown fields,
   so an older web would have claimed MAIN. It answers `not_scheduled` before any read or write unless
@@ -8686,6 +8688,16 @@ stay (none has shipped). A PROFIT year is untouched, key for key and byte for by
   items were INCOME, of any size (parts or none — a sliver too small for the note can still move the 10-K's total
   across a rounding step), the bar reads "Costs, after other items" and the alt text "costs after other items"; a cost,
   zero or no operating line keeps "Costs and expenses". The worker draws it from the spec (no worker change; `READBACK_LOOK` stays news-v23).
+- **An undivided bar that hides other costs is never posted** (owner decision 2026-11-27, on the open call "a loss year
+  whose other items were a COST with no gross line": "i don't think we need to post for these companies. so, post the
+  other one"). When the bar cannot be split (no gross or no operating line, or a part ≤ 0) and interest, tax and other
+  items were a COST — or no operating line can tell — the one bar labelled "Costs and expenses" would hold interest and
+  tax the 10-K does not count there. ONE predicate, `company_news_rules.money_map_costs_undivided` (the template's own
+  Decimal arithmetic), refuses it at the read (`company_news_adapter._money_map_record` →
+  `money_map_costs_undivided`, a content refusal remembered for the fiscal year, so the walk posts the next company the
+  same day) and in the template (`news_templates._money_map_parts` → ``costs_undivided``, so `revalidate` refuses a day
+  built before the rule). Other INCOME keeps the undivided bar under the news-v24 label; exactly ZERO keeps "Costs and
+  expenses" (the bar is then the statement's own total). No `TEMPLATE_VERSION` bump: no accepted output changes.
 - **Rounding.** One decimal (`money_image`'s form) unless the reader's arithmetic misses at that precision (parts ±
   other vs costs, costs − revenue vs the net loss, within half the coarsest figure's last digit: `_lands`), then two
   decimals for that post (`MONEY_MAP_COSTS_PLACES`) — the revenue card above it included (`flow[0]` takes the costs
@@ -8717,8 +8729,120 @@ stay (none has shipped). A PROFIT year is untouched, key for key and byte for by
   carries art since the final review of 2026-11-26, §12.21 — the gate stands for the day the Money Map is put back).
 
 Not done: a costs view for a profit year (the owner approved the step card for those; a thin-margin year would draw two
-almost equal bars). The label "Costs, after other items" on an other-income year was decided by the owner on 2026-11-27
-(the bullet above).
+almost equal bars). The label "Costs, after other items" on an other-income year, and the refusal of an undivided bar
+that hides other costs, were decided by the owner on 2026-11-27 (the bullets above).
+
+### 12.25 Replace a Money Map post with the next company (owner decision 2026-11-27, migration 215)
+
+The owner, reviewing a Money Map post in Telegram: "when i review the post for this type of post, i can have an option
+to replace to the other companies (like the next one)", and his choice: "Full replacement: the next company's post
+(video + picture) comes to Telegram for review about 20-75 min after the tap. Max 2 replacements a day. Money Map posts
+only. Needs migration 215, off until you switch it on." Built 2026-11-27 and not deployed: `MARKETING_REPLACE_ENABLED`
+defaults False and is read at call time; migration 215 (`database/migrations/215_marketing_replacement_runs.sql`) must
+be applied before the web that carries it; the media worker does not change. Design and its binding amendments (from
+two adversarial reviews): `~/.claude/plans/marketing-v2-design/replace/`.
+
+- **A replacement is a new run of the same (ET day, lane).** `marketing_runs.replacement` is 1 or 2 and
+  `replaces_run_id` names the run it replaces; both are 0 / NULL on every day's own run (CHECKed together). The claim
+  key becomes UNIQUE (`run_date`, `lane`, `replacement`): 215 adds it first, then drops `UNIQUE (run_date, lane)` by its
+  definition, as 210 did. It is called `replacement`, never "generation": `generation_id` and `generations` already
+  mean the writer's lease and its call count. Replacement 0 is byte for byte the run of before — its INSERT never names
+  the column, and its keys, paths, labels and Telegram texts carry no new segment.
+- **One Postgres function writes it** (`public.marketing_request_replacement`, SECURITY INVOKER, service_role only;
+  called by `run_service.request_replacement`). In one transaction, under a per-ET-day advisory lock over both lanes,
+  it checks that the tapped run is the newest of its (day, lane), media_ready, with an accepted money_map script, no
+  post approved / queued / published / failed / retracted and at least one pending_review, and that the day holds
+  fewer than two replacements; then it inserts the `planned` replacement (attempts 0, and no owner id: the row is
+  echoed to the worker), rejects every pending post of the run (each review record names the new run) and stamps the
+  run `metadata.replaced_by`. One function, because PostgREST can neither reject on condition that no sibling was
+  approved, count both lanes' replacements nor insert in one write: a check-then-act lets an Approve all, a second tap
+  or the other lane's tap slip between the steps. The cap counts REQUESTS, so a replacement that found nothing has
+  still spent its slot and the cap cannot loop. A replayed tap (a lost response) is answered `requested` again from the
+  ledger, never written twice, with the replacement's status now (so a stale tap after it ended is never told it is
+  coming) — and BEFORE the cutoff check: a request that committed seconds before the cutoff is still answered on a
+  retry after it. The web refuses first, before the call: the switch off, Money Map switched off now, past the lane's
+  cutoff or another ET day, a spotlight lane closed for the date — except for a run whose request already landed
+  (`metadata.replaced_by`, never restored), which goes to the function with the start of its day as the cutoff, so it
+  can only read the replay back, never plan a replacement the web refused. A 23505 from the function means migration
+  210 was re-run after 215 (ERROR; the owner reads "Could not record that — tap again").
+- **The existing claim runs it; the worker is unchanged.** The worker's next tick INSERTs the day's run as always, meets
+  23505 on (day, lane, 0), and the claim reads the (day, lane)'s NEWEST run — `get_run_by_date` orders by `created_at`,
+  then `id` (the function stamps `created_at` after its lock, so numbers and stamps rise together, and the read names
+  no 215 column) — and re-claims the planned row with the usual CAS. The pre-inserted row slips past `resume_only` and
+  `spotlight_start_closed`, which gate only an INSERT, so `run_service.replacement_claim_problem` closes it unrun
+  instead (`skipped`, skip reason `replacement_expired`) when its day is over, or when it is unstarted outside its
+  lane's start window or with the switch off — never a run at `assets_ready`, whose posts exist (the next resume
+  completes it, as for any day). A replacement runs only on its own ET day, with at most 2 attempts. Its objects live
+  under `<run_date>[/spotlight]/r<n>/` and its posts are keyed `<run_date>[:spotlight]:r<n>:<platform>:<format>`: the
+  worker's manifest is deterministic, so without the server's `r<n>` folder a replacement's would land on the replaced
+  run's path and be refused every attempt. The worker reads only the run's id, date, lane, attempts and stage, uploads
+  to the path the server mints, and turns the build's skip into `nothing_qualified` as it always did.
+- **Taps close per lane:** 22:10 ET on the main lane (the 22:15 tick starts it and 23:15 leaves one retry), and
+  (`MARKETING_RUN_HOUR_ET` − 1):10 ET on the spotlight lane, the morning lane's last start tick (15:10 with the
+  defaults). The function re-checks the cutoff the web passes, on its own clock read after the lock.
+- **The build makes ONLY a Money Map** (`script_service._select_replacement`, chain `selection.replacement_chain` =
+  money_map then SKIP, from the switches read now): never the day's calendar, never C0's drop, never the lesson — a
+  main-lane replacement must not become a second weekly lesson. It keeps away from everything its (day, lane) already
+  drew: the replaced scripts' ledger keys join the adapter's exclude set (`run_service.replaced_scripts`, which raises
+  rather than answer on a guess), and a candidate whose LEAD company one of them drew, a share-class twin included, is
+  excluded `replaced_company` (an exclusion, never a template refusal or a refusal memo). Without that, a replacement
+  re-picks the very same company: `recent_source_refs` and the cross-lane read never see the caller's own lane on its
+  run date. Nothing left: one `rejected` / `nothing_qualified` script, the run closes `skipped`. Money Map switched off,
+  or a worker that cannot draw it, writes its own trail outcome (`switched_off`, `worker_capability`), an
+  infrastructure outcome that alerts. `create_posts` of a replacement re-checks it: a template outside
+  `REPLACEABLE_SERIES` is a 422, the switch off now a 409 `MARKETING_TEMPLATE_REFUSED` (the day skips
+  `template_refused`). `scripts/marketing_news_preview.py --exclude-ref` previews what a replacement would post.
+- **The review bot.** "🔄 Next company" is the LAST row of BOTH decision messages of a Money Map run's review bundles,
+  only while the switch is exactly True, the run is media_ready, has never been replaced, is below its cap and its
+  cutoff, its spotlight lane is open, Money Map is switched on now, and none of its posts is approved or sent; per-post
+  review mode never shows it (one WARNING per process when the switch is on without bundles). Its callbacks are their
+  own two-letter family, `nx:` (ask / yes / keep / restore, then the run uuid: no single letter was left), dispatched
+  after the owner allow-list, after the Learn and stake-finder families. A tap asks first: the 🔄 row is swapped for
+  "✅ Yes, get the next company" / "↩ No, keep this one" by an edit of the keyboard alone (every `nx:` change is
+  edit-only, never a fallback message that could carry a second live button). Yes calls the function, appends "🔄
+  Replaced HH:MM ET (k of 2 today) …" to the tapped message and removes the other decision's keyboard through the
+  shared pacer (flood control stops those edits, never the decision). An Approve all on one decision removes the
+  other's 🔄 row; a decision sent after the tap is closed when it is stamped. The replacement's bundles name their run
+  "… · replacement n" and carry "Replaces: {SYM} (replaced HH:MM ET)."
+- **The original can come back** (`public.marketing_restore_replaced`): every notice that says nothing replaces it
+  carries "↩ Post {SYM} after all" while the restore can work. Under the same lock it puts back to pending_review
+  EXACTLY the posts that request rejected — only while the original is media_ready, its replacement is the newest run
+  of the (day, lane) and is over with NO post at all, and it is still that ET day — to its END
+  (`run_service.restore_closes`), never the tap cutoff: a tap in the last hour before the cutoff starts its replacement
+  only at the next :15 tick, after it, and an unstarted one is closed after it, so a cutoff-bound restore could never
+  bring those originals back (the posts stay fresh for the publisher through the next ET day). A retried restore is
+  answered from the ledger before that day check — removes their review record and offer stamps (the next sweep offers a fresh bundle, without 🔄) and keeps
+  an audit record on each post and on the run. With the "no post" rule, at most one run per (day, lane) ever PUBLISHES,
+  whatever a later change does. It reads no switch: the owner may want the original back precisely because replacing
+  was switched off. It is the only way a rejected post returns to pending_review.
+- **One ending, one message.** A replacement that made posts is answered by its bundles. Otherwise the review cycle's
+  notice step (in the publisher loop, every ≤ 10 minutes: no new loop) sends exactly one ringing notice — no other
+  company qualified; no company because a data source failed; never started; failed at its cap or skipped for another
+  reason; finished with no post to review — and stamps `metadata.replacement_reported` only after it went out (at
+  least once, the bundles' rule). Before it, the step closes on the WEB clock every replacement no claim will ever run
+  or finish (its spotlight lane closed for the date, its start window passed, its day over, the switch off: a closed
+  lane's claim answers `not_scheduled` before reading anything), and it reads due rows by STATE, never by date alone.
+  The nightly check and the final word judge a replacement first: quiet once reported, the same notice text and stamp
+  when they meet an unreported ending, quiet for 75 minutes after a request the worker has not started, then one alert
+  naming the real cause (the day over, the lane closed, the switch off, the last start passed, or the cron). The weekly
+  digest lists each replacement as its own row under its day and lane, and counts the rejected posts under "replaced by
+  the next company"; two days later `close_finished_runs` closes the replaced run `skipped` with reason `replaced`.
+- **Per-day bounds.** The ledger reads that bounded a window by days × lanes now bound it by days × `RUNS_PER_DAY_MAX`
+  (4: two lanes and two replacements). Accepted: the looser bound also loosens their guard against a double-counted day
+  (review L7c).
+- **Rollback.** `MARKETING_REPLACE_ENABLED=false` first: no button, every tap refused, an unstarted replacement closed
+  unrun (the owner is told once), one already rendering cannot post. Never roll the WEB back below this release while a
+  replacement row is dated within the last 15 ET days (the 14-day spotlight cooldown read plus the run day; it also
+  covers the digest's two-week window): the old web reads a (day, lane) unordered and could hand a replacement to a
+  claim, and its per-day bounds raise or drop rows. Never drop 215's columns, key or functions while a
+  replacement-aware web runs, and never re-run 210 after 215. The worker needs no rollback. The steps are in 215's
+  header.
+
+Rejected: inserting the replacement at the CLAIM from a recorded request (the tap would promise a run the claim could
+still refuse; an unserved request leaves no row any check can see; the cap would be counted twice with no lock between);
+PostgREST writes for the tap (check-then-act); counting only successful replacements against the cap (a skip could
+loop); resuming a replacement the next day (it would post overnight and compete with that day's runs); the button in
+per-post review mode; a restore that needs the switch on.
 
 ## Appendix A: Where things live
 
@@ -8889,6 +9013,8 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-11-15/16 | Marketing v2, built and not deployed, every switch off: a second daily post, the spotlight lane (migration 210, §12.19); two single-company spotlight series with the `feature` picture, the filed cost per share and first-line prefixes (news-v22, §12.20); per-post art (§12.21). Owner decisions 2026-11-15, quoted from the plan (`~/.claude/plans/i-need-to-improve-wondrous-boot.md`): (1) "Add a second daily post" on "Tue, Thu, Sat", "Full set: video + picture", in its own morning slot; (2) "Google draws, Claude checks": a fresh picture for each post, Claude writing the brief and inspecting the result, Gemini drawing it, Money Moves untouched ("we don't change anything at the money moves"); (3) "Loosen caption hype words": BREAKING / Alert / one emoji in the FIRST caption line only, scope "Spotlights + Form 4 + earnings"; (4) "Picture and video cover": the art and the logo also open each company video; (5) the filed cost per share in "Captions + picture", never spoken in a video or drawn on a video card; (6) main-lane posts "Video cover now, pictures later". The art's `made_with_ai` True on a template picture that drew it reverses the 2026-10-09 rule for such pictures. Session decisions (2026-11-15/16, under the owner's "finish everything"; each revertible): the art-native `feature` layout was built with the spotlight series rather than with the art, so the series ship with a flat band and gain art when it is switched on; the insider spotlight's window starts the day after the last window an earlier insider spotlight CHECKED (recorded on its selection trail), not at the previous run's date, so a 13F-led day loses no filing; earnings "BREAKING" freshness counts exchange trading days (a day counts unless both the exchange and the federal government close), which can only remove a label; the spotlight lane yields to the main lane every series the main lane's chain holds that day (a spotlight Money Map had pushed the main lane's same-day Money Map into a second weekly lesson), so until a spotlight series is listed the lane runs on Saturdays only; the build and its art share one 280 s ceiling | The owner shared 8 competitor Facebook posts (insider-buy alerts, "BREAKING … per its latest 13F") and asked for 2-3 more posts a week like them, with the company logo and Money Moves-style art and no charts. Production already posted once a day; reach came almost only from video; one run per ET day was built into the schema (`run_date` UNIQUE, migration 170); most competitor wording was banned by our validators; Claude cannot generate images | A `lane` field on the existing claim route (an older web ignores it and claims main); a separate spotlight series switch; the weekly roundups or the lesson on the spotlight lane; a rest_day row for a spotlight day where nothing qualified; a Gemini fallback for the art's brief or check; art on the main lane's pictures now; a caption sentence for the AI disclosure; a migration for the art; separate time budgets for the build and the art (they would defer the render); the cover's art band at y 240 (no measured cover fit); a cost per share rounded to cents; a BREAKING prefix on a weekly roundup or a 13F filing |
 | 2026-11-26 | Marketing v2 final review, not deployed: AI art used NOWHERE (`post_art.ART_SERIES` empty, the Money Map in `NEVER_ART_SERIES`; §12.21, §12.23); a Form 4 record holds 3-5 companies, the five largest (`INSIDER_MAX_ROWS` 5; §12.23); an older worker re-claiming a built run keeps a stake's basis label and the earnings table, so it fails loudly (`template_onscreen.PRE_V23_ROW_DROPS`; §12.23); a theme row's disc of a missing logo draws its ticker chip (§12.22) | The owner's 2026-11-20 answers were "Drop it from insider posts (Recommended) :: Keep the code but use it nowhere for now; the switch stays off" (not "Put it on Money Map covers") and "At least 3 companies, at most 5 (the 5 largest purchases when more qualify)"; the build had kept the Money Map cover's art and a cap of 8. A rollback re-claim sent a stake amount without its basis and earnings names without figures, which the server accepted | Refusing the read-back with 409 (an older worker retries a 409 six times, and it would also refuse a resume past `rendered`); stripping more keys; a theme reserved for Wednesday (an open owner call); drawing the name at 9 px or skipping the disc on a theme row |
 | 2026-11-27 | Marketing v2 deployed (2026-11-27 00:20 UTC, every switch off; the owner switched the spotlight, the theme, the 13F spotlight and the first-line prefixes on that evening; the 13F prefix became "🐋 13F filing:"). The first spotlight post found three faults, fixed the same night: a NEW spotlight run starts only before `MARKETING_RUN_HOUR_ET` of its date (the lane switched on at 20:00 ET of a spotlight Thursday had posted that evening; §12.19); a Storage LIST or upload that dies on a dropped connection is tried once more (its four logo calls had failed together, §12.13 storage); a Form 4 company whose lines span two share classes is refused `share_class_overlap` (Biglari's Class A and B had been summed into one range). |
+| 2026-11-27 | A Money Map loss year whose costs bar cannot be split and whose interest, tax and other items were a cost (or cannot be told) is never posted; the next company posts instead (`money_map_costs_undivided` at the read, ``costs_undivided`` in the template, one predicate). A quiet spotlight day stays quiet (owner: "no need to. just send me what i need to approve") | The owner's two remaining open calls of the release: the one undivided bar labelled "Costs and expenses" would include interest and tax the 10-K does not count there ("i don't think we need to post for these companies. so, post the other one") | Draw the bar with a third label; keep posting it with "Costs and expenses"; alert on every quiet day |
+| 2026-11-27 | "🔄 Next company" on a Money Map run's review bundles, built and not deployed, switch off (`MARKETING_REPLACE_ENABLED`, migration 215, §12.25): a confirmed tap rejects the run's waiting posts and inserts a planned replacement run of the same (ET day, lane) — replacement 1 or 2, at most 2 a day over both lanes — in ONE Postgres function under a per-day lock; the worker's next tick claims it through the existing claim (newest run by `created_at`, a gate for a never-started row), with no worker change; its build makes only a Money Map, keeping out every record its (day, lane) drew; keys and paths gain `r<n>` for n ≥ 1 only; one notice when it makes no post, with "↩ Post {SYM} after all" (a second function, the only way back to pending_review). Rollback: switch off first; never roll the web back while a replacement row is dated within 15 ET days | The owner: "when i review the post for this type of post, i can have an option to replace to the other companies (like the next one)"; his choice "Full replacement … Max 2 replacements a day. Money Map posts only. Needs migration 215, off until you switch it on." Two adversarial reviews (the ledger, the posts) added the restore, an idempotent request, reporting by state with expiry on the web's clock, and edit-only keyboards | Inserting the replacement at the claim from a recorded request; PostgREST check-then-act writes for the tap; calling it "generation" (the writer's word); counting only successful replacements; resuming a replacement the next day; the button in per-post review mode; a restore that needs the switch on |
 
 ---
 

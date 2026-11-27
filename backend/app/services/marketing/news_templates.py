@@ -608,6 +608,10 @@ SERIES_SPECS: Dict[str, SeriesSpec] = {
 REFUSAL_CODES: Tuple[str, ...] = (
     "record_invalid", "stale_source", "too_few_rows", "implausible_figures", "slot_rejected",
     "congress_name", "placement", "script_shape", "too_few_outlets", "image_spec_invalid",
+    # owner decision 2026-11-27 ("i don't think we need to post for these companies. so, post the other one"): a Money
+    # Map loss year whose costs bar would be ONE undivided piece holding interest, tax and other items that were a
+    # cost, or that no operating line can tell apart (`company_news_rules.money_map_costs_undivided`)
+    "costs_undivided",
 )
 
 
@@ -3702,6 +3706,13 @@ def _money_map_parts(rec: rules.MoneyMap, run_date: date) -> _Parts:
     op = None if rec.operating_profit_usd is None else _dec(rec.operating_profit_usd)
     if abs(ni) > rev or (gp is not None and abs(gp) > rev) or (op is not None and abs(op) > rev):
         raise NewsTemplateRefused("implausible_figures", "a profit or loss larger than revenue")
+    # Owner decision 2026-11-27 (the open call "a loss year whose other items were a COST with no gross line"): "i don't
+    # think we need to post for these companies. so, post the other one". The adapter refuses such a record at the read
+    # (`money_map_costs_undivided`, remembered, the walk moves on); this stands behind it for a record built before the
+    # rule (`revalidate` at create_posts) and for any other caller — one predicate, so the two can never disagree
+    if rules.money_map_costs_undivided(rec):
+        raise NewsTemplateRefused("costs_undivided", "a loss year's costs bar would hold interest, tax and other "
+                                                     "items it cannot name")
     segs = sorted(rec.segments, key=lambda s: (-s.value_usd, s.name.casefold()))
     other = _dec(rec.other_usd or 0.0)
     elim = _dec(rec.eliminations_usd or 0.0)

@@ -104,6 +104,7 @@ from app.schemas.marketing import (
     LESSON_VIDEO_FEATURES,
     POST_FORMATS_BY_PLATFORM,
     READBACK_LOOK,
+    REPLACEABLE_SERIES,
     RUN_LANE_MAIN,
     RUN_LANE_SPOTLIGHT,
     SCRIPT_REJECT_REASONS,
@@ -164,6 +165,7 @@ from app.services.marketing.run_service import (
     hook_card_text,
     run_date_et,
     run_lane,
+    run_replacement,
     run_worker_capabilities,
 )
 
@@ -404,8 +406,13 @@ NEWS_RECENT_LIMIT = RECENT_LIMIT * len(selection.POST_WEEKDAYS)
 #: A series' outcome in the day's fallback trail (`fact_sheet.selection.trail`, run `series_trail`). `other_lane`
 #: (the spotlight lane, 2026-11-15): the other lane already used the series that day, or drew the lead company of
 #: every candidate it offered (`_cross_lane`) — an exclusion, never a refusal.
+#: Replacement runs (migration 215, owner decision 2026-11-27: "🔄 Next company"), appended LAST: `replaced` — every
+#: candidate a replacement's Money Map offered led with a company the day's lane already drew (REPLACED_COMPANY, an
+#: exclusion, a content outcome); `switched_off` / `worker_capability` (amendment A3) — the replacement could not ask
+#: Money Map at all, because it is switched off now (MARKETING_NEWS_SERIES / MARKETING_CONTENT_CLASSES) or the worker
+#: holding the run cannot draw a template: configuration, never "no company qualified" (digest `_INFRA_OUTCOMES`).
 SERIES_OUTCOMES = ("chosen", "no_candidates", "all_recent", "all_refused", "unavailable", "timeout",
-                   "error", "budget", "other_lane", "week_cap")
+                   "error", "budget", "other_lane", "week_cap", "replaced", "switched_off", "worker_capability")
 #: Owner decision 2026-11-27 ("1 backup theme a week (Recommended)": "At most one quiet-week theme per week across both
 #: daily posts, so Wednesday almost always keeps a theme."): the trail outcome of a theme BACKUP step (any theme step but
 #: the main lane's Wednesday lead, `selection.theme_is_fallback`) in an ET week whose backup was already made, in either
@@ -419,6 +426,24 @@ OTHER_LANE = "other_lane"
 OTHER_LANE_COMPANY = "other_lane_company"
 #: Its reason when the other lane already used the series that day (the series is never started).
 OTHER_LANE_SERIES = "posted by the other lane today"
+#: Replacement runs (migration 215): the exclusion code of a candidate whose LEAD company (`lead_keys`: its issuer root
+#: or display name — a share-class twin included) is one an earlier run of the SAME (day, lane) drew — the replaced
+#: run's, and an earlier replacement's (`runs.replaced_scripts`). Collected with the cross-lane exclusions, never with
+#: the refusals: it never reaches the source's refusal memo and is never a template refusal. Checked BEFORE the
+#: cross-lane lead rule (a spotlight replacement's replaced lead is also in that rule's set: it is named as replaced).
+REPLACED_COMPANY = "replaced_company"
+#: The trail outcome of a series every candidate of which was REPLACED_COMPANY (`SERIES_OUTCOMES`).
+REPLACED = "replaced"
+#: Amendment A3: the trail outcome (series `money_map`) of a replacement that never asked Money Map because it is
+#: switched off now (`selection.replacement_chain` is just the SKIP) — reason REPLACEMENT_MONEY_MAP_OFF.
+REPLACEMENT_SWITCHED_OFF = "switched_off"
+REPLACEMENT_MONEY_MAP_OFF = "money_map_off"
+#: Amendment A3: the trail outcome (series `money_map`) of a replacement whose holding worker cannot draw a template
+#: (no WORKER_CAPABILITY_NEWS_TEMPLATES — reason REPLACEMENT_NO_TEMPLATES) or cannot draw Money Map's picture (a layout
+#: capability the series needs — reason REPLACEMENT_NO_LAYOUT).
+REPLACEMENT_WORKER_CAPABILITY = "worker_capability"
+REPLACEMENT_NO_TEMPLATES = "worker_without_news_templates"
+REPLACEMENT_NO_LAYOUT = "worker_cannot_draw_its_layout"
 #: Rule (b) of the cross-lane exclusion (the spotlight lane, 2026-11-15): a candidate whose LEAD company
 #: (`lead_company`, compared by `lead_keys` — its issuer root and display name, so GOOGL and GOOG are one company: C0,
 #: 2026-11-16) the other lane drew on a run dated within this many ET days before the run date — or on it —
@@ -1524,6 +1549,32 @@ def lead_keys(output: Any) -> FrozenSet[str]:
     return frozenset(keys)
 
 
+def replaced_lead_keys(scripts: Iterable[Any]) -> FrozenSet[str]:
+    """The `lead_keys` a replacement run must keep away from (migration 215): every lead an earlier run of its (day,
+    lane) drew — `scripts` is `runs.replaced_scripts` (`{run_id, replacement, source_ref, output}`). Each script gives
+    its output's `lead_keys` AND the issuer root of its Money Map ledger key (``news:money_map:<SYM>:<FY>`` →
+    ``root:<issuer root>``), so a replaced script whose stored output does not read back still keeps its company — and
+    its share-class twin — out. Pure, never raises; a script that yields no key at all is logged at WARNING (its exact
+    ledger key is still in the build's exclude set)."""
+    keys: Set[str] = set()
+    for s in scripts:
+        if not isinstance(s, Mapping):
+            continue
+        own = set(lead_keys(s.get("output")))
+        ref = s.get("source_ref")
+        parts = ref.split(":") if isinstance(ref, str) else []
+        if len(parts) == 4 and parts[0] + ":" == news_rules.LEDGER_PREFIX and parts[1] == "money_map":
+            root = news_rules.issuer_root(parts[2])
+            if root:
+                own.add(LEAD_KEY_ROOT + root)
+        if not own:
+            logger.warning("marketing template day: the replaced script of run %s (replacement %s, source %s) names no "
+                           "lead company — only its exact ledger key is kept out", str(s.get("run_id"))[:40],
+                           s.get("replacement"), str(ref)[:80])
+        keys |= own
+    return frozenset(keys)
+
+
 def _record_lead_keys(company: Any) -> FrozenSet[str]:
     """`lead_keys` of a record's company row (its issuer root, its casefolded display name) — the keys the output's
     lead will carry when that company leads it. Pure, never raises."""
@@ -1850,8 +1901,9 @@ class MarketingScriptService:
         source_ref, template or class (it has none). That trail is what lets the run-health texts and the digest
         tell a quiet day from a data source that timed out (`digest_service._series_note` and its skip texts read
         the RUN, never the script — OBS-1: a machinery failure must not hide behind "nothing qualified"). Every
-        other row without a pick (a rest day, a lesson day's empty pool) mirrors nothing, exactly as before: a main
-        run never reaches SKIP. The same rules as `_heal_mirror`: only on a HELD run, one fenced merge
+        other row without a pick (a rest day, a lesson day's empty pool) mirrors nothing, exactly as before: only a
+        spotlight run or a replacement run (migration 215) reaches SKIP. The same rules as `_heal_mirror`: only on a
+        HELD run, one fenced merge
         (`cas=True`), written only when something differs, a lost write logged and retried by the next kick."""
         meta_want = _selection_mirror(row)
         if meta_want is None or meta_want.get("series") != selection.SKIP:
@@ -1895,9 +1947,14 @@ class MarketingScriptService:
         same way (`_without_feature_series`).
 
         A SPOTLIGHT run (migration 210) is selected by `_select_spotlight` — its own calendar, ending in a skip,
-        never the lesson. Everything below is the MAIN lane's, unchanged."""
+        never the lesson. A REPLACEMENT run (migration 215, either lane) by `_select_replacement` — Money Map or the
+        skip, never the day's calendar, never the lesson — decided before the lane, so a day's own run (replacement 0)
+        never reads anything new. Everything below is the MAIN lane's, unchanged."""
         run_id = run["id"]
         run_date = date.fromisoformat(str(run["run_date"])[:10])
+        replacement = self._replacement(run)
+        if replacement >= 1:
+            return await self._select_replacement(run, run_date, replacement)
         if self._lane(run) == RUN_LANE_SPOTLIGHT:
             return await self._select_spotlight(run, run_date)
         plan = selection.plan_for(run_date)
@@ -1960,6 +2017,89 @@ class MarketingScriptService:
             logger.error("marketing script REFUSED run_id=%s run_date=%s: %s — no selection, nothing written",
                          run.get("id"), run.get("run_date"), e)
             raise MarketingRequestInvalid(f"run {run.get('id')}: {e}") from e
+
+    @staticmethod
+    def _replacement(run: Dict[str, Any]) -> int:
+        """The run's replacement number (`run_service.run_replacement`, migration 215: 0 for a day's own run — and for a
+        row that carries none — 1..RUN_REPLACEMENT_MAX for a replacement the owner asked for). A value that does not
+        read back is never guessed — what the build may draw, and what it must keep away from, depend on it:
+        MarketingRequestInvalid (a 422), logged at ERROR with the run id, before any selection or write."""
+        try:
+            return run_replacement(run)
+        except ValueError as e:
+            logger.error("marketing script REFUSED run_id=%s run_date=%s: %s — no selection, nothing written",
+                         run.get("id"), run.get("run_date"), e)
+            raise MarketingRequestInvalid(f"run {run.get('id')}: {e}") from e
+
+    async def _select_replacement(self, run: Dict[str, Any], run_date: date, n: int) -> Optional[Dict[str, Any]]:
+        """A REPLACEMENT run's first selection (migration 215, owner decision 2026-11-27: "Full replacement … Money Map
+        posts only"): the owner tapped "🔄 Next company" on the day's Money Map of this lane, so this run posts the NEXT
+        Money Map company — or nothing:
+
+        * the chain = `selection.replacement_chain` on the switches read NOW (MARKETING_CONTENT_CLASSES, and
+          MARKETING_NEWS_SERIES while a news class is on): ``(money_map, SKIP)``. It never reads the day's calendar
+          (`plan_for` / `spotlight_plan_for`, `spotlight_day_problem`), the lesson pool or a rest day, on either lane;
+        * Money Map switched off now (the chain is just the SKIP) → the `nothing_qualified` skip, its trail ONE
+          `money_map` step with outcome `switched_off` (amendment A3: configuration, never "no company qualified");
+        * a holder that did not declare WORKER_CAPABILITY_NEWS_TEMPLATES — or one that cannot draw Money Map's picture
+          (the layout narrowings the other selections apply, no-ops for Money Map today) → the same skip, outcome
+          `worker_capability` (WARNING naming the worker). Never the lesson;
+        * otherwise the background template build (`_await_template_build`), which keeps away from every record and
+          lead company the day's lane already drew (`runs.replaced_scripts`, REPLACED_COMPANY) and ends in the same
+          skip when nothing else qualifies (`last_error` "replacement <n>: no other company qualified").
+
+        The build's per-run decisions (frozen formats, video features, the art step) are a fresh run's: all per run."""
+        run_id = run["id"]
+        lane = self._lane(run)
+        classes = parse_content_classes(settings.MARKETING_CONTENT_CLASSES)
+        news_series = (selection.parse_news_series(settings.MARKETING_NEWS_SERIES)
+                       if classes != frozenset({"A"}) else frozenset())
+        chain = selection.replacement_chain(classes, news_series)
+        plan = selection.DayPlan(False, chain, selection.REPLACEMENT_PLAN_REASON)
+        logger.info("marketing script (replacement %d): run_id=%s run_date=%s lane=%s content classes %s news_series=%s "
+                    "chain=%s — the next Money Map company, or nothing (never the day's calendar, never the lesson)",
+                    n, run_id, run_date, lane, ",".join(sorted(classes)) or "none",
+                    ",".join(sorted(news_series)) or "none", list(chain))
+        series = REPLACEABLE_SERIES[0]
+
+        async def skip(outcome: str, reason: str, last_error: str) -> Dict[str, Any]:
+            return await self._skip_nothing_qualified(run, run_date, {
+                "plan": plan.reason, "chain": list(chain),
+                "trail": [{"series": series, "outcome": outcome, "reason": reason}]}, last_error=last_error)
+
+        if not any(s not in selection.CHAIN_TERMINALS for s in chain):
+            logger.warning(
+                "marketing script (replacement %d): Money Map is switched off NOW (MARKETING_CONTENT_CLASSES=%r, "
+                "MARKETING_NEWS_SERIES lists %s) — run_id=%s run_date=%s lane=%s SKIPS: nothing replaces the rejected "
+                "post (never the lesson)", n, str(settings.MARKETING_CONTENT_CLASSES)[:40],
+                ",".join(sorted(news_series)) or "nothing", run_id, run_date, lane)
+            return await skip(REPLACEMENT_SWITCHED_OFF, REPLACEMENT_MONEY_MAP_OFF,
+                              f"replacement {n}: Money Map is switched off")
+        caps = run_worker_capabilities(run)
+        if WORKER_CAPABILITY_NEWS_TEMPLATES not in caps:
+            logger.warning(
+                "marketing script (replacement %d): the worker holding run_id=%s (worker_version=%r, attempt %s, "
+                "declared %s) did not declare %r on its claim — an older worker image cannot draw a template, and a "
+                "replacement never falls to the lesson: the run SKIPS (deploy the drop-2 marketing worker)", n, run_id,
+                str(run.get("worker_version") or "")[:64], run.get("attempts"), sorted(caps) or "nothing",
+                WORKER_CAPABILITY_NEWS_TEMPLATES)
+            return await skip(REPLACEMENT_WORKER_CAPABILITY, REPLACEMENT_NO_TEMPLATES,
+                              f"replacement {n}: the worker cannot draw a template")
+        drawable = chain
+        cannot_draw = [s for s in drawable if s in LAYOUTS_2B_SERIES]
+        if cannot_draw and WORKER_CAPABILITY_LAYOUTS_2B not in caps:
+            logger.warning(
+                "marketing script (replacement %d): %s's post image is a drop-2b layout (%s), but the worker holding "
+                "run_id=%s (worker_version=%r, declared %s) did not declare %r on its claim — dropped (deploy the "
+                "drop-2b marketing worker)", n, cannot_draw, "/".join(WORKER_LAYOUTS_2B), run_id,
+                str(run.get("worker_version") or "")[:64], sorted(caps) or "nothing", WORKER_CAPABILITY_LAYOUTS_2B)
+            drawable = tuple(s for s in drawable if s not in LAYOUTS_2B_SERIES)
+        drawable = _without_feature_series(drawable, run, lane=lane)
+        drawable = _without_look_series(drawable, run, lane=lane)
+        if not any(s not in selection.CHAIN_TERMINALS for s in drawable):
+            return await skip(REPLACEMENT_WORKER_CAPABILITY, REPLACEMENT_NO_LAYOUT,
+                              f"replacement {n}: the worker cannot draw Money Map")
+        return await self._await_template_build(run, run_date, plan, drawable, classes)
 
     async def _select_spotlight(self, run: Dict[str, Any], run_date: date) -> Optional[Dict[str, Any]]:
         """The SPOTLIGHT day's first selection (migration 210, owner decision 2026-11-15). The lane is news-only and
@@ -2036,15 +2176,19 @@ class MarketingScriptService:
         return await self._await_template_build(run, run_date, plan, chain, classes)
 
     async def _skip_nothing_qualified(self, run: Dict[str, Any], run_date: date,
-                                      selection_block: Dict[str, Any]) -> Dict[str, Any]:
-        """A SPOTLIGHT day where nothing qualified: ONE first-write-wins INSERT of a `rejected` script, reject_reason
-        `nothing_qualified` (migration 210's CHECK), carrying the selection trail in its fact sheet — so the day is
-        VISIBLE (the run closes `skipped`, the trail says why), never a rest day and never the lesson. A concurrent
-        writer's row is adopted. The lane comes from the run (`insert_script`)."""
+                                      selection_block: Dict[str, Any], *,
+                                      last_error: Optional[str] = None) -> Dict[str, Any]:
+        """A SPOTLIGHT day where nothing qualified, or a REPLACEMENT run (migration 215) that found no other company:
+        ONE first-write-wins INSERT of a `rejected` script, reject_reason `nothing_qualified` (migration 210's CHECK),
+        carrying the selection trail in its fact sheet — so the day is VISIBLE (the run closes `skipped`, the trail
+        says why), never a rest day and never the lesson. A concurrent writer's row is adopted. The lane (and a
+        replacement's number) comes from the run (`insert_script`). `last_error`: the row's words (None — a spotlight
+        day's — "spotlight: nothing qualified", exactly as before; a replacement says which and why)."""
         run_id = run["id"]
         row, ours = await self.runs.insert_script({
             "run_id": run_id, "run_date": run_date.isoformat(), "status": REJECTED,
-            "reject_reason": REASON_NOTHING_QUALIFIED, "last_error": "spotlight: nothing qualified",
+            "reject_reason": REASON_NOTHING_QUALIFIED,
+            "last_error": "spotlight: nothing qualified" if last_error is None else last_error,
             "fact_sheet": {"selection": selection_block},
         }, run=run)
         trail = selection_block.get("trail") if isinstance(selection_block.get("trail"), list) else []
@@ -2173,9 +2317,18 @@ class MarketingScriptService:
         with the lane, which reads them first); a series the other lane used that day falls back `other_lane`
         before the source is asked; a candidate whose LEAD company (`lead_company`) the other lane drew within
         CROSS_LANE_COMPANY_DAYS is EXCLUDED — collected apart from the refusals, so it never reaches the source's
-        refusal memo (a Money Map or a stake held back for weeks because of the other lane's post)."""
+        refusal memo (a Money Map or a stake held back for weeks because of the other lane's post).
+
+        A REPLACEMENT run (migration 215: its chain is `selection.replacement_chain`, `_select_replacement`) ends in the
+        SKIP on either lane — never the lesson — and keeps away from its OWN lane's day too: every earlier run of its
+        (day, lane) — the replaced run and any earlier replacement — is read (`runs.replaced_scripts`; a failed or
+        inconsistent read RAISES: never built on a guess about what it replaces), their ledger keys join the exclude
+        set (the source refuses them `already_posted`), and a candidate whose LEAD company is one they drew (a
+        share-class twin included) is EXCLUDED as REPLACED_COMPANY — like a cross-lane exclusion, never a refusal and
+        never reported to the refusal memo. A day's own run (replacement 0) reads nothing new."""
         run_id = str(run["id"])
         lane = self._lane(run)
+        replacement = self._replacement(run)
         existing = await self.runs.get_script(run_id)
         if existing is not None:
             logger.info("marketing template day: run_id=%s already has its row (status=%s source=%s) — a "
@@ -2187,6 +2340,13 @@ class MarketingScriptService:
         recent = await self.runs.recent_source_refs(run_date, selection.news_recent_limit(), lane=lane)
         same_day_refs, taken_today, avoid_leads = await self._cross_lane(run, run_date, lane)
         exclude = frozenset(r for r in recent if isinstance(r, str)) | same_day_refs
+        # Replacement runs (migration 215): the records and lead companies this (day, lane) already drew — read only
+        # for a replacement, so a day's own run reads exactly what it always did. A failed read raises like the reads
+        # above (the build crashes into the kick; the next kick builds afresh).
+        replaced_leads: FrozenSet[str] = frozenset()
+        if replacement >= 1:
+            replaced_leads, replaced_refs = await self._replaced(run, run_date, lane, replacement)
+            exclude = exclude | replaced_refs
         # The insider spotlight's ledger inputs (B decisions 5-6) — read only when the day's chain holds it, so every
         # other build reads exactly what it always did. A failed read raises like the two reads above.
         spotlight_kw = (await self._spotlight_source_kw(run, run_date)
@@ -2201,8 +2361,11 @@ class MarketingScriptService:
         week_backups = (theme_week_fallbacks(theme_rows, run_date, lane, run_id=run_id)
                         if theme_rows is not None
                         and selection.theme_is_fallback(run_date, main_lane=lane == RUN_LANE_MAIN) else [])
-        spotlight = lane == RUN_LANE_SPOTLIGHT
-        end_of_chain = "the skip (nothing_qualified)" if spotlight else "the lesson"
+        # The chain's terminal: a spotlight day and a replacement run (migration 215, either lane) end in the SKIP — the
+        # `nothing_qualified` row — never the lesson; a day's own MAIN run ends in the lesson, exactly as before.
+        skip_terminal = lane == RUN_LANE_SPOTLIGHT or replacement >= 1
+        skip_error = f"replacement {replacement}: no other company qualified" if replacement >= 1 else None
+        end_of_chain = "the skip (nothing_qualified)" if skip_terminal else "the lesson"
         try:
             news = self._news_source_fn()
         except Exception as e:  # noqa: BLE001 — a broken adapter import must not cost the day its lesson
@@ -2233,12 +2396,14 @@ class MarketingScriptService:
 
         for i, series in enumerate(chain):
             if series in selection.CHAIN_TERMINALS:
-                if spotlight:
-                    if series != selection.SKIP:   # unreachable: `spotlight_plan_for` never names the lesson
-                        logger.error("marketing template day: the spotlight chain %s reached %r run_id=%s — a "
-                                     "spotlight day never posts the lesson: it skips", list(chain), series, run_id)
+                if skip_terminal:
+                    if series != selection.SKIP:   # unreachable: neither chain ever names the lesson
+                        logger.error("marketing template day: the %s chain %s reached %r run_id=%s — it never posts "
+                                     "the lesson: it skips", "replacement" if replacement >= 1 else "spotlight",
+                                     list(chain), series, run_id)
                     return await self._skip_nothing_qualified(
-                        run, run_date, block({"series": selection.SKIP, "outcome": "no_candidates"}))
+                        run, run_date, block({"series": selection.SKIP, "outcome": "no_candidates"}),
+                        last_error=skip_error)
                 if series != selection.LESSON:     # unreachable: `plan_for` never names the skip
                     logger.error("marketing template day: the main chain %s reached %r run_id=%s — the main lane "
                                  "always ends in the lesson: selecting it", list(chain), series, run_id)
@@ -2306,7 +2471,8 @@ class MarketingScriptService:
                     run, run_date, series, rec, rejections, block({"series": series, "outcome": "chosen", **checked}),
                     store_state=store_state, allow_x_url=allow_x_url, image_posts=image_posts,
                     deadline=deadline, news=news, refused=refused, excluded=excluded, avoid_leads=avoid_leads,
-                    first_line_prefix=first_line_prefix, art_holder=art_holder, picture_outlets=picture_outlets)
+                    first_line_prefix=first_line_prefix, art_holder=art_holder, picture_outlets=picture_outlets,
+                    replaced_leads=replaced_leads)
                 if built is None:
                     # Only a TEMPLATE refusal reaches the source's refusal memo; a cross-lane exclusion never does
                     # (the memo would hold back a Money Map for 28 days, a stake for its fingerprint's life).
@@ -2344,14 +2510,20 @@ class MarketingScriptService:
                 return row
             if refused:
                 logger.error("marketing series %s refused every candidate%s run_id=%s codes=%s", series,
-                             (f" it did not exclude ({len(excluded)} excluded: the other lane drew their lead "
-                              "company)") if excluded else "", run_id, sorted(set(refused)))
+                             (f" it did not exclude ({len(excluded)} excluded: "
+                              + ("the other lane drew their lead company" if REPLACED_COMPANY not in excluded else
+                                 "their lead company was drawn by the other lane or by this lane's replaced run")
+                              + ")") if excluded else "", run_id, sorted(set(refused)))
                 # review of 2026-11-26: a list the composer cut below three companies (`too_few_rows`) or whose lead the
                 # other lane drew leaves its window UNCHECKED — its companies stay in reach of the next spotlight
                 # (`SPOTLIGHT_UNCHECKED_REFUSALS`); any other refusal is a checked window, as before
                 unchecked = set(refused) <= SPOTLIGHT_UNCHECKED_REFUSALS
                 self._fell_back(run_id, trail, series, "all_refused", sorted(set(refused))[0], nxt,
                                 extra=None if unchecked else checked)
+            elif excluded and all(code == REPLACED_COMPANY for code in excluded):
+                # Replacement runs (migration 215): every candidate led with a company this (day, lane) already drew —
+                # the one being replaced (or its twin), or an earlier replacement's. An exclusion, never a refusal.
+                self._fell_back(run_id, trail, series, REPLACED, REPLACED_COMPANY, nxt)
             elif excluded:
                 # Rule (b): every candidate's lead company was drawn by the other lane within CROSS_LANE_COMPANY_DAYS.
                 # Review of 2026-11-26: no post was made, so the window stays unchecked (the lead's 2-day hold ends and
@@ -2366,11 +2538,12 @@ class MarketingScriptService:
                 self._fell_back(run_id, trail, series, "no_candidates",
                                 str(getattr(got, "skip_reason", "") or ""), nxt, extra=checked)
         # Unreachable while every chain ends in a terminal (`selection.enabled_chain`); never a silent day.
-        if spotlight:
-            logger.error("marketing template day: the spotlight chain %s ended without its skip run_id=%s — the day "
-                         "skips (nothing_qualified)", list(chain), run_id)
+        if skip_terminal:
+            logger.error("marketing template day: the %s chain %s ended without its skip run_id=%s — the day "
+                         "skips (nothing_qualified)", "replacement" if replacement >= 1 else "spotlight", list(chain),
+                         run_id)
             return await self._skip_nothing_qualified(
-                run, run_date, block({"series": selection.SKIP, "outcome": "no_candidates"}))
+                run, run_date, block({"series": selection.SKIP, "outcome": "no_candidates"}), last_error=skip_error)
         logger.error("marketing template day: the chain %s ended without the lesson run_id=%s — selecting the "
                      "lesson", list(chain), run_id)
         return await self._select_lesson(run, run_date, recent, classes=classes,
@@ -2421,6 +2594,32 @@ class MarketingScriptService:
                         "series today=%s lead companies to avoid (last %d ET days)=%s", run_id, lane, run_date, today,
                         last, sorted(refs)[:10], sorted(taken)[:10], CROSS_LANE_COMPANY_DAYS, sorted(leads)[:20])
         return frozenset(refs), frozenset(taken), frozenset(leads)
+
+    async def _replaced(self, run: Dict[str, Any], run_date: date, lane: str, replacement: int
+                        ) -> Tuple[FrozenSet[str], FrozenSet[str]]:
+        """What a REPLACEMENT run (migration 215) must keep away from on its own (day, lane): (the `lead_keys` of every
+        earlier run of it — `replaced_lead_keys`, a share-class twin included —, their ledger keys). From ONE bounded
+        read, `runs.replaced_scripts(run_date, lane, below=replacement)`: the replaced run's script and every earlier
+        replacement's (`recent_source_refs` never reads the caller's own lane on its run date, and `_cross_lane` drops
+        same-lane rows, so without it the next company would be the SAME company). That read RAISES on a failure or on
+        a ledger it cannot vouch for (a missing or extra run, an empty source_ref): logged at ERROR with the run id and
+        re-raised — the build crashes into the kick, the next kick builds afresh, and nothing is posted on a guess
+        about what it replaces."""
+        run_id = str(run["id"])
+        try:
+            scripts = await self.runs.replaced_scripts(run_date, lane, below=replacement)
+        except Exception as e:
+            logger.error("marketing template day: the replacement's ledger read failed run_id=%s run_date=%s lane=%s "
+                         "replacement=%s (%s: %s) — the build stops; the next kick builds afresh", run_id, run_date,
+                         lane, replacement, type(e).__name__, e)
+            raise
+        refs = frozenset(str(s["source_ref"]) for s in scripts
+                         if isinstance(s, Mapping) and isinstance(s.get("source_ref"), str) and s["source_ref"])
+        leads = replaced_lead_keys(scripts)
+        logger.info("marketing template day: replacement %d run_id=%s run_date=%s lane=%s keeps away from what this "
+                    "lane already drew today: refs=%s lead companies=%s", replacement, run_id, run_date, lane,
+                    sorted(refs)[:10], sorted(leads)[:20])
+        return leads, refs
 
     async def _theme_ledger(self, run: Dict[str, Any], run_date: date, lane: str) -> List[Dict[str, Any]]:
         """The theme scripts of BOTH lanes dated [run_date − THEME_HISTORY_DAYS, run_date] — through run_date + 1 for a
@@ -2588,7 +2787,7 @@ class MarketingScriptService:
         selection_block: Dict[str, Any], *, store_state: str, allow_x_url: bool, image_posts: bool,
         deadline: float, news: Any, refused: List[str], excluded: List[str], avoid_leads: FrozenSet[str],
         first_line_prefix: bool = False, art_holder: Optional[Dict[str, Any]] = None,
-        picture_outlets: Optional[Sequence[str]] = None,
+        picture_outlets: Optional[Sequence[str]] = None, replaced_leads: FrozenSet[str] = frozenset(),
     ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any], str]]:
         """(output, fact sheet, ledger key) of ONE candidate record, as stored — or None, its refusal code
         appended to `refused` (logged). Never raises but for a cancellation: a candidate the template
@@ -2609,7 +2808,13 @@ class MarketingScriptService:
 
         `picture_outlets` (review 2026-11-20): the platforms whose post will carry the picture, as THIS build read the
         switches once (`template_picture_outlets`) — `compose` freezes it into the output; None (a caller that does
-        not say): every picture platform, `compose`'s default."""
+        not say): every picture platform, `compose`'s default.
+
+        `replaced_leads` (migration 215, a replacement run only — empty for a day's own run): the lead companies this
+        (day, lane) already drew (`replaced_lead_keys`). A candidate that composes and passes its first re-check but
+        whose lead is one of them is EXCLUDED with REPLACED_COMPANY — checked BEFORE `avoid_leads` (a spotlight
+        replacement's replaced lead is in both: it is named as the replaced company), never a refusal, never
+        reported to the refusal memo."""
         run_id = str(run["id"])
         try:
             if getattr(rec, "series", None) != series:
@@ -2671,6 +2876,15 @@ class MarketingScriptService:
                          ref, run_id, codes)
             refused.extend(codes)
             return None
+        if replaced_leads:
+            hit = lead_keys(out) & replaced_leads
+            if hit:
+                logger.info("marketing series %s candidate %s EXCLUDED run_id=%s: its lead company %s (%s) was already "
+                            "drawn by this lane today — the run being replaced, or an earlier replacement (not a "
+                            "template refusal, not reported to the source)", series, ref, run_id, lead_company(out),
+                            ",".join(sorted(hit)))
+                excluded.append(REPLACED_COMPANY)
+                return None
         if avoid_leads:
             hit = lead_keys(out) & avoid_leads
             if hit:

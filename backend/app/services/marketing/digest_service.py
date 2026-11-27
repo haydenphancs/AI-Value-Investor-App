@@ -56,6 +56,13 @@ read-only look at the records `_final_owed` takes, once per process, on a day af
     (`health_hour_et`, `final_hour_et`) — the main lane's whenever the spotlight lane is open, because its hour
     rule (`selection.spotlight_hours_problem`: spotlight hour + attempts ≤ run hour) ends the spotlight's attempts
     and resumes before the main lane's begin.
+  - Replacement runs (migration 215, the owner's "🔄 Next company"): both jobs judge the NEWEST run of each lane, which
+    may be a replacement — by its own rules (`_replacement_verdict`): quiet once its notice went out, while it runs on
+    its own day, or when its bundles speak; H1 for one no worker started 75 minutes after the request, naming the
+    real cause (its day over, its lane closed, the switch off, its start window passed, or the cron); and, for an
+    ending whose notice has not gone out, THE SAME notice the review bot would send (`review_service.
+    replacement_notice`), stamped `replacement_reported` after the send — one text, one stamp (amendment A10). A
+    day's own run is judged exactly as before.
 * `digest_cycle()` — job `marketing_digest_weekly` (MARKETING_DIGEST_ENABLED, checked here as well as
   in the tick), Monday at/after 09:00 ET with a Tuesday catch-up
   when Monday's never succeeded (`owed_since` = this week's Monday). It covers the previous
@@ -86,7 +93,11 @@ read-only look at the records `_final_owed` takes, once per process, on a day af
   then the spotlight run as "spotlight: …" (a spotlight day with no row: "spotlight: no run (a spotlight day)"; one
   where nothing qualified: "spotlight: skipped — nothing qualified") — and every post row, picture fallback and the
   memory peak name a spotlight run "<day> · spotlight"; the cost line sums both lanes' runs and scripts. With no
-  spotlight row and the lane closed, the digest is the one of before.
+  spotlight row and the lane closed, the digest is the one of before. Since migration 215 a lane's day run is followed
+  by one row per replacement the owner asked for ("replacement 1: media_ready · Money Map"), every post row, picture
+  fallback and the memory peak name a replacement run "<day> · replacement <n>", the posts the owner's "🔄 Next
+  company" rejected count in their own "replaced by the next company" bucket (never "no reason"), and the cost line
+  counts the replacement runs too. A week with no replacement is the digest of before.
 
 Delivery follows `publish_feed.feed_cycle`: the review bot configured + its review chat, the shared
 Telegram flood back-off (`review_service._rate_limited_until` — while it is open no claim is taken, and
@@ -117,7 +128,7 @@ import statistics
 import time
 from collections import Counter
 from datetime import date, datetime, time as dtime, timedelta, timezone
-from typing import Any, Awaitable, Dict, FrozenSet, Iterable, List, NamedTuple, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, FrozenSet, Iterable, List, NamedTuple, Optional, Tuple
 
 from app.config import settings
 from app.integrations import telegram
@@ -126,10 +137,14 @@ from app.schemas.marketing import (
     IMAGE_FALLBACK_REASONS,
     POST_FORMATS,
     POST_METADATA_IMAGE_FALLBACK,
+    REPLACEMENT_SKIP_REASON,
     RUN_LANE_MAIN,
     RUN_LANE_SPOTLIGHT,
     RUN_LANES,
+    RUN_META_REPLACEMENT_REPORTED,
+    RUN_META_REPLACEMENT_REQUEST,
     RUN_STAGES,
+    RUNS_PER_DAY_MAX,
     parse_content_classes,
 )
 from app.services.marketing import (
@@ -144,6 +159,8 @@ from app.services.marketing.outlet_base import scrub
 from app.services.marketing.outlet_upload_post import PLATFORMS as UPLOAD_POST_PLATFORMS
 from app.services.marketing.review_service import REJECT_REASONS, _truncate_utf16, utf16_len
 from app.services.marketing.run_service import (
+    REPLACEMENT_START_GRACE_MINUTES,
+    WORKER_TICK_MINUTE,
     _exec,
     _parse_ts,
     _touched,
@@ -154,8 +171,15 @@ from app.services.marketing.run_service import (
     lane_label,
     month_start_utc,
     post_lane,
+    post_replacement,
     post_run_date,
+    replaced_by_run_id,
+    replacement_start_closes,
+    replacement_unstarted,
+    run_attempts_cap,
+    run_label,
     run_lane,
+    run_replacement,
 )
 from app.services.notification_jobs import JobStateUnreadable
 from app.utils.market_hours import ET
@@ -224,10 +248,14 @@ WEEK_POST_LIMIT = 500
 MEASURED_POST_LIMIT = 300
 #: At most this many pages: 42 days of runs (the 35-day read plus a week of slack for a late reconcile) × 16
 #: (platform, format) pairs (the 13 of POST_FORMATS_BY_PLATFORM plus Batch 3's 3 of EXTRA_POST_FORMATS_BY_PLATFORM)
-#: × 2 lanes (one run per (day, lane) since migration 210 — the spotlight lane — one post per pair, published on
-#: its run day or the next) = 1,344 published posts at the most, against 1,500 (4 → 5 pages with the spotlight
-#: lane) — a test derives the bound from the two maps and RUN_LANES. Past it the scorecard says the newest may be
-#: missing (never silent).
+#: × 2 lanes (at most one PUBLISHING run per (day, lane) since migration 210 — the spotlight lane — one post per
+#: pair, published on its run day or the next) = 1,344 published posts at the most, against 1,500 (4 → 5 pages with
+#: the spotlight lane) — a test derives the bound from the two maps and RUN_LANES. Migration 215 (the owner's
+#: "🔄 Next company") lets a (day, lane) hold up to three RUNS but still only one that publishes: the request function
+#: refuses a run with any post that can reach a platform (REPLACEMENT_BLOCKING_POST_STATUSES) and rejects every one
+#: still pending, and the restore puts the original back only while its replacement made no post at all — so the
+#: published-post ceiling is unchanged (amendment A13). Past it the scorecard says the newest may be missing (never
+#: silent).
 MEASURED_POST_PAGES = 5
 #: The most published posts the 35-day read takes in.
 MEASURED_POST_MAX = MEASURED_POST_LIMIT * MEASURED_POST_PAGES
@@ -332,6 +360,13 @@ _SKIP_HINTS: Dict[str, str] = {
     "template_refused": "the day's company post failed the template re-check, or MARKETING_CONTENT_CLASSES / "
                         "MARKETING_NEWS_SERIES no longer lists its class or series (or this deploy no longer "
                         "ships the series) — read the web log 'create_posts TEMPLATE REFUSED' for this run",
+    # Migration 215: a SERVER-written skip (never a worker `SkipRun`) — the claim's gate or the web's expiry step closed
+    # one of the owner's "🔄 Next company" runs unrun (`metadata.replacement_expired.why`). Only a replacement carries
+    # it, and its ending normally reaches the owner as the review bot's own notice (N3 / N4); this is the loud
+    # fallback's hint when that notice could not be built.
+    REPLACEMENT_SKIP_REASON: "the owner's next-company replacement was not run (its lane's start window closed, the "
+                             "spotlight lane closed for its date, its day ended, or MARKETING_REPLACE_ENABLED was off) "
+                             "— nothing replaced the rejected post",
 }
 
 #: A lane's own wording of a skip hint, over `_SKIP_HINTS` (migration 210). The spotlight lane adds the one switch
@@ -360,10 +395,18 @@ _SERIES_OUTCOME_WORDS: Dict[str, str] = {
     "other_lane": "the other lane posted it or its company",
     # owner decision 2026-11-27 ("1 backup theme a week"): a quiet week's backup theme was already made that week
     "week_cap": "this week's one backup theme was already used",
+    # replacement runs (migration 215, "🔄 Next company"): every candidate led with the company being replaced (or one
+    # an earlier replacement drew) — a content outcome; and (amendment A3) the two configuration skips of a
+    # replacement — operator words, infrastructure outcomes (never "no company qualified")
+    "replaced": "only the company being replaced was left",
+    "switched_off": "switched off in MARKETING_NEWS_SERIES or MARKETING_CONTENT_CLASSES",
+    "worker_capability": "the marketing worker's image cannot draw it — deploy the current worker",
 }
 #: The fallback outcomes that are about the data source or the machinery, not about the week's content
 #: (OBS-1, 2026-10-15): `_series_note` never lets one hide behind a content outcome ("nothing qualified").
-_INFRA_OUTCOMES = frozenset({"unavailable", "timeout", "error", "budget"})
+#: Amendment A3 (migration 215): a replacement's `switched_off` / `worker_capability` skips are configuration — they
+#: alert, never a quiet "no company qualified".
+_INFRA_OUTCOMES = frozenset({"unavailable", "timeout", "error", "budget", "switched_off", "worker_capability"})
 #: At most this many fallback steps are named in a series note; the rest are counted ("and N more").
 _SERIES_NOTE_STEPS = 3
 #: What a series note calls a day that reached the SKIP terminal (a spotlight day where nothing qualified).
@@ -823,8 +866,9 @@ _LANE_WORDS: Dict[str, _LaneWords] = {
 #: a rest day on either lane, and on the spotlight lane a day where no spotlight series had a record
 #: (`nothing_qualified`, migration 210 — an ordinary quiet day there, never a failure). That one is quiet ONLY when
 #: the run's own trail shows every series fell through on content (`_quiet_nothing_qualified`); a data source that
-#: failed, or a trail that never reached the run, alerts (OBS-1). Owner question open: to hear about every quiet
-#: spotlight day too, drop it here.
+#: failed, or a trail that never reached the run, alerts (OBS-1). Owner decision 2026-11-27: no alert on a quiet
+#: spotlight day ("no need to. just send me what i need to approve for the backup post is okay"). A replacement run
+#: (migration 215) never reaches these rules: its ending is the review bot's notice (`_replacement_verdict`).
 _QUIET_SKIPS: Dict[str, FrozenSet[str]] = {
     RUN_LANE_MAIN: frozenset({"rest_day"}),
     RUN_LANE_SPOTLIGHT: frozenset({"rest_day", "nothing_qualified"}),
@@ -839,12 +883,13 @@ def _lane_words(lane: str) -> _LaneWords:
     return words
 
 
-def _day_label(run_date: date, lane: str) -> str:
+def _day_label(run_date: date, lane: str, replacement: Any = 0) -> str:
     """A run's day as the health texts name it: "Tue 2026-11-17" for the main lane (byte for byte what every
     message said before the spotlight lane), "Tue 2026-11-17 · spotlight" for the spotlight lane
-    (`run_service.lane_label`)."""
+    (`run_service.lane_label`) — and, for one of the owner's replacement runs (migration 215), " · replacement 1"
+    after either; `replacement` None (a number that does not read back) is " · replacement ?"."""
     _lane_words(lane)
-    return lane_label(run_date.strftime("%a %Y-%m-%d"), lane)
+    return lane_label(run_date.strftime("%a %Y-%m-%d"), lane, replacement)
 
 
 def _no_retry(lane: str = RUN_LANE_MAIN) -> str:
@@ -884,10 +929,10 @@ def _no_run_hint(lane: str = RUN_LANE_MAIN) -> str:
 #: the lane is closed for the run's date NOW (`selection.is_spotlight_day` False: the claim gate then refuses every
 #: claim of that date, resumes included) — never "the worker retries hourly", never "check the cron", which sent the
 #: owner to debug a healthy cron. Names every switch that can close it (`selection.spotlight_day_problem`).
-_LANE_CLOSED = ("the spotlight lane is closed for that day now (MARKETING_SPOTLIGHT_ENABLED, "
-                "MARKETING_SPOTLIGHT_WEEKDAYS, the hour rule MARKETING_SPOTLIGHT_HOUR_ET + MARKETING_MAX_RUN_ATTEMPTS "
-                "≤ MARKETING_RUN_HOUR_ET, MARKETING_CONTENT_CLASSES or MARKETING_NEWS_SERIES), so the worker cannot "
-                "claim it again")
+_LANE_CLOSED_WHY = ("the spotlight lane is closed for that day now (MARKETING_SPOTLIGHT_ENABLED, "
+                    "MARKETING_SPOTLIGHT_WEEKDAYS, the hour rule MARKETING_SPOTLIGHT_HOUR_ET + MARKETING_MAX_RUN_ATTEMPTS "
+                    "≤ MARKETING_RUN_HOUR_ET, MARKETING_CONTENT_CLASSES or MARKETING_NEWS_SERIES)")
+_LANE_CLOSED = f"{_LANE_CLOSED_WHY}, so the worker cannot claim it again"
 
 
 def _lane_closed(lane: str, lane_open: bool) -> bool:
@@ -1048,10 +1093,151 @@ def _with_memory(text: Optional[str], memory: Optional[str]) -> Optional[str]:
     return f"{text}\n{memory}" if memory else text
 
 
+class HealthVerdict(NamedTuple):
+    """One lane's run-health judgement (`health_verdict` / `final_verdict`): its `text` (None = nothing to say) and —
+    only when that text IS a replacement run's ending notice (migration 215, amendment A10: built by the ONE builder,
+    `review_service.replacement_notice`) — that `notice`: the caller stamps the run's `replacement_reported` through
+    `review_service.stamp_replacement_reported` after the message went out (one text, one stamp, never a second
+    message from the review bot's notice step), and its "↩ Post {SYM} after all" keyboard rides on the message.
+    When `text` is longer than the notice's own text it carries the run's memory-peak line too (`_carried_memory`)."""
+    text: Optional[str]
+    notice: Optional[Any] = None
+
+
+#: A replacement the owner asked for ("🔄 Next company", migration 215) that no worker tick has started this long after
+#: the request is reported by the nightly check / final word (DESIGN §1.2 H1): the worker ticks hourly at :15, so 75
+#: minutes is a whole missed tick plus slack. DESIGN names it REPLACEMENT_START_GRACE_SECONDS; it is renamed here so it
+#: is never read as `run_service.REPLACEMENT_START_GRACE_MINUTES` (the web expiry's 20-minute grace after a lane's LAST
+#: start tick — a different clock).
+REPLACEMENT_UNSTARTED_ALERT_SECONDS = 75 * 60
+
+
+def _replacement_number(run: Any) -> Optional[int]:
+    """0 for no run (or not a row) and for a day's own run; 1..RUN_REPLACEMENT_MAX for one of the owner's replacement
+    runs (migration 215); None when the row's `replacement` does not read back (`run_service.run_replacement`) —
+    never guessed: such a row is judged by the day-run rules under the "replacement ?" label."""
+    if not isinstance(run, dict):
+        return 0
+    try:
+        return run_replacement(run)
+    except ValueError:
+        return None
+
+
+def _asked_at(run: Dict[str, Any]) -> Optional[datetime]:
+    """When the owner asked for a replacement: the request function's own `metadata.replacement_request.at` (the clock
+    read after its per-day lock), else the row's `created_at` (the same instant), else None."""
+    request = _meta(run).get(RUN_META_REPLACEMENT_REQUEST)
+    at = _parse_ts(request.get("at")) if isinstance(request, dict) else None
+    return at if at is not None else _parse_ts(run.get("created_at"))
+
+
+def _unstarted_text(run: Dict[str, Any], *, run_date: date, lane: str, lane_open: bool, replace_on: bool,
+                    now: datetime) -> Optional[str]:
+    """H1 for a replacement no worker tick has started (`run_service.replacement_unstarted`), or None while it is still
+    inside REPLACEMENT_UNSTARTED_ALERT_SECONDS of its request (the next :15 tick takes it). Amendment A10 / review L2:
+    H1 names the REAL cause, in the order the web's expiry step judges it (`run_service.replacement_expiry_problem`) —
+    its day is over; its spotlight lane is closed for its date (`lane_open` False); replacing is switched off
+    (`replace_on` False); its lane's last start tick has passed — and blames the cron only where the worker is the
+    cause. A request time that cannot be read, or lies more than _FUTURE_SKEW ahead, is not inside the grace: the text
+    alerts with "at ? ET" (never quiet on a guess). Pure. Each text is sent with no restore button: the original
+    cannot be restored while its replacement may still run (`marketing_restore_replaced` answers
+    `replacement_running`)."""
+    asked = _asked_at(run)
+    readable = asked is not None and asked <= now + _FUTURE_SKEW
+    if readable and now - asked < timedelta(seconds=REPLACEMENT_UNSTARTED_ALERT_SECONDS):
+        return None
+    local = _et_local(asked) if readable else None
+    head = f"⚠️ Marketing run {run_label(run)} was asked for at {local.strftime('%H:%M') if local else '?'} ET"
+    who = review_service.replaced_symbol(run) or review_service._EARLIER_COMPANY
+    if run_date < _et_day(now):
+        return (f"{head} and no worker started it before its day ended, so nothing replaced {who}. Check the "
+                f"marketing-worker cron and its last logs.")
+    if _lane_closed(lane, lane_open):
+        return f"{head} and will not be started: {_LANE_CLOSED_WHY}. Nothing replaces {who}."
+    if not replace_on:
+        return (f"{head} and will not be started: replacing was switched off (MARKETING_REPLACE_ENABLED). Nothing "
+                f"replaces {who}.")
+    closes = replacement_start_closes(run_date, lane)
+    if now >= closes:
+        tick = _et_local(closes - timedelta(minutes=REPLACEMENT_START_GRACE_MINUTES))
+        # An unreadable run hour closes the window at the day's start (`replacement_start_closes`): no tick to name.
+        named = tick is not None and tick.date() == run_date and tick.minute == WORKER_TICK_MINUTE
+        last = f" ({tick:%H:%M} ET)" if named else ""
+        return (f"{head} and the worker did not start it before this lane's last start{last} — check the "
+                f"marketing-worker cron. Nothing replaces {who}.")
+    return (f"{head} and the worker has not started it — check the marketing-worker cron. Nothing replaces {who} "
+            f"until it runs.")
+
+
+def _replacement_verdict(run: Dict[str, Any], replacement: Optional[int], *, run_date: date, now: datetime, lane: str,
+                         lane_open: bool, notice: Any, replace_on: bool, memory_ok: bool, max_attempts: Any,
+                         day_rules: Callable[[Any, Any], Optional[str]]) -> HealthVerdict:
+    """The run-health judgement of one of the owner's replacement runs (migration 215, DESIGN §3.8 as amended by A10):
+    its ending reaches the owner as ONE message — its own review bundles, or the review bot's notice (N1-N5) — so the
+    nightly check and the final word stay quiet wherever that message speaks, and send THE SAME notice where it has not
+    gone out. Pure; `day_rules(max_attempts, replacement)` is the day-run text (`_health_text` / `_final_text`) the
+    loud fallback uses, under the replacement's label. In order:
+
+    * a number that does not read back (`replacement` None) → the day-run rules under today's cap, labelled
+      "· replacement ?";
+    * its notice already went out (`metadata.replacement_reported`) → only the memory line (`memory_ok`: the final word
+      repeats none the nightly check carried) — and none at all when the message that carried the notice carried the
+      peak too (`replacement_reported.memory`, written by `_stamp_notices`: that stamp's own write moves `updated_at`
+      past the check, so `memory_ok` alone would send the peak twice);
+    * never started (`run_service.replacement_unstarted`) → quiet inside REPLACEMENT_UNSTARTED_ALERT_SECONDS, then H1
+      naming the real cause (`_unstarted_text`);
+    * an ending its notice would speak for (`notice`, `review_service.replacement_notice`: N1-N5) → that notice's
+      text (+ the memory line), carried in the verdict so the caller stamps it once it is sent;
+    * its bundles speak (`NOTICE_BUNDLES`), or `media_ready` / `published` → only the memory line — never "recovered
+      at": the bundles told him;
+    * still running or `failed` below its own attempts cap (`run_service.run_attempts_cap`) on its own ET day → None:
+      the next tick may still finish it, and the notice step speaks when it ends;
+    * anything else (a terminal run whose notice could not be built, a run left unfinished on a past day, an
+      unexpected status) → the day-run rules under the replacement's label and its own cap — the loud fallback."""
+    if replacement is None:
+        return HealthVerdict(day_rules(max_attempts, None))
+    memory = _memory_line(run, _day_label(run_date, lane, replacement))
+    shown_memory = memory if memory_ok else None
+    reported = _meta(run).get(RUN_META_REPLACEMENT_REPORTED)
+    if reported is not None:
+        carried = isinstance(reported, dict) and reported.get(review_service.REPORTED_MEMORY_KEY) is True
+        return HealthVerdict(None if carried else shown_memory)
+    if replacement_unstarted(run):
+        return HealthVerdict(_unstarted_text(run, run_date=run_date, lane=lane, lane_open=lane_open,
+                                             replace_on=replace_on, now=now))
+    known = notice if isinstance(notice, review_service.ReplacementNotice) else None
+    if known is not None and known.code != review_service.NOTICE_BUNDLES and known.text:
+        return HealthVerdict(_with_memory(known.text, shown_memory), known)
+    status = _key(run.get("status"))
+    if (known is not None and known.code == review_service.NOTICE_BUNDLES) or status in ("media_ready", "published"):
+        return HealthVerdict(shown_memory)
+    cap = run_attempts_cap(run)
+    if run_date == _et_day(now):
+        if status in ("planned", "in_progress"):
+            return HealthVerdict(None)
+        attempts = _count(run.get("attempts"))
+        if status == "failed" and attempts is not None and attempts < cap:
+            return HealthVerdict(None)
+    return HealthVerdict(day_rules(cap, replacement))
+
+
 def evaluate_run_health(
     run: Optional[Dict[str, Any]], *, run_date: date, posting_day: bool, now: datetime, max_attempts: Any,
-    stale_seconds: Any, lane: str = RUN_LANE_MAIN, lane_open: bool = True,
+    stale_seconds: Any, lane: str = RUN_LANE_MAIN, lane_open: bool = True, notice: Any = None,
+    replace_on: bool = True,
 ) -> Optional[str]:
+    """`health_verdict`'s text — what is wrong with the run of `run_date`, as one Telegram message, or None."""
+    return health_verdict(run, run_date=run_date, posting_day=posting_day, now=now, max_attempts=max_attempts,
+                          stale_seconds=stale_seconds, lane=lane, lane_open=lane_open, notice=notice,
+                          replace_on=replace_on).text
+
+
+def health_verdict(
+    run: Optional[Dict[str, Any]], *, run_date: date, posting_day: bool, now: datetime, max_attempts: Any,
+    stale_seconds: Any, lane: str = RUN_LANE_MAIN, lane_open: bool = True, notice: Any = None,
+    replace_on: bool = True,
+) -> HealthVerdict:
     """What is wrong with the run of `run_date`, as one Telegram message — or None when nothing is.
     Pure. Called from `health_hour_et()` (22:00 ET by default) with `max_attempts` =
     MARKETING_MAX_RUN_ATTEMPTS and `stale_seconds` = MARKETING_RUN_STALE_SECONDS: it says only what the
@@ -1083,12 +1269,37 @@ def evaluate_run_health(
     passed by `_health_work`). A SPOTLIGHT run below the attempts cap whose lane has closed since (its switch, its
     weekdays, the hour rule, the classes or the per-series switch) can never be retried — the claim gate refuses every
     claim of that date — so its failed / abandoned line says so (`_LANE_CLOSED`) instead of promising hourly retries.
-    The main lane ignores it."""
+    The main lane ignores it.
+
+    Migration 215: `run` is the NEWEST run of its (day, lane) (`get_run_for_date`), which may be one of the owner's
+    replacement runs ("🔄 Next company"). Such a run is judged FIRST, by its own rules (`_replacement_verdict`), whatever
+    `posting_day` says — its row proves the day posted: `notice` is the review bot's notice for its ending
+    (`review_service.replacement_notice`, computed by the caller, which reads the run's posts when it needs them) and
+    `replace_on` whether MARKETING_REPLACE_ENABLED is on now (read by the caller only for a replacement no worker
+    started). A day's own run (replacement 0) ignores both: its texts are byte for byte the ones above."""
+    _lane_words(lane)
+    replacement = _replacement_number(run)
+    if replacement != 0:
+        return _replacement_verdict(
+            run, replacement, run_date=run_date, now=_aware(now), lane=lane, lane_open=lane_open, notice=notice,
+            replace_on=replace_on, memory_ok=True, max_attempts=max_attempts,
+            day_rules=lambda cap, n: _health_text(run, run_date=run_date, posting_day=True, now=now, max_attempts=cap,
+                                                  stale_seconds=stale_seconds, lane=lane, lane_open=lane_open,
+                                                  replacement=n))
+    return HealthVerdict(_health_text(run, run_date=run_date, posting_day=posting_day, now=now,
+                                      max_attempts=max_attempts, stale_seconds=stale_seconds, lane=lane,
+                                      lane_open=lane_open))
+
+
+def _health_text(run: Optional[Dict[str, Any]], *, run_date: date, posting_day: bool, now: datetime, max_attempts: Any,
+                 stale_seconds: Any, lane: str, lane_open: bool, replacement: Any = 0) -> Optional[str]:
+    """The day-run rules of `health_verdict` — every run's before migration 215, byte for byte. `replacement` only
+    names the run (`_day_label`) when one of the owner's replacement runs falls back to them."""
     words = _lane_words(lane)
     if not posting_day:
         return None
     closed = _lane_closed(lane, lane_open)
-    day = _day_label(run_date, lane)
+    day = _day_label(run_date, lane, replacement)
     if not isinstance(run, dict):
         return (f"⚠️ Marketing: no run for {day}, {words.day_kind} — the worker never claimed it. "
                 f"{_no_run_hint(lane)}; {words.nothing}.")
@@ -1219,9 +1430,17 @@ def ran_as_posting_day(run: Any) -> bool:
     any reason but `rest_day` ran as a posting day. False for everything that does not show it: a `rest_day`
     skip, no run, an unreadable row, and a run that stopped before its first kick decided anything (failed or
     abandoned at `planned` with nothing selected, or skipped with no reason) — on those the posting days in
-    force now decide (`judged_posting_day`), exactly as before."""
+    force now decide (`judged_posting_day`), exactly as before.
+
+    Review L7(d) (migration 215): the caller reads the NEWEST run of the (day, lane), which may be one of the owner's
+    replacement runs — True for any row with replacement ≥ 1, even one still `planned` with nothing selected: the
+    request function inserts one only for a `media_ready` Money Map run of that day, so its day posted. A number that
+    does not read back is no evidence either way: the row's own work decides, as above."""
     if not isinstance(run, dict):
         return False
+    replacement = _replacement_number(run)
+    if replacement is not None and replacement >= 1:
+        return True
     status = _key(run.get("status"))
     reason = _key(_meta(run).get("skip_reason"))
     if status == "skipped" and reason == "rest_day":
@@ -1257,8 +1476,19 @@ def _check_stamp(checked: datetime) -> str:
 def evaluate_run_final(
     run: Optional[Dict[str, Any]], *, run_date: date, posting_day: bool, now: datetime, max_attempts: Any,
     stale_seconds: Any, checked_at: Optional[datetime], nightly: str = NIGHTLY_NEVER, lane: str = RUN_LANE_MAIN,
-    lane_open: bool = True,
+    lane_open: bool = True, notice: Any = None, replace_on: bool = True,
 ) -> Optional[str]:
+    """`final_verdict`'s text — the final word on the run of `run_date`, or None."""
+    return final_verdict(run, run_date=run_date, posting_day=posting_day, now=now, max_attempts=max_attempts,
+                         stale_seconds=stale_seconds, checked_at=checked_at, nightly=nightly, lane=lane,
+                         lane_open=lane_open, notice=notice, replace_on=replace_on).text
+
+
+def final_verdict(
+    run: Optional[Dict[str, Any]], *, run_date: date, posting_day: bool, now: datetime, max_attempts: Any,
+    stale_seconds: Any, checked_at: Optional[datetime], nightly: str = NIGHTLY_NEVER, lane: str = RUN_LANE_MAIN,
+    lane_open: bool = True, notice: Any = None, replace_on: bool = True,
+) -> HealthVerdict:
     """The final word on the run of `run_date`, judged from `final_hour_et()` the next day (`final_due`: the
     worker's last tick that may still touch it has run) — or None when the nightly check already said all
     there is to say. Pure. `checked_at` is WHEN that check judged the run (`nightly_check_time`: the claim
@@ -1310,13 +1540,41 @@ def evaluate_run_final(
     happened — check the marketing-worker cron" (the claim gate refused every retry: the cron is healthy) and never
     "the worker resumes a day only until …": its line names the closed lane (`_LANE_CLOSED`). The main lane ignores
     it. Residual, accepted: the lane is read when the word is judged, not during the retry window, so a lane reopened
-    before the word (or closed only after the window) is judged by its state now."""
+    before the word (or closed only after the window) is judged by its state now.
+
+    Migration 215: as in `health_verdict` — one of the owner's replacement runs is judged FIRST by its own rules
+    (`_replacement_verdict`, with `notice` and `replace_on` from the caller); its memory line rides along only when the
+    nightly check cannot have carried it (no check, or the run changed after it), and a replacement that ended
+    `media_ready` after the check is never "recovered at": its bundles told him. A day's own run ignores both."""
+    _lane_words(lane)
+    replacement = _replacement_number(run)
+    if replacement != 0:
+        aware_now = _aware(now)
+        checked = _aware(checked_at) if isinstance(checked_at, datetime) else None
+        touched = _touched(run) if isinstance(run, dict) else None
+        return _replacement_verdict(
+            run, replacement, run_date=run_date, now=aware_now, lane=lane, lane_open=lane_open, notice=notice,
+            replace_on=replace_on, memory_ok=checked is None or (touched is not None and touched > checked),
+            max_attempts=max_attempts,
+            day_rules=lambda cap, n: _final_text(run, run_date=run_date, posting_day=True, now=now, max_attempts=cap,
+                                                 stale_seconds=stale_seconds, checked_at=checked_at, nightly=nightly,
+                                                 lane=lane, lane_open=lane_open, replacement=n))
+    return HealthVerdict(_final_text(run, run_date=run_date, posting_day=posting_day, now=now,
+                                     max_attempts=max_attempts, stale_seconds=stale_seconds, checked_at=checked_at,
+                                     nightly=nightly, lane=lane, lane_open=lane_open))
+
+
+def _final_text(run: Optional[Dict[str, Any]], *, run_date: date, posting_day: bool, now: datetime, max_attempts: Any,
+                stale_seconds: Any, checked_at: Optional[datetime], nightly: str, lane: str, lane_open: bool,
+                replacement: Any = 0) -> Optional[str]:
+    """The day-run rules of `final_verdict` — every run's before migration 215, byte for byte. `replacement` only
+    names the run (`_day_label`) when one of the owner's replacement runs falls back to them."""
     words = _lane_words(lane)
     if not posting_day:
         return None
     closed = _lane_closed(lane, lane_open)
     now = _aware(now)
-    day = _day_label(run_date, lane)
+    day = _day_label(run_date, lane, replacement)
     checked = _aware(checked_at) if isinstance(checked_at, datetime) else None
     if not isinstance(run, dict):
         if checked is not None:
@@ -1710,20 +1968,26 @@ def _post_lane_or_main(post: Dict[str, Any]) -> str:
 
 def _run_text(day: Optional[date], post: Dict[str, Any]) -> str:
     """A post's run as a digest row names it: "10-03" (byte for byte the rows of before), "11-17 · spotlight" for a
-    spotlight post, "?" without a readable run day."""
-    return lane_label(day.strftime("%m-%d"), _post_lane_or_main(post)) if day is not None else "?"
+    spotlight post, "11-27 · replacement 1" / "11-27 · spotlight · replacement 1" for a post of one of the owner's
+    replacement runs (migration 215, `run_service.post_replacement`), "?" without a readable run day."""
+    if day is None:
+        return "?"
+    return lane_label(day.strftime("%m-%d"), _post_lane_or_main(post), post_replacement(post) or 0)
 
 
-def _image_fallbacks(posts: List[Dict[str, Any]]
-                     ) -> List[Tuple[Optional[date], Optional[str], List[Tuple[str, int]]]]:
+def _image_fallbacks(posts: List[Dict[str, Any]]) -> List[Tuple[Any, ...]]:
     """The runs whose live posts carry `metadata.image_fallback` (POST_METADATA_IMAGE_FALLBACK — a code
     `create_posts` stamps on each post frozen as text where the day's picture should have gone), as (run day,
     lane, [(the reason in the owner's words, its posts)]): IMAGE_FALLBACK_REASONS' words in that order, an unknown
     code as fixed words last — never the stored value. Keyed by (day, lane) (migration 210): the main and the
     spotlight run of one day each froze their own picture, so each gets its own line, main first. The lane is
     the post key's (`_post_lane_or_main`). A post without a readable run day is under (None, None), listed last.
-    Pure."""
-    by_run: Dict[Tuple[Optional[date], Optional[str]], Counter] = {}
+    Pure.
+
+    Migration 215: keyed by (day, lane, replacement) — one of the owner's replacement runs froze its own picture, so
+    it gets its own line after its lane's day run; ITS tuple carries the replacement number as a fourth element
+    (day, lane, reasons, n), the way the memory peak carries its lane, so a day run's tuple is the one of before."""
+    by_run: Dict[Tuple[Optional[date], Optional[str], int], Counter] = {}
     for post in posts:
         code = _meta(post).get(POST_METADATA_IMAGE_FALLBACK)
         if not code:
@@ -1731,15 +1995,17 @@ def _image_fallbacks(posts: List[Dict[str, Any]]
         known = code if isinstance(code, str) and code in IMAGE_FALLBACK_REASONS else None
         day = post_run_date(post)
         lane = _post_lane_or_main(post) if day is not None else None
-        by_run.setdefault((day, lane), Counter())[known] += 1
-    out: List[Tuple[Optional[date], Optional[str], List[Tuple[str, int]]]] = []
-    for day, lane in sorted(by_run, key=lambda k: (k[0] is None, k[0] or date.min,
-                                                   RUN_LANES.index(k[1]) if k[1] in RUN_LANES else len(RUN_LANES))):
-        counts = by_run[(day, lane)]
+        replacement = (post_replacement(post) or 0) if day is not None else 0
+        by_run.setdefault((day, lane, replacement), Counter())[known] += 1
+    out: List[Tuple[Any, ...]] = []
+    for day, lane, replacement in sorted(
+            by_run, key=lambda k: (k[0] is None, k[0] or date.min,
+                                   RUN_LANES.index(k[1]) if k[1] in RUN_LANES else len(RUN_LANES), k[2])):
+        counts = by_run[(day, lane, replacement)]
         reasons = [(IMAGE_FALLBACK_REASONS[c], counts[c]) for c in IMAGE_FALLBACK_REASONS if counts.get(c)]
         if counts.get(None):
             reasons.append((_UNKNOWN_FALLBACK, counts[None]))
-        out.append((day, lane, reasons))
+        out.append((day, lane, reasons) if replacement == 0 else (day, lane, reasons, replacement))
     return out
 
 
@@ -1801,8 +2067,14 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date
     the main lane's) reads "spotlight: no run (a spotlight day)", and a day where no spotlight series had a record
     "spotlight: skipped — nothing qualified" (quiet in the nightly check, listed here). A row whose lane does not
     read back is listed apart ("lane ?: "), never folded into a known lane. With no spotlight row and the lane
-    closed, the rows are byte for byte what they were."""
-    by_slot: Dict[Tuple[date, str], Dict[str, Any]] = {}
+    closed, the rows are byte for byte what they were.
+
+    Migration 215: a (day, lane) may hold the owner's replacement runs beside its own: the day run's row first (once
+    closed, "skipped — replaced · Money Map"), then one row per replacement, by number, prefixed "replacement <n>: "
+    after the lane's prefix ("replacement 1: media_ready · Money Map", "spotlight: replacement 1: skipped — nothing
+    qualified …"); a number that does not read back is "replacement ?: ", never folded into the day run. The week's
+    memory peak names a replacement run by its number too. A week with no replacement lists the rows of before."""
+    by_slot: Dict[Tuple[date, str], List[Dict[str, Any]]] = {}
     for run in runs:
         if not isinstance(run, dict):
             continue
@@ -1813,29 +2085,41 @@ def _run_rows(runs: List[Dict[str, Any]], week_start: date, week_end: date
             lane = run_lane(run)
         except ValueError:
             lane = _UNREADABLE_LANE
-        by_slot[(d, lane)] = run
+        by_slot.setdefault((d, lane), []).append(run)
     rows: List[Tuple[date, str]] = []
-    # (MB, day, stage, that run's alert line, its lane)
-    peak: Optional[Tuple[float, date, str, int, str]] = None
+    # (MB, day, stage, that run's alert line, its lane, its replacement number — None when it does not read back)
+    peak: Optional[Tuple[Any, ...]] = None
     d = week_start
     while d <= week_end:
         for lane in RUN_LANES + (_UNREADABLE_LANE,):
-            run = by_slot.get((d, lane))
+            slot = by_slot.get((d, lane))
             prefix = _LANE_ROW_PREFIX[lane]
-            if run is None:
+            if not slot:
                 if lane == RUN_LANE_MAIN and selection.is_posting_day(d):
                     rows.append((d, "no run (a posting day)"))
                 elif lane == RUN_LANE_SPOTLIGHT and selection.is_spotlight_day(d):
                     rows.append((d, f"{prefix}no run (a spotlight day)"))
                 continue
-            text = _run_row_text(run)
-            if text:
-                rows.append((d, f"{prefix}{text}"))
-            for mb, stage in _memory_peaks(run):
-                if peak is None or mb > peak[0]:
-                    peak = (mb, d, stage, _memory_alert_mb(run), lane)
+            # the day run first, then its replacements by number (one that does not read back last)
+            for run in sorted(slot, key=lambda r: (_replacement_number(r) is None, _replacement_number(r) or 0)):
+                replacement = _replacement_number(run)
+                text = _run_row_text(run)
+                if text:
+                    rows.append((d, f"{prefix}{_replacement_row_prefix(replacement)}{text}"))
+                for mb, stage in _memory_peaks(run):
+                    if peak is None or mb > peak[0]:
+                        peak = (mb, d, stage, _memory_alert_mb(run), lane, replacement)
         d += timedelta(days=1)
     return rows, peak
+
+
+def _replacement_row_prefix(replacement: Optional[int]) -> str:
+    """How a digest run row names one of the owner's replacement runs (migration 215): nothing for a day's own run
+    (the rows of before), "replacement <n>: " for a replacement, "replacement ?: " for a number that does not read
+    back."""
+    if replacement == 0:
+        return ""
+    return f"replacement {replacement if replacement is not None else '?'}: "
 
 
 #: A run row whose lane does not read back (`run_service.run_lane` raises) — listed apart in the digest.
@@ -1843,8 +2127,18 @@ _UNREADABLE_LANE = "?"
 #: How a digest run row names its lane: nothing for the main lane (the rows of before, byte for byte).
 _LANE_ROW_PREFIX: Dict[str, str] = {RUN_LANE_MAIN: "", RUN_LANE_SPOTLIGHT: f"{RUN_LANE_SPOTLIGHT}: ",
                                     _UNREADABLE_LANE: "lane ?: "}
-#: A skip reason the digest says in words rather than its code ("skipped — nothing qualified").
-_SKIP_ROW_WORDS: Dict[str, str] = {"nothing_qualified": "nothing qualified"}
+#: A skip reason the digest says in words rather than its code ("skipped — nothing qualified"). Migration 215: a day
+#: run closed after the owner's "🔄 Next company" (`metadata.closed.reason` = replaced) reads "skipped — replaced"; a
+#: replacement closed unrun (REPLACEMENT_SKIP_REASON) "skipped — not run" — or, when a worker had started it,
+#: "skipped — not finished" (`_REPLACEMENT_STARTED_ROW_WORDS`).
+_SKIP_ROW_WORDS: Dict[str, str] = {"nothing_qualified": "nothing qualified", "replaced": "replaced",
+                                   REPLACEMENT_SKIP_REASON: "not run"}
+_REPLACEMENT_STARTED_ROW_WORDS = "not finished"
+#: The digest's rejection bucket for a post the owner's confirmed "🔄 Next company" rejected (migration 215:
+#: `metadata.review.replaced_by_run_id`, written only by the request function) — digest words only, never a review-bot
+#: verb or a REJECT_REASONS code (the bot never asks why for such a post).
+REPLACED_REASON = "replaced"
+REPLACED_REASON_WORDS = "replaced by the next company"
 
 
 def _run_row_text(run: Dict[str, Any]) -> str:
@@ -1859,6 +2153,8 @@ def _run_row_text(run: Dict[str, Any]) -> str:
         why = reason or _key(closed.get("reason"))
         if reason == "rest_day":
             text = ""
+        elif why == REPLACEMENT_SKIP_REASON and (_count(run.get("attempts")) or 0) > 0:
+            text = f"skipped — {_REPLACEMENT_STARTED_ROW_WORDS}"   # a worker had claimed it: it was not "not run"
         elif why:
             text = f"skipped — {_SKIP_ROW_WORDS.get(why, why)}"
     elif status == "failed":
@@ -2293,6 +2589,12 @@ def summarize_week(
         run_txt = _run_text(run_day, p)   # "10-03", or "11-17 · spotlight" for the spotlight lane's post
         if p.get("status") == "rejected":
             review = _meta(p).get("review") if isinstance(_meta(p).get("review"), dict) else {}
+            if replaced_by_run_id(p) is not None:
+                # Migration 215: rejected by the owner's confirmed "🔄 Next company" (the request function's review
+                # record), never by a ❌ — its own bucket, never "no reason" (the bot never asks why for it).
+                reasons[REPLACED_REASON] += 1
+                rejected_rows.append((_label(_platform(p)), run_txt, REPLACED_REASON_WORDS, _post_format(p)))
+                continue
             reason = review.get("reason")
             code = reason if isinstance(reason, str) and reason in REJECT_REASONS else None
             reasons[code or "none"] += 1
@@ -2363,6 +2665,15 @@ def summarize_week(
         "spend": spend_out, "latency": _latency(live), "runway": runway, "escalated": escalated_rows,
         "metrics_job": metrics_job, "runs": run_rows, "memory_peak": peak, "cost": cost,
     }
+
+
+def _fallback_run(item: Tuple[Any, ...]) -> str:
+    """The run a picture-fallback line names (`_image_fallbacks`): "Thu 10-01", "Thu 10-01 · spotlight" — and, for one
+    of the owner's replacement runs (migration 215: its tuple's fourth element), "Thu 10-01 · replacement 1"."""
+    day, lane = item[0], item[1]
+    if day is None:
+        return "an unreadable day"
+    return lane_label(_day(day), lane, item[3] if len(item) > 3 else 0)
 
 
 def _capped(rows: List[str], cap: int, indent: str = "  ") -> List[str]:
@@ -2582,9 +2893,11 @@ def _render_digest(r: Dict[str, Any], cap: int, score_cap: Optional[int] = None)
         if peak:
             mb, d, stage, alert = peak[:4]
             lane = peak[4] if len(peak) > 4 else RUN_LANE_MAIN
+            replacement = peak[5] if len(peak) > 5 else 0
             flag = f" ⚠️ above {_n(alert)} MB" if mb > alert else ""
-            # the spotlight run's peak is named by its lane (`lane_label`); the main run's exactly as before
-            day = lane_label(_day(d), lane)
+            # the spotlight run's peak is named by its lane (`lane_label`) and a replacement run's by its number
+            # (migration 215); the main day run's exactly as before
+            day = lane_label(_day(d), lane, replacement)
             lines.append(f"Worker memory peak: {_n(int(round(mb)))} MB ({stage}, {day}){flag}")
     lines.append("")
 
@@ -2614,6 +2927,8 @@ def _render_digest(r: Dict[str, Any], cap: int, score_cap: Optional[int] = None)
         if rej["rows"]:
             by = rej["by_reason"]
             reason_parts = [f"{REJECT_REASONS[c]} {_n(by[c])}" for c in REJECT_REASONS if by.get(c)]
+            if by.get(REPLACED_REASON):
+                reason_parts.append(f"{REPLACED_REASON_WORDS} {_n(by[REPLACED_REASON])}")
             if by.get("none"):
                 reason_parts.append(f"no reason {_n(by['none'])}")
             lines.append(f"Rejected {_n(len(rej['rows']))}: " + " · ".join(reason_parts))
@@ -2626,11 +2941,11 @@ def _render_digest(r: Dict[str, Any], cap: int, score_cap: Optional[int] = None)
             # Codes only, in the owner's words (IMAGE_FALLBACK_REASONS). "text posts instead", never "posted as
             # text": a member may have been rejected or expired, not posted.
             # Days, not runs: a day's main and spotlight run each get their own line below (one day, two lines).
-            days = len({d for d, _lane, _reasons in fallbacks})
+            days = len({item[0] for item in fallbacks})
             lines.append(f"🖼 Picture not used on {_plural(days, 'day', 'days')} (text posts instead):")
-            lines += _capped([f"{lane_label(_day(d), lane) if d is not None else 'an unreadable day'}: "
-                              + "; ".join(f"{words} ({_plural(n, 'post', 'posts')})" for words, n in reasons)
-                              for d, lane, reasons in fallbacks], cap)
+            lines += _capped([f"{_fallback_run(item)}: "
+                              + "; ".join(f"{words} ({_plural(n, 'post', 'posts')})" for words, n in item[2])
+                              for item in fallbacks], cap)
     if r.get("rehearsal"):
         lines.append(f"(+{_n(r['rehearsal'])} rehearsal rows — dry run, never publishable; not counted)")
     lines.append("")
@@ -2846,22 +3161,45 @@ async def _runway(svc: Any, today: date) -> Dict[str, Any]:
     # only `before_today` reaches may be a lesson.) Since migration 210 a day may hold TWO rows (the main lane's
     # and the spotlight lane's, newest first by creation): the main lesson is not always the first — a spotlight
     # retry after 16:15 ET lands above it — so every row of today counts (`_rows_of_today`), never only [:1].
-    today_picked = bool(selection.lesson_refs(with_today[:_rows_of_today(with_today, before_today, limit=limit)]))
+    # Since migration 215 the owner's replacement runs add up to REPLACEMENTS_PER_DAY more scripts to a day: their
+    # count today (one indexed read) widens the bound only on a day that holds one (review L7(b)).
+    rows = _rows_of_today(with_today, before_today, limit=limit,
+                          replacements_today=await _replacements_today(svc, today))
+    today_picked = bool(selection.lesson_refs(with_today[:rows]))
     return pool_runway(pool, selection.lesson_refs(with_today), today=today, today_picked=today_picked,
                        classes=classes, news_series=news_series)
 
 
-def _rows_of_today(with_today: List[Any], before_today: List[Any], *, limit: int) -> int:
+async def _replacements_today(svc: Any, today: date) -> int:
+    """How many of the owner's replacement runs `today` holds (`count_replacements`, both lanes) — the runway's bound on
+    today's rows (`_rows_of_today`). A failed read is a WARNING and the MOST a day can hold (RUNS_PER_DAY_MAX −
+    len(RUN_LANES)): the bound never undercounts today's rows, and a day with none reads the same as long as the two
+    ledger reads were not cut (the length difference decides then). Never raises but CancelledError."""
+    try:
+        return await svc.count_replacements(today)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        most = RUNS_PER_DAY_MAX - len(RUN_LANES)
+        logger.warning("marketing digest: today's replacement runs could not be counted (%s: %s) — the runway bounds "
+                       "today's rows by the most a day can hold (%d)", type(e).__name__, e, len(RUN_LANES) + most)
+        return most
+
+
+def _rows_of_today(with_today: List[Any], before_today: List[Any], *, limit: int, replacements_today: Any = 0) -> int:
     """How many of the newest rows of `with_today` (the ledger read through today) are TODAY's, given
     `before_today` (the same read stopping before today) and the read's `limit`. Pure; at most len(RUN_LANES) —
-    one script per run, one run per (day, lane).
+    one script per run, one run per (day, lane) — plus `replacements_today`, the owner's replacement runs today
+    (migration 215: each may add one script; clamped to 0..RUNS_PER_DAY_MAX − len(RUN_LANES), a value that is not a
+    count is 0). Review L7(b): with none today the bound — and so every answer — is the one of before.
 
     A read the limit did not cut holds every older row, so today's count is the length difference. A cut read
     (the ledger outgrew the limit) is matched by content: the smallest shift k for which `with_today[k:]` lines up
-    with `before_today` — the last len(RUN_LANES) − 1 positions left out of the comparison, since a day the limit
-    splits may come back as either of its rows. Two reads that line up at no shift (a row written between them, a
+    with `before_today` — the last (bound − 1) positions left out of the comparison, since a day the limit
+    splits may come back as any of its rows. Two reads that line up at no shift (a row written between them, a
     hand edit) fall back to the old rule — one row when they differ — logged at WARNING, never a guess beyond it."""
-    lanes = len(RUN_LANES)
+    extra = replacements_today if type(replacements_today) is int and replacements_today > 0 else 0
+    lanes = len(RUN_LANES) + min(extra, RUNS_PER_DAY_MAX - len(RUN_LANES))
     if len(with_today) < limit:
         k = len(with_today) - len(before_today)
         if 0 <= k <= lanes:
@@ -2939,7 +3277,11 @@ async def gather_digest(svc: Any, now: datetime) -> Dict[str, Any]:
     spend = await _optional("X spend", _spend(svc, now))
     # The cost line: X posts touched since the week before began (every charge — a metrics read on an
     # old post, a back-dated correction — bumps its row's updated_at), the week before's runs (this
-    # week's are `runs`), and both weeks' script token counts. Each read fails alone.
+    # week's are `runs`), and both weeks' script token counts. Each read fails alone. Since migration 215 the run and
+    # script reads also hold the owner's replacement runs (their bounds are days × RUNS_PER_DAY_MAX), so their worker
+    # time, tokens and art are counted — never "unreadable" for a week that held replacements. Review L7(c), accepted:
+    # that bound is looser than the old days × lanes for every window, so a hand-edited extra row meets the reads'
+    # double-count guard later (`script_tokens_between` still refuses two scripts of one (day, lane, replacement)).
     charge_rows = await _optional("the X charge journal",
                                   svc.list_charge_rows_since("x", prev_start, limit=X_CHARGE_ROW_LIMIT))
     prev_runs = await _optional("the week before's runs", svc.list_runs_between(prev_week_start, prev_week_end))
@@ -2975,16 +3317,22 @@ _DEFAULT_RETRY_AFTER = 60
 _PACER = telegram_pacing.PACER
 
 
-async def _send_one(chat_id: int, text: str, *, what: str) -> Tuple[bool, Optional[str], bool]:
+async def _send_one(chat_id: int, text: str, *, what: str,
+                    reply_markup: Optional[Dict[str, Any]] = None) -> Tuple[bool, Optional[str], bool]:
     """Send ONE plain-text message (never split, never a `parse_mode`). Returns (sent, why not,
     rate_limited). A 429 sets the SHARED flood back-off (`review_service._rate_limited_until`), so the
     review sweep and the feed hold off too and no report claims its day until it has passed; any other
-    Telegram failure is logged and retried on a later tick."""
+    Telegram failure is logged and retried on a later tick. `reply_markup` (migration 215) only when a run-health
+    message carries a replacement's notice that may still restore its original ("↩ Post {SYM} after all"): every other
+    message is sent exactly as before, with no keyboard key at all."""
     if utf16_len(text) > MAX_DIGEST_UNITS:   # never: compose_digest fits — but never two messages either
         text = _truncate_utf16(text, MAX_DIGEST_UNITS - 1) + "…"
     try:
         await _PACER.wait()
-        await telegram.send_message(chat_id, text)
+        if reply_markup is None:
+            await telegram.send_message(chat_id, text)
+        else:
+            await telegram.send_message(chat_id, text, reply_markup=reply_markup)
     except asyncio.CancelledError:
         raise
     except TelegramRateLimitException as e:
@@ -3061,29 +3409,115 @@ def _main_lane_nightly(run_date: date, spot: Any, how: str) -> str:
     return how
 
 
+# ── replacement runs in the run-health jobs (migration 215, amendment A10) ────
+# The nightly check and the final word judge the NEWEST run of each (day, lane) (`get_run_for_date`), which may be one
+# of the owner's "🔄 Next company" replacements. Its ending reaches the owner as ONE message: when one of these jobs
+# meets an ending whose notice has not gone out, it sends THE SAME text the review bot's notice step would (one builder,
+# `review_service.replacement_notice`) and stamps `replacement_reported` itself AFTER its message went out — through the
+# one stamp writer, `review_service.stamp_replacement_reported` — so the notice step never sends it a second time. A
+# lost stamp re-sends it there (at least once, the bundles' own rule). A day's own runs read nothing new.
+
+
+async def _replacement_notice_for(svc: Any, run: Any, at: datetime) -> Optional[Any]:
+    """The review bot's notice for a replacement run's ending (`review_service.replacement_notice`), for a run-health
+    job to send in its place — or None: no run, a day's own run (no read at all), a number that does not read back, a
+    notice already stamped, nothing due. Reads the run's posts only when the builder needs them
+    (`review_service._notice_needs_posts`: a media_ready run, or one that ended at the assets_ready checkpoint). Never
+    raises but CancelledError: a failed read or a notice that cannot be built is a WARNING and None — the verdict then
+    falls back to the day-run text for an ending (loud, never silence), and to the memory line for a media_ready run
+    (the notice step speaks for it)."""
+    replacement = _replacement_number(run)
+    if replacement is None or replacement < 1 or _meta(run).get(RUN_META_REPLACEMENT_REPORTED) is not None:
+        return None
+    run_id = run.get("id")
+    try:
+        if not isinstance(run_id, str) or review_service.canonical_post_id(run_id) != run_id:
+            raise ValueError(f"run id {str(run_id)[:40]!r} is not a canonical uuid")
+        posts = await review_service._run_posts(svc, run_id) if review_service._notice_needs_posts(run) else None
+        return review_service.replacement_notice(run, now=at, posts=posts)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("marketing run health: the notice for replacement run_id=%s (%s) could not be built (%s: %s) — "
+                       "judged without it (an ending gets the day-run alert; the review bot's notice step retries)",
+                       str(run_id)[:40], run_label(run), type(e).__name__, e)
+        return None
+
+
+def _replace_on_for(runs: Iterable[Any]) -> bool:
+    """MARKETING_REPLACE_ENABLED now (`selection.replacement_on`) — read only when one of `runs` is a replacement no
+    worker started (the one text that names the switch, H1); True otherwise, unused, so a day's own runs read nothing
+    new."""
+    for run in runs:
+        replacement = _replacement_number(run)
+        if replacement is not None and replacement >= 1 and replacement_unstarted(run):
+            return selection.replacement_on()
+    return True
+
+
+def _notice_keyboard(verdicts: Iterable[HealthVerdict]) -> Optional[Dict[str, Any]]:
+    """The restore buttons ("↩ Post {SYM} after all") of every notice a run-health message carries, as ONE keyboard
+    (each button names its own replaced run), or None when it carries none — the message is then sent exactly as
+    before (no keyboard key)."""
+    rows: List[Any] = []
+    for verdict in verdicts:
+        keyboard = getattr(verdict.notice, "keyboard", None) if verdict.notice is not None else None
+        if isinstance(keyboard, dict) and isinstance(keyboard.get("inline_keyboard"), list):
+            rows += keyboard["inline_keyboard"]
+    return {"inline_keyboard": rows} if rows else None
+
+
+def _carried_memory(verdict: HealthVerdict) -> bool:
+    """Did this run-health verdict's text carry the run's memory-peak line beside its notice? `_replacement_verdict`
+    appends it to the notice's own text (`_with_memory`) and nothing else ever differs, so a text longer than the
+    notice's is exactly that. Recorded in the stamp (`replacement_reported.memory`): the final word, which reads that
+    stamp's own write as a change after the check, must not send the same peak a second time (review 2026-11-27)."""
+    notice_text = getattr(verdict.notice, "text", None)
+    return isinstance(verdict.text, str) and isinstance(notice_text, str) and verdict.text != notice_text
+
+
+async def _stamp_notices(svc: Any, judged: Iterable[Tuple[Any, HealthVerdict]], *, at: datetime, what: str) -> None:
+    """After a run-health message went out: stamp `replacement_reported` on every replacement whose notice it carried
+    (`review_service.stamp_replacement_reported` — one fenced write each, recording whether the memory line went with
+    it; a miss is its own WARNING, and the notice step then sends that notice again: at least once)."""
+    for run, verdict in judged:
+        if verdict.notice is None or not isinstance(run, dict):
+            continue
+        stamped = await review_service.stamp_replacement_reported(svc, str(run.get("id")), verdict.notice.code, now=at,
+                                                                  memory_shown=_carried_memory(verdict))
+        logger.info("marketing %s: replacement notice %s for run_id=%s (%s) sent in it — stamped=%s", what,
+                    verdict.notice.code, run.get("id"), run_label(run), stamped)
+
+
 async def _health_work(chat_id: int, at: datetime, counters: Dict[str, int]) -> Tuple[bool, int, Optional[str]]:
-    """Today's runs — the main lane's and the spotlight lane's — judged by `evaluate_run_health`; ONE message when
+    """Today's runs — the main lane's and the spotlight lane's — judged by `health_verdict`; ONE message when
     something is wrong with either. Done (True) when there is nothing to say or the message went out. A failed
     read of either lane's run raises: the attempt fails and a later tick judges both again (never one lane on a
-    guess about the other)."""
+    guess about the other). A replacement's notice it sends is stamped after the send (`_stamp_notices`)."""
     today = _et_day(at)
     svc = get_marketing_run_service()
     run = await svc.get_run_for_date(today)
     spot = await svc.get_run_for_date(today, lane=RUN_LANE_SPOTLIGHT)
     counters["checked"] += 1
     knobs = dict(now=at, max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
-                 stale_seconds=settings.MARKETING_RUN_STALE_SECONDS)
-    text = _one_message((
-        evaluate_run_health(run, run_date=today, posting_day=selection.is_posting_day(today), **knobs),
-        evaluate_run_health(spot, run_date=today, posting_day=_spotlight_day(today, spot), lane=RUN_LANE_SPOTLIGHT,
-                            lane_open=selection.is_spotlight_day(today), **knobs),
-    ))
+                 stale_seconds=settings.MARKETING_RUN_STALE_SECONDS, replace_on=_replace_on_for((run, spot)))
+    verdicts = (
+        health_verdict(run, run_date=today, posting_day=selection.is_posting_day(today),
+                       notice=await _replacement_notice_for(svc, run, at), **knobs),
+        health_verdict(spot, run_date=today, posting_day=_spotlight_day(today, spot), lane=RUN_LANE_SPOTLIGHT,
+                       lane_open=selection.is_spotlight_day(today),
+                       notice=await _replacement_notice_for(svc, spot, at), **knobs),
+    )
+    text = _one_message(v.text for v in verdicts)
     if text is None:
         logger.info("marketing run health %s: nothing to report (status=%s, spotlight status=%s)", today,
                     _status_of(run), _status_of(spot))
         return True, 0, None
-    sent, why, limited = await _send_one(chat_id, text, what=f"run-health alert for {today}")
+    what = f"run-health alert for {today}"
+    sent, why, limited = await _send_one(chat_id, text, what=what, reply_markup=_notice_keyboard(verdicts))
     _tally(counters, sent, limited)
+    if sent:
+        await _stamp_notices(svc, zip((run, spot), verdicts), at=at, what=what)
     return (True, 1, None) if sent else (False, 0, why)
 
 
@@ -3111,23 +3545,29 @@ async def _final_work(chat_id: int, at: datetime, counters: Dict[str, int]) -> T
     spot = await svc.get_run_for_date(run_date, lane=RUN_LANE_SPOTLIGHT)
     counters["checked"] += 1
     knobs = dict(run_date=run_date, now=at, max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
-                 stale_seconds=settings.MARKETING_RUN_STALE_SECONDS, checked_at=checked_at, nightly=how)
+                 stale_seconds=settings.MARKETING_RUN_STALE_SECONDS, checked_at=checked_at, nightly=how,
+                 replace_on=_replace_on_for((run, spot)))
     # B3PD-2: a past day is a posting day by its own record too — never only by TODAY's posting days. The one
     # nightly check judged both lanes (it is due on either lane's day), so what it SAID serves both (`knobs`); whether
     # its success proves the MAIN lane's day is `_main_lane_nightly`'s call.
     main_posting_day = judged_posting_day(run_date, nightly=_main_lane_nightly(run_date, spot, how), run=run)
-    text = _one_message((
-        evaluate_run_final(run, posting_day=main_posting_day, **knobs),
-        evaluate_run_final(spot, posting_day=_spotlight_day(run_date, spot), lane=RUN_LANE_SPOTLIGHT,
-                           lane_open=selection.is_spotlight_day(run_date), **knobs),
-    ))
+    verdicts = (
+        final_verdict(run, posting_day=main_posting_day, notice=await _replacement_notice_for(svc, run, at), **knobs),
+        final_verdict(spot, posting_day=_spotlight_day(run_date, spot), lane=RUN_LANE_SPOTLIGHT,
+                      lane_open=selection.is_spotlight_day(run_date),
+                      notice=await _replacement_notice_for(svc, spot, at), **knobs),
+    )
+    text = _one_message(v.text for v in verdicts)
     if text is None:
         logger.info("marketing run health (final) %s: nothing to add to the nightly check of %s (status=%s, "
                     "spotlight status=%s)", run_date, _et_stamp(checked_at) if checked_at is not None else "(none)",
                     _status_of(run), _status_of(spot))
         return True, 0, None
-    sent, why, limited = await _send_one(chat_id, text, what=f"final run-health word for {run_date}")
+    what = f"final run-health word for {run_date}"
+    sent, why, limited = await _send_one(chat_id, text, what=what, reply_markup=_notice_keyboard(verdicts))
     _tally(counters, sent, limited)
+    if sent:
+        await _stamp_notices(svc, zip((run, spot), verdicts), at=at, what=what)
     return (True, 1, None) if sent else (False, 0, why)
 
 

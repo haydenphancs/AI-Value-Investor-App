@@ -180,13 +180,16 @@ MEASURE_MAX_AGE = timedelta(days=30)
 #: platforms × 4 posting days a week × 30 days ≈ 140 rows today; at Batch 3's seven days with its three
 #: extra videos (Facebook, LinkedIn, Threads) ~11 a day × 30 days ≈ 330.
 MEASURE_SCAN_LIMIT = 300
-#: The ceiling, never the expected volume: one run per (day, lane) (`marketing_runs` UNIQUE (run_date, lane),
-#: migration 210 — the main lane and the spotlight lane) records at most one post per (platform, format)
-#: (`marketing_posts` UNIQUE (run_id, platform, format) over POST_FORMATS_BY_PLATFORM's 13 pairs plus Batch 3's 3
-#: of EXTRA_POST_FORMATS_BY_PLATFORM — 16), published on its run day or the next, so 30 days (plus a week of slack
-#: for a late reconcile) hold at most 37 × 16 × 2 = 1,184 published posts: 5 × 300 = 1,500 is that bound (4 → 5
-#: pages with the spotlight lane; a test derives it from the two maps and RUN_LANES, with room for one more
-#: pair, so widening them past it fails the build).
+#: The ceiling, never the expected volume: at most one PUBLISHING run per (day, lane) (migration 210 — the main lane
+#: and the spotlight lane) records at most one post per (platform, format) (`marketing_posts` UNIQUE (run_id,
+#: platform, format) over POST_FORMATS_BY_PLATFORM's 13 pairs plus Batch 3's 3 of EXTRA_POST_FORMATS_BY_PLATFORM —
+#: 16), published on its run day or the next, so 30 days (plus a week of slack for a late reconcile) hold at most
+#: 37 × 16 × 2 = 1,184 published posts: 5 × 300 = 1,500 is that bound (4 → 5 pages with the spotlight lane; a test
+#: derives it from the two maps and RUN_LANES, with room for one more pair, so widening them past it fails the
+#: build). Migration 215 (the owner's "🔄 Next company", `marketing_runs` UNIQUE (run_date, lane, replacement)) lets a
+#: (day, lane) hold up to three RUNS, still only one of which publishes: the request function refuses a run with a
+#: post in any status that can reach a platform (REPLACEMENT_BLOCKING_POST_STATUSES) and rejects every one still
+#: pending, and the restore puts the original back only while its replacement made no post at all (amendment A13).
 MEASURE_SCAN_PAGES = 5
 #: No new platform read starts after this many seconds in one tick.
 READ_BUDGET_SECONDS = 120.0

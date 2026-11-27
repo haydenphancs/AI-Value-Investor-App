@@ -43,6 +43,59 @@ NEWS_CLASSES = ("C", "F")
 RUN_LANE_MAIN = "main"
 RUN_LANE_SPOTLIGHT = "spotlight"
 RUN_LANES = (RUN_LANE_MAIN, RUN_LANE_SPOTLIGHT)
+
+# ── Replacement runs (migration 215, owner decision 2026-11-27: "Full replacement … Max 2 replacements a day. Money
+# Map posts only."). The review bot's "🔄 Next company" asks for a NEW run of the same (day, lane) — replacement 1 or
+# 2 — through ONE Postgres function that rejects the original's pending posts and inserts the planned row in one
+# transaction; "↩ Post {SYM} after all" undoes it through a second one while the replacement made no post. Every value
+# below is pinned equal to the SQL by tests/test_marketing_replacement_sql.py.
+#: `marketing_runs.replacement` CHECK (replacement BETWEEN 0 AND 2), per (day, lane); also the request's `c_max`.
+RUN_REPLACEMENT_MAX = 2
+#: The request's `c_per_day`: replacement rows per ET day over BOTH lanes. A replacement that found nothing still used
+#: its slot, so the cap cannot loop.
+REPLACEMENTS_PER_DAY = 2
+#: The most runs (so scripts: one per run) one ET day can hold — every per-day read bound derives from it.
+RUNS_PER_DAY_MAX = len(RUN_LANES) + REPLACEMENTS_PER_DAY
+#: The request's `c_series`: only a Money Map run may be replaced, and a replacement only ever posts Money Map.
+REPLACEABLE_SERIES: Tuple[str, ...] = ("money_map",)
+#: A replacement's own attempts cap (the claim takes min(this, MARKETING_MAX_RUN_ATTEMPTS)); the restore's
+#: `c_max_attempts` (a `failed` replacement below it may still be re-claimed and post, so it cannot be restored).
+REPLACEMENT_MAX_ATTEMPTS = 2
+#: `public.marketing_request_replacement(p_run_id, p_by, p_not_after)` — every `outcome` it can return.
+REPLACEMENT_REQUEST_RPC = "marketing_request_replacement"
+REPLACEMENT_OUTCOMES: Tuple[str, ...] = ("requested", "not_found", "too_late", "already_replaced", "not_ready",
+                                         "not_money_map", "member_decided", "nothing_pending", "cap_reached")
+#: Refusals the web answers BEFORE calling the function (never an SQL outcome): the replace switch is off; the
+#: spotlight lane is closed for the run's date (no claim would ever read the row); Money Map is switched off
+#: (MARKETING_NEWS_SERIES / MARKETING_CONTENT_CLASSES), so the replacement could never post. "too_late" is checked
+#: on both sides and is an SQL outcome. A run whose request already LANDED (`run_service.replacement_request_landed`)
+#: is asked of the function anyway — with a cutoff that has passed, so it can only read the replay back — and the
+#: local refusal answers only when that is not a replay (review 2026-11-27: a lost response retried late).
+REPLACEMENT_REFUSALS_LOCAL: Tuple[str, ...] = ("switched_off", "lane_closed", "money_map_off")
+#: The request's blocking set: a run with a post in ANY of these is final for today (every status from which a post
+#: can reach, or has reached, a platform). pending_review, rejected and skipped never post.
+REPLACEMENT_BLOCKING_POST_STATUSES: Tuple[str, ...] = ("approved", "queued", "published", "failed", "retracted")
+#: `public.marketing_restore_replaced(p_run_id, p_by, p_now)` — every `outcome` it can return. A second restore of
+#: the same run answers `restored` with `replayed: true` (read back, never a second write).
+REPLACEMENT_RESTORE_RPC = "marketing_restore_replaced"
+RESTORE_OUTCOMES: Tuple[str, ...] = ("restored", "not_found", "not_restorable", "replacement_running",
+                                     "replacement_has_posts", "too_late")
+#: A replacement in one of these statuses can never post again (no claim takes it), so its original may be restored
+#: when it made no post; a `failed` one counts only at REPLACEMENT_MAX_ATTEMPTS.
+RESTORE_FINAL_RUN_STATUSES: Tuple[str, ...] = ("skipped", "published", "media_ready")
+#: `marketing_runs.metadata.skip_reason` of a replacement closed unrun (server-written), and why it was.
+REPLACEMENT_SKIP_REASON = "replacement_expired"
+REPLACEMENT_EXPIRED_WHY: Tuple[str, ...] = ("start_window_closed", "day_over", "switched_off", "lane_closed")
+#: Server-owned run metadata keys of the feature (all in SERVER_OWNED_RUN_METADATA): on the REPLACED run, who asked
+#: and what it became (`replaced_by`) and, after a restore, `restored_from`; on the REPLACEMENT, what it replaces
+#: (`replacement_request`, never the owner's id — the worker reads this row), that the owner was told how it ended
+#: (`replacement_reported`) and why it was closed unrun (`replacement_expired`).
+RUN_META_REPLACED_BY = "replaced_by"
+RUN_META_REPLACEMENT_REQUEST = "replacement_request"
+RUN_META_REPLACEMENT_REPORTED = "replacement_reported"
+RUN_META_REPLACEMENT_EXPIRED = "replacement_expired"
+RUN_META_RESTORED_FROM = "restored_from"
+
 #: `output.authorship` of a template package (the writer's packages are "ai", or carry none).
 TEMPLATE_AUTHORSHIP = "template"
 #: The one `output.video_layout` value: one text card per narration line, after an opening card.
@@ -130,7 +183,12 @@ WORKER_RUN_STATUSES = ("failed", "skipped", "media_ready")
 #: `series` / `series_trail` (drop 2) are the day's news series and the fallback chain that reached
 #: it, mirrored from the script's fact sheet by `script_service._heal_mirror` — the digest and the
 #: review bundle print them, so the worker must not be able to rewrite why the day says what it says.
-SERVER_OWNED_RUN_METADATA = ("claim_nonce", "closed", "worker_capabilities", "series", "series_trail")
+#: Migration 215 (appended LAST): the replacement keys (RUN_META_*, above) — written by the two SQL functions and the
+#: web's expiry / notice steps, never by the worker, which holds a replacement row and would otherwise be able to
+#: rewrite what it replaces or silence the owner's notice.
+SERVER_OWNED_RUN_METADATA = ("claim_nonce", "closed", "worker_capabilities", "series", "series_trail",
+                             RUN_META_REPLACED_BY, RUN_META_REPLACEMENT_REQUEST, RUN_META_REPLACEMENT_REPORTED,
+                             RUN_META_REPLACEMENT_EXPIRED, RUN_META_RESTORED_FROM)
 
 #: What a worker may declare it can render (`RunClaimRequest.capabilities`; drop 1, 2026-10-09). The
 #: claim records the declaration on the run (`metadata.worker_capabilities`, server-owned), REPLACING

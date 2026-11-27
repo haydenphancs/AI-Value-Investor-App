@@ -9305,13 +9305,14 @@ async def test_restyle_a_template_output_whose_stored_footer_is_not_a_short_one_
 
 def test_final_stale_template_problem_names_any_version_but_this_codes():
     assert mrs.stale_template_problem({"template_version": _TPL_VERSION}) is None
-    for out in ({"template_version": "news-v21"}, {"template_version": "news-v24"}, {}, {"template_version": None},
-                {"template_version": 23}, None, "news-v23"):
+    # news-v24 (2026-11-27): the shipped news-v23 is now another version too; "news-v25" stands for a later one
+    for out in ({"template_version": "news-v21"}, {"template_version": "news-v23"}, {"template_version": "news-v25"},
+                {}, {"template_version": None}, {"template_version": 23}, None, "news-v24"):
         problem = mrs.stale_template_problem(out)
         assert problem is not None and _TPL_VERSION in problem, out
 
 
-@pytest.mark.parametrize("version", ["news-v21", "news-v22", None])
+@pytest.mark.parametrize("version", ["news-v21", "news-v22", "news-v23", None])   # news-v23: shipped, before v24
 @pytest.mark.parametrize("kind", ["card", "video"])
 @pytest.mark.asyncio
 async def test_final_a_template_another_version_composed_registers_no_media_and_is_the_409_skip(svc, caplog, kind,
@@ -9435,7 +9436,7 @@ def _theme_script(svc, run_date: str, source_ref: Optional[str], *, template_id:
 
 
 @pytest.mark.asyncio
-async def test_phase3_theme_refs_between_reads_every_theme_key_of_the_whole_window_oldest_first(svc):
+async def test_phase3_theme_scripts_between_reads_every_theme_key_of_the_whole_window_oldest_first(svc):
     """The rotation's OWN bounded read (`script_service._theme_source_kw` asks THEME_HISTORY_DAYS back): every theme
     script of the window — any status, old and new keys — oldest first, nothing outside it, no other series, no
     row without a key. Twelve weeks of weekly theme posts all come back however much else was posted (the general
@@ -9453,11 +9454,15 @@ async def test_phase3_theme_refs_between_reads_every_theme_key_of_the_whole_wind
     _theme_script(svc, (start - timedelta(days=1)).isoformat(), "news:theme_explainer:too-old:biggest:x")
     _theme_script(svc, (end + timedelta(days=1)).isoformat(), "news:theme_explainer:future:biggest:x")
     _theme_script(svc, end.isoformat(), None)                                      # no key: a crash before the pick
-    got = await svc.theme_refs_between(start, end)
+    rows = await svc.theme_scripts_between(start, end)
+    got = [r["source_ref"] for r in rows]
     assert len(got) == 12 and all(r.startswith("news:theme_explainer:slug-") for r in got)
+    # owner decision 2026-11-27 (the weekly backup cap): each row carries its day and its lane (none = main)
+    assert [r["run_date"] for r in rows] == [d.isoformat() for d in reversed(weekly)]
+    assert {r["lane"] for r in rows} == {"main"} and all(r["run_id"] for r in rows)
     assert [R.theme_ref_items(r)[0] for r in got] == [f"slug-{i}" for i in range(12)]          # oldest first
     assert all(R.theme_ref_items(r) is not None for r in got)
-    assert await svc.theme_refs_between(end, start) == []                          # inverted: nothing read
+    assert await svc.theme_scripts_between(end, start) == []                       # inverted: nothing read
     # the window the script service asks for reaches ten weeks back with room to spare
     assert (end - start).days == R.THEME_HISTORY_DAYS >= 70
 
@@ -9466,10 +9471,11 @@ async def test_phase3_theme_refs_between_reads_every_theme_key_of_the_whole_wind
 async def test_phase3_the_theme_read_is_bounded_and_raises_past_the_bound(svc):
     for lane in ("main", "spotlight"):
         _theme_script(svc, "2026-11-25", f"news:theme_explainer:a-{lane}:make_money:2026-11-25", lane=lane)
-    assert len(await svc.theme_refs_between(date(2026, 11, 25), date(2026, 11, 25))) == 2
+    got = await svc.theme_scripts_between(date(2026, 11, 25), date(2026, 11, 25))
+    assert sorted(r["lane"] for r in got) == ["main", "spotlight"]
     _theme_script(svc, "2026-11-25", "news:theme_explainer:b:make_money:2026-11-25")
-    with pytest.raises(mrs.MarketingRunError, match="theme_refs_between: more than 2 theme scripts"):
-        await svc.theme_refs_between(date(2026, 11, 25), date(2026, 11, 25))
+    with pytest.raises(mrs.MarketingRunError, match="theme_scripts_between: more than 2 theme scripts"):
+        await svc.theme_scripts_between(date(2026, 11, 25), date(2026, 11, 25))
 
 
 _RANKED_FOOTER = "Not investment advice · Source: company filings and market data"

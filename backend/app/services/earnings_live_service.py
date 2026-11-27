@@ -354,7 +354,12 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
   residual below) still updates. A leftover with no figure of its own reads as the report before
   from its own next fold, and until then as its own, LIVE (minutes: an after-close company's day
   is asked every 15 min in the morning), never `reported` with nothing in it; a read never notes
-  the report before itself, or a true report would read as a stale row, its poll ended.
+  the report before itself (that read a true report as a stale row, its poll ended). A fold still
+  does, for a TRUE report with no figure yet beside a stale earlier row FMP filled first (the
+  fold's reading, older than this branch): it reads as that row, but a row of today reading so
+  keeps asking every 30 s while its day is read, so its own figures reach an open sheet; and once
+  a report has shown figures of its own it never reads through a row that does not stand
+  (`_record_shown`), a guard holding its figures included (the tenth 2026-11-26 review).
   Which row is the report follows the push where this process saw the landings
   (`_the_report_before`): an earlier row it saw land outside its own result window (a stale Friday
   row FMP filled on Monday morning, beside Monday's true report) is the one the push skipped, so
@@ -1257,10 +1262,16 @@ def _the_report_before(earlier: _Record) -> bool:
 
 def _record_shown(rec: _Record) -> _Record:
     """The record a report reads from: its own, or with no figures of its own, the report it
-    noted (ONE REPORT, TWO DATES in the module docstring)."""
+    noted (ONE REPORT, TWO DATES in the module docstring). Never a noted record that does not
+    stand as the report before (`_the_report_before`) once this record has shown figures of its
+    own (`landed_at`): this record is then the report, and a guard holding its figures (a dropped
+    digit) must not let a stale earlier row speak for it, in its sheet or in its push's inbox
+    rows and wakes (the tenth 2026-11-26 review)."""
     before = rec.report_before
     if (before is None or has_results(eps_metric(rec), revenue_metric(rec))
             or not has_results(eps_metric(before), revenue_metric(before))):
+        return rec
+    if rec.landed_at is not None and not _the_report_before(before):
         return rec
     return before
 
@@ -2601,6 +2612,16 @@ class EarningsLiveService:
             else:
                 snap = replace(snap, live_label=False, poll_seconds=sheet_poll_seconds(
                     snap.status, snap.preliminary, rec.day, n, labelled=False))
+        if (snap.reads_as is not None and rec.day == n.date() and snap.poll_seconds is None
+                and not has_results(eps_metric(rec), revenue_metric(rec))
+                and fmp_window_open(rec.day, n)):
+            # A row dated today with no figures of its own, reading as an earlier report, keeps
+            # asking while the loop reads its day: when it is the true report beside a stale
+            # earlier row FMP filled first, its own figures then reach an open sheet as they land
+            # (one that stopped asking stayed on the stale row's figures until reopened, the tenth
+            # 2026-11-26 review). A real leftover's open sheet costs memo reads. From 22:00 ET
+            # nothing is read for it, so nothing asks.
+            snap = replace(snap, poll_seconds=EARNINGS_LIVE_POLL_SECONDS)
         if snap.poll_seconds is None and needs_fmp(snap.eps, snap.revenue) and any(
                 self.awaits_first_load(d, n.date())
                 for d in (day, snap.reads_as) if d is not None):

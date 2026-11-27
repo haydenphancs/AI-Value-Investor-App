@@ -159,7 +159,8 @@ tick hands the watcher a second list (`EarningsLiveService.late_filing_symbols`,
     earlier same-day 2.02 8-K a restart or a late add left unread) waits for a calm round even once
     another class has read the real release; and the twin's wait is judged before its filing's two
     SEC reads, so in the seconds before a window closes it waits its next late read for a call that
-    would have started calm. A burst of releases FMP beat neither stretches a round nor
+    would have started calm, and in EDGAR's last minute it is not read that day (like the cut near
+    21:58). A burst of releases FMP beat neither stretches a round nor
     crowds the model chat and reports share;
   * a release read late lands on a record that holds FMP's figures and its landing already:
     it adds its outlook and its link alone. Its figures are dropped before they reach the record

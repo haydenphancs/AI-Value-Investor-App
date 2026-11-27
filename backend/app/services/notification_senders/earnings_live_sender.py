@@ -324,6 +324,10 @@ class _Told:
     # The texts a correction wrote, without the mark: rows holding one marked are the sender's own,
     # and follow the record whatever moves (`_corrections`).
     written: FrozenSet[str] = frozenset()
+    # The live track only: a held read after the push found no row held. Its one push made every
+    # live row of the key, so no wake can write the record's words again, and a surprise the record
+    # moves to is kept for its words no longer (`_seen_at_its_surprise`, the tenth review).
+    none_held: bool = False
 
 
 def reset() -> None:
@@ -924,7 +928,8 @@ def _note_told(kind: str, snap: LiveSnapshot, title: str, body: str) -> None:
         _know(known, said.body, words)
     told[kind] = _Told(title, known, said.body if said is not None else body,
                        then.held if then is not None else False,
-                       then.written if then is not None else frozenset())
+                       then.written if then is not None else frozenset(),
+                       then.none_held if then is not None else False)
     if kind == KIND_EARNINGS_LIVE and KIND_EARNINGS_RESULT not in told:
         result = _said_now(KIND_EARNINGS_RESULT, snap)
         told[KIND_EARNINGS_RESULT] = _Told(
@@ -944,7 +949,8 @@ def _seen_at_its_surprise(told: Dict[str, _Told], track: str, then: _Told, said:
     write them at it now, and a correction then judges that row at it too (`_Words.revenue_pcts`;
     the ninth 2026-11-26 review). Returns the track as it now stands."""
     words = then.known.get(said.body)
-    if words is None or said.revenue_pct is None or said.revenue_pct in words.revenue_pcts:
+    if (then.none_held or words is None or said.revenue_pct is None
+            or said.revenue_pct in words.revenue_pcts):
         return then
     known = dict(then.known)
     _know(known, said.body, _words_of(said))
@@ -971,12 +977,14 @@ async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
             continue
         for track, then in list(told.items()):
             again = (snap.symbol, snap.day, track)
-            if _failed_until.get(again, 0.0) > mono:
-                continue
             said = _said_now(_TRACKS[track][1], snap)
             if said is None:
                 continue
+            # Kept through a failed write's wait too: it does no I/O, and a wake may write the
+            # words meanwhile (the tenth review).
             then = _seen_at_its_surprise(told, track, then, said)
+            if _failed_until.get(again, 0.0) > mono:
+                continue
             due = _revise_after.get(again, 0.0)
             if said.body != then.seen:
                 owed.append((0, 0.0, len(owed), snap, track, then, said))
@@ -996,7 +1004,7 @@ async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
                           and (snap.symbol, snap.day) not in _result_rows_in_live_words):
             # Nothing the record contradicts (held rows wake to the record's own words), or no
             # result row in the live words yet: the texts are kept for when a wake writes one.
-            told[track] = _Told(then.title, known, said.body, False, then.written)
+            told[track] = _Told(then.title, known, said.body, False, then.written, then.none_held)
             _revise_after.pop(again, None)
             continue
         if tried >= MAX_REVISIONS_PER_ROUND:
@@ -1010,7 +1018,7 @@ async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
         for write in writes:
             _know(known, write.text, write.words)
         written = then.written | {write.text for write in writes}
-        told[track] = _Told(then.title, known, "", then.held, written)
+        told[track] = _Told(then.title, known, "", then.held, written, then.none_held)
         try:
             changed, held = await asyncio.to_thread(_write_corrections, key, rows_kind,
                                                     then.title, writes)
@@ -1022,7 +1030,8 @@ async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
                            track, type(e).__name__, e, HELD_RETRY_SECONDS)
             return revised
         _failed_until.pop(again, None)
-        told[track] = _Told(then.title, known, said.body, held, written)
+        told[track] = _Told(then.title, known, said.body, held, written,
+                            then.none_held or (not held and track == KIND_EARNINGS_LIVE))
         if held:
             _revise_after[again] = mono + HELD_RETRY_SECONDS
         else:

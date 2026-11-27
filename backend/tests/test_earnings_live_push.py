@@ -7871,3 +7871,124 @@ async def test_the_records_own_revenue_beside_a_rows_own_eps_carries_the_records
     await sender.dispatch_landings(_fmp_says(live, t2, eps=0.3608, revenue=16.6e9 * 1.24 / 10), t2)
     assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == (
         "Updated: Revenue beat consensus by 24% · EPS missed consensus by 12%.")
+
+
+# ── The tenth 2026-11-26 review ───────────────────────────────────────────────────────────────────
+
+_FRI, _MON = date(2026, 10, 30), date(2026, 11, 2)
+
+
+def _row_dated(day: date, *, eps=None, revenue=None, eps_est=0.41, rev_est=16.6e9) -> Dict[str, Any]:
+    return {"symbol": "INTC", "date": day.isoformat(), "companyName": "Intel Corporation",
+            "epsEstimated": eps_est, "revenueEstimated": rev_est,
+            "epsActual": eps, "revenueActual": revenue}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landed,held", [
+    ({"eps": 0.44}, {"eps": 0.044}),
+    ({"eps": 0.44, "revenue": 17.1e9}, {"eps": 0.044, "revenue": 1.71e9}),
+], ids=["eps_only_then_held", "both_then_both_held"])
+async def test_a_pushed_report_whose_figures_a_guard_holds_never_reads_as_a_stale_row(
+        dispatch, live, landed, held):
+    """The tenth review's critic: INTC moved its report from Friday to Monday. Monday landed and was
+    pushed; FMP then filled the stale Friday row (seen pending on Friday, so it does not stand) and
+    restated Monday with a dropped digit, which the guard holds. Monday showed no figure of its own,
+    its fold noted Friday, and every reader took Friday's figures at Friday's consensus as Monday's:
+    the inbox correction ("Revenue beat consensus by 14%", a revenue Monday never had) and a held
+    row's wake. A report that has landed reads as itself."""
+    key = "earnings_result:INTC:2026-11-02"
+    live.observe_rows(_FRI, [_row_dated(_FRI, eps_est=0.38, rev_est=15.0e9)],
+                      _et_time(_FRI, 16), fetched=True)
+    live.observe_rows(_MON, [_row_dated(_MON)], _et_time(_MON, 6), fetched=True)
+    at = _et_time(_MON, 7)
+    live.observe_rows(_MON, [_row_dated(_MON, **landed)], at, fetched=True)
+    await sender.dispatch_landings(live.landed_snapshots(at), at)
+    pushed = dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"]
+    live.observe_rows(_FRI, [_row_dated(_FRI, eps=0.44, revenue=17.1e9, eps_est=0.38,
+                                        rev_est=15.0e9)], _et_time(_MON, 7, 10), fetched=True)
+    assert not els._the_report_before(live._records[("INTC", _FRI)])
+    live.observe_rows(_MON, [_row_dated(_MON, **held)], _et_time(_MON, 7, 20), fetched=True)
+    t = _et_time(_MON, 7, 21)
+    await sender.dispatch_landings(live.landed_snapshots(t), t)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == pushed
+    sheet = live.snapshot("INTC", _MON, t)
+    assert sheet.reads_as is None and sheet.eps.checking and sheet.eps.estimate == 0.41
+    wake = sender.copy_at_wake(KIND_EARNINGS_LIVE, {"ticker": "INTC", "report_date": "2026-11-02"},
+                               _et_time(_MON, 7, 22), text=("INTC results are out", pushed))
+    assert wake is not None and wake.send is False and "beat" not in wake.body
+
+
+async def _a_correction_then_the_same_words_at_another_surprise(dispatch, live, *, held: bool,
+                                                                last_eps: float) -> str:
+    """Pushed at revenue +3% beside EPS +13.2%; FMP's +24.6% is corrected onto u1's row ("25%");
+    then +25.3% (the same words: no write); then the revenue held beside a restated EPS."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    await sender.dispatch_landings(_lands(live, at, eps=_EPS_PLUS_13, revenue=17.1e9), at)
+    if held:
+        dispatch.held_rows[(key, KIND_EARNINGS_LIVE)] = {
+            "u2": dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"]}
+    for minute, rev in ((20, _REV_PLUS_24_6), (40, _REV_PLUS_25_3)):
+        t = at + timedelta(minutes=minute)
+        await sender.dispatch_landings(_fmp_says(live, t, eps=_EPS_PLUS_13, revenue=rev), t)
+    t = at + timedelta(minutes=60)
+    await sender.dispatch_landings(
+        _fmp_says(live, t, eps=last_eps, revenue=_REV_PLUS_25_3 / 10), t)
+    return dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"]
+
+
+@pytest.mark.asyncio
+async def test_once_no_live_row_is_held_a_moved_surprise_is_no_longer_kept(dispatch, live):
+    """The tenth review: after its one push, a held read finding no live row held means no wake can
+    write the record's words again, yet every surprise the record moved to was still kept for them,
+    and u1's row lost a revenue verdict a push of its own pair (+24.6%, EPS +12.6%) keeps."""
+    row = await _a_correction_then_the_same_words_at_another_surprise(dispatch, live, held=False,
+                                                                      last_eps=0.4617)
+    assert row == "Updated: Revenue beat consensus by 25% · EPS beat consensus by 13%."
+
+
+@pytest.mark.asyncio
+async def test_while_a_live_row_is_held_a_moved_surprise_is_still_kept(dispatch, live):
+    """The control: u2 still held, so its wake may write the words at +25.3%, and the rows holding
+    them are judged at it too."""
+    row = await _a_correction_then_the_same_words_at_another_surprise(dispatch, live, held=True,
+                                                                      last_eps=0.4617)
+    assert row == "Updated: Revenue reported · EPS beat consensus by 13%."
+
+
+@pytest.mark.asyncio
+async def test_a_moved_surprise_is_kept_through_a_failed_writes_wait(dispatch, live, monkeypatch):
+    """The tenth review: the round skipped a track in its failed write's 300 s wait before keeping
+    the record's surprise, so a wake in that wait wrote seen words at an unseen surprise (+25.3%),
+    and its row was later judged at +24.6% alone. The sender's clock follows the minutes."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    clock = [0.0]
+    monkeypatch.setattr(sender, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    real_dispatch = sender.dispatch_landings
+
+    async def _dispatch_at(snaps, when):
+        clock[0] = (when - at).total_seconds()
+        return await real_dispatch(snaps, when)
+
+    monkeypatch.setattr(sender, "dispatch_landings", _dispatch_at)
+    await sender.dispatch_landings(_lands(live, at, eps=_EPS_PLUS_13, revenue=17.1e9), at)
+    dispatch.held_rows[(key, KIND_EARNINGS_LIVE)] = {
+        "u2": dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"]}
+    dispatch.revise_errors = [RuntimeError("a database blip")]
+    t = at + timedelta(minutes=20)
+    await sender.dispatch_landings(_fmp_says(live, t, eps=_EPS_PLUS_13, revenue=_REV_PLUS_24_6), t)
+    t = at + timedelta(minutes=21)
+    await sender.dispatch_landings(_fmp_says(live, t, eps=_EPS_PLUS_13, revenue=_REV_PLUS_25_3), t)
+    words = "Revenue beat consensus by 25% · EPS beat consensus by 13%."
+    dispatch.held_rows[(key, KIND_EARNINGS_LIVE)]["u2"] = words      # its wake, at +25.3%
+    dispatch.end_unread(key, KIND_EARNINGS_LIVE, "u2")
+    for minute, rev in ((24, _REV_PLUS_24_6), (30, _REV_PLUS_24_6)):
+        t = at + timedelta(minutes=minute)
+        await sender.dispatch_landings(_fmp_says(live, t, eps=_EPS_PLUS_13, revenue=rev), t)
+    t = at + timedelta(minutes=60)
+    await sender.dispatch_landings(
+        _fmp_says(live, t, eps=0.4608, revenue=_REV_PLUS_24_6 / 10), t)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u2"] == (
+        "Updated: Revenue reported · EPS beat consensus by 12%.")

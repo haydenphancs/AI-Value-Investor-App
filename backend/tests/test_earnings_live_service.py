@@ -10070,3 +10070,29 @@ def test_fmps_first_figures_in_the_fold_that_lands_the_report_say_after_the_land
     assert lines[0].startswith("EARNINGS_LIVE_LANDING") and " landed via=own_fetch " in lines[0]
     assert lines[1].startswith("EARNINGS_LIVE_FMP_FIRST") and lines[1].endswith("(after the landing)")
     assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 16, 41))] == ["INTC"]
+
+
+# ── The tenth 2026-11-26 review ───────────────────────────────────────────────────────────────────
+
+def test_a_row_of_today_reading_as_an_earlier_report_keeps_asking_while_its_day_is_read():
+    """The tenth review: a TRUE report with no figures yet, beside a stale earlier row FMP filled
+    first, reads as that row from its own next fold (the fold's reading, older than this branch),
+    and its poll followed that row's day: none, so an open sheet stayed on the stale row's figures
+    at the stale row's consensus. A row dated today with no figures of its own that reads as an
+    earlier report keeps asking every 30 s while the loop reads its day, and its own figures reach
+    the sheet as they land; from 22:00 ET nothing is read for it, so nothing asks."""
+    friday, monday = date(2026, 10, 30), date(2026, 11, 2)
+    svc = _svc()
+    svc.observe_rows(friday, [_row("INTC", friday, eps_est=0.38)], _et(friday, 16), fetched=True)
+    svc.observe_rows(monday, [_row("INTC", monday)], _et(monday, 6), fetched=True)
+    svc.observe_rows(friday, [_row("INTC", friday, eps=0.44, rev=17.1e9, eps_est=0.38)],
+                     _et(monday, 7, 10), fetched=True)
+    svc.observe_rows(monday, [_row("INTC", monday)], _et(monday, 7, 15), fetched=True)
+    snap = svc.snapshot("INTC", monday, _et(monday, 7, 16))
+    assert (snap.reads_as, snap.status, snap.eps.estimate) == (friday, els.STATUS_REPORTED, 0.38)
+    assert snap.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS
+    assert svc.snapshot("INTC", monday, _et(monday, 22)).poll_seconds is None
+    svc.observe_rows(monday, [_row("INTC", monday, eps=0.44, rev=17.1e9)], _et(monday, 7, 20),
+                     fetched=True)
+    own = svc.snapshot("INTC", monday, _et(monday, 7, 21))
+    assert (own.reads_as, own.eps.estimate) == (None, 0.41)

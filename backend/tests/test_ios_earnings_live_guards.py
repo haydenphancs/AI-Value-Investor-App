@@ -2170,6 +2170,15 @@ def test_the_retry_is_bounded_and_a_refusal_ends_the_poll_at_once():
         assert start.index(reset) < start.index("pollTask = Task"), (
             f"Try Again must start clean: {reset}"
         )
+    # Every write of either count, in any spelling (the tenth 2026-11-26 review: a reset at the
+    # top of each ask, or in the catch once the bound is reached, kept the retry going for ever and
+    # passed every pin above): the declaration, start()'s reset, the answer's reset, the catch's
+    # increment, in that order.
+    for count in ("failedLoads", "failedAsksOverAnswer"):
+        writes = re.findall(
+            rf"\b(?:self\.)?{count}\s*([-+*/%&|^]?=)(?!=)\s*([^\s}}]+)", vm)
+        assert writes == [("=", "0")] * 3 + [("+=", "1")], (count, writes)
+    assert load.index("failedLoads = 0") > load.index("try await apiClient.request(")
 
 
 def test_a_failed_ask_over_a_shown_answer_asks_again_on_the_retry():

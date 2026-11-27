@@ -883,7 +883,7 @@ def test_news_v22_a_prefixed_template_caption_links_its_smart_link_at_its_byte_o
     start, end = facet["index"]["byteStart"], facet["index"]["byteEnd"]
     # the emoji is 1 code point and 4 bytes (+3); the value line's em dash 1 and 3 (+2)
     assert start == len(post.caption[:at].encode("utf-8")) == at + 3 + 2 * post.caption[:at].count("\u2014")
-    assert post.caption[:at].count("\U0001F6A8") + post.caption[:at].count("\U0001F4CA") == 1
+    assert post.caption[:at].count("\U0001F6A8") + post.caption[:at].count("\U0001F40B") == 1
     assert post.caption.encode("utf-8")[start:end] == SMART_LINK.encode("utf-8")
     assert facet["features"] == [{"$type": "app.bsky.richtext.facet#link", "uri": SMART_LINK}]
 

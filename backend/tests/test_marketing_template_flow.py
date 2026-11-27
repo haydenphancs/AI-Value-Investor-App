@@ -2657,7 +2657,7 @@ async def test_news_v22_a_prefixed_spotlight_day_carries_its_prefix_in_captions_
                                                                                      prefix_id):
     """MARKETING_FIRST_LINE_PREFIX on at the build: each spotlight's stored captions open on its prefix where it fits
     ("🚨 BREAKING:" — every person of the insider list filed the business day before the Thursday run, owner decisions
-    2026-11-20; "📊 13F filing:"), the output
+    2026-11-20; "🐋 13F filing:"), the output
     re-checks clean as stored, the worker's read-back carries no prefix and no emoji at all (the worker never receives
     captions: the video, its cards and the cover stay prefix-free), and create_posts records the prefixed captions
     under the lane's keys, pending review."""

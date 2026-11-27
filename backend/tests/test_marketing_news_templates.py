@@ -6322,9 +6322,9 @@ def test_the_caption_budget_matrix(name, factory, run_date, store_state, allow_x
                     first_line_prefix=prefix)
     # a prefix opens only a caption body and the composed caption that starts with it — never the YouTube title
     for f, body in out["captions"].items():
-        if body.startswith(("\U0001F6A8", "\U0001F4CA")):
+        if body.startswith(("\U0001F6A8", "\U0001F40B")):
             assert f != "youtube_title" and out["first_line_prefix"] and body.startswith(out["first_line_prefix"] + " ")
-    assert not out["posts"]["youtube"]["title"].startswith(("\U0001F6A8", "\U0001F4CA"))
+    assert not out["posts"]["youtube"]["title"].startswith(("\U0001F6A8", "\U0001F40B"))
     assert len(out["posts"]) >= T.NEWS_MIN_OUTLETS
     assert "threads" in out["posts"], out["dropped_outlets"]
     if factory().series in ("ceo_buys", "insider_buys", "thirteen_f", "money_map", "congress_count", "earnings"):
@@ -11002,13 +11002,13 @@ def test_isp_composition_is_deterministic():
 #
 # Scope "Spotlights + Form 4 + earnings": a closed, code-owned prefix opens a caption's FIRST line — the insider
 # spotlight "🚨 BREAKING:" while fresh, else "🚨 Insider purchase alert:"; the weekly Form 4 roundups the alert only, never
-# BREAKING; earnings "🚨 BREAKING:" while fresh, else none; the 13F spotlight "📊 13F filing:". Never the YouTube title,
+# BREAKING; earnings "🚨 BREAKING:" while fresh, else none; the 13F spotlight "🐋 13F filing:". Never the YouTube title,
 # the picture, the alt text or the video. Behind MARKETING_FIRST_LINE_PREFIX (off: every caption byte for byte today's),
 # frozen per build into `output.first_line_prefix_on`. The validator's exemption is POSITIONAL, with must-reject twins.
 
 BREAKING = "\U0001F6A8 BREAKING:"
 ALERT = "\U0001F6A8 Insider purchase alert:"
-F13_FILING = "\U0001F4CA 13F filing:"
+F13_FILING = "\U0001F40B 13F filing:"
 _PREFIXES = frozenset({BREAKING, ALERT, F13_FILING})
 #: the samples whose series may carry a prefix (the rest must compose byte for byte as with the switch off)
 _PREFIX_SAMPLES = [s for s in SAMPLES if s[1]().series in T.PREFIX_IDS_BY_SERIES]
@@ -11255,7 +11255,7 @@ def test_news_v22_the_prefix_is_tried_content_first_on_the_headline_only_outlets
 
 
 def test_news_v22_the_13f_after_prefix_twins_say_13f_once():
-    """"📊 13F filing:" says "13F": the 13F spotlight's prefixed headline is its after-prefix twin (`f13s.list.hp.*`) —
+    """"🐋 13F filing:" says "13F": the 13F spotlight's prefixed headline is its after-prefix twin (`f13s.list.hp.*`) —
     the filer the subject of the hook's verbs, without "latest 13F" (the prefix says it) — never "13F" twice in one
     line; every other series writes its headline as it is after a prefix."""
     out = compose_on(f13s_list2(), SPOT_SAT)

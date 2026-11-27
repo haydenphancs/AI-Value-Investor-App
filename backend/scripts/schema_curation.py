@@ -200,10 +200,30 @@ CURATION: dict[str, TableDoc] = {
         note="Guest-writable, so no FK to users. Drives pedagogy only — never analysis."),
     "public.user_memory_facts": T("identity", key=("user_id", "fact_key", "fact_value", "hit_count"),
         note="Derived from conversation, never extracted verbatim."),
+    "public.apple_sign_in_grants": T("identity",
+        purpose="Sign in with Apple refresh token per user, kept ONLY so account deletion can "
+                "revoke the Apple grant (Apple's account-deletion guidance; SOC-04).",
+        key=("user_id", "apple_sub", "client_id", "refresh_token"),
+        note="Written by /auth/oauth from the sign-in's single-use authorization code (app "
+             ">= 1.04); read once by DELETE /users/me BEFORE admin.delete_user, then cascades. "
+             "A credential — never logged; unusable without the .p8-signed client secret."),
     "public.device_tokens": T("identity",
         purpose="APNs device tokens for push. One row per install per user; `environment` "
                 "separates sandbox from production so a TestFlight token never gets a prod push.",
         key=("user_id", "token", "platform", "environment")),
+    "public.auth_refresh_families": T("identity",
+        key=("family_id", "user_id", "auth_time", "revoked_at", "revoke_reason"),
+        note="One row per app SESSION (a sign-in on one device); its id is the `sid` claim in "
+             "every token. Revoked by /auth/logout, by reuse of a retired refresh token, or by "
+             "sign-out-all (migration 214). Written only by the 214 RPCs, under a per-user "
+             "advisory lock."),
+    "public.auth_refresh_tokens": T("identity",
+        key=("jti", "family_id", "user_id", "parent_jti", "expires_at", "revoked_at",
+             "replaced_by", "child_count"),
+        note="One row per refresh token (`jti`). Single-use: a retired token presented again "
+             "outside the 120 s grace window revokes its whole family. Pre-214 tokens are "
+             "recorded on first use under an id derived from their hash (`legacy`). Expired "
+             "rows are pruned per user by the 214 RPCs; no job."),
 
     # ----------------------------------------------------------------- billing
     "public.user_credits": T("billing",
@@ -222,6 +242,15 @@ CURATION: dict[str, TableDoc] = {
              "(migration 200), on a refund row: what an Apple-refund clawback had already paid "
              "for of the charge — delta + covered is what the refund settled, and a replay "
              "reports any shortfall."),
+    "public.deleted_account_fingerprints": T("billing",
+        purpose="Keyed fingerprints of DELETED accounts, so a returning account does not get "
+                "the free welcome credits a second time.",
+        key=("fingerprint", "kind", "expires_at", "times_matched"),
+        note="Migration 211 (audit CC-01). HMAC-SHA256 (Vault key deleted_account_fingerprint_"
+             "key) of the canonical email and each Apple/Google subject; no user id, no email. "
+             "Written by record_deleted_account() from DELETE /users/me before the auth row "
+             "goes; read by the DEFERRED sign-up trigger trg_withhold_returning_welcome, which "
+             "also withholds from an alias of a live account. Kept 90 days (owner, 2026-11-26)."),
     "public.credit_purchases": T("billing",
         purpose="One row per consumable App Store purchase, and the exactly-once guard for it.",
         key=("user_id", "transaction_id", "environment", "product_id", "credits", "revoked_at"),

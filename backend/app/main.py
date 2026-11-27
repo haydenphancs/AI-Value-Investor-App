@@ -29,6 +29,7 @@ from app.integrations.finra_short_interest import close_finra_client
 from app.integrations.fmp import close_fmp_client
 from app.integrations.openai_compat import close_openai_compat_client
 from app.integrations.anthropic_client import close_claude_client
+from app.integrations.apple_id import close_apple_id_client
 from app.integrations.openfda import close_openfda_client
 from app.integrations.sec_edgar import close_sec_edgar_client
 from app.integrations.telegram import close_telegram_client
@@ -746,6 +747,7 @@ async def lifespan(app: FastAPI):
     await close_bluesky_client()
     await close_brave_search_client()
     await close_upload_post_client()
+    await close_apple_id_client()
     await close_health_client()
     logger.info("Shutting down")
 

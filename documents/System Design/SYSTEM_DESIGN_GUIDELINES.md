@@ -169,7 +169,7 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **19** modules): `fmp`, `gemini`, `anthropic_client` (Claude,
+**Integrations** (`backend/app/integrations/`, **20** modules): `fmp`, `gemini`, `anthropic_client` (Claude,
 for marketing and Learn weekly work only, reached only through `app/services/llm_provider.py`: there it is the
 SECOND provider for the marketing and Learn weekly writer/judge roles, behind per-role switches that default to
 Gemini, with the same Gemini call as the fallback on any Claude failure, 2026-10-30; and, through
@@ -209,6 +209,13 @@ throttle, parks every ticker for SEC's Retry-After. The same service is a new **
 temperature 0, which 3.x models ignore), whose answer is data only: a figure reaches a user only as the
 number printed in a quote verified against the release, and the outlook only as that quote, never
 in the model's words.
+
+And `apple_id` (Sign in with Apple's REST API, 2026-11-26, SOC-04): `/auth/token` to exchange the
+single-use authorization code an app ≥ 1.04 sends with `/auth/oauth`, and `/auth/revoke` at account
+deletion — called only by `app/services/apple_sign_in_service.py`, which keeps the refresh token in
+`apple_sign_in_grants` (migration 213, service-role-only). Each call is authenticated by an ES256
+client secret signed with a Sign in with Apple `.p8` key (`APPLE_SIGN_IN_KEY_ID` /
+`APPLE_SIGN_IN_PRIVATE_KEY`); with either unset the feature is off and logs that it is (§9.1).
 **No Google Search grounding** (retired 2026-10-02). Gemini's `google_search` tool is not used
 anywhere: the Gemini API Additional Terms let a grounded answer be shown only to the end user who
 sent the prompt, together with Google's Search Suggestions, unmodified, and never cached, stored or
@@ -1447,7 +1454,7 @@ owner id and save time, because `HomeDashboardData` holds `Color`s and is not Co
   lapses too. Every read, write and delete runs in order on one detached task chain, so a delete
   always lands after a late write.
 - **Shown for at most 96 h** (`maxDisplayAge`, owner decision 2026-10-01). That stays below the
-  refresh token's 7 d minus the access token's 24 h, so a provably dead session's dashboard never
+  refresh token's 7 d minus the access token's life (60 min since 2026-11-26), so a provably dead session's dashboard never
   shows; `tests/test_ios_home_instant_paint_guards.py` pins it. The pulse header reads
   "Updated <time>" until a live load replaces the snapshot, and the seed never counts as a load,
   so the live request still goes out at once. A snapshot whose numbers describe an earlier US
@@ -2339,22 +2346,79 @@ These routes return them:
 - `/auth/register`, but only while Supabase's *Confirm email* is OFF. It is ON in production, so
   register returns no tokens there.
 
-There is no `POST /auth/token`. Access tokens last 24 h, refresh tokens 7 d. The JWT carries `sub`,
-`email`, `iat`, `exp` — **not** a `tier` claim; tier is read from `public.users`, so a plan change
-takes effect without waiting for a token to turn over.
+There is no `POST /auth/token`. Access tokens last **60 minutes** (CC-10, 2026-11-26: they were
+24 h; `config._cap_access_token_life` clamps a higher environment value to 60 with a WARNING
+rather than failing the deploy), refresh tokens 7 d, sliding. The JWT carries `sub`, `email`,
+`iat`, `exp`, and since migration 214 `sid` (the session) and `auth_time` (when the credential that
+started the session was verified) — **not** a `tier` claim; tier is read from `public.users`, so a
+plan change takes effect without waiting for a token to turn over.
 
-**Refresh tokens are re-issued, not rotated.** Each `/auth/refresh` returns a new refresh token but
-never retires the one it was given:
-- refresh tokens carry no `jti`, and there is no reuse detection;
-- `/auth/logout` only logs.
+**Server-side sessions (migration 214, 2026-11-26; SEC-3 / AUTH-BE-10).** Until then refresh
+tokens were re-issued, never retired, and `/auth/logout` only logged, so a leaked refresh token
+was a permanent session. Now (`services/auth_session_service.py`, tables `auth_refresh_families`
+and `auth_refresh_tokens`, four SECURITY DEFINER RPCs that each take a per-user advisory lock):
+- **A session is a family.** Every token-minting sign-in (`/auth/login`, `/auth/oauth`,
+  `/auth/session-exchange`, `/auth/confirm-email`, the two password routes, `/auth/register` with
+  confirmation off) starts one (`start_refresh_family`). Its id is the `sid` claim of every access
+  and refresh token it rotates through.
+- **A refresh token is single-use.** `/auth/refresh` retires the presented `jti` and inserts its
+  successor in ONE transaction (`rotate_refresh_token`), re-checking the eviction stamps under the
+  lock. A retired token presented again is REUSE: the whole session is revoked and both holders
+  must sign in again — except inside a grace window (`REFRESH_TOKEN_REUSE_GRACE_SECONDS`, 120 s),
+  which issues a SIBLING instead, at most `REFRESH_TOKEN_MAX_CHILDREN` (3) successors per token. The
+  window exists because the app's restore loop and its pre-flight refresh are not single-flighted
+  together, and a refresh whose response was lost is re-sent by the failover path.
+- **Legacy tokens** (pre-214, no `jti`) keep working until their own `exp`, so the deploy signs
+  nobody out; the first refresh records them under an id derived from a hash of the token's
+  SIGNING INPUT (`legacy_jti`: `header.payload` — the signature segment is malleable, python-jose
+  accepts it with `=` padding appended, which once let one token open six sessions), so they are
+  single-use from then on, and moves them onto a tracked session.
+- **Logout ends the session**: `/auth/logout` revokes the family named by the refresh token in its
+  body (builds after 1.03, from an in-memory mirror — never a main-thread Keychain read) and by
+  the bearer's `sid` (every build whose tokens a 214 backend minted). A pre-214 token names no
+  session; that logout revokes nothing and still answers 200.
+- **Sign out of all devices** (`POST /auth/sign-out-all`, a Settings row) stamps
+  `users.sessions_revoked_at` — the NEXT whole second, read after the lock, because every check
+  floors the stamp to whole seconds and a stamp inside second S would spare tokens minted earlier
+  in S — revokes every family and detaches every device token. It signs out
+  the calling device TOO: a thief who calls it with a stolen access token loses their own session
+  with everyone else's, where a variant that returned fresh tokens would let them evict the owner.
+  It is the lever an Apple/Google account had none of.
+- **Fail open or closed, per call.** `/auth/refresh` (rotation) fails CLOSED: any store error is a
+  503 `AUTH_UNAVAILABLE`. Starting a session fails OPEN to an untracked (legacy-shaped) token after
+  one retry, logged at ERROR (a retry whose first attempt committed reuses that session): the
+  credential was just verified, and the token's first refresh records it. The one exception is
+  the migration NOT APPLIED YET — PostgREST's `PGRST202`/`PGRST205` for the RPC, nothing else
+  (42P01/42883/42703 can come from inside a function body): a session start then mints an
+  untracked token and a LEGACY token refreshes statelessly, with a throttled ERROR, so a backend
+  deployed before 214 signs nobody out. A token that carries a `jti` or `sid` was minted by a live
+  214, so for it a missing function is a rollback or a signature drift: refresh and logout answer
+  503, never a quiet stateless success.
+- **Not revoked per request:** an access token outlives its session by at most its 60 minutes. No
+  route reads the session row per request (that would be a second database read on every
+  authenticated call); the short access token is the bound. Expired rows are pruned per account by
+  the RPCs themselves, no job.
 
-So a leaked refresh token keeps refreshing until the account's password changes or `SECRET_KEY` is
-rotated. An Apple/Google account can stop it only by setting a password. This is a recorded gap:
-server-side sessions (rotation with reuse detection, revocation on logout, "sign out of all
-devices") are a planned follow-up, not shipped behaviour.
+**Re-authentication before account deletion (SEC-11, 2026-11-26).** `POST /auth/reauthenticate`
+checks a FRESH credential of the caller's own account — the password (on the isolated auth
+client), or an Apple/Google id token whose subject `account_has_identity` finds already linked
+BEFORE GoTrue sees it (GoTrue's id-token sign-in would create an account for an unknown subject),
+or a Supabase token whose SIGN-IN (`amr` timestamp, never `iat`: a GoTrue refresh mints a fresh
+`iat` and keeps `amr`) is under 10 minutes old — and returns a five-minute, single-purpose JWT
+(`type=reauth`, `purpose=account_delete`). It never mints or replaces a session. `DELETE /users/me`
+reads it from `X-Caydex-Reauth`: a proof that is present but wrong is 403 `AUTH_REAUTH_REQUIRED`
+before anything is deleted; a session whose `auth_time` is within
+`ACCOUNT_DELETE_RECENT_AUTH_SECONDS` (10 min) counts as re-authenticated; a request with neither is
+accepted while `ACCOUNT_DELETE_REQUIRE_REAUTH` is off — every build up to 1.03 deletes with the
+bearer alone, and App Review 5.1.1(v) needs that to keep working. The switch goes on once those
+builds are below the minimum supported version (OWNER_TASKS); an old build then gets the error's
+copy ("sign out, sign back in, and delete within 10 minutes").
 
-**Only `/auth/session-exchange` accepts a Supabase token (2026-11-26).** Every other route takes
-only an app-minted access token. Two fallbacks are gone:
+**Only `/auth/session-exchange` turns a Supabase token into a session (2026-11-26);
+`/auth/reauthenticate` also verifies one sent in the request body (JWKS only, sign-in under 10
+minutes) but returns only a five-minute re-auth proof.** Both read it from the request body; no
+route accepts a Supabase token as its bearer, which is always an app-minted access token. Two
+fallbacks are gone:
 - the old path that let any route accept a Supabase JWT as a bearer;
 - the `SUPABASE_JWT_SECRET`-keyed 503 branch that came with it.
 
@@ -2369,24 +2433,28 @@ The iOS client never sent a Supabase token as a bearer: it exchanges it at once.
 - It answers any JOSE error with a refusal, never a 500.
 
 Session-exchange then refuses an anonymous Supabase user (`is_anonymous`) and a token issued
-before the account's last password change. If it cannot read that timestamp, it fails CLOSED
-(503 `AUTH_UNAVAILABLE`). Nothing reads `SUPABASE_JWT_SECRET` any more.
+before the account's last password change or sign-out-all. If it cannot read those timestamps, it
+fails CLOSED (503 `AUTH_UNAVAILABLE`). Nothing reads `SUPABASE_JWT_SECRET` any more.
 
 **A password change evicts sessions, where the stamp is checked.**
 - **Who stamps it:** `/auth/reset-password`, `/auth/change-password`, `/auth/set-password`, and
   `/auth/confirm-email` when it sets a password all stamp `users.password_changed_at`. A stamp that
   fails is retried once, then logged at ERROR. The password change itself stands, because the
   password has already changed by then.
-- **Who checks it:** a token whose `iat` predates the stamp is refused by `/auth/refresh`, by
-  `/auth/session-exchange`, and by the strict per-route dependencies `get_current_user` and
-  `get_current_user_or_guest`.
-- **Who does not:** the router-level `get_current_user_id` gate does NOT read the stamp. On a route
-  whose only auth dependency is that gate (most market-data routes), a pre-change access token
-  keeps working until it expires, at most 24 h. It can no longer refresh, and it cannot reach any
-  route that reads the account.
+- **Who checks it:** a token whose `iat` predates the stamp — or `users.sessions_revoked_at`, the
+  sign-out-all stamp, whichever is later — is refused by `/auth/refresh` (in Python and again inside
+  `rotate_refresh_token`, under the lock), by `/auth/session-exchange`, and by the strict per-route
+  dependencies `get_current_user` and `get_current_user_or_guest`.
+- **Who does not:** the router-level `get_current_user_id` gate does NOT read the stamps (it reads
+  no row at all). On a route whose only auth dependency is that gate (most market-data routes), a
+  pre-change access token keeps working until it expires, at most 60 minutes (CC-10: it was 24 h).
+  It can no longer refresh, and it cannot reach any route that reads the account. A users-row
+  cache inside the gate was the alternative and was not taken: a second database dependency on
+  every market-data request, with the window still ~60 s plus cache, for a bound the shorter token
+  already gives at one refresh per hour of use.
 
-So "a reset evicts an attacker" holds for refresh, for account data and for the Supabase door. It
-does not hold for the market-data routes, for up to a day.
+So "a reset evicts an attacker" holds for refresh, for account data and for the Supabase door. On
+the market-data routes it holds after at most an hour.
 
 `/auth/refresh` fails CLOSED. When it cannot read the account's row, it answers 503
 `AUTH_UNAVAILABLE`, which the client retries without clearing its credential. Before 2026-11-26 it
@@ -2477,8 +2545,12 @@ found Forgot password.
     minutes), so one person's retries are refused by the address window. HOURLY ceilings sit
     behind them, above anything a person does, so the short windows do not multiply abuse:
     16 confirmation emails (sign-up + resend) and 6 reset emails per address an hour, and 30
-    emails per IP an hour across all three routes (the project's mail budget is 100). One inbox
-    can get at most ~22 Caydex emails an hour (11 before), one IP at most 30. Supabase's 60 s
+    emails per IP an hour across all three routes (the project's mail budget is 100).
+    `/auth/change-email` counts against the same per-IP hourly ceiling (2 emails per start: it
+    mails the current and the new address) and has its own per-recipient hourly bucket (5 starts
+    an hour toward one new address). One inbox can get at most ~22 Caydex emails an hour from
+    sign-up, resend and reset (11 before), plus at most 5 change-email codes as someone's new
+    address; one IP at most 30. Supabase's 60 s
     "minimum interval per user" is kept per email TYPE and does not lower these. The code-ENTRY
     routes (`/auth/confirm-email`, `/auth/reset-password`) keep 10 per address per hour: they limit
     guesses, not mail. Residuals: everyone behind one NAT address shares the IP buckets (an 11th
@@ -2658,7 +2730,8 @@ an identity: every read path filters on `user_id`, so any identity more than one
 is a cross-user leak, not untidy state.
 
 **Which surfaces require an account.** All `.signInRequired` routes: the `/users/me` family,
-`/auth/logout`, `/auth/change-password`, `/auth/set-password`, `/billing/verify`, whale
+`/auth/logout`, `/auth/sign-out-all`, `/auth/reauthenticate`, `/auth/change-password`,
+`/auth/set-password`, `/auth/change-email`, `/auth/change-email/confirm`, `/billing/verify`, whale
 follow/unfollow/activity — and **every AI-generation surface**: the `/research/*` routes,
 `GET /stocks/{t}/report`, `POST /stocks/{t}/prewarm-report`, and every chat route. (The separate
 `POST /stocks/{t}/report/chat` was deleted 2026-09-11: it shared `ChatRateLimit` and the 1-credit
@@ -2697,6 +2770,69 @@ worse than before), while set-password fails **closed** with `AUTH_UNAVAILABLE` 
 stands between the caller and the write, so proceeding could overwrite an existing password with
 no proof of the current one). Pinned by `tests/test_set_password_oauth.py`.
 
+**Sign in with Apple and Google: revoked at deletion, re-checked on foreground (2026-11-26).**
+Both providers sign in natively and post an identity token to `/auth/oauth`, which Supabase
+verifies (`sign_in_with_id_token`). Four things sit around that (sign-in audit SOC-04/05/07/08):
+
+- **Apple grant revocation (SOC-04).** Apple's account-deletion guidance asks for the user's Sign
+  in with Apple tokens to be revoked through its REST API. GoTrue's id_token grant holds no Apple
+  token, so from app 1.04 the request also carries Apple's single-use `authorization_code`
+  (optional: 1.0–1.03 never send it). `/auth/oauth` exchanges it at Apple's token endpoint
+  (https://appleid.apple.com/auth/token) inside the same request (`services/apple_sign_in_service.py` → `integrations/apple_id.py`,
+  bounded at 6 s, never fails the sign-in) and keeps the refresh token in `apple_sign_in_grants`
+  (migration 213, service-role-only, cascades from `public.users`) — only when the subject of the
+  id_token Apple returns equals the subject of the identity token Supabase verified, so nobody
+  can attach another person's code to their own account. `DELETE /users/me` revokes it at
+  `/auth/revoke` after the purge check and BEFORE `admin.delete_user` (bounded at 8 s; a failure
+  is logged and the deletion goes ahead — 5.1.1(v) outranks it). Both calls authenticate with an
+  ES256 client secret minted per call from a Sign in with Apple `.p8` key
+  (`APPLE_SIGN_IN_KEY_ID` / `APPLE_SIGN_IN_PRIVATE_KEY`, team `APPLE_TEAM_ID`, client
+  `APPLE_BUNDLE_ID`). With either secret unset the feature is OFF: sign-in stores nothing (one
+  WARNING per process) and every deletion logs a WARNING that the grant was not revoked. Shipped
+  builds' Apple users have no stored grant until they sign in with Apple again on ≥ 1.04 — or
+  confirm it's them with Apple before deleting: the Confirm It's You step on ≥ 1.04 sends Apple's
+  fresh `authorization_code` to `/auth/reauthenticate` with the identity token, which stores the
+  grant from it the same way (after the token proved the caller, the same subject check,
+  best-effort: a failure never refuses the re-authentication), so an account last signed in on
+  1.0–1.03 is revoked when deleted from 1.04. A deletion from 1.0–1.03 itself still revokes
+  nothing for such an account.
+  The app also asks `getCredentialState(forUserID:)` on foreground, on iOS's
+  `credentialRevokedNotification` and when a session is established, for a session that came in
+  WITH Apple (the Keychain account link `AppleSignInStore` records at sign-in, cleared with the
+  session tokens and by every non-Apple sign-in), and signs out through `AppState.signOut()` on
+  `.revoked` only — `.notFound` / `.transferred` keep the session.
+- **Google grant (SOC-04).** GoogleSignIn keeps its own state in the Keychain: every session end
+  signs it out — a tapped Sign Out, and also a session the server ended (a dead credential, an
+  undone adoption, the fresh-install purge), through `AuthService.clearToken`
+  (`SocialSignInService.endGoogleSession()`) — and an account deletion `disconnect`s it first —
+  revoking the device's grant — before the sign-out (`AppState.signOutAfterAccountDeletion`).
+- **Google nonce (SOC-07).** The native Google path now binds a nonce exactly like Apple: GIDSignIn
+  gets the SHA-256 hex of a fresh raw nonce (it copies what it is given into the ID token's claim)
+  and `/auth/oauth` gets the raw value (GoTrue compares `sha256(raw)` with the claim). Supabase's
+  project-wide "Skip nonce check" must nevertheless stay ON while builds 1.0–1.03 are in use —
+  they send no nonce while the SDK mints its own claim, which GoTrue rejects once the skip is off
+  — so turning it off waits for a minimum-version gate (OWNER_TASKS).
+- **Apple's first-time name (SOC-05).** Apple sends the name only on the first authorization. The
+  app keeps it in the Keychain, keyed by Apple's user id, from that moment until an `/auth/oauth`
+  succeeds, resends it on every attempt in between, and clears it on success and at session end.
+  The backend TRUNCATES a provider name to the column's 64 characters instead of refusing it (a
+  longer name used to 422 the whole sign-in, losing both the tap and the name).
+- **A provider sign-in that confirms an older, unconfirmed account (SOC-08).** GoTrue links a
+  verified provider email to an existing email/password user regardless of confirmation; for an
+  unconfirmed one it then NULLs the password, deletes the email identity, REPLACES user_metadata
+  with the provider's identity data and confirms the address (`RemoveUnconfirmedIdentities`, its
+  pre-account-takeover guard — verified in supabase/auth's source; the local stack cannot mint a
+  Google or Apple token). The password loss is GoTrue's and correct (whoever registered never
+  proved the mailbox); the account then shows "Set a Password". What GoTrue leaves is
+  `public.users.display_name`, copied from that unverified registration by the signup trigger and
+  never synced. `/auth/oauth` recognises the sign-in — `email_confirmed_at` from this request, an
+  account more than 10 s older than that, and no `display_name` left in user_metadata (GoTrue
+  merges on a confirmed link, replaces on an unconfirmed one) — and resets the name to the
+  provider's (or the email placeholder), logging a WARNING. Any unreadable signal: no reset.
+
+Pinned by `tests/test_apple_sign_in_revocation.py`, `tests/test_oauth_unconfirmed_account_link.py`
+and `tests/test_ios_social_signin_hardening.py` (source scans, each guard mutation-tested).
+
 *Both generation doors must stay gated or the gate is cosmetic* — they cost the same on a cache miss.
 
 ⚠️ **This paragraph used to end "everything else is guest-capable by design, which is also an App
@@ -2725,13 +2861,61 @@ and for consumables that gate is load-bearing rather than tidy: Apple does not r
 so credits bought against a per-install guest identity would be stranded on an install the user can
 wipe. See [§9b.4](#9b4-restore-and-why-buying-requires-an-account).
 
+**An account's email changes only with a proof and two codes (2026-11-26, audit CC-09).** There
+was no way to change it, and `public.users.email` — the copy change-password, set-password and
+Profile read — never followed a change made in Studio.
+- `POST /auth/change-email {new_email, current_password | code}` needs exactly ONE proof: the
+  current password (re-checked by a real sign-in), or, for an Apple/Google account with none, the
+  recovery code `POST /auth/forgot-password` mails to the CURRENT address (set-password's proof).
+  Both are checked against the address GoTrue holds (`admin.get_user_by_id`), never the body and
+  never the `public.users` copy. The change itself is GoTrue `PUT /user {email}` made with the
+  caller's OWN Supabase token passed explicitly (`auth._request(..., jwt=)`): the auth client is a
+  process-wide singleton whose stored session another request's sign-in can replace, so
+  `update_user()` could change someone else's email.
+- With Supabase's **Secure email change** ON (the launch checklist pins it), GoTrue mails a code to
+  the current AND the new address, from the canonical template
+  `documents/legal/supabase-email-templates/change-email.html` (only `{{ .Token }}` and
+  `{{ .NewEmail }}`; never the current address, which a mistyped new one would leak).
+  `POST /auth/change-email/confirm {current_code, new_code}` verifies each as type `email_change`
+  against the account's current and pending (`new_email`) addresses. It is order-tolerant: each
+  code is spent as it confirms, so a "complete" answer from either verify finishes the change, and a
+  refusal names the address whose code failed when the other was accepted.
+- **Enumeration:** an address another account holds (`email_exists`) is answered exactly like a
+  real send (`status: "codes_sent"`, after a 0.4–1.2 s pause); no code ever arrives.
+  `/auth/register`'s 409 `AUTH_EMAIL_ALREADY_REGISTERED` already tells anyone whether an address
+  has a CONFIRMED account (owner decision 2026-11-26), so change-email stays silent only so that
+  it does not open a second, cheaper channel — as `/auth/resend-confirmation` already does. GoTrue checks
+  "taken" BEFORE its per-user send interval, so a second start within that minute used to answer a
+  free address 503 and a taken one 200 (independent audit, 2026-11-26): the backend now spaces
+  sends per account (`CHANGE_EMAIL_SEND_SPACING_SECONDS` = 65, at or above Supabase's 60 s
+  default), checked before any GoTrue call and charged on every send attempt, one 429 for both.
+  Both routes are also limited (start 10/h per address, 5/h per account; confirm 20/h and 10/h),
+  and a start also counts twice against the per-IP hourly mail ceiling and once against a 5/h
+  bucket for the new address (the mail limits above).
+  **Residuals, accepted for the owner to re-check:** with Secure email change, GoTrue mails the
+  CURRENT address only on a real send, so an account holder sees in their own inbox whether an
+  address is taken (one inbox, one start, ≤ 5 per account per hour); turning Secure email change
+  off would close that but let a stolen password alone move an account. While the project-wide
+  email quota is used up, a free address answers 503 and a taken one 200. Timing differences remain
+  over many tries.
+- New codes, both 400 `fix_input`: `AUTH_EMAIL_UNCHANGED` (the current address) and
+  `AUTH_EMAIL_REJECTED` (GoTrue refused the address itself). A spent recovery code after a failed
+  change is `AUTH_CODE_USED`. There is deliberately no "nothing waits to confirm" code: a start
+  aimed at another account's address leaves nothing pending, so a confirm then reads exactly like
+  two refused codes (`AUTH_CODE_INVALID`, after a short pause). (A refused change also leaves an
+  EARLIER pending change, and its codes, intact — the same own-inbox residual as above.)
+- Migration 212's `on_auth_user_email_changed` trigger copies a changed, non-empty
+  `auth.users.email` into `public.users` (fails open; the pending `email_change` is never synced);
+  the routes also write it after a completed change, so deploy order does not matter. The caller's
+  session is not re-minted: the `email` claim in Caydex tokens is informational, read by nothing.
+
 Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 
 ### 9.2 Data Protection
 
 | Data | iOS storage | Backend storage | Notes |
 |---|---|---|---|
-| Auth tokens | **Keychain** (`Core/Services/AuthService.swift::KeychainService`), `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` | n/a | The live in-process copy is `APIClient.currentAuthToken()`, which **deliberately diverges** from the Keychain during `.restoring` — never read the Keychain directly (`.claude/rules/auth.md` §8). **A fresh install purges the session an earlier install left behind (2026-11-26).** Keychain items outlive the app, so a reinstall used to restore the previous user's session. `AuthService.purgeSessionLeftByAnEarlierInstall` runs first in the launch Task, before the one launch Keychain read. It clears the two session tokens only when BOTH traces of an earlier launch are missing: the UserDefaults marker `auth.install-marker.v1`, and the App Group key `widget.api.baseURL`, which every build since 2026-08-28 writes at each launch and which iOS deletes with the app. An update keeps the session: it arrives without the marker but with the App Group key. An unreadable App Group also keeps it (logged as a warning). The device proof and the guest install id are never cleared. |
+| Auth tokens | **Keychain** (`Core/Services/AuthService.swift::KeychainService`), `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: the two session tokens, plus `AppleSignInStore`'s `apple-account-link-v1` (the Apple ID the current session signed in with) and `apple-pending-name-v1` (Apple's first-time name, kept only until an `/auth/oauth` succeeds or the session ends) | `auth_refresh_families` / `auth_refresh_tokens` (migration 214: ids, expiry and revocation only, never the token text); `apple_sign_in_grants` (migration 213: Apple's refresh token, kept only for the revoke at account deletion, service-role-only, deleted with the user row) | The live in-process copy is `APIClient.currentAuthToken()`, which **deliberately diverges** from the Keychain during `.restoring` — never read the Keychain directly (`.claude/rules/auth.md` §8). **A fresh install purges the session an earlier install left behind (2026-11-26).** Keychain items outlive the app, so a reinstall used to restore the previous user's session. `AuthService.purgeSessionLeftByAnEarlierInstall` runs first in the launch Task, before the one launch Keychain read. It clears the two session tokens and the Apple account link (through `AuthService.clearToken`) only when BOTH traces of an earlier launch are missing: the UserDefaults marker `auth.install-marker.v1`, and the App Group key `widget.api.baseURL`, which every build since 2026-08-28 writes at each launch and which iOS deletes with the app. An update keeps the session: it arrives without the marker but with the App Group key. An unreadable App Group also keeps it (logged as a warning). The device proof and the guest install id are never cleared. |
 | User profile | **In memory only** — `UserState.profile` | `public.users` (RLS) | Re-fetched from the backend each launch. Not persisted. |
 | Research reports | **In memory only** — `ResearchState.reports` | `research_reports` (service-role; the in-code `user_id` filter is the effective wall) | Not persisted client-side. |
 | Last Home dashboard (Market Pulse, scanners, signals as served, themes, the watchlist strip — active group name, tickers and prices — and the Trillion group) | **On disk** since 2026-10-01: the raw `GET /home/dashboard` response under Library/Caches/HomeDashboard (`HomeDashboardSnapshotStore`), `.completeFileProtectionUntilFirstUserAuthentication`, never backed up | nothing new — built per request from the existing tables | The account's watchlist tickers and their prices now survive app termination. Owner-stamped with the stored token's `sub`, shown for at most 96 h, deleted at session end, on a change of account and by Settings › Clear Cache (§7.1). Pro signals are kept exactly as served; the server's redaction remains the gate. |
@@ -5389,6 +5573,60 @@ calendar mode may simply not be reconciled yet.
   `refund_credits`' existing cap, unchanged from the calendar boundary.
 - A $0 offer period (an offer code or a future free trial) is a period like any other and grants a
   full allocation. That was already true of `grant_tier_upgrade`.
+
+### 9b.13 The welcome grant is once per person (migration 211, audit CC-01)
+
+Every new `public.users` row is seeded the free tier's allocation (`create_user_credits`, 50
+credits), and DELETE /users/me removes the auth row completely. So delete → sign up again with the
+same email, Apple ID or Google account, or a Gmail alias of a live account, used to mint another
+50 credits every time (two AI reports). Owner decisions, 2026-11-26: a returning account opens
+with "0 credits (Recommended)"; its fingerprint is kept "90 days (Recommended)".
+
+- **The ledger.** `deleted_account_fingerprints` holds HMAC-SHA256 fingerprints of a deleted
+  account's canonical email (lowercased, local part cut at its first `+`, Gmail dots removed,
+  googlemail.com → gmail.com: `canonical_account_email`) and of each non-email identity's
+  provider subject (`auth.identities.provider_id`, e.g. Apple's and Google's `sub`). No user id,
+  no email. The HMAC key is a Vault secret the migration generates inside the database
+  (`deleted_account_fingerprint_key`, never rotated: rotating it orphans every row); a missing key
+  RAISES rather than falling back to an unkeyed, dictionary-reversible hash. Rows expire 90 days
+  after the last deletion, are never matched once expired, and are deleted by the next sign-up or
+  deletion. Service-role only.
+- **Written** by `record_deleted_account(uuid)` from DELETE /users/me, after the purge succeeded
+  and BEFORE `admin.delete_user` (it reads `auth.users` / `auth.identities`). It fails OPEN, loudly:
+  deleting an account is an App Store 5.1.1(v) and privacy obligation, the ledger only protects
+  free credits, so a failure is an ERROR naming what is lost and the deletion completes. DELETE
+  /users/me is also limited (10 per address, 5 per account, per hour). The per-account limit is
+  charged only AFTER the re-authentication check (§9.1), so a refused proof never uses it up and
+  someone holding a stolen token cannot lock the owner out of deleting.
+- **Read** by `trg_withhold_returning_welcome`, a DEFERRED constraint trigger on `auth.users` AFTER
+  INSERT. It runs at COMMIT because GoTrue inserts the user row first and its identity row second
+  in one transaction, so an ordinary AFTER INSERT trigger cannot see the Apple/Google subject.
+  On a fingerprint match, or another live account with the same canonical email, it withholds the
+  UNTOUCHED opening grant only (nothing used, no purchased credits, no paid period,
+  `total = tier_alloc`, no ledger row but the `grant`): it appends a granted-only
+  `welcome_withheld` row (−50, `ref_id` NULL so no refund pairs with it; Credit History: "Welcome
+  credits already claimed") and sets `total` to 0. `tier_alloc` keeps the period's allowance on
+  purpose: `ensure_credit_period` tops a calendar account up whenever `tier_alloc` is below the
+  plan's allocation, so zeroing it re-granted the 50 as `tier_upgrade` at the next balance read
+  (caught by the local end-to-end run). The purchased pool is never
+  read or written (§9b.1). The next ET month's allowance arrives as usual. It fails OPEN (the 044
+  pattern): an error keeps the normal grant, because blocking a sign-up over a credit control is
+  the worse failure.
+- **Verified on a local Supabase stack (2026-11-26, CLI 2.75, migrations 211 + 212 applied as
+  `postgres` and re-applied idempotently):** delete → same address re-registered (other case) opens
+  at 0 with `grant` + `welcome_withheld`; a live Gmail account's `googlemail.com` dot/plus alias opens
+  at 0; an Apple and a Google subject, inserted the way GoTrue does (user row, then identity row, one
+  transaction), are withheld for a new relay address; a balance read does not top the grant back
+  up; with the Vault key hidden the sign-up commits with the normal grant and
+  `record_deleted_account` raises; expired rows neither match nor survive the next sign-up; a grant
+  used before commit is left alone. The suite pins the SQL at the source level only (no database in
+  tests), so this run is the behavioural evidence.
+- **Not covered, accepted:** a genuinely new mailbox or Apple/Google account still gets the
+  welcome grant (the bar is a real identity, not zero); the address an account had BEFORE an email
+  change is not fingerprinted at deletion; `+` is stripped for every domain, so two people sharing a
+  plus-addressed mailbox count as one (so a new QA or App Review account made as a +alias of an
+  existing inbox opens with 0 credits); a canonicalisation change needs a REINDEX of
+  `idx_users_canonical_email`. The privacy policy §6 states the 90-day fingerprint.
 
 ---
 

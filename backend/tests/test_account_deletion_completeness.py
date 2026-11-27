@@ -32,6 +32,17 @@ from fastapi import HTTPException
 from app.api.v1.endpoints import users as users_ep
 from app.dependencies import GUEST_USER_ID
 
+@pytest.fixture(autouse=True)
+def _fresh_deletion_limiter():
+    """DELETE /users/me charges its per-account bucket inside the handler (after the re-auth
+    check, review 2026-11-27); tests that call the handler directly, several times for one
+    account, start each test with an empty limiter."""
+    from app.core.security import rate_limiter as _rl
+    _rl.clear()
+    yield
+    _rl.clear()
+
+
 _USER_ID = "11111111-2222-4333-8444-555555555555"
 
 

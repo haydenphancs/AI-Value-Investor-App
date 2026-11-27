@@ -103,7 +103,15 @@ enum APIEndpoint: Sendable {
     case signIn(email: String, password: String)
     case signUp(email: String, password: String, displayName: String)
     case refreshToken(refreshToken: String)
-    case signOut
+    /// `POST /auth/logout`. Carries the device's REFRESH token (migration 214) so the server can
+    /// end exactly this session; nil sends no body (the server then uses the bearer's `sid`).
+    case signOut(refreshToken: String?)
+    /// "Sign out of all devices" (`POST /auth/sign-out-all`) — every session of the account,
+    /// THIS device's included. The caller then runs the local sign-out.
+    case signOutAllDevices
+    /// Re-enter a credential before deleting the account (`POST /auth/reauthenticate`): returns
+    /// a five-minute proof for `.deleteAccount(reauthToken:)`. Never replaces the session.
+    case reauthenticate(ReauthenticateRequestBody)
     /// Start a password reset — sends a one-time code to the address.
     case forgotPassword(email: String)
     /// Finish a password reset with the emailed code.
@@ -113,13 +121,25 @@ enum APIEndpoint: Sendable {
     /// Create a FIRST password for a signed-in account that has none (Apple/Google sign-in).
     /// The emailed recovery code is the proof — the session alone is deliberately not enough.
     case setPassword(code: String, newPassword: String)
+    /// Start changing a signed-in account's email (`POST /auth/change-email`). Exactly one proof:
+    /// the current password, or the recovery code `forgotPassword` mailed to the CURRENT address
+    /// (an Apple/Google account has no password). Supabase then mails a code to each address.
+    case changeEmail(newEmail: String, currentPassword: String?, code: String?)
+    /// Finish it with the two codes (`POST /auth/change-email/confirm`). Both addresses come from
+    /// the account on the server, never from this request.
+    case confirmEmailChange(currentCode: String, newCode: String)
     /// Re-send the signup confirmation email.
     case resendConfirmation(email: String)
     /// Confirm a new account's address with the emailed code and sign in with the password
     /// (`POST /auth/confirm-email` → TokenResponse). Pre-session, so `.public`.
     case confirmEmail(email: String, code: String, password: String)
-    /// Native social sign-in with a provider identity token (Sign in with Apple).
-    case oauthSignIn(provider: String, idToken: String, nonce: String?, displayName: String?)
+    /// Native social sign-in with a provider identity token (Sign in with Apple, native Google).
+    /// `authorizationCode`: Apple's single-use code, exchanged server-side for a token account
+    /// deletion can revoke (SOC-04); nil for Google, and omitted from the body when nil.
+    case oauthSignIn(
+        provider: String, idToken: String, nonce: String?, displayName: String?,
+        authorizationCode: String?
+    )
     /// Exchange a Supabase access token for app tokens (web OAuth flow, e.g. Google).
     case sessionExchange(supabaseAccessToken: String)
 
@@ -136,7 +156,8 @@ enum APIEndpoint: Sendable {
     case updateAvatar(imageBase64: String)
     /// Clear the profile picture, reverting to the placeholder glyph.
     case deleteAvatar
-    case deleteAccount
+    /// `DELETE /users/me`. `reauthToken` (from `.reauthenticate`) travels in `X-Caydex-Reauth`.
+    case deleteAccount(reauthToken: String?)
     /// Move this install's guest watchlist + portfolios onto the account that just signed in.
     /// Migration 108 partitions guests per install, so without this call the guest-first funnel
     /// silently costs the user their work: they add tickers during onboarding, create an account,
@@ -475,6 +496,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/auth/refresh"
         case .signOut:
             return "/api/v1/auth/logout"
+        case .signOutAllDevices:
+            return "/api/v1/auth/sign-out-all"
+        case .reauthenticate:
+            return "/api/v1/auth/reauthenticate"
         case .forgotPassword:
             return "/api/v1/auth/forgot-password"
         case .resetPassword:
@@ -483,6 +508,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/auth/change-password"
         case .setPassword:
             return "/api/v1/auth/set-password"
+        case .changeEmail:
+            return "/api/v1/auth/change-email"
+        case .confirmEmailChange:
+            return "/api/v1/auth/change-email/confirm"
         case .resendConfirmation:
             return "/api/v1/auth/resend-confirmation"
         case .confirmEmail:
@@ -830,8 +859,9 @@ enum APIEndpoint: Sendable {
     nonisolated var method: HTTPMethod {
         switch self {
         case .trackEvents,
-             .signIn, .signUp, .refreshToken, .signOut,
+             .signIn, .signUp, .refreshToken, .signOut, .signOutAllDevices, .reauthenticate,
              .forgotPassword, .resetPassword, .changePassword, .setPassword,
+             .changeEmail, .confirmEmailChange,
              .resendConfirmation, .confirmEmail, .oauthSignIn, .sessionExchange, .verifyPurchase,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage, .streamChatMessage,
@@ -1039,6 +1069,13 @@ enum APIEndpoint: Sendable {
         case .refreshToken(let refreshToken):
             return RefreshTokenRequest(refreshToken: refreshToken)
 
+        case .signOut(let refreshToken):
+            // No body at all when there is nothing to send: the server reads the bearer's `sid`.
+            return refreshToken.map { LogoutRequest(refreshToken: $0) }
+
+        case .reauthenticate(let body):
+            return body
+
         case .forgotPassword(let email):
             return ForgotPasswordRequest(email: email)
 
@@ -1053,15 +1090,22 @@ enum APIEndpoint: Sendable {
         case .setPassword(let code, let newPassword):
             return SetPasswordRequest(code: code, newPassword: newPassword)
 
+        case .changeEmail(let newEmail, let currentPassword, let code):
+            return ChangeEmailRequest(newEmail: newEmail, currentPassword: currentPassword, code: code)
+
+        case .confirmEmailChange(let currentCode, let newCode):
+            return ConfirmEmailChangeRequest(currentCode: currentCode, newCode: newCode)
+
         case .resendConfirmation(let email):
             return ResendConfirmationRequest(email: email)
 
         case .confirmEmail(let email, let code, let password):
             return ConfirmEmailRequest(email: email, code: code, password: password)
 
-        case .oauthSignIn(let provider, let idToken, let nonce, let displayName):
+        case .oauthSignIn(let provider, let idToken, let nonce, let displayName, let authorizationCode):
             return OAuthSignInRequest(
-                provider: provider, idToken: idToken, nonce: nonce, displayName: displayName
+                provider: provider, idToken: idToken, nonce: nonce, displayName: displayName,
+                authorizationCode: authorizationCode
             )
 
         case .sessionExchange(let supabaseAccessToken):
@@ -1228,6 +1272,13 @@ enum APIEndpoint: Sendable {
     ///
     /// `.confirmEmail` is limited per email too, but deliberately WITHOUT the proof relaxation:
     /// its secret is an emailed code, and a proof would widen the guessing budget for it.
+    /// The account-deletion re-authentication proof, sent as `X-Caydex-Reauth` (SEC-11). Only
+    /// `.deleteAccount` carries one; nil everywhere else and when the caller has none.
+    nonisolated var reauthProof: String? {
+        if case .deleteAccount(let token) = self { return token }
+        return nil
+    }
+
     nonisolated var deviceProofEmail: String? {
         switch self {
         case .signIn(let email, _), .forgotPassword(let email), .resetPassword(let email, _, _):
@@ -1475,6 +1526,18 @@ enum APIEndpoint: Sendable {
         // its only caller already ignores the result — and saves a guaranteed-401 round trip.
         case .signOut, .changePassword, .setPassword:
             return .signInRequired
+
+        // The email change (audit CC-09): both take `get_current_user_id` and act on the
+        // caller's own account. NOT auth endpoints (`isAuthEndpoint`), for .setPassword's
+        // reason: a 401 comes from the dependency, before any code is checked, so the
+        // refresh-and-retry replays a request whose codes were never spent.
+        case .changeEmail, .confirmEmailChange:
+            return .signInRequired
+
+        // Both take `get_current_user` (2026-11-26, migration 214): sign-out-all and the
+        // re-authentication before account deletion act on the caller's own account.
+        case .signOutAllDevices, .reauthenticate:
+            return .signInRequired
         }
     }
 
@@ -1538,6 +1601,36 @@ nonisolated struct RefreshTokenRequest: Encodable, Sendable {
     let refreshToken: String
 }
 
+nonisolated struct LogoutRequest: Encodable, Sendable {
+    let refreshToken: String
+}
+
+/// Exactly ONE credential: `password`; or `provider` + `idToken` (+ `nonce` for Apple), as for
+/// `/auth/oauth`; or `supabaseAccessToken` (the web Google flow). nil fields are omitted on the
+/// wire (`encodeIfPresent`), which is what the server's "exactly one" check reads.
+nonisolated struct ReauthenticateRequestBody: Encodable, Sendable {
+    var password: String?
+    var provider: String?
+    var idToken: String?
+    var nonce: String?
+    var supabaseAccessToken: String?
+    /// Apple only: the fresh single-use authorization code. The server exchanges it for the
+    /// refresh token account deletion revokes (SOC-04) — the way an account last signed in on
+    /// 1.0–1.03 gets a revocable grant right before it is deleted. `authorization_code` on the
+    /// wire (the encoder converts to snake_case); an older backend ignores it.
+    var authorizationCode: String?
+}
+
+nonisolated struct ReauthenticateResponse: Decodable, Sendable {
+    let reauthToken: String
+    let expiresIn: Int
+
+    enum CodingKeys: String, CodingKey {
+        case reauthToken = "reauth_token"
+        case expiresIn = "expires_in"
+    }
+}
+
 // Password recovery. Property names are camelCase; the encoder's convertToSnakeCase maps
 // them to the backend's `new_password` / `current_password`.
 nonisolated struct ForgotPasswordRequest: Encodable, Sendable {
@@ -1562,6 +1655,20 @@ nonisolated struct SetPasswordRequest: Encodable, Sendable {
     let newPassword: String
 }
 
+/// Exactly one of `currentPassword` / `code` is non-nil; the synthesized `Encodable` omits the
+/// nil one, which is what the backend's exactly-one-proof check reads.
+nonisolated struct ChangeEmailRequest: Encodable, Sendable {
+    let newEmail: String
+    let currentPassword: String?
+    let code: String?
+}
+
+/// No addresses: the server reads both from the account.
+nonisolated struct ConfirmEmailChangeRequest: Encodable, Sendable {
+    let currentCode: String
+    let newCode: String
+}
+
 nonisolated struct ResendConfirmationRequest: Encodable, Sendable {
     let email: String
 }
@@ -1579,6 +1686,9 @@ nonisolated struct OAuthSignInRequest: Encodable, Sendable {
     let idToken: String
     let nonce: String?
     let displayName: String?
+    /// → `authorization_code`. The synthesized encoder skips a nil optional, so a Google
+    /// sign-in's body is exactly what it was before.
+    let authorizationCode: String?
 }
 
 nonisolated struct SessionExchangeRequest: Encodable, Sendable {
@@ -1626,6 +1736,24 @@ nonisolated struct PasswordChangedResponse: Decodable, Sendable {
         case refreshToken = "refresh_token"
         case userId = "user_id"
     }
+}
+
+/// `POST /auth/change-email` and `POST /auth/change-email/confirm` (audit CC-09).
+///
+/// `status` is a STRING on the wire, read through `isChanged`: only "changed" means the account's
+/// address is now `email`. Anything else — "codes_sent", or a value a newer backend adds — reads
+/// as "check both inboxes", the reading that claims nothing happened. Decoding the field as an
+/// enum would make an unknown value THROW after the server already did the work.
+///
+/// "codes_sent" is also the answer when another account already uses the address (no email goes
+/// out then): this route never says which addresses have accounts (sign-up does, by design, since 2026-11-26), so neither may this app.
+/// Nothing here re-mints the session — the caller's tokens are untouched by an email change.
+nonisolated struct EmailChangeResponse: Decodable, Sendable {
+    let status: String
+    let email: String
+    let message: String
+
+    var isChanged: Bool { status == "changed" }
 }
 
 nonisolated struct UpdateAvatarRequestBody: Encodable, Sendable {

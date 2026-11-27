@@ -130,6 +130,13 @@ final class AuthService {
     /// only if no write overtook it, so a stale read never undoes a sign-in or sign-out.
     private var keychainWrites = 0
 
+    /// The stored REFRESH token, mirrored in memory so sign-out can hand it to `/auth/logout`
+    /// (migration 214) without a main-thread Keychain read. Set by every write (`saveTokens`) and by
+    /// the off-main read (`loadStoredRefreshToken`), cleared by `clearToken`. nil after a cold
+    /// launch until the first refresh or sign-in — the logout then names the session by the
+    /// bearer's `sid` alone, which every 214-minted token carries.
+    private var refreshTokenMirror: String?
+
     // MARK: - Initialization
 
     init(apiClient: APIClient, keychain: KeychainService? = nil) {
@@ -156,6 +163,8 @@ final class AuthService {
             responseType: AuthResponse.self
         )
 
+        // Not an Apple session: drop any Apple account link an earlier session left (SOC-04).
+        recordAppleIdentity(nil, accountId: response.userId)
         // Store tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         // A verified password earns this install its per-email lockout exemption.
@@ -185,6 +194,7 @@ final class AuthService {
             retryCount: 0
         )
 
+        recordAppleIdentity(nil, accountId: response.userId)
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1   // new session — invalidate any in-flight older-session refresh
         let epoch = sessionEpoch
@@ -215,6 +225,7 @@ final class AuthService {
             return .needsEmailConfirmation(message: response.message)
         }
 
+        recordAppleIdentity(nil, accountId: response.userId)
         saveTokens(accessToken: accessToken, refreshToken: refreshToken)
         sessionEpoch += 1
         let epoch = sessionEpoch
@@ -320,20 +331,34 @@ final class AuthService {
         )
     }
 
-    /// Sign in with a native provider identity token (Sign in with Apple).
+    /// Sign in with a native provider identity token (Sign in with Apple, native Google).
     ///
-    /// The token is verified by Supabase against Apple's public keys — the client is not
+    /// The token is verified by Supabase against the provider's public keys — the client is not
     /// trusted. `displayName` is passed through because Apple supplies the name only on the
-    /// very first authorization.
+    /// very first authorization — and for Apple it is kept in the Keychain until this request
+    /// succeeds (SOC-05, `AppleSignInStore.nameForSignIn`), so a failed first attempt no longer
+    /// loses it. `authorizationCode` (Apple) lets the backend keep a revocable token (SOC-04);
+    /// `appleUserID` becomes the session's account link for the credential-state check.
     func signInWithProvider(
-        provider: String, idToken: String, nonce: String?, displayName: String?
+        provider: String, idToken: String, nonce: String?, displayName: String?,
+        authorizationCode: String? = nil, appleUserID: String? = nil
     ) async throws -> UserProfile {
+        let isApple = provider == "apple"
+        // Both capped at the backend's 64-scalar limit: builds before 1.04 sent a longer
+        // provider name as-is and the backend 422'd the whole sign-in.
+        let name = isApple
+            ? await Self.appleNameForSignIn(received: displayName, appleUserID: appleUserID, keychain: keychain)
+            : AppleSignInStore.normalisedName(displayName)
         let response = try await apiClient.request(
             endpoint: .oauthSignIn(
-                provider: provider, idToken: idToken, nonce: nonce, displayName: displayName
+                provider: provider, idToken: idToken, nonce: nonce, displayName: name,
+                authorizationCode: isApple ? authorizationCode : nil
             ),
             responseType: AuthResponse.self
         )
+        // The server has the name now (it persists it before answering): nothing is pending.
+        if isApple { AppleSignInStore.clearPendingName(keychain: keychain) }
+        recordAppleIdentity(isApple ? appleUserID : nil, accountId: response.userId)
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1
         let epoch = sessionEpoch
@@ -350,6 +375,7 @@ final class AuthService {
             endpoint: .sessionExchange(supabaseAccessToken: supabaseToken),
             responseType: AuthResponse.self
         )
+        recordAppleIdentity(nil, accountId: response.userId)
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
         sessionEpoch += 1
         let epoch = sessionEpoch
@@ -357,6 +383,21 @@ final class AuthService {
         let profile = try await adoptedSessionProfile(epoch: epoch)
         DeviceProofStore.remember(response.deviceToken, for: profile.email)
         return profile
+    }
+
+    /// Which Apple ID (if any) the session being adopted came in with — `AppleSignInStore`'s
+    /// account link, read by `AppState.checkAppleCredentialState` (SOC-04). EVERY sign-in path
+    /// calls this, just before `saveTokens`: an Apple sign-in records its Apple ID, every other
+    /// way in clears the link, so a link left by an earlier session can never sign out someone
+    /// who came in by email or Google. `clearToken()` drops it with the tokens at every session end.
+    private func recordAppleIdentity(_ appleUserID: String?, accountId: String?) {
+        guard let appleUserID, !appleUserID.isEmpty, let accountId, !accountId.isEmpty else {
+            AppleSignInStore.clearAccountLink(keychain: keychain)
+            return
+        }
+        AppleSignInStore.setAccountLink(
+            .init(appleUserID: appleUserID, accountId: accountId), keychain: keychain
+        )
     }
 
     /// The profile read that completes a sign-in whose tokens were just adopted. A failure is
@@ -400,7 +441,17 @@ final class AuthService {
         let endedToken: String?
         /// `sessionEpoch` right after the bump: the backstop's guard.
         let epoch: Int
+        /// The ended session's REFRESH token (from the in-memory mirror, taken just before the
+        /// Keychain clear), so `POST /auth/logout` can name exactly this session (migration 214).
+        /// Defaulted so a caller that has none (a test double, a mutation scan) can omit it.
+        var endedRefreshToken: String? = nil
+        /// The server already ended every session ("Sign out of all devices"): the detach and the
+        /// logout would each be a guaranteed 401, and the server has detached every device.
+        var endedByServer: Bool = false
     }
+
+    /// Set by `noteSessionsEndedByServer()` and consumed by the very next `beginSignOut()`.
+    private var nextSignOutEndedByServer = false
 
     /// Sign out, part 1 — everything LOCAL, synchronously: end the session epoch, clear the
     /// Keychain, disarm the client. `AppState.signOut()` calls this BEFORE it changes the
@@ -410,8 +461,9 @@ final class AuthService {
     /// shows the signed-out UI at once, so every screen reloads. Sign-out used to begin inside a
     /// Task and disarm the client only after the device detach and logout round trips, so those
     /// reloads were built with the ENDED account's token — its reports list landed in the
-    /// signed-out UI — and `/auth/logout` only logs, so that token stays valid server-side. With
-    /// no suspension point in here, the client is disarmed before `AppState` has changed anything.
+    /// signed-out UI — and an ACCESS token stays valid server-side until it expires (≤ 60 min; the
+    /// logout revokes the session's refresh tokens, not the access token). With no suspension
+    /// point in here, the client is disarmed before `AppState` has changed anything.
     func beginSignOut() -> SignOutHandoff {
         sessionEpoch += 1
 
@@ -426,28 +478,69 @@ final class AuthService {
         //
         // No epoch guard: nothing in this function suspends, so no newer session can have
         // written its own tokens yet.
+        //
+        // The refresh token is taken FIRST, from the in-memory mirror (never a main-thread
+        // Keychain read — `test_ios_launch_no_main_thread_keychain.py`): `/auth/logout` uses it
+        // to end THIS session server-side (migration 214), and `clearToken()` below drops it.
+        let endedRefreshToken = refreshTokenMirror
         clearToken()
 
         // Read and cleared as one swap under the client's lock, without an actor hop, so no
         // request can be built with the ended token after this line.
         let endedToken = apiClient.disarmAuthToken()
-        return SignOutHandoff(endedToken: endedToken, epoch: sessionEpoch)
+        let endedByServer = nextSignOutEndedByServer
+        nextSignOutEndedByServer = false
+        return SignOutHandoff(endedToken: endedToken, epoch: sessionEpoch, endedRefreshToken: endedRefreshToken, endedByServer: endedByServer)
+    }
+
+    /// "Sign out of all devices": the server ends every session of the account, this one included
+    /// (`POST /auth/sign-out-all`). Sent through the ARMED client — the session is still live —
+    /// so an expired access token is refreshed first like any request. On success the caller runs
+    /// the local sign-out at once (`AppState.signOutEverywhere()`); on failure nothing changed.
+    func signOutAllDevices() async throws {
+        try await apiClient.request(endpoint: .signOutAllDevices)
+    }
+
+    /// Marks the next `beginSignOut()` as ending a session the SERVER already ended. Called
+    /// synchronously right before `AppState.signOut()`, in the same main-actor turn, so no other
+    /// sign-out can consume it.
+    func noteSessionsEndedByServer() {
+        nextSignOutEndedByServer = true
+    }
+
+    /// Re-enter a credential before a permanent action (account deletion, SEC-11) and get the
+    /// five-minute proof the server asks for. Never touches the session or the Keychain.
+    func reauthenticate(_ body: ReauthenticateRequestBody) async throws -> String {
+        try await apiClient.request(
+            endpoint: .reauthenticate(body),
+            responseType: ReauthenticateResponse.self
+        ).reauthToken
     }
 
     /// Sign out, part 2 — the network calls, sent with the ended token passed explicitly, after
     /// `beginSignOut()` has already ended the session locally. Best-effort throughout.
     func finishSignOut(_ handoff: SignOutHandoff) async {
-        if let endedToken = handoff.endedToken {
+        // GoogleSignIn keeps its own signed-in state in the Keychain; the ended session must not
+        // leave it behind (SOC-04). Local and synchronous, so first — before the two round trips
+        // below, which a kill can cut short. A no-op when nobody signed in with Google here.
+        SocialSignInService.endGoogleSession()
+
+        if handoff.endedByServer {
+            // Sign out of all devices: the server revoked every session and detached every device
+            // already. Both calls below would be a 401 for the token it just evicted.
+            Self.log.notice("sign-out: the server already ended every session — device detach and backend logout skipped")
+        } else if let endedToken = handoff.endedToken {
             // Detach the APNs token with the ended session's credential — the call is
             // authenticated. Otherwise `device_tokens` keeps mapping this device to the account
             // being signed out and the sweeper keeps pushing its alerts here.
             await PushNotificationManager.shared.unregisterCurrentDevice(authenticatedAs: endedToken)
 
             // Best-effort backend logout, with the same credential so the server can see who is
-            // logging out. Passed explicitly: re-arming the shared client to send these two would
-            // reopen the window `beginSignOut()` closed.
+            // logging out, and the session's refresh token so it can revoke exactly this session
+            // (migration 214; the bearer's `sid` names it too). Passed explicitly: re-arming the
+            // shared client to send these two would reopen the window `beginSignOut()` closed.
             do {
-                try await apiClient.requestAuthenticated(as: endedToken, endpoint: .signOut)
+                try await apiClient.requestAuthenticated(as: endedToken, endpoint: .signOut(refreshToken: handoff.endedRefreshToken))
             } catch {
                 Self.log.warning("sign-out: POST /auth/logout failed (best-effort, the session is already ended locally): \(AppError.from(error).analyticsCode, privacy: .public)")
             }
@@ -476,7 +569,8 @@ final class AuthService {
             throw APIError.unauthorized
         }
         // A session that changed during the read owns the Keychain now. Sending what the read
-        // returned could spend a NEWER session's refresh token (the server rotates it on use),
+        // returned could spend a NEWER session's refresh token (single-use since migration 214:
+        // the server retires it and a second use outside a short grace window ends the session),
         // leaving that session holding a dead one.
         guard epoch == sessionEpoch else { return }
 
@@ -517,7 +611,13 @@ final class AuthService {
 
     /// The stored refresh token, read OFF the main thread (see `loadStoredToken`).
     private func loadStoredRefreshToken() async -> String? {
-        await keychainValueOffMain(forKey: Self.refreshTokenKey)
+        let writes = keychainWrites
+        let token = await keychainValueOffMain(forKey: Self.refreshTokenKey)
+        // Only if no write overtook the read: a stale value must never replace a newer session's.
+        if writes == keychainWrites {
+            refreshTokenMirror = token
+        }
+        return token
     }
 
     /// Every Keychain read in this class: one `get`, on a detached task, so the main actor never
@@ -527,6 +627,17 @@ final class AuthService {
         let keychain = self.keychain
         return await Task.detached(priority: .userInitiated) {
             keychain.get(key)
+        }.value
+    }
+
+    /// The name to send with an Apple sign-in (SOC-05), resolved OFF the main actor: it is a
+    /// Keychain read (and, when Apple sent a name, a write). Kept below `keychainValueOffMain`
+    /// on purpose: that session-token reader stays the file's first detached read.
+    private static func appleNameForSignIn(
+        received: String?, appleUserID: String?, keychain: KeychainService
+    ) async -> String? {
+        await Task.detached(priority: .userInitiated) {
+            AppleSignInStore.nameForSignIn(received: received, appleUserID: appleUserID, keychain: keychain)
         }.value
     }
 
@@ -593,6 +704,7 @@ final class AuthService {
         keychain.set(refreshToken, forKey: Self.refreshTokenKey)
         keychainWrites &+= 1
         storedTokenPresent = true
+        refreshTokenMirror = refreshToken
     }
 
     /// Clear stored tokens
@@ -601,6 +713,17 @@ final class AuthService {
         keychain.delete(Self.refreshTokenKey)
         keychainWrites &+= 1
         storedTokenPresent = false
+        refreshTokenMirror = nil
+        // GoogleSignIn's own signed-in state ends with every session too — not only on a tapped
+        // Sign Out (`finishSignOut`) but when the server ends the session (a dead credential, an
+        // undone adoption, the fresh-install purge), which reach only this funnel (review
+        // 2026-11-27). Local and synchronous; a no-op when nobody signed in with Google here.
+        // After an account deletion `disconnectGoogleGrant()` has already read its token.
+        SocialSignInService.endGoogleSession()
+        // The Apple account link describes THIS session, so it ends with it (SOC-04) — on every
+        // path that ends one: sign-out, a dead credential, an undone adoption, the fresh-install
+        // purge (a link an earlier install left would otherwise outlive its session).
+        AppleSignInStore.clearAccountLink(keychain: keychain)
     }
 }
 

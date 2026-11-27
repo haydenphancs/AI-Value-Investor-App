@@ -830,6 +830,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "AUTH_FORBIDDEN" {
                 return .forbidden
             }
+            // 403 AUTH_REAUTH_REQUIRED (SEC-11): deleting the account needs a FRESH proof of
+            // identity, and the request had none or carried a stale one. The session is fine —
+            // `.validationFailed` is outside `isAuthError` (nothing clears the Keychain), keeps the
+            // server's wording and points at the confirm step (`.fixInput`). Never `.forbidden`,
+            // whose "Access Denied" + goBack would tell the user they may not delete at all.
+            if code == "AUTH_REAUTH_REQUIRED" {
+                return .validationFailed(
+                    message: message.isEmpty
+                        ? "For your security, please confirm it's you before deleting your account."
+                        : message
+                )
+            }
             // 503 AUTH_UNAVAILABLE can also arrive on the businessError path (the default arm of
             // validateResponse handles non-401 statuses).
             if code == "AUTH_UNAVAILABLE" {
@@ -899,6 +911,24 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
                 || code == "AUTH_PASSWORD_NOT_SET"
                 || code == "AUTH_PASSWORD_ALREADY_SET" {
                 return .validationFailed(message: message)
+            }
+            // 400s from the email change (`/auth/change-email`, audit CC-09): the address typed
+            // is already the account's, or the identity provider refused the address itself.
+            // Both are what the user typed — `.validationFailed` keeps the server's sentence,
+            // points at the form and is outside `isAuthError`, so no credential is touched. Never
+            // `.apiError`, whose `.retry` would resend an identical request refused identically.
+            // (An address another account holds is NOT one of these: that answer is a 200, and a
+            // confirm with nothing pending reads as AUTH_CODE_INVALID, so nothing here can tell
+            // anyone which addresses have accounts.)
+            if code == "AUTH_EMAIL_UNCHANGED" {
+                return .validationFailed(
+                    message: message.isEmpty ? "That's already the email on your account." : message
+                )
+            }
+            if code == "AUTH_EMAIL_REJECTED" {
+                return .validationFailed(
+                    message: message.isEmpty ? "That email address can't be used. Try a different one." : message
+                )
             }
 
             // ── Codes that used to fall through to the generic branch below ──────────────

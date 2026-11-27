@@ -3,7 +3,7 @@
 import string
 import unicodedata
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from typing import Optional
 
 # The display-name bound lives with the profile schema that owns the column, and is imported
@@ -50,6 +50,12 @@ SIGN_IN_SECRET_MAX_LENGTH = 1024
 # Provider / session tokens: an Apple id_token is ~1 KiB, a Supabase JWT ~1 KiB, a refresh
 # token a few dozen bytes. 8 KiB leaves room for any claim set without admitting a payload.
 TOKEN_MAX_LENGTH = 8192
+# Sign in with Apple's authorization code is a short opaque string (~65 characters today);
+# 1 KiB leaves room for a format change without admitting a payload.
+AUTHORIZATION_CODE_MAX_LENGTH = 1024
+# The provider name a social sign-in carries is TRUNCATED to DISPLAY_NAME_MAX_LENGTH, not refused
+# (OAuthSignInRequest); this raw bound only stops a payload.
+OAUTH_DISPLAY_NAME_RAW_MAX_LENGTH = 512
 
 # One-time codes (signup confirmation, password recovery). The live project sends 8 digits; the
 # range is deliberately wider so a dashboard change to the OTP length never 422s every user.
@@ -289,6 +295,79 @@ class ConfirmEmailRequest(BaseModel):
         return _normalize_otp_code(v)
 
 
+class ChangeEmailRequest(BaseModel):
+    """Start changing the signed-in account's email address (audit CC-09).
+
+    The bearer token alone is never enough — a stolen access token would otherwise move the
+    account to the thief's mailbox, and every reset code with it. So exactly ONE proof comes
+    with the request:
+      * `current_password` — an account with a password, re-checked by a real sign-in; or
+      * `code` — the recovery code `POST /auth/forgot-password` emails to the CURRENT address
+        (an Apple/Google account has no password; the same proof `/auth/set-password` takes).
+    The current address is resolved from the token's subject, never the body.
+
+    Supabase's Secure email change then mails a code to BOTH addresses, and
+    `POST /auth/change-email/confirm` takes the two.
+    """
+
+    new_email: EmailStr
+    current_password: Optional[str] = Field(
+        default=None, min_length=1, max_length=SIGN_IN_SECRET_MAX_LENGTH, repr=False,
+    )
+    code: Optional[str] = Field(
+        default=None, min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False,
+    )
+
+    @field_validator("code")
+    @classmethod
+    def _code_digits(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _normalize_otp_code(v)
+
+    @model_validator(mode="after")
+    def _exactly_one_proof(self) -> "ChangeEmailRequest":
+        if (self.current_password is None) == (self.code is None):
+            raise ValueError("send exactly one of current_password or code")
+        return self
+
+
+class ConfirmEmailChangeRequest(BaseModel):
+    """Finish an email change with the two codes Supabase's Secure email change sent: one to
+    the current address, one to the new one. Both addresses are read from the account itself
+    (the token's subject), never from the body."""
+
+    current_code: str = Field(min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False)
+    new_code: str = Field(min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False)
+
+    @field_validator("current_code", "new_code")
+    @classmethod
+    def _code_digits(cls, v: str) -> str:
+        return _normalize_otp_code(v)
+
+
+#: `EmailChangeResponse.status` values. iOS decodes this field; a new value needs an iOS branch
+#: first (the decoder treats an unknown one as "codes sent", the safe reading).
+EMAIL_CHANGE_CODES_SENT = "codes_sent"
+EMAIL_CHANGE_CHANGED = "changed"
+
+
+class EmailChangeResponse(BaseModel):
+    """Both email-change steps answer with this shape.
+
+    `status`:
+      * "codes_sent" — `/auth/change-email`: check both inboxes. Also the answer when another
+        account already uses the address: no email goes out then, but the response is the same,
+        so this route never tells anyone which addresses have accounts.
+      * "changed" — `/auth/change-email/confirm` (or a project with email confirmation off): the
+        account's address is now `email`.
+    `email` is the address the user asked for ("codes_sent") or the account's new address
+    ("changed"). The caller's session is untouched either way: nothing is re-minted.
+    """
+
+    status: str
+    email: str
+    message: str
+
+
 class MessageResponse(BaseModel):
     """Generic acknowledgement for flows that must not leak whether an account exists."""
 
@@ -359,9 +438,27 @@ class OAuthSignInRequest(BaseModel):
     # client generated one; Supabase verifies the pairing.
     nonce: Optional[str] = Field(default=None, max_length=TOKEN_MAX_LENGTH, repr=False)
     # Apple only returns the display name on the FIRST authorization, so the client passes
-    # it through for us to persist. Never used as an identity claim. Same bound as the
-    # column's other writers: `get_current_user` re-reads this row on every request.
-    display_name: Optional[str] = Field(default=None, max_length=DISPLAY_NAME_MAX_LENGTH)
+    # it through for us to persist. Never used as an identity claim. Same STORED bound as the
+    # column's other writers (`get_current_user` re-reads this row on every request) — but
+    # TRUNCATED to it, not refused: a provider name over 64 characters used to 422 the whole
+    # sign-in, and the retry carried no name (Apple sends it once), so the user could neither get
+    # in on that tap nor keep their name. The raw bound only stops a payload.
+    display_name: Optional[str] = Field(default=None, max_length=OAUTH_DISPLAY_NAME_RAW_MAX_LENGTH)
+    # Sign in with Apple's single-use authorization code (~5 minutes), OPTIONAL: builds 1.0–1.03
+    # never send it and must keep decoding. Exchanged inside the same request for a refresh token
+    # that account deletion can revoke (SOC-04, `services/apple_sign_in_service.py`). Ignored for
+    # Google. A credential: repr=False, and `log_redaction` redacts the key by name.
+    authorization_code: Optional[str] = Field(
+        default=None, max_length=AUTHORIZATION_CODE_MAX_LENGTH, repr=False,
+    )
+
+    @field_validator("display_name")
+    @classmethod
+    def _cap_display_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        trimmed = value.strip()[:DISPLAY_NAME_MAX_LENGTH].strip()
+        return trimmed or None
 
 
 class SessionExchangeRequest(BaseModel):
@@ -376,6 +473,65 @@ class SessionExchangeRequest(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str = Field(max_length=TOKEN_MAX_LENGTH, repr=False)
+
+
+class LogoutRequest(BaseModel):
+    """Optional body of `POST /auth/logout` (migration 214).
+
+    The device's refresh token, so the server can end THAT session even when the bearer is an
+    older token. Optional: builds up to 1.03 send no body, and the bearer's `sid` claim names the
+    session for them.
+    """
+
+    refresh_token: Optional[str] = Field(default=None, max_length=TOKEN_MAX_LENGTH, repr=False)
+
+
+class LogoutResponse(BaseModel):
+    message: str
+    # Server-side sessions ended by this call: 0 for a pre-214 token (nothing to revoke).
+    sessions_revoked: int = 0
+
+
+class ReauthenticateRequest(BaseModel):
+    """Re-enter a credential before a sensitive action (account deletion, SEC-11).
+
+    Exactly ONE of: `password`; `provider` + `id_token` (+ `nonce` for Apple), as on
+    `/auth/oauth`; or `supabase_access_token` (the web Google flow), as on
+    `/auth/session-exchange`. The credential must belong to the caller's own account.
+    """
+
+    password: Optional[str] = Field(default=None, max_length=SIGN_IN_SECRET_MAX_LENGTH, repr=False)
+    provider: Optional[str] = Field(default=None, pattern="^(apple|google)$")
+    id_token: Optional[str] = Field(default=None, min_length=16, max_length=TOKEN_MAX_LENGTH, repr=False)
+    nonce: Optional[str] = Field(default=None, max_length=TOKEN_MAX_LENGTH, repr=False)
+    supabase_access_token: Optional[str] = Field(
+        default=None, min_length=16, max_length=TOKEN_MAX_LENGTH, repr=False,
+    )
+    # Apple only: the single-use authorization code Sign in with Apple hands the app with the
+    # identity token. NOT a credential kind (it proves nothing by itself) — after the identity
+    # token proved the caller, it is exchanged for the refresh token that account deletion
+    # revokes (SOC-04). This is how an account last signed in on 1.0–1.03 (which never sent the
+    # code) gets a revocable grant at the "Confirm it's you" step right before deletion.
+    authorization_code: Optional[str] = Field(
+        default=None, max_length=AUTHORIZATION_CODE_MAX_LENGTH, repr=False,
+    )
+
+    def credential_kind(self) -> Optional[str]:
+        """`password` / `id_token` / `supabase_token`, or None when the body is not exactly one."""
+        kinds = []
+        if self.password:
+            kinds.append("password")
+        if self.provider or self.id_token:
+            kinds.append("id_token" if (self.provider and self.id_token) else "incomplete")
+        if self.supabase_access_token:
+            kinds.append("supabase_token")
+        return kinds[0] if len(kinds) == 1 and kinds[0] != "incomplete" else None
+
+
+class ReauthenticateResponse(BaseModel):
+    # The proof for `DELETE /users/me`'s `X-Caydex-Reauth` header. Short-lived, one purpose.
+    reauth_token: str = Field(repr=False)
+    expires_in: int
 
 
 class TokenResponse(BaseModel):

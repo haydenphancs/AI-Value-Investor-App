@@ -838,8 +838,14 @@ def test_the_window_counts_no_system_reason_and_every_spend_or_refund():
     # whichever side of the NOT IN list they sit on. Exempt only while that stays true (checked
     # below against the migration's own INSERT and the model).
     purchased_only = {"feedback_reward"}       # migration 199 (merged with 200 on 2026-10-22)
+    # Creation-only granted-pool rows: written once, at account creation, as the account's SECOND
+    # ledger row (after its opening `grant`), before any paid period can exist. The window only
+    # reads rows after a paid period's clawback row (`t.id > revoked_ledger_id`), so these can
+    # never fall inside one. Exempt only while that stays true (checked below against the single
+    # writer's own guards).
+    creation_only = {"welcome_withheld"}       # migration 211 (audit CC-01, 2026-11-26)
     for reason, (kind, _title, _ref) in hist._REASONS.items():
-        if reason.startswith("pack_") or reason in purchased_only:
+        if reason.startswith("pack_") or reason in purchased_only or reason in creation_only:
             continue                            # purchased pool only: granted_delta is 0 either way
         if kind in (hist.KIND_GRANT, hist.KIND_EXPIRE, hist.KIND_REVOKE):
             assert reason in system, f"{reason} ({kind}) moves the granted pool outside any spend"
@@ -852,8 +858,24 @@ def test_the_window_counts_no_system_reason_and_every_spend_or_refund():
         for _at, stmt in statements(strip_sql_comments(text), r"\bINSERT INTO (?:public\.)?credit_transactions\b"):
             written |= set(re.findall(r"'([a-z_]+)'", stmt)) & set(hist._REASONS)
     assert {"grant", "monthly_reset", "monthly_expired", "plan_period", "tier_revoked"} <= written, written
-    assert {r for r in written if not r.startswith("pack_") and r not in purchased_only} <= system, (
+    assert {r for r in written
+            if not r.startswith("pack_") and r not in purchased_only and r not in creation_only} <= system, (
         written - system)
+    # The creation-only premise, pinned: ONE writer (211's sign-up trigger), and it refuses any
+    # account that is not a brand-new one — no paid period, nothing but the opening grant.
+    writers = set()
+    for name, text in migration_sources():
+        code = strip_sql_comments(text)
+        for at, stmt in statements(code, r"\bINSERT INTO (?:public\.)?credit_transactions\b"):
+            if creation_only & set(re.findall(r"'([a-z_]+)'", stmt)):
+                writers.add(name)
+                fn = code[:at]
+                fn = fn[fn.rindex("CREATE OR REPLACE FUNCTION"):]
+                assert "withhold_returning_welcome_credits" in fn, f"{name}: another writer of {creation_only}"
+                guards = norm_sql(fn)
+                for guard in ("v_row.paid_period_id IS NOT NULL", "reason <> 'grant'", "v_row.used <> 0"):
+                    assert guard in guards, f"{name}: the creation-only guard {guard!r} is gone"
+    assert writers == {"211_deleted_account_fingerprints.sql"}, writers
     # The exemption's premise, pinned: every ledger INSERT of a purchased-only reason writes
     # granted_delta 0, in the migrations and in the model's writer.
     seen = set()

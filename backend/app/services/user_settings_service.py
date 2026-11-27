@@ -285,3 +285,25 @@ class UserSettingsService:
                 user_id, type(e).__name__, e,
             )
             return False
+
+    def unregister_all_devices(self, user_id: str) -> bool:
+        """Detach EVERY APNs token of this account — "Sign out of all devices" (migration 214).
+
+        Those devices are signed out by the server, not by themselves, so none of them runs its
+        own sign-out detach (`unregister_device`), and the one that asked can no longer
+        authenticate a detach either: its own token was just revoked with the rest. Without this
+        every signed-out phone kept receiving the account's alerts. Each device registers again
+        when it signs back in.
+        """
+        if not user_id:
+            return False
+        try:
+            self.supabase.table("device_tokens").delete().eq("user_id", user_id).execute()
+            return True
+        except Exception as e:
+            logger.error(
+                "device_tokens delete-all failed for user=%s (%s: %s) — signed-out devices may "
+                "keep receiving this account's notifications until they sign in elsewhere",
+                user_id, type(e).__name__, e,
+            )
+            return False

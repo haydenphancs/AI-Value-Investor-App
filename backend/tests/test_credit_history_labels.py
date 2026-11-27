@@ -62,6 +62,7 @@ _EXPECTED_KINDS = {
     "tester_grant": KIND_GRANT,
     "feedback_reward": KIND_GRANT,  # a confirmed issue report, granted by hand (migration 199)
     "tier_revoked": KIND_REVOKE,
+    "welcome_withheld": KIND_REVOKE,  # a returning account's welcome grant taken back (211)
     "monthly_expired": KIND_EXPIRE,  # ensure_credit_period's expiry row (migration 194)
     "pack_purchase": KIND_PURCHASE,
     "pack_revoked": KIND_REVOKE,

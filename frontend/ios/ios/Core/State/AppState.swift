@@ -20,6 +20,8 @@
 import SwiftUI
 import Combine
 import UserNotifications
+import AuthenticationServices
+import OSLog
 
 // MARK: - Global App State
 
@@ -269,6 +271,22 @@ final class AppState {
             forName: .caydexEntitlementChanged, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in await self?.refreshEntitlement() }
+        }
+
+        // Sign in with Apple can be revoked from outside the app at any time (SOC-04): re-check
+        // on every foreground, and the moment iOS says a credential was revoked. Both are cheap
+        // no-ops unless the current session came in with Apple. (The cold launch is covered by
+        // `establishAuthenticatedSession`: this observer is not registered yet when the launch's
+        // own didBecomeActive arrives.)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.checkAppleCredentialState(trigger: "foreground") }
+        }
+        NotificationCenter.default.addObserver(
+            forName: ASAuthorizationAppleIDProvider.credentialRevokedNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in await self?.checkAppleCredentialState(trigger: "revoked-notification") }
         }
 
         // Announce connectivity so a session can heal the moment the network comes back.
@@ -838,6 +856,73 @@ final class AppState {
         auth.status = .authenticated
         cancelRestoreBackoff()
         await onAuthenticated(userId: userId, identity: identity)
+        // The cold-launch Apple credential check (SOC-04): the foreground observer is not yet
+        // registered when the launch's own didBecomeActive arrives. Unstructured, so a slow
+        // Apple answer never delays anything above; a no-op for a session not made with Apple.
+        Task { [weak self] in await self?.checkAppleCredentialState(trigger: "session-established") }
+    }
+
+    // MARK: - Sign in with Apple credential state (SOC-04)
+
+    private static let appleCredentialLog = Logger(subsystem: "com.phan.caydex", category: "auth")
+
+    /// One check at a time: a foreground and the revocation notification can arrive together.
+    private var appleCredentialCheckInFlight = false
+
+    /// End a session whose Apple ID no longer authorises Caydex.
+    ///
+    /// A user can stop using Sign in with Apple for Caydex at any time (Settings → Apple Account →
+    /// Sign in with Apple → Stop Using). Our session is our own token pair, so nothing on the
+    /// server notices: before this, the session simply went on working. Apple's guidance is to
+    /// ask `getCredentialState(forUserID:)` on launch and foreground and sign out on `.revoked`.
+    ///
+    /// Only a session that came in WITH Apple has an Apple ID to ask about — the account link
+    /// `AuthService` records at sign-in, honoured only for the account signed in now. Only
+    /// `.revoked` signs out: `.notFound` and `.transferred` are logged and the session is kept —
+    /// signing someone out on an answer we cannot explain is the worse failure. A sign-out goes
+    /// through `signOut()`, never a bare Keychain clear (auth.md §8: disarm first).
+    func checkAppleCredentialState(trigger: String) async {
+        guard auth.status == .authenticated, let accountId = user.profile?.id, !accountId.isEmpty,
+              !appleCredentialCheckInFlight else { return }
+        appleCredentialCheckInFlight = true
+        defer { appleCredentialCheckInFlight = false }
+        let generation = credentialGeneration
+
+        // A Keychain read: off the main actor.
+        let appleUserID = await Task.detached(priority: .utility) {
+            AppleSignInStore.appleUserID(linkedTo: accountId)
+        }.value
+        guard let appleUserID else { return }
+
+        let state: ASAuthorizationAppleIDProvider.CredentialState
+        do {
+            state = try await ASAuthorizationAppleIDProvider().credentialState(forUserID: appleUserID)
+        } catch {
+            let ns = error as NSError
+            Self.appleCredentialLog.warning("apple credential check (\(trigger, privacy: .public)) failed: domain=\(ns.domain, privacy: .public) code=\(ns.code, privacy: .public) — session kept")
+            return
+        }
+
+        // A sign-out, a sign-in or an account switch while Apple answered owns the session now.
+        guard generation == credentialGeneration, auth.status == .authenticated,
+              user.profile?.id == accountId else { return }
+
+        switch state {
+        case .authorized:
+            return
+        case .revoked:
+            Self.appleCredentialLog.notice("apple credential check (\(trigger, privacy: .public)): Sign in with Apple was revoked for this app — signing out")
+            signOut()
+            currentError = .sessionEnded(
+                message: "Sign in with Apple was turned off for Caydex, so you've been signed out. Sign in again to keep going."
+            )
+        case .notFound:
+            Self.appleCredentialLog.notice("apple credential check (\(trigger, privacy: .public)): Apple reports no credential for this Apple ID — session kept")
+        case .transferred:
+            Self.appleCredentialLog.notice("apple credential check (\(trigger, privacy: .public)): credential transferred — session kept")
+        @unknown default:
+            Self.appleCredentialLog.notice("apple credential check (\(trigger, privacy: .public)): unknown state \(state.rawValue, privacy: .public) — session kept")
+        }
     }
 
     /// The one piece of the fan-out that cannot wait until after the status is published.
@@ -1501,6 +1586,33 @@ final class AppState {
         discardDataForEndedSession()
     }
 
+    /// The account was DELETED server-side (`DELETE /users/me` answered): revoke this device's
+    /// Google grant, then sign out (SOC-04). The server revokes the Apple grant itself, before it
+    /// deletes the account; Google's grant lives in GoogleSignIn on the device, so the device
+    /// revokes it. Disconnect FIRST: it reads the token to revoke synchronously, and the sign-out
+    /// that follows signs GoogleSignIn out (`AuthService.finishSignOut`). Both callers — Settings
+    /// and the Profile view model — go through here.
+    func signOutAfterAccountDeletion() {
+        SocialSignInService.disconnectGoogleGrant()
+        signOut()
+    }
+
+    /// "Sign out of all devices" (migration 214): the server ends EVERY session of the account —
+    /// this one included — then this device signs out locally exactly like `signOut()`.
+    ///
+    /// Throws (and changes nothing locally) when the server could not do it, so the caller can say
+    /// so: a sign-out-everywhere that silently only signed out here would leave the user believing
+    /// a thief was evicted. On success the local half runs in the same main-actor turn as the
+    /// `noteSessionsEndedByServer()` mark, so `finishSignOut` skips the detach and the logout —
+    /// both would 401 against the token the server just evicted, and the server already detached
+    /// every device.
+    func signOutEverywhere() async throws {
+        guard let authService else { throw APIError.authRequired }
+        try await authService.signOutAllDevices()
+        authService.noteSessionsEndedByServer()
+        signOut()
+    }
+
     /// Drop this device's Learn progress + bookmarks because the session that owned them ended.
     ///
     /// Learn state is DEVICE-GLOBAL — the four stores' UserDefaults keys carry no user id — so
@@ -1578,6 +1690,12 @@ final class AppState {
         // with shares and values, in Library/Caches. Same rule as Home's: unbind and delete.
         UpdatesFeedSnapshotStore.shared.clearForEndedSession()
         TrackingSnapshotStore.shared.clearForEndedSession()
+        // Sign in with Apple's pending name and account link (SOC-04/05) are device-global too —
+        // Keychain items with no Caydex user in their key. Left behind, a person's name and Apple
+        // user id would stay on this phone after their session ended (auth.md §7).
+        // Synchronous (two deletes, like `clearToken`'s), so a sign-in that follows can never be
+        // overtaken by this clear and lose what it just wrote.
+        AppleSignInStore.clearForEndedSession()
 
         // Everything below used to sit OUTSIDE this funnel, called only from `signOut()`. That
         // covered exactly one of the three ways a session ends — the other two (a dead access
@@ -1816,9 +1934,10 @@ final class AppState {
         do {
             let profile: UserProfile
             switch result {
-            case let .identityToken(provider, token, nonce, displayName):
+            case let .identityToken(provider, token, nonce, displayName, authorizationCode, appleUserID):
                 profile = try await authService.signInWithProvider(
-                    provider: provider, idToken: token, nonce: nonce, displayName: displayName
+                    provider: provider, idToken: token, nonce: nonce, displayName: displayName,
+                    authorizationCode: authorizationCode, appleUserID: appleUserID
                 )
             case let .supabaseSession(accessToken):
                 profile = try await authService.exchangeSupabaseSession(accessToken: accessToken)

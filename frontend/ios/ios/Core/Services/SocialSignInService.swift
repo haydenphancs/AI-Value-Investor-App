@@ -67,8 +67,17 @@ enum SocialSignInError: LocalizedError {
 
 /// Result of a provider handshake, ready to hand to the backend.
 enum SocialSignInResult: Sendable {
-    /// A provider identity token (Apple) → POST /auth/oauth
-    case identityToken(provider: String, token: String, nonce: String?, displayName: String?)
+    /// A provider identity token (Apple, or native Google) → POST /auth/oauth.
+    ///
+    /// `nonce` is the RAW nonce; the provider was given its SHA-256 (Supabase hashes the raw
+    /// value and compares). `authorizationCode` (Apple only, single-use, ~5 minutes) lets the
+    /// backend keep a token it can revoke at account deletion (SOC-04). `appleUserID` (Apple's
+    /// `credential.user`) keys the pending name and the credential-state check; it never leaves
+    /// the device.
+    case identityToken(
+        provider: String, token: String, nonce: String?, displayName: String?,
+        authorizationCode: String?, appleUserID: String?
+    )
     /// A Supabase access token (web flow) → POST /auth/session-exchange
     case supabaseSession(accessToken: String)
 }
@@ -130,7 +139,9 @@ final class SocialSignInService: NSObject {
 
             // Apple returns the name ONLY on the first authorization for this app. If we
             // don't capture it here it is gone permanently, so pass it through for the
-            // backend to persist (it never overwrites an existing name).
+            // backend to persist (it never overwrites an existing name). `AppState` also keeps
+            // it in the Keychain until an `/auth/oauth` succeeds (SOC-05, `AppleSignInStore`),
+            // because a failed first attempt used to lose it for good.
             let displayName = [
                 credential.fullName?.givenName,
                 credential.fullName?.familyName,
@@ -142,11 +153,20 @@ final class SocialSignInService: NSObject {
             let nonce = currentAppleNonce
             currentAppleNonce = nil
 
+            // Single-use, ~5 minutes: the backend exchanges it inside the same `/auth/oauth`
+            // request for a token it can revoke when the account is deleted (SOC-04). Optional —
+            // a missing code only means this grant cannot be revoked later.
+            let authorizationCode = credential.authorizationCode
+                .flatMap { String(data: $0, encoding: .utf8) }
+                .flatMap { $0.isEmpty ? nil : $0 }
+
             return .identityToken(
                 provider: "apple",
                 token: identityToken,
                 nonce: nonce,
-                displayName: displayName.isEmpty ? nil : displayName
+                displayName: displayName.isEmpty ? nil : displayName,
+                authorizationCode: authorizationCode,
+                appleUserID: credential.user.isEmpty ? nil : credential.user
             )
         }
     }
@@ -305,6 +325,23 @@ final class SocialSignInService: NSObject {
         return token
     }
 
+    // MARK: - Ending provider sessions (SOC-04)
+
+    /// Sign GoogleSignIn out locally. Called by `AuthService.finishSignOut` on every sign-out.
+    static func endGoogleSession() {
+        #if canImport(GoogleSignIn)
+        endGoogleSessionNative()
+        #endif
+    }
+
+    /// Revoke the device's Google grant. Called once, after a successful account deletion,
+    /// BEFORE the sign-out (`AppState.signOutAfterAccountDeletion`).
+    static func disconnectGoogleGrant() {
+        #if canImport(GoogleSignIn)
+        disconnectGoogleGrantNative()
+        #endif
+    }
+
     // MARK: - Failure log
 
     private static let log = Logger(subsystem: "com.phan.caydex", category: "auth")
@@ -379,10 +416,13 @@ extension SocialSignInService {
     /// `provider: "google"` and hands the token to Supabase's `sign_in_with_id_token`. No
     /// backend change, and the web flow's `/auth/session-exchange` round trip disappears.
     ///
-    /// No nonce is sent. Supabase must therefore have **Skip nonce check** enabled on the
-    /// Google provider — the SDK does not expose the raw nonce needed to verify the pairing,
-    /// which is why Google's own documented Supabase integration requires that setting. Apple
-    /// is unaffected and keeps its nonce binding.
+    /// NONCE, exactly as for Apple (SOC-07, 2026-11-26): GoogleSignIn ≥ 7.1 takes a custom
+    /// nonce, and puts what it is given into the ID token's `nonce` claim verbatim. So Google
+    /// gets the SHA-256 HEX of a fresh raw nonce and the backend gets the RAW value, which GoTrue
+    /// hashes and compares to the claim. Passing the raw value to Google would fail that
+    /// comparison. Builds 1.0–1.03 sent none (the SDK then mints its own claim), so Supabase's
+    /// project-wide **Skip nonce check** must stay ON until a minimum-version gate retires them
+    /// (OWNER_TASKS); while it is ON, GoTrue ignores the nonce and nothing here can break.
     @MainActor
     fileprivate func signInWithGoogleNative(clientID: String) async throws -> SocialSignInResult {
         guard let presenter = Self.topViewController() else {
@@ -391,9 +431,18 @@ extension SocialSignInService {
 
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID)
 
+        // One per attempt, never reused: generated here, its hash handed to Google, the raw
+        // value returned with this result only.
+        let rawNonce = Self.randomNonceString()
+
         let result: GIDSignInResult
         do {
-            result = try await GIDSignIn.sharedInstance.signIn(withPresenting: presenter)
+            result = try await GIDSignIn.sharedInstance.signIn(
+                withPresenting: presenter,
+                hint: nil,
+                additionalScopes: nil,
+                nonce: Self.sha256(rawNonce)
+            )
         } catch {
             // `.canceled` must surface as our own cancelled case, or the caller shows an
             // error toast for a user who simply tapped the X.
@@ -411,9 +460,36 @@ extension SocialSignInService {
         return .identityToken(
             provider: "google",
             token: idToken,
-            nonce: nil,
-            displayName: result.user.profile?.name
+            nonce: rawNonce,
+            displayName: result.user.profile?.name,
+            authorizationCode: nil,
+            appleUserID: nil
         )
+    }
+
+    /// Forget GoogleSignIn's own signed-in state (its Keychain entry) when a Caydex session ends
+    /// (SOC-04). Local and synchronous; a no-op when nobody signed in with Google here. Our
+    /// session never depended on it — `/auth/oauth` already turned the ID token into our own —
+    /// but leaving it meant the SDK kept the ended account's Google tokens on the device.
+    static func endGoogleSessionNative() {
+        GIDSignIn.sharedInstance.signOut()
+    }
+
+    /// Revoke this device's Google grant to Caydex after the account was DELETED (SOC-04), the
+    /// Google twin of the server-side Apple revoke. GIDSignIn reads the token to revoke (from
+    /// `currentUser`, else its Keychain) SYNCHRONOUSLY inside this call and only then starts the
+    /// request, so the sign-out that follows cannot pull it away. Best-effort: the outcome is
+    /// logged; the deletion has already happened.
+    static func disconnectGoogleGrantNative() {
+        let log = Logger(subsystem: "com.phan.caydex", category: "auth")
+        GIDSignIn.sharedInstance.disconnect { error in
+            if let error {
+                let ns = error as NSError
+                log.warning("google disconnect after account deletion failed: domain=\(ns.domain, privacy: .public) code=\(ns.code, privacy: .public)")
+            } else {
+                log.info("google disconnect after account deletion: grant revoked (or none held)")
+            }
+        }
     }
 
     /// Topmost presented controller, so the sheet is not attached to something already

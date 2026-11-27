@@ -98,21 +98,28 @@ def create_access_token(
 
 def create_refresh_token(
     data: dict[str, Any],
-    expires_delta: Optional[timedelta] = None
+    expires_delta: Optional[timedelta] = None,
+    *,
+    expires_at: Optional[datetime] = None,
 ) -> str:
     """
     Create a JWT refresh token (longer expiration).
 
     Args:
-        data: Data to encode in the token
+        data: Data to encode in the token (since migration 214 also `jti` and `sid` — see
+            `services/auth_session_service.py`)
         expires_delta: Token expiration time (default from settings)
+        expires_at: An exact expiry, so the token's `exp` equals the `expires_at` its row in
+            `auth_refresh_tokens` was written with. Wins over `expires_delta`.
 
     Returns:
         str: Encoded JWT refresh token
     """
     to_encode = data.copy()
 
-    if expires_delta:
+    if expires_at is not None:
+        expire = expires_at
+    elif expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(
@@ -217,6 +224,71 @@ def create_widget_token(user_id: str) -> str:
         settings.SECRET_KEY,
         algorithm=settings.ALGORITHM,
     )
+
+
+# ── Re-authentication proof (SEC-11) ─────────────────────────────────────────────────
+#
+# Deleting an account is permanent, so a bearer token alone (24 h of a leaked access token
+# used to be enough) should not do it. `POST /auth/reauthenticate` checks a FRESH credential —
+# the password, or an Apple/Google sign-in already linked to the account — and returns this
+# token: five minutes, one purpose, bound to the account. `DELETE /users/me` accepts it in the
+# `X-Caydex-Reauth` header.
+#
+# It is not a session: `_decode_access_token` allow-lists `type == "access"`, so it can never be
+# replayed as a bearer, and nothing but `decode_reauth_token` accepts it.
+
+REAUTH_TOKEN_TYPE = "reauth"
+#: The one action a proof is minted for. A new sensitive action gets its OWN purpose string,
+#: never a reuse of this one.
+REAUTH_PURPOSE_ACCOUNT_DELETE = "account_delete"
+
+
+def create_reauth_token(user_id: str, purpose: str = REAUTH_PURPOSE_ACCOUNT_DELETE) -> str:
+    """Mint the short-lived proof that `user_id` just re-entered a credential."""
+    now = datetime.now(timezone.utc)
+    return jwt.encode(
+        {
+            "sub": user_id,
+            "type": REAUTH_TOKEN_TYPE,
+            "purpose": purpose,
+            "jti": secrets.token_hex(16),
+            "iat": now,
+            "exp": now + timedelta(seconds=settings.REAUTH_TOKEN_EXPIRE_SECONDS),
+        },
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+
+
+def decode_reauth_token(
+    token: Optional[str], user_id: str, purpose: str = REAUTH_PURPOSE_ACCOUNT_DELETE,
+) -> bool:
+    """True only for an unexpired proof of `purpose` minted for `user_id`. Never raises."""
+    if not isinstance(token, str) or not token.strip() or len(token) > 4096:
+        return False
+    try:
+        payload = jwt.decode(token.strip(), settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except ExpiredSignatureError:
+        logger.info("re-authentication proof rejected: expired (user=%s)", user_id)
+        return False
+    except (JWTError, JOSEError, ValueError, TypeError) as e:
+        logger.warning("re-authentication proof rejected: %s (user=%s)", type(e).__name__, user_id)
+        return False
+    if not isinstance(payload, dict):
+        return False
+    ok = (
+        payload.get("type") == REAUTH_TOKEN_TYPE
+        and payload.get("purpose") == purpose
+        and isinstance(payload.get("sub"), str)
+        and payload.get("sub") == user_id
+    )
+    if not ok:
+        logger.warning(
+            "re-authentication proof rejected: type=%r purpose=%r for another account=%s "
+            "(user=%s)", payload.get("type"), payload.get("purpose"),
+            payload.get("sub") != user_id, user_id,
+        )
+    return ok
 
 
 # ── Device proof: "this install has signed into this account before" ─────────────────

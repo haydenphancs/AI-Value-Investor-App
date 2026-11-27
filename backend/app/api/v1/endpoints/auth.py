@@ -8,6 +8,7 @@ from jose import JWTError
 from jose.exceptions import ExpiredSignatureError
 from supabase import Client
 import logging
+import random
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -16,22 +17,31 @@ from app.database import (
     get_admin_client, get_auth_client, get_supabase, resolve_admin_client,
     run_gotrue,
 )
-from app.dependencies import forward_client_ip_to_gotrue, get_current_user_id
+from app.dependencies import (
+    _decode_access_token, forward_client_ip_to_gotrue, get_current_user, get_current_user_id,
+    security,
+)
 from app.core.security import (
-    create_access_token, create_device_proof, create_refresh_token, decode_token,
+    create_device_proof, create_reauth_token, decode_token,
     rate_limiter, trusted_client_ip, verify_device_proof, verify_supabase_token,
 )
+from app.services import auth_session_service as auth_sessions
 from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.services.auth_methods_service import auth_methods_service
+from app.services import apple_sign_in_service
 from app.schemas.auth import (
     SignInRequest, SignUpRequest, RefreshTokenRequest,
     TokenResponse, AuthUserResponse,
     ForgotPasswordRequest, ResetPasswordRequest, ChangePasswordRequest,
     SetPasswordRequest, ConfirmEmailRequest,
     MessageResponse, PasswordChangedResponse, SignUpResponse, ResendConfirmationRequest,
-    OAuthSignInRequest, SessionExchangeRequest,
+    OAuthSignInRequest, SessionExchangeRequest, LogoutRequest, LogoutResponse,
+    ReauthenticateRequest, ReauthenticateResponse,
+    ChangeEmailRequest, ConfirmEmailChangeRequest, EmailChangeResponse,
+    EMAIL_CHANGE_CHANGED, EMAIL_CHANGE_CODES_SENT,
     PASSWORD_TOO_LONG_MESSAGE, _validate_password_strength,
 )
+from app.config import settings
 from app.utils.supabase_async import sb_exec
 import asyncio
 
@@ -51,7 +61,8 @@ logger = logging.getLogger(__name__)
 # HOURLY ceilings sit behind them, sized above anything a person does, so the short windows do
 # not multiply abuse by four (review 2026-11-26: 11 → 44 emails an hour into one inbox):
 #   per address: 16 confirmation emails (sign-up + resend together) and 6 reset emails an hour;
-#   per IP:      30 emails an hour across all three routes (the project's mail budget is 100).
+#   per IP:      30 emails an hour across all three routes AND /auth/change-email (which counts
+#                twice per start: it mails two addresses), against the project's budget of 100.
 # One inbox can therefore get at most ~22 Caydex emails an hour (it was 11 with hourly windows),
 # and one IP at most 30. Supabase's "Minimum interval per user" (60 s) is kept PER EMAIL TYPE,
 # so it does not lower these. The /register IP limits also bound how fast one address can test
@@ -64,6 +75,8 @@ MAIL_HOUR_SECONDS = 3600
 CONFIRM_MAIL_PER_ADDRESS_PER_HOUR = 16
 RESET_MAIL_PER_ADDRESS_PER_HOUR = 6
 MAIL_PER_IP_PER_HOUR = 30
+# /auth/change-email: codes mailed to one NEW address (the caller chooses it) per hour.
+CHANGE_MAIL_PER_RECIPIENT_PER_HOUR = 5
 
 # The sign-up answer while the address still needs confirming: a NEW address, or one whose
 # earlier sign-up was never confirmed (GoTrue re-sends that one's email). An address that
@@ -130,14 +143,64 @@ def _issued_before_password_change(issued_at: Any, changed_at: Any) -> bool:
     return issued_dt < changed_dt.replace(microsecond=0)
 
 
-def is_token_stale_after_password_change(
-    payload: dict, user_id: Optional[str], supabase: Client
-) -> bool:
-    """True when this token was issued BEFORE the account's last password change.
+#: Why a token was evicted, as `token_eviction_reason` reports it.
+EVICTED_BY_PASSWORD_CHANGE = "password_changed"
+EVICTED_BY_SIGN_OUT_ALL = "sessions_revoked"
 
-    See migration 105 for the full reasoning. Short version: the app mints its own JWTs
-    and validates them on signature + expiry only, so without this a password reset leaves
-    every previously issued token valid.
+#: `AUTH_SESSION_EXPIRED` copy per cause. The stock copy names a password change, which is wrong
+#: for every other way a session ends.
+_SESSION_ENDED_COPY = "Your session has ended. Please sign in again."
+_SIGNED_OUT_EVERYWHERE_COPY = "You were signed out on all devices. Please sign in again."
+
+
+def _users_stamps(supabase: Client, user_id: str) -> Optional[dict]:
+    """The eviction stamps of one account: `{password_changed_at, sessions_revoked_at}`, or None
+    for no row. Raises on a read error (the callers decide what that means).
+
+    Asks for `sessions_revoked_at` (migration 214) and, while 214 is not applied yet, falls back
+    to the 105 column alone instead of failing every refresh on an unknown column.
+    """
+    def _read(columns: str):
+        result = (
+            supabase.table("users").select(columns).eq("id", user_id).limit(1).execute()
+        )
+        rows = result.data or []
+        if isinstance(rows, dict):  # a client that answered with the bare object
+            rows = [rows]
+        return rows[0] if rows else None
+
+    try:
+        return _read("password_changed_at, sessions_revoked_at")
+    except Exception as e:  # noqa: BLE001 — only a missing 214 column is retried
+        if not auth_sessions.is_column_missing(e):
+            raise
+        logger.warning(
+            "users.sessions_revoked_at is missing (migration 214 not applied) — checking "
+            "password_changed_at only for user=%s", user_id,
+        )
+        return _read("password_changed_at")
+
+
+def _eviction_reason_from(issued_at: Any, row: Optional[dict]) -> Optional[str]:
+    """Pure: which stamp, if any, this `iat` predates. Raises ValueError/TypeError on a value
+    that cannot be read (callers on a minting path treat that as "cannot prove fresh")."""
+    if not row:
+        return None
+    if _issued_before_password_change(issued_at, row.get("sessions_revoked_at")):
+        return EVICTED_BY_SIGN_OUT_ALL
+    if _issued_before_password_change(issued_at, row.get("password_changed_at")):
+        return EVICTED_BY_PASSWORD_CHANGE
+    return None
+
+
+def token_eviction_reason(
+    payload: dict, user_id: Optional[str], supabase: Client
+) -> Optional[str]:
+    """Why this token is evicted — it predates the last password change (migration 105) or the
+    last "sign out of all devices" (214) — or None when it is not.
+
+    The app mints its own JWTs and validates them on signature + expiry only, so without these
+    stamps a password reset or a sign-out-all would leave every previously issued token valid.
 
     FAILS CLOSED (SEC-4): a read or parse error raises `_IdentityStoreUnavailable`, which the
     refresh path answers with 503 AUTH_UNAVAILABLE. It used to return False ("allowing the
@@ -146,32 +209,29 @@ def is_token_stale_after_password_change(
     refresh token into a permanent post-reset session — and refresh allows 60 tries a minute.
     A 503 is retryable and iOS keeps its credential on it, so a blip still logs nobody out.
 
-    A row with no stamp, or NO ROW, is "not stale": existence is `_app_user_row_exists`'s
+    A row with no stamp, or NO ROW, is "not evicted": existence is `_app_user_row_exists`'s
     question, asked first. `limit(1)` rather than `single()` for exactly that reason —
     `single()` raises on zero rows, which would read as an outage.
     """
     issued_at = payload.get("iat")
     if not user_id or issued_at is None:
-        return False
+        return None
     try:
-        result = (
-            supabase.table("users")
-            .select("password_changed_at")
-            .eq("id", user_id)
-            .limit(1)
-            .execute()
-        )
-        rows = result.data or []
-        if isinstance(rows, dict):  # a client that answered with the bare object
-            rows = [rows]
-        changed_at = rows[0].get("password_changed_at") if rows else None
-        return _issued_before_password_change(issued_at, changed_at)
+        return _eviction_reason_from(issued_at, _users_stamps(supabase, user_id))
     except Exception as e:
         logger.error(
-            "password_changed_at check unavailable for user=%s (%s: %s) — refusing to mint "
+            "eviction-stamp check unavailable for user=%s (%s: %s) — refusing to mint "
             "(fail closed)", user_id, type(e).__name__, e,
         )
         raise _IdentityStoreUnavailable(f"{type(e).__name__}: {e}") from e
+
+
+def is_token_stale_after_password_change(
+    payload: dict, user_id: Optional[str], supabase: Client
+) -> bool:
+    """True when this token predates the account's last password change OR its last
+    sign-out-all. Kept under its 105-era name; `token_eviction_reason` says which."""
+    return token_eviction_reason(payload, user_id, supabase) is not None
 
 
 #: The stamp is retried once (inside the worker thread, so the sleep never blocks the loop).
@@ -290,12 +350,15 @@ async def sign_in(
             )
         user_id = db_rows[0]["id"] if db_rows else str(user.id)
 
-        access_token = create_access_token(data={"sub": user_id, "email": user.email})
-        refresh_token = create_refresh_token(data={"sub": user_id, "email": user.email})
+        # A new server-side session (migration 214). Fails OPEN to an untracked token — the
+        # password was just verified; see `auth_session_service.start_session`.
+        issued = await asyncio.to_thread(
+            auth_sessions.start_session, supabase, user_id, user.email,
+        )
 
         return TokenResponse(
-            access_token=access_token,
-            refresh_token=refresh_token,
+            access_token=issued.access_token,
+            refresh_token=issued.refresh_token,
             user_id=user_id,
             # A verified credential earns this install its lockout exemption for the address.
             device_token=create_device_proof(email_key),
@@ -440,14 +503,15 @@ async def sign_up(
             "Registration completed WITHOUT confirmation for user=%s "
             "(email confirmation appears disabled in Supabase)", user.id,
         )
-        access_token = create_access_token(data={"sub": str(user.id), "email": user.email})
-        refresh_token = create_refresh_token(data={"sub": str(user.id), "email": user.email})
+        issued = await asyncio.to_thread(
+            auth_sessions.start_session, supabase, str(user.id), user.email,
+        )
 
         return SignUpResponse(
             confirmation_required=False,
             message="Account created.",
-            access_token=access_token,
-            refresh_token=refresh_token,
+            access_token=issued.access_token,
+            refresh_token=issued.refresh_token,
             user_id=str(user.id),
         )
     except HTTPException:
@@ -542,6 +606,111 @@ async def sign_up(
         raise HTTPException(status_code=400, detail="Registration failed")
 
 
+def _refresh_answer(
+    rotation: "auth_sessions.Rotation", user_id: str, email: Optional[str], payload: dict,
+) -> TokenResponse:
+    """Map `rotate_refresh_token`'s status to new tokens or a typed refusal.
+
+    Every refusal is AUTH_SESSION_EXPIRED (iOS may drop the credential on it: the session really
+    is over) except `mismatch` (AUTH_TOKEN_INVALID), `account_missing` (AUTH_ACCOUNT_NOT_FOUND)
+    and anything unrecognised (503 AUTH_UNAVAILABLE — never "allowed", never a sign-out).
+    """
+    status = rotation.status
+    sid = rotation.family_id
+    if status in ("rotated", "grace"):
+        if not sid:
+            logger.error(
+                "Refresh for user=%s: rotate answered %r with no session id — refusing (fail "
+                "closed)", user_id, status,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_UNAVAILABLE, message=f"refresh: {status} without a session id",
+            )
+        if status == "grace":
+            logger.info(
+                "Refresh grace re-issue for user=%s sid=%s: token presented again %.1fs after "
+                "its first use (successor %s) — a lost response retried, or a race",
+                user_id, sid, rotation.age_seconds or 0.0, rotation.child_count,
+            )
+        elif rotation.legacy:
+            logger.info(
+                "Refresh moved a pre-214 token onto tracked session %s for user=%s", sid, user_id,
+            )
+        access, refresh = auth_sessions.mint_pair(
+            user_id, email, sid=sid, jti=rotation.new_jti, auth_time=rotation.auth_time,
+            refresh_expires_at=rotation.new_expires_at,
+        )
+        return TokenResponse(access_token=access, refresh_token=refresh, user_id=user_id)
+
+    if status == "degraded":
+        # Migration 214 is not applied (logged at ERROR in the service): the pre-214 stateless
+        # behaviour, so a backend deployed one step early signs nobody out.
+        access, refresh = auth_sessions.mint_pair(
+            user_id, email, sid=None, jti=None,
+            auth_time=auth_sessions.auth_time_of(payload.get(auth_sessions.AUTH_TIME_CLAIM)),
+        )
+        return TokenResponse(access_token=access, refresh_token=refresh, user_id=user_id)
+
+    if status == "reuse":
+        # A security event: two parties held this token. Both now have to sign in again; only
+        # the real owner can.
+        logger.warning(
+            "Refresh token REUSE for user=%s sid=%s: presented %.0fs after its first use "
+            "(successors %s, legacy=%s) — session revoked",
+            user_id, sid, rotation.age_seconds or 0.0, rotation.child_count, rotation.legacy,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_SESSION_EXPIRED,
+            message="refresh token reused outside the grace window; session revoked",
+            user_message=_SESSION_ENDED_COPY,
+        )
+    if status == "revoked":
+        logger.info(
+            "Refresh rejected for user=%s: session %s already ended (%s)",
+            user_id, sid, rotation.reason,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_SESSION_EXPIRED,
+            message=f"session revoked ({rotation.reason})",
+            user_message=(
+                _SIGNED_OUT_EVERYWHERE_COPY if rotation.reason == "signout_all"
+                else _SESSION_ENDED_COPY
+            ),
+        )
+    if status in ("evicted", "expired"):
+        logger.info("Refresh rejected for user=%s: session store says %s", user_id, status)
+        raise auth_error(
+            ErrorCode.AUTH_SESSION_EXPIRED,
+            message=f"refresh token {status} (session store)",
+            user_message=_SESSION_ENDED_COPY,
+        )
+    if status == "unknown":
+        logger.warning(
+            "Refresh rejected for user=%s: tracked jti has no row (pruned or the table was "
+            "emptied)", user_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_SESSION_EXPIRED,
+            message="refresh token unknown to the session store",
+            user_message=_SESSION_ENDED_COPY,
+        )
+    if status == "account_missing":
+        logger.warning("Refresh rejected: no public.users row for user=%s (session store)", user_id)
+        raise auth_error(
+            ErrorCode.AUTH_ACCOUNT_NOT_FOUND, message=f"no public.users row for {user_id}",
+        )
+    if status == "mismatch":
+        logger.error(
+            "Refresh rejected for user=%s: the token's row belongs to ANOTHER account — a "
+            "signing-key compromise or a minting bug", user_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_TOKEN_INVALID, message="refresh token row belongs to another account",
+        )
+    logger.error("Refresh for user=%s: rotate answered unknown status %r — refusing", user_id, status)
+    raise auth_error(ErrorCode.AUTH_UNAVAILABLE, message=f"refresh: unknown status {status!r}")
+
+
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     request: RefreshTokenRequest,
@@ -629,31 +798,43 @@ async def refresh_token(
                 message=f"no public.users row for {user_id}",
             )
 
-        # A refresh token minted BEFORE the last password change must not mint new access
-        # tokens — otherwise a reset doesn't evict a thief and they keep access for the
-        # full 7-day refresh lifetime. This is the check that actually caps the window;
-        # see migration 105. Fails closed too (raises `_IdentityStoreUnavailable`).
-        if (await asyncio.to_thread(is_token_stale_after_password_change, payload, user_id, supabase)):
-            logger.info(
-                "Refresh rejected for user=%s: token predates last password change",
-                user_id,
-            )
-            # AUTH_SESSION_EXPIRED is the code `dependencies.py` already raises for this
-            # exact condition; its stock copy is the same sentence. Reusing it removes the
-            # duplicate contract rather than papering over it.
+        # A refresh token minted BEFORE the last password change (migration 105) or the last
+        # "sign out of all devices" (214) must not mint new access tokens — otherwise neither
+        # evicts a thief. Fails closed too (raises `_IdentityStoreUnavailable`).
+        reason = await asyncio.to_thread(token_eviction_reason, payload, user_id, supabase)
+        if reason is not None:
+            logger.info("Refresh rejected for user=%s: token predates %s", user_id, reason)
+            # AUTH_SESSION_EXPIRED is the code `dependencies.py` raises for the same condition.
+            signed_out_everywhere = reason == EVICTED_BY_SIGN_OUT_ALL
             raise auth_error(
                 ErrorCode.AUTH_SESSION_EXPIRED,
-                message="refresh token predates users.password_changed_at",
+                message=(
+                    "refresh token predates users.sessions_revoked_at" if signed_out_everywhere
+                    else "refresh token predates users.password_changed_at"
+                ),
+                user_message=_SIGNED_OUT_EVERYWHERE_COPY if signed_out_everywhere else None,
             )
 
-        access_token = create_access_token(data={"sub": user_id, "email": email})
-        new_refresh = create_refresh_token(data={"sub": user_id, "email": email})
-
-        return TokenResponse(
-            access_token=access_token,
-            refresh_token=new_refresh,
-            user_id=user_id,
-        )
+        # Single use (migration 214): retire THIS token and reserve its successor in one
+        # transaction. A token already used is reuse — the session is revoked — unless it comes
+        # back inside the grace window (a lost response retried). Fails CLOSED.
+        try:
+            rotation = await asyncio.to_thread(
+                auth_sessions.rotate, supabase, user_id, payload, request.refresh_token,
+            )
+        except auth_sessions.SessionStoreUnavailable:
+            # Already logged at ERROR in the service, with the user id.
+            raise auth_error(
+                ErrorCode.AUTH_UNAVAILABLE,
+                message="refresh: session store unavailable; refusing to mint (fail closed)",
+            )
+        except ValueError as e:
+            # Signed with our key but carrying an unusable jti/iat: a minting bug, not a client.
+            logger.error("Refresh rejected for user=%s: malformed claims (%s)", user_id, e)
+            raise auth_error(
+                ErrorCode.AUTH_TOKEN_INVALID, message=f"refresh token claims unusable: {e}",
+            )
+        return _refresh_answer(rotation, user_id, email, payload)
     except HTTPException:
         raise
     except _IdentityStoreUnavailable:
@@ -674,11 +855,354 @@ async def refresh_token(
         )
 
 
-@router.post("/logout")
-async def logout(user_id: str = Depends(get_current_user_id)):
-    """Logout (client deletes tokens)."""
-    logger.info(f"User {user_id} logged out")
-    return {"message": "Successfully logged out"}
+def _sid_of_logout_refresh_token(raw: Optional[str], user_id: str) -> Optional[str]:
+    """The session named by the refresh token a newer client sends to `/auth/logout`, or None.
+
+    It must verify and belong to the caller. An EXPIRED one names a session that is already over
+    (nothing to revoke); a foreign or forged one is ignored with a WARNING — logout still ends the
+    bearer's own session, and never someone else's.
+    """
+    if not raw or not raw.strip():
+        return None
+    try:
+        payload = decode_token(raw.strip())
+    except ExpiredSignatureError:
+        logger.info("logout: the body's refresh token has expired — nothing to revoke from it")
+        return None
+    except Exception as e:  # noqa: BLE001 — a bad body token must never fail a logout
+        logger.warning(
+            "logout: the body's refresh token did not verify (%s) — ignored", type(e).__name__,
+        )
+        return None
+    if not isinstance(payload, dict) or payload.get("type") != "refresh":
+        logger.warning("logout: the body's token is not a refresh token — ignored")
+        return None
+    if payload.get("sub") != user_id:
+        logger.warning(
+            "logout: the body's refresh token belongs to another account (caller=%s) — ignored",
+            user_id,
+        )
+        return None
+    return auth_sessions.parse_uuid(payload.get(auth_sessions.SESSION_CLAIM))
+
+
+def _sid_of_bearer(credentials: Any) -> Optional[str]:
+    """The `sid` claim of the caller's access token (already verified by the dependency)."""
+    token = getattr(credentials, "credentials", None)
+    if not isinstance(token, str) or not token.strip():
+        return None
+    try:
+        payload = _decode_access_token(token.strip())
+    except Exception:  # noqa: BLE001 — `get_current_user_id` already accepted it
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return auth_sessions.parse_uuid(payload.get(auth_sessions.SESSION_CLAIM))
+
+
+@router.post("/logout", response_model=LogoutResponse)
+async def logout(
+    body: Optional[LogoutRequest] = None,
+    user_id: str = Depends(get_current_user_id),
+    credentials: Any = Depends(security),
+    supabase: Client = Depends(get_supabase),
+):
+    """End the caller's server-side session (migration 214).
+
+    It used to only log, so the tokens of a signed-out device stayed valid server-side. The
+    session is named by the refresh token in the body (builds after 1.03) and by the bearer's
+    `sid` claim (every build, once its tokens were minted by a 214 backend); both are revoked if
+    they differ. The access token itself stays valid until it expires (≤ 60 min): no route reads
+    the session row per request — see SYSTEM_DESIGN_GUIDELINES §9.
+
+    A pre-214 token names no session, so there is nothing to revoke: 200 with
+    `sessions_revoked: 0`. A store failure is a 503 (logged at ERROR): iOS has already dropped the
+    tokens either way, and the failure must be visible rather than reported as a sign-out.
+    """
+    sids: list[str] = []
+    from_body = _sid_of_logout_refresh_token(
+        body.refresh_token if isinstance(body, LogoutRequest) else None, user_id,
+    )
+    if from_body:
+        sids.append(from_body)
+    from_bearer = _sid_of_bearer(credentials)
+    if from_bearer and from_bearer not in sids:
+        sids.append(from_bearer)
+
+    if not sids:
+        logger.info("User %s logged out (pre-214 tokens: no server session to revoke)", user_id)
+        return LogoutResponse(message="Successfully logged out", sessions_revoked=0)
+
+    revoked = 0
+    for sid in sids:
+        try:
+            outcome = await asyncio.to_thread(
+                auth_sessions.revoke_session, supabase, user_id, sid, reason="logout",
+            )
+        except auth_sessions.SessionStoreUnavailable as e:
+            logger.error(
+                "logout: could not revoke session %s for user=%s (%s) — it stays usable until "
+                "its refresh token expires", sid, user_id, e,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_UNAVAILABLE,
+                message=f"logout: session store unavailable for sid={sid}",
+            )
+        if outcome == "revoked":
+            revoked += 1
+        elif outcome == "unknown":
+            # The sid came from a token WE signed for this user, so "unknown" means the session row
+            # is already gone: pruned, or the account was just deleted (the app signs out right
+            # after `DELETE /users/me`, which cascades every session away). Expected, so INFO.
+            logger.info(
+                "logout: user=%s session %s no longer exists (pruned, or the account was "
+                "deleted) — nothing to revoke", user_id, sid,
+            )
+    logger.info("User %s logged out: %d session(s) revoked of %s", user_id, revoked, sids)
+    return LogoutResponse(message="Successfully logged out", sessions_revoked=revoked)
+
+
+def _detach_all_devices(user_id: str) -> bool:
+    """`UserSettingsService.unregister_all_devices`, behind a module-level seam for the tests."""
+    from app.services.user_settings_service import UserSettingsService
+
+    return UserSettingsService().unregister_all_devices(user_id)
+
+
+@router.post("/sign-out-all", response_model=MessageResponse)
+async def sign_out_all(
+    req: Request,
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+):
+    """"Sign out of all devices" — THIS one included (migration 214, SEC-3).
+
+    Stamps `users.sessions_revoked_at`, which every refresh and every route that reads the users
+    row compares with a token's `iat` (like `password_changed_at`), and revokes every session row.
+    It is the lever an Apple/Google account was missing: it has no password to change.
+
+    It signs out the caller too, on purpose. A thief holding a stolen access token who calls this
+    gains nothing — they lose their own session with everyone else's — whereas a variant that
+    handed the caller fresh tokens would let a thief evict the owner and keep the only session.
+
+    Every device token of the account is detached too: no signed-out device can authenticate its
+    own detach any more, and a signed-out phone must not keep receiving the account's alerts.
+    """
+    user_id = user["id"]
+    if not rate_limiter.is_allowed(
+        f"signout_all:user:{user_id}", max_requests=5, window_seconds=3600, protected=True,
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many sign-out requests. Please try again later.",
+            headers={"Retry-After": "3600"},
+        )
+    try:
+        result = await asyncio.to_thread(auth_sessions.revoke_all_sessions, supabase, user_id)
+    except auth_sessions.SessionSchemaMissing:
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="sign-out-all: migration 214 is not applied",
+            user_message="Signing out of all devices isn't available right now. Please try again later.",
+        )
+    except auth_sessions.SessionStoreUnavailable as e:
+        logger.error("sign-out-all failed for user=%s (%s)", user_id, e)
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="sign-out-all: session store unavailable",
+            user_message="We couldn't sign you out of your other devices. Please try again.",
+        )
+    status_ = result.get("status")
+    if status_ == "account_missing":
+        logger.warning("sign-out-all: no public.users row for user=%s", user_id)
+        raise auth_error(ErrorCode.AUTH_ACCOUNT_NOT_FOUND, message=f"no public.users row for {user_id}")
+    if status_ != "revoked":
+        logger.error("sign-out-all for user=%s answered %r — not confirmed", user_id, result)
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"sign-out-all: unexpected status {status_!r}",
+            user_message="We couldn't sign you out of your other devices. Please try again.",
+        )
+
+    detached = await asyncio.to_thread(_detach_all_devices, user_id)
+    logger.info(
+        "Signed out of all devices: user=%s sessions=%s devices_detached=%s",
+        user_id, result.get("families"), detached,
+    )
+    return MessageResponse(message="You're signed out on all devices.")
+
+
+_REAUTH_WRONG_ACCOUNT = (
+    "That sign-in belongs to a different account. Use the one you're signed in with."
+)
+_REAUTH_WRONG_PASSWORD = "That password isn't right. Please try again."
+#: A Supabase token older than this is not a fresh sign-in.
+_REAUTH_SUPABASE_TOKEN_MAX_AGE_SECONDS = 600
+
+
+@router.post("/reauthenticate", response_model=ReauthenticateResponse)
+async def reauthenticate(
+    request: ReauthenticateRequest,
+    req: Request,
+    user: dict = Depends(get_current_user),
+    supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
+):
+    """Prove a FRESH credential before deleting the account (SEC-11).
+
+    Returns a five-minute, single-purpose proof for `DELETE /users/me`'s `X-Caydex-Reauth`
+    header. It never replaces the session: the credential is checked on the isolated auth client
+    and nothing here mints app tokens.
+
+    The credential must belong to the CALLER: a password is checked against the account's own
+    email; an Apple/Google token's subject must already be linked to this account
+    (`account_has_identity`) BEFORE GoTrue sees it, because GoTrue's id-token sign-in creates an
+    account for a subject it does not know.
+    """
+    user_id = user["id"]
+    client_ip = trusted_client_ip(req)
+    _enforce_credential_limits(
+        (f"reauth:ip:{client_ip}", 10, 60),
+        (f"reauth:user:{user_id}", 5, 900),
+        detail="Too many attempts. Please try again later.",
+    )
+    kind = request.credential_kind()
+    if kind is None:
+        raise auth_error(
+            ErrorCode.INVALID_INPUT,
+            message="reauthenticate: send exactly one of password, provider+id_token, "
+                    "supabase_access_token",
+            user_message="Something went wrong. Please try again.",
+            status_code=400,
+        )
+
+    gotrue = _auth_of(auth_client, supabase)
+    if kind == "password":
+        email = (user.get("email") or "").strip()
+        if not email:
+            raise auth_error(
+                ErrorCode.AUTH_CREDENTIALS_INVALID,
+                message="reauthenticate: the account has no email to check a password against",
+                user_message=_REAUTH_WRONG_PASSWORD,
+            )
+        try:
+            result = await run_gotrue(
+                gotrue.auth.sign_in_with_password, {"email": email, "password": request.password},
+            )
+        except Exception as e:  # noqa: BLE001 — classified below
+            if _is_rejected_credential(e):
+                logger.info("reauthenticate: password rejected for user=%s", user_id)
+                raise auth_error(
+                    ErrorCode.AUTH_CREDENTIALS_INVALID,
+                    message="reauthenticate: password rejected",
+                    user_message=_REAUTH_WRONG_PASSWORD,
+                )
+            logger.error(
+                "reauthenticate: password check failed for user=%s (%s: %s)",
+                user_id, type(e).__name__, e,
+            )
+            raise auth_error(ErrorCode.AUTH_UNAVAILABLE, message="reauthenticate: password check failed")
+        verified_id = str(getattr(getattr(result, "user", None), "id", "") or "")
+
+    elif kind == "id_token":
+        try:
+            from jose import jwt as _jose_jwt
+
+            subject = _jose_jwt.get_unverified_claims(request.id_token).get("sub")
+        except Exception:  # noqa: BLE001 — an unparsable token is a provider failure
+            subject = None
+        if not isinstance(subject, str) or not subject or len(subject) > 255:
+            raise auth_error(
+                ErrorCode.AUTH_PROVIDER_FAILED, message="reauthenticate: id_token has no subject",
+            )
+        try:
+            linked = await asyncio.to_thread(
+                auth_sessions.account_has_identity, supabase, user_id, request.provider, subject,
+            )
+        except auth_sessions.SessionStoreUnavailable as e:
+            logger.error("reauthenticate: identity check failed for user=%s (%s)", user_id, e)
+            raise auth_error(ErrorCode.AUTH_UNAVAILABLE, message="reauthenticate: identity check failed")
+        if not linked:
+            logger.info(
+                "reauthenticate: %s subject is not linked to user=%s — refused before GoTrue",
+                request.provider, user_id,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_CREDENTIALS_INVALID,
+                message=f"reauthenticate: {request.provider} identity not linked to this account",
+                user_message=_REAUTH_WRONG_ACCOUNT,
+            )
+        credentials: dict = {"provider": request.provider, "token": request.id_token}
+        if request.nonce:
+            credentials["nonce"] = request.nonce
+        try:
+            result = await run_gotrue(gotrue.auth.sign_in_with_id_token, credentials)
+        except Exception as e:  # noqa: BLE001 — bad signature / audience / nonce / expiry
+            logger.warning(
+                "reauthenticate: %s token failed verification for user=%s (%s)",
+                request.provider, user_id, type(e).__name__,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_PROVIDER_FAILED,
+                message=f"reauthenticate: sign_in_with_id_token failed for {request.provider}",
+            )
+        verified_id = str(getattr(getattr(result, "user", None), "id", "") or "")
+
+    else:  # supabase_token
+        try:
+            payload = await verify_supabase_token(request.supabase_access_token)
+        except Exception:  # noqa: BLE001
+            payload = None
+        if not isinstance(payload, dict) or payload.get("is_anonymous") is True:
+            raise auth_error(
+                ErrorCode.AUTH_PROVIDER_FAILED, message="reauthenticate: supabase token unverifiable",
+            )
+        # The SIGN-IN time (`amr`), not `iat`: a GoTrue refresh mints a token with a fresh `iat`
+        # and no new credential, so `iat` would let a held GoTrue refresh token re-authenticate.
+        signed_in = auth_sessions.supabase_sign_in_time(payload)
+        if signed_in is None or time.time() - signed_in > _REAUTH_SUPABASE_TOKEN_MAX_AGE_SECONDS:
+            raise auth_error(
+                ErrorCode.AUTH_PROVIDER_FAILED,
+                message="reauthenticate: supabase token is not a fresh sign-in",
+            )
+        verified_id = str(payload.get("sub") or "")
+
+    if verified_id != user_id:
+        logger.warning(
+            "reauthenticate: verified a %s credential for another account (caller=%s)",
+            kind, user_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_CREDENTIALS_INVALID,
+            message="reauthenticate: credential belongs to another account",
+            user_message=_REAUTH_WRONG_ACCOUNT,
+        )
+
+    logger.info("reauthenticate: user=%s re-proved a %s credential", user_id, kind)
+
+    # Apple: store the grant from the fresh authorization code, AFTER the identity token proved
+    # the caller, and BEFORE answering — the deletion this proof is for comes next and revokes
+    # whatever grant is stored. Without this, an account last signed in on 1.0–1.03 (no code was
+    # ever sent) is never revoked (SOC-04, review 2026-11-27). Best-effort: the service never
+    # raises and checks the code's subject against the verified token's; a failure here must
+    # never refuse the re-authentication.
+    if kind == "id_token" and request.provider == "apple" and request.authorization_code:
+        try:
+            apple_grant = await apple_sign_in_service.store_grant_from_authorization_code(
+                supabase, user_id=user_id, authorization_code=request.authorization_code,
+                identity_token=request.id_token,
+            )
+            logger.info("reauthenticate: Apple grant for user=%s: %s", user_id, apple_grant)
+        except Exception as e:  # noqa: BLE001 — never fail a re-authentication on the grant
+            logger.error(
+                "reauthenticate: Apple grant step raised for user=%s (%s) — proof issued anyway",
+                user_id, type(e).__name__, exc_info=True,
+            )
+
+    return ReauthenticateResponse(
+        reauth_token=create_reauth_token(user_id),
+        expires_in=settings.REAUTH_TOKEN_EXPIRE_SECONDS,
+    )
 
 
 @router.post("/resend-confirmation", response_model=MessageResponse)
@@ -999,8 +1523,8 @@ async def confirm_email(
         )
 
     logger.info("confirm-email: signed in user=%s", user_id)
-    return _issue_app_tokens_for(
-        user_id, getattr(user, "email", None) or email_key, device_proof=False,
+    return await _issue_app_tokens_for(
+        supabase, user_id, getattr(user, "email", None) or email_key, device_proof=False,
     )
 
 
@@ -1427,19 +1951,31 @@ def _app_user_row_exists(supabase: Client, user_id: str, *, fail_closed: bool = 
         return True
 
 
-def _issue_app_tokens_for(
-    user_id: str, email: Optional[str], *, device_proof: bool = True,
+async def _issue_app_tokens_for(
+    supabase: Client,
+    user_id: str,
+    email: Optional[str],
+    *,
+    device_proof: bool = True,
+    auth_time: Optional[int] = None,
+    auth_time_unknown: bool = False,
 ) -> TokenResponse:
-    """Mint the app's own JWTs for an authenticated Supabase user.
+    """Start a server-side session (migration 214) and mint the app's own JWTs for it.
 
     A provider sign-in, a session exchange and a password change all VERIFIED a credential, so
     they earn the device proof (auth.md §3a). `/auth/confirm-email` passes
     `device_proof=False`: an emailed code proves the mailbox, not a password, and §3a mints the
-    lockout exemption only after a credential was verified."""
-    access_token = create_access_token(data={"sub": user_id, "email": email})
-    refresh_token = create_refresh_token(data={"sub": user_id, "email": email})
+    lockout exemption only after a credential was verified.
+
+    `auth_time` (when the credential was verified) defaults to now; session exchange passes the
+    Supabase token's own `iat`. The session start fails OPEN to an untracked token — see
+    `auth_session_service.start_session` for why that is the right side here and not on refresh."""
+    issued = await asyncio.to_thread(
+        auth_sessions.start_session, supabase, user_id, email,
+        auth_time=auth_time, auth_time_unknown=auth_time_unknown,
+    )
     return TokenResponse(
-        access_token=access_token, refresh_token=refresh_token, user_id=user_id,
+        access_token=issued.access_token, refresh_token=issued.refresh_token, user_id=user_id,
         device_token=create_device_proof(email) if (email and device_proof) else None,
     )
 
@@ -1477,6 +2013,111 @@ def _ensure_display_name(supabase: Client, user_id: str, display_name: Optional[
             "Could not persist display_name for user=%s (%s: %s)",
             user_id, type(e).__name__, e,
         )
+
+
+# ── SOC-08: a provider sign-in that confirmed an account somebody registered earlier ──────────
+#
+# Verified in GoTrue's source (supabase/auth master, 2026-11-26): an id_token sign-in whose
+# VERIFIED email matches an existing email/password user is LINKED to that user
+# (`DetermineAccountLinking` → LinkAccount, regardless of confirmation). When that user was never
+# confirmed, `createAccountFromExternalIdentity` then calls `RemoveUnconfirmedIdentities` — which
+# sets `encrypted_password` to NULL, deletes the email identity and OVERWRITES user_metadata with
+# the provider's identity data — and `Confirm()`s the address. That is GoTrue's pre-account-
+# takeover guard and it is right: whoever registered that address never proved the mailbox, and
+# might not be its owner. Two consequences reach us:
+#
+#   (a) the earlier password is gone. A person who registered, never confirmed, and then used
+#       Google/Apple finds email sign-in refused later. Not reversible and not ours to undo; the
+#       account shows "Set a Password" (no password), and Forgot Password works. Logged below.
+#   (b) `public.users.display_name` is NOT touched by GoTrue — our signup trigger copied it from
+#       the unverified registration at INSERT, and no trigger syncs later changes. So a squatter
+#       who registered the victim's address first chose the name the victim's account then wore.
+#       Fixed here: the name is reset to the provider's (or the placeholder).
+#
+# GoTrue's response gives no "just linked" flag, so the case is recognised by three signals that
+# must ALL hold, each ruling out a legitimate shape:
+#   * `email_confirmed_at` is from THIS request (within the window below of our clock) — rules
+#     out every account confirmed earlier, by email or by an earlier provider sign-in;
+#   * the account is older than that confirmation by more than a few seconds — rules out a
+#     brand-new provider account (created and confirmed in one transaction);
+#   * `user_metadata` carries no `display_name` — our register always writes it there, and GoTrue
+#     MERGES metadata when it links to a confirmed user but REPLACES it when it links to an
+#     unconfirmed one. This rules out an account confirmed by its emailed code a minute ago and
+#     then linked to Google, whose own chosen name must survive.
+# Any signal unreadable → no reset (the name is cosmetic; a wrong reset is the worse error).
+
+#: How far from our clock `email_confirmed_at` may be and still be THIS request's confirmation.
+_LINK_CONFIRMED_WITHIN_SECONDS = 120
+#: Clock skew tolerated the other way (Supabase's clock ahead of Railway's).
+_LINK_CONFIRMED_SKEW_SECONDS = 30
+#: An account must predate that confirmation by more than this to be an EARLIER registration.
+_LINK_ACCOUNT_OLDER_BY_SECONDS = 10
+
+
+def _as_utc(value: Any) -> Optional[datetime]:
+    """A GoTrue timestamp (datetime or ISO-8601 string, possibly with `Z`) as aware UTC, or None."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _confirmed_an_earlier_unconfirmed_account(user: Any, *, now: Optional[datetime] = None) -> bool:
+    """True when this provider sign-in is the one that LINKED to and CONFIRMED an account someone
+    registered earlier without confirming it (see the block comment above)."""
+    confirmed = _as_utc(getattr(user, "email_confirmed_at", None))
+    created = _as_utc(getattr(user, "created_at", None))
+    metadata = getattr(user, "user_metadata", None)
+    if confirmed is None or created is None or not isinstance(metadata, dict):
+        return False
+    age = ((now or datetime.now(timezone.utc)) - confirmed).total_seconds()
+    if not (-_LINK_CONFIRMED_SKEW_SECONDS <= age <= _LINK_CONFIRMED_WITHIN_SECONDS):
+        return False
+    if (confirmed - created).total_seconds() <= _LINK_ACCOUNT_OLDER_BY_SECONDS:
+        return False
+    return "display_name" not in metadata
+
+
+def _provider_name_for_reset(display_name: Optional[str], metadata: Any) -> Optional[str]:
+    """The name to give an account whose earlier name came from an unverified registration:
+    the one the app sent, else the provider's own (GoTrue just wrote the identity data into
+    user_metadata), capped like every other writer of the column."""
+    from app.schemas.user import DISPLAY_NAME_MAX_LENGTH
+
+    candidates = [display_name]
+    if isinstance(metadata, dict):
+        candidates += [metadata.get("full_name"), metadata.get("name")]
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:DISPLAY_NAME_MAX_LENGTH]
+    return None
+
+
+def _reset_name_from_unverified_registration(
+    supabase: Client, user_id: str, name: Optional[str], email: Optional[str],
+) -> bool:
+    """Replace the display name an unverified registration chose. Never raises (cosmetic).
+
+    Falls back to the email's local part — exactly the signup trigger's placeholder, which
+    `_ensure_display_name` treats as "unset", so a later Apple first-time name can still fill it."""
+    value = name or ((email or "").split("@")[0].strip() or None)
+    if not value:
+        return False
+    try:
+        supabase.table("users").update({"display_name": value}).eq("id", user_id).execute()
+        return True
+    except Exception as e:
+        logger.warning(
+            "OAuth: could not reset the display name an unverified registration chose for user=%s "
+            "(%s: %s)", user_id, type(e).__name__, e,
+        )
+        return False
 
 
 @router.post("/oauth", response_model=TokenResponse)
@@ -1550,9 +2191,44 @@ async def oauth_sign_in(
             user_message="Your account isn't ready yet. Please try again.",
         )
 
+    # SOC-08: this sign-in confirmed an account someone registered earlier and never confirmed.
+    # GoTrue already removed that registration's password and email identity; the name it chose
+    # is ours to drop (see the block comment above `_confirmed_an_earlier_unconfirmed_account`).
+    if _confirmed_an_earlier_unconfirmed_account(user):
+        reset = await asyncio.to_thread(
+            _reset_name_from_unverified_registration, supabase, user_id,
+            _provider_name_for_reset(request.display_name, getattr(user, "user_metadata", None)),
+            getattr(user, "email", None),
+        )
+        logger.warning(
+            "OAuth: provider=%s sign-in confirmed user=%s, an account registered earlier and never "
+            "confirmed — GoTrue removed its unconfirmed password and email identity (pre-account-"
+            "takeover guard); the display name its registration chose was %s",
+            request.provider, user_id, "reset" if reset else "NOT reset (write failed)",
+        )
+
     (await asyncio.to_thread(_ensure_display_name, supabase, user_id, request.display_name))
+
+    # Sign in with Apple: keep a token account deletion can REVOKE (SOC-04). The code is
+    # single-use and lives ~5 minutes, so it is exchanged here or never. Best-effort and
+    # bounded — the service never raises, and a failure only means this grant cannot be revoked
+    # later. AFTER the row check, so only a real account's grant is stored. Google's grant is
+    # revoked on-device (GIDSignIn `disconnect`); a code sent with provider "google" is ignored.
+    if request.provider == "apple" and request.authorization_code:
+        try:
+            apple_grant = await apple_sign_in_service.store_grant_from_authorization_code(
+                supabase, user_id=user_id, authorization_code=request.authorization_code,
+                identity_token=request.id_token,
+            )
+            logger.info("OAuth: Apple grant for user=%s: %s", user_id, apple_grant)
+        except Exception as e:  # noqa: BLE001 — the service never raises; never fail a sign-in on it
+            logger.error(
+                "OAuth: Apple grant step raised for user=%s (%s) — signing in without it",
+                user_id, type(e).__name__, exc_info=True,
+            )
+
     logger.info("OAuth sign-in succeeded provider=%s user=%s", request.provider, user_id)
-    return _issue_app_tokens_for(user_id, getattr(user, "email", None))
+    return await _issue_app_tokens_for(supabase, user_id, getattr(user, "email", None))
 
 
 @router.post("/session-exchange", response_model=TokenResponse)
@@ -1611,17 +2287,30 @@ async def session_exchange(
 
     # The DB trigger creates public.users on auth.users insert. Confirm it landed rather
     # than minting tokens for an id with no app-level row — and, in the SAME read, fetch the
-    # password stamp. `limit(1)` so a missing row is an empty list, not an exception.
+    # eviction stamps (password change, 105; sign-out-all, 214). `limit(1)` so a missing row is
+    # an empty list, not an exception.
     try:
-        row = (await sb_exec(
-            supabase.table("users").select("id, password_changed_at").eq("id", user_id).limit(1)
-        ))
+        try:
+            row = (await sb_exec(
+                supabase.table("users").select("id, password_changed_at, sessions_revoked_at")
+                .eq("id", user_id).limit(1)
+            ))
+        except Exception as e:  # noqa: BLE001 — only a missing 214 column is retried
+            if not auth_sessions.is_column_missing(e):
+                raise
+            logger.warning(
+                "session-exchange: users.sessions_revoked_at missing (migration 214 not "
+                "applied) — checking password_changed_at only for user=%s", user_id,
+            )
+            row = (await sb_exec(
+                supabase.table("users").select("id, password_changed_at").eq("id", user_id).limit(1)
+            ))
         rows = row.data or []
         if isinstance(rows, dict):
             rows = [rows]
         if not rows or not (rows[0] or {}).get("id"):
             raise ValueError("no public.users row")
-        changed_at = rows[0].get("password_changed_at")
+        stamps = rows[0]
     except Exception as e:
         logger.error(
             "session-exchange: users read failed or no app user row for verified Supabase "
@@ -1646,30 +2335,51 @@ async def session_exchange(
     # (they last up to an hour) POSTs it here after the victim's reset and gets app tokens with
     # `iat = now` — which pass every later eviction check, so the reset did nothing. FAIL
     # CLOSED: an `iat` we cannot read, or a stamp we cannot parse, is not "fresh".
-    if changed_at:
+    # The same holds for a sign-out-all (migration 214): a Supabase token from before it must not
+    # come back as a fresh session.
+    #
+    # Compared on the SIGN-IN time (`amr`), not `iat`, when the token carries it (review
+    # 2026-11-26): a GoTrue refresh mints a new Supabase token with a fresh `iat` and the same
+    # `amr`, and neither a password change nor a sign-out-all ends GoTrue's own sessions — so on
+    # `iat` alone, anyone holding a GoTrue refresh token from before could walk back in here.
+    signed_in_at = auth_sessions.supabase_sign_in_time(payload)
+    if stamps.get("password_changed_at") or stamps.get("sessions_revoked_at"):
         try:
-            stale = _issued_before_password_change(payload.get("iat"), changed_at)
+            stale = _eviction_reason_from(
+                signed_in_at if signed_in_at is not None else payload.get("iat"), stamps,
+            )
         except (TypeError, ValueError, OverflowError, OSError) as e:
             logger.error(
-                "session-exchange: cannot compare iat with password_changed_at for user=%s "
+                "session-exchange: cannot compare iat with the eviction stamps for user=%s "
                 "(%s) — refusing (fail closed)", user_id, type(e).__name__,
             )
             raise auth_error(
                 ErrorCode.AUTH_PROVIDER_FAILED,
-                message="supabase token iat unreadable against password_changed_at",
+                message="supabase token iat unreadable against the eviction stamps",
             )
         if stale:
             logger.warning(
-                "session-exchange rejected for user=%s: Supabase token predates the last "
-                "password change", user_id,
+                "session-exchange rejected for user=%s: Supabase token predates the last %s",
+                user_id,
+                "sign-out-all" if stale == EVICTED_BY_SIGN_OUT_ALL else "password change",
             )
             raise auth_error(
                 ErrorCode.AUTH_PROVIDER_FAILED,
-                message="supabase access token predates users.password_changed_at",
+                message=(
+                    "supabase access token predates users.sessions_revoked_at"
+                    if stale == EVICTED_BY_SIGN_OUT_ALL
+                    else "supabase access token predates users.password_changed_at"
+                ),
             )
 
     logger.info("Session exchange succeeded for user=%s", user_id)
-    return _issue_app_tokens_for(user_id, email)
+    # `auth_time` = when the user actually signed in (`amr`), never now and never `iat` (a GoTrue
+    # refresh moves `iat`): a replayed or refreshed Supabase token must not count as a fresh
+    # sign-in for account deletion (SEC-11). No `amr` → unknown → not "recent".
+    return await _issue_app_tokens_for(
+        supabase, user_id, email,
+        auth_time=signed_in_at, auth_time_unknown=signed_in_at is None,
+    )
 
 
 # ── Password recovery ─────────────────────────────────────────────────────────
@@ -2047,7 +2757,7 @@ async def change_password(
     # password_changed_at`. Without this the request that changed the password evicted its own
     # session: the next authenticated call 401'd and the app signed the user out seconds after
     # telling them the change succeeded. Every OTHER device is still evicted, which is the point.
-    tokens = _issue_app_tokens_for(user_id, email)
+    tokens = await _issue_app_tokens_for(supabase, user_id, email)
     return PasswordChangedResponse(
         message="Your password has been changed. Other devices will need to sign in again.",
         access_token=tokens.access_token,
@@ -2207,10 +2917,483 @@ async def set_password(
     # Minted AFTER the stamp so `iat >= password_changed_at`: this device stays signed in while
     # every other one is evicted. Same contract as change-password — dropping these tokens signs
     # the caller out seconds after telling them it worked.
-    tokens = _issue_app_tokens_for(user_id, email)
+    tokens = await _issue_app_tokens_for(supabase, user_id, email)
     return PasswordChangedResponse(
         message="Your password is set. You can now sign in with your email and password.",
         access_token=tokens.access_token,
         refresh_token=tokens.refresh_token,
         user_id=user_id,
+    )
+
+
+# ── Email change (audit CC-09, 2026-11-26) ───────────────────────────────────────────────────
+#
+# There was no way to change an account's email. Two routes now do it, on top of Supabase's
+# Secure email change (both addresses must confirm):
+#
+#   POST /auth/change-email          proof (current password, or the recovery code emailed to the
+#                                    current address) → GoTrue `PUT /user {email}` with the
+#                                    caller's OWN Supabase token → a code to each address.
+#   POST /auth/change-email/confirm  both codes → GoTrue `/verify` type email_change, twice →
+#                                    the account's address is the new one.
+#
+# `public.users.email` follows through migration 212's trigger; the routes also write it
+# themselves after a completed change, so the order of deploy and migration cannot leave Profile,
+# change-password and set-password on the old address.
+#
+# ⚠️ The GoTrue client is a PROCESS-WIDE singleton, and a sign-in stores its session on it. Two
+# separate `run_gotrue` calls (sign in, then `update_user`) can therefore interleave with another
+# request's sign-in, and `update_user` would change THAT user's email. So `update_user` is never
+# used: the PUT carries the caller's own access token explicitly (`jwt=`), which the SDK's
+# `_request` puts in the Authorization header over anything stored on the client.
+#
+# ENUMERATION: an address that already belongs to another account is answered exactly like a
+# sent pair of codes (and after a similar pause): nothing tells the caller which addresses have
+# accounts. The user simply never receives a code at that address.
+
+#: GoTrue codes meaning ANOTHER account already holds the address — answered as "codes sent".
+_GOTRUE_EMAIL_TAKEN_CODES = frozenset({"email_exists", "user_already_exists"})
+#: Wording fallback for an untyped "taken" refusal (an older GoTrue, a test fake).
+_EMAIL_TAKEN_MARKERS = ("already been registered", "already registered", "email address already")
+#: GoTrue codes meaning the address ITSELF cannot be used — the user's to fix.
+_GOTRUE_EMAIL_INVALID_CODES = frozenset({"email_address_invalid", "validation_failed"})
+
+#: How long the "taken" answer waits before it returns, so it is not obviously faster than a
+#: real send (GoTrue mails both codes before it answers). Patched to 0 in tests.
+_EMAIL_TAKEN_PAUSE_SECONDS = (0.4, 1.2)
+#: The same for a confirm with nothing pending, which skips the two verifies. Patched to 0 in tests.
+_CONFIRM_NOTHING_PENDING_PAUSE_SECONDS = (0.1, 0.4)
+
+#: Attempts per trusted client address and per account, per hour. Every start mails two codes.
+CHANGE_EMAIL_LIMIT_PER_IP = (10, 3600)
+CHANGE_EMAIL_LIMIT_PER_USER = (5, 3600)
+#: Each confirm checks up to two codes; GoTrue limits verifies on its side too.
+CONFIRM_EMAIL_CHANGE_LIMIT_PER_IP = (20, 3600)
+CONFIRM_EMAIL_CHANGE_LIMIT_PER_USER = (10, 3600)
+
+_EMAIL_CHANGE_CODES_SENT_MESSAGE = (
+    "We sent a code to your current email and another to the new one. "
+    "Enter both to finish the change."
+)
+_EMAIL_CHANGE_DONE_MESSAGE = "Your email has been changed. Use it to sign in from now on."
+_EMAIL_CHANGE_SEND_FAILED = (
+    "We couldn't send the codes right now. Please try again in a few minutes."
+)
+_EMAIL_CHANGE_BOTH_CODES_REFUSED = (
+    "Those codes are incorrect or have expired. Check the newest email at each address, "
+    "or start again to get new codes."
+)
+_EMAIL_CHANGE_CODE_SPENT = (
+    "We couldn't start the email change, and that code has now been used. "
+    "Send a new code and try again."
+)
+
+
+def _raw_json(data: Any) -> Any:
+    """`xform` for the SDK's `_request`: hand back GoTrue's JSON untouched. The SDK's own
+    parsers raise on the partial email-change answer (`{"msg": ...}` has no user), and its
+    `_request` turns ANY exception into an AuthRetryableError — a refused code would have read
+    as an outage."""
+    return data
+
+
+def _email_key(address: str) -> str:
+    return (address or "").strip().lower()
+
+
+#: The least time between two email-change SENDS for one account, whatever the address. It must
+#: stay at or above Supabase's own per-user minimum interval between emails (60 s by default):
+#: GoTrue runs its "address taken" check BEFORE that interval check, so without this spacing a
+#: second start within the minute answered a FREE address 429 (→ 503) and a TAKEN one 200 —
+#: two quick calls told any account holder which addresses have accounts (independent audit,
+#: 2026-11-26). Checked before any GoTrue call, charged on every send attempt (taken or free),
+#: answered with one 429. Process-local, which is enough: production runs one uvicorn worker.
+CHANGE_EMAIL_SEND_SPACING_SECONDS = 65
+_email_change_last_send: dict[str, float] = {}
+_EMAIL_CHANGE_LAST_SEND_MAX = 10_000
+
+
+def _email_change_send_wait(user_id: str) -> int:
+    """Seconds this account must still wait before another send, 0 when it may send now."""
+    last = _email_change_last_send.get(user_id)
+    if last is None:
+        return 0
+    left = CHANGE_EMAIL_SEND_SPACING_SECONDS - (time.monotonic() - last)
+    return max(0, int(left + 0.999))
+
+
+def _mark_email_change_send(user_id: str) -> None:
+    now = time.monotonic()
+    if len(_email_change_last_send) >= _EMAIL_CHANGE_LAST_SEND_MAX:
+        # Bounded: drop every entry whose wait is over (they no longer limit anything).
+        for uid, at in list(_email_change_last_send.items()):
+            if now - at >= CHANGE_EMAIL_SEND_SPACING_SECONDS:
+                del _email_change_last_send[uid]
+    _email_change_last_send[user_id] = now
+
+
+async def _read_auth_account(get_user_by_id, user_id: str, *, route: str) -> tuple[str, Optional[str]]:
+    """(current address, pending new address) from GoTrue's own user record — the source of
+    truth, never the `public.users` copy (CC-09 is exactly that copy going stale).
+
+    `get_user_by_id` is the bound ADMIN verb, resolved at the call site through
+    `resolve_admin_client` (tests/test_supabase_client_isolation.py)."""
+    try:
+        got = await run_gotrue(get_user_by_id, user_id)
+    except Exception as e:
+        if _gotrue_code(e) == "user_not_found" or _gotrue_status(e) == 404:
+            raise auth_error(
+                ErrorCode.AUTH_ACCOUNT_NOT_FOUND, message=f"{route}: no auth.users row for {user_id}",
+            )
+        logger.error(
+            "%s: account read failed for user=%s: %s: %s (status=%s code=%s)",
+            route, user_id, type(e).__name__, e, _gotrue_status(e), _gotrue_code(e), exc_info=True,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"{route}: admin.get_user_by_id failed: {type(e).__name__}",
+        )
+    user = getattr(got, "user", None)
+    if user is None or not getattr(user, "id", None):
+        raise auth_error(
+            ErrorCode.AUTH_ACCOUNT_NOT_FOUND, message=f"{route}: no auth user returned for {user_id}",
+        )
+    if str(user.id) != str(user_id):
+        logger.error("%s: admin read for user=%s returned user=%s", route, user_id, user.id)
+        raise auth_error(ErrorCode.AUTH_FORBIDDEN, message=f"{route}: account read mismatch")
+    current = (getattr(user, "email", None) or "").strip()
+    if not current:
+        # Not an email account at all (none exist today). Forbidden, not "not found": the
+        # session is fine and must not be cleared.
+        raise auth_error(
+            ErrorCode.AUTH_FORBIDDEN,
+            message=f"{route}: account {user_id} has no email address to change",
+            user_message="This account has no email address to change.",
+        )
+    pending = (getattr(user, "new_email", None) or "").strip() or None
+    return current, pending
+
+
+def _mirror_public_email(supabase: Client, user_id: str, email: str) -> None:
+    """Write the new address into `public.users` too. Migration 212's trigger normally already
+    has; this covers the window before it is applied. Best effort: the change itself succeeded,
+    and a failure leaves only the copy stale (logged, and the trigger/backfill repairs it)."""
+    try:
+        supabase.table("users").update({"email": email}).eq("id", user_id).execute()
+    except Exception as e:  # noqa: BLE001 — logged; the change itself already succeeded
+        logger.warning(
+            "change-email: could not mirror the new address into public.users for user=%s "
+            "(%s: %s) — migration 212's trigger is the other writer",
+            user_id, type(e).__name__, e,
+        )
+
+
+async def _verify_email_change_code(
+    request_verb, address: str, code: str, *, user_id: str, which: str,
+) -> str:
+    """One `/verify` type email_change. "complete" (GoTrue answered with a session: the change is
+    done), "accepted" (this half confirmed, the other still waits) or "rejected" (wrong, expired or
+    already used). An outage or a 429 raises 503 AUTH_UNAVAILABLE: the code may still be good."""
+    try:
+        answer = await run_gotrue(
+            request_verb, "POST", "verify",
+            body={"type": "email_change", "email": address, "token": code},
+            xform=_raw_json,
+        )
+    except Exception as e:
+        if _classify_gotrue_failure(e) == "rejected":
+            logger.info(
+                "change-email/confirm: the %s-address code was refused for user=%s "
+                "(status=%s code=%s)", which, user_id, _gotrue_status(e), _gotrue_code(e),
+            )
+            return "rejected"
+        raise _otp_failure(e, route="change-email/confirm", user_id=user_id)
+    if isinstance(answer, dict) and answer.get("access_token"):
+        return "complete"
+    return "accepted"
+
+
+@router.post("/change-email", response_model=EmailChangeResponse)
+async def change_email(
+    request: ChangeEmailRequest,
+    req: Request,
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
+):
+    """Start changing the signed-in account's email (audit CC-09). See `ChangeEmailRequest`.
+
+    The proof is the current password, or the recovery code from `POST /auth/forgot-password`
+    for an Apple/Google account with none. Then GoTrue's Secure email change mails a code to the
+    current AND the new address; `POST /auth/change-email/confirm` takes both. An address that
+    another account already uses gets the same "codes_sent" answer (enumeration).
+    """
+    client_ip = trusted_client_ip(req)
+    # Each start makes GoTrue mail TWO addresses, so it counts twice against the per-IP hourly
+    # mail ceiling the sign-up, resend and reset routes share (review 2026-11-27: this route
+    # used to sit outside it). The new address is chosen by the caller, so it gets its own
+    # hourly bucket too — charged on every attempt, at entry, so a taken address and a free one
+    # get the same answer and no code is spent before a refusal. Caller-chosen key last.
+    _enforce_credential_limits(
+        (f"changeemail:ip:{client_ip}", *CHANGE_EMAIL_LIMIT_PER_IP),
+        (f"changeemail:user:{user_id}", *CHANGE_EMAIL_LIMIT_PER_USER),
+        (f"mail:ip:h:{client_ip}", MAIL_PER_IP_PER_HOUR, MAIL_HOUR_SECONDS),
+        (f"mail:ip:h:{client_ip}", MAIL_PER_IP_PER_HOUR, MAIL_HOUR_SECONDS),
+        (f"change_mail:email:{_email_key(str(request.new_email))}",
+         CHANGE_MAIL_PER_RECIPIENT_PER_HOUR, MAIL_HOUR_SECONDS),
+        detail="Too many email change attempts. Please try again later.",
+    )
+    # Before any GoTrue call, and the same answer whatever the address (see the constant).
+    wait = _email_change_send_wait(user_id)
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail="Please wait a minute before asking for new codes.",
+            headers={"Retry-After": str(wait)},
+        )
+
+    current, _pending = await _read_auth_account(
+        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.get_user_by_id,
+        user_id, route="change-email",
+    )
+    new_email = str(request.new_email).strip()
+    if _email_key(new_email) == _email_key(current):
+        raise auth_error(
+            ErrorCode.AUTH_EMAIL_UNCHANGED, message="change-email: the new address is the current one",
+        )
+
+    gotrue = _auth_of(auth_client, supabase)
+    spent_code = request.code is not None
+    if request.current_password is not None:
+        # An Apple/Google account has no password: the sign-in below would answer
+        # invalid_credentials, which reads as "your current password is incorrect" about a
+        # password that never existed. Same probe as change-password, failing open the same way.
+        methods = await auth_methods_service.get(supabase, user_id)
+        if methods is not None and methods.get("has_password") is False:
+            raise auth_error(
+                ErrorCode.AUTH_PASSWORD_NOT_SET,
+                message="change-email with a password on a password-less account",
+                user_message="This account doesn't have a password. Use the code we email you instead.",
+            )
+        try:
+            proven = await run_gotrue(
+                gotrue.auth.sign_in_with_password,
+                {"email": current, "password": request.current_password},
+            )
+        except Exception as e:
+            if _is_rejected_credential(e):
+                logger.info("change-email: current password did not match for user=%s", user_id)
+                raise auth_error(
+                    ErrorCode.AUTH_CREDENTIALS_INVALID,
+                    message="change-email: current-password re-authentication failed",
+                    user_message="Your current password is incorrect.",
+                )
+            logger.error(
+                "change-email: re-authentication failed unexpectedly for user=%s: %s: %s "
+                "(status=%s code=%s)", user_id, type(e).__name__, e, _gotrue_status(e),
+                _gotrue_code(e), exc_info=True,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_UNAVAILABLE,
+                message=f"change-email: current-password check upstream failure: {type(e).__name__}",
+            )
+    else:
+        try:
+            proven = await run_gotrue(
+                gotrue.auth.verify_otp,
+                {"email": current, "token": request.code, "type": "recovery"},
+            )
+        except Exception as e:
+            raise _otp_failure(e, route="change-email", user_id=user_id)
+
+    session = getattr(proven, "session", None)
+    supabase_token = getattr(session, "access_token", None)
+    proven_id = str(getattr(getattr(proven, "user", None), "id", "") or "")
+    if not supabase_token or not proven_id:
+        logger.error(
+            "change-email: the proof succeeded but returned no session for user=%s", user_id,
+        )
+        if spent_code:
+            raise auth_error(
+                ErrorCode.AUTH_CODE_USED, message="change-email: verify_otp returned no session",
+                user_message=_EMAIL_CHANGE_CODE_SPENT,
+            )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE, message="change-email: sign-in returned no session",
+        )
+    if proven_id != str(user_id):
+        logger.error(
+            "change-email: the proof resolved to a DIFFERENT user (token subject=%s, proof=%s)",
+            user_id, proven_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_FORBIDDEN, message="change-email: proof resolved to a different account",
+        )
+
+    # Charged on EVERY send attempt — a taken address included — or the spacing itself would
+    # tell the two apart.
+    _mark_email_change_send(user_id)
+    try:
+        updated = await run_gotrue(
+            gotrue.auth._request, "PUT", "user",
+            jwt=supabase_token, body={"email": new_email}, xform=_raw_json,
+        )
+    except Exception as e:
+        code = _gotrue_code(e)
+        if code in _GOTRUE_EMAIL_TAKEN_CODES or (
+            code is None and any(m in str(e).lower() for m in _EMAIL_TAKEN_MARKERS)
+        ):
+            logger.info(
+                "change-email: the new address already belongs to an account (user=%s) — "
+                "answering as sent", user_id,
+            )
+            await asyncio.sleep(random.uniform(*_EMAIL_TAKEN_PAUSE_SECONDS))
+            return EmailChangeResponse(
+                status=EMAIL_CHANGE_CODES_SENT, email=new_email,
+                message=_EMAIL_CHANGE_CODES_SENT_MESSAGE,
+            )
+        if code in _GOTRUE_EMAIL_INVALID_CODES:
+            logger.info(
+                "change-email: the provider refused the new address for user=%s (code=%s)",
+                user_id, code,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_EMAIL_REJECTED,
+                message=f"change-email: the provider refused the new address (code={code})",
+            )
+        if _classify_gotrue_failure(e) == "rate_limited":
+            logger.error(
+                "GOTRUE_RATE_LIMITED route=change-email verb=update_user user=%s status=%s code=%s",
+                user_id, _gotrue_status(e), code,
+            )
+        else:
+            logger.error(
+                "change-email: update_user failed for user=%s: %s: %s (status=%s code=%s)",
+                user_id, type(e).__name__, e, _gotrue_status(e), code, exc_info=True,
+            )
+        if spent_code:
+            raise auth_error(
+                ErrorCode.AUTH_CODE_USED,
+                message=(
+                    f"change-email: update_user failed after a verified code: "
+                    f"{type(e).__name__} (code={code})"
+                ),
+                user_message=_EMAIL_CHANGE_CODE_SPENT,
+            )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"change-email: update_user failed: {type(e).__name__} (code={code})",
+            user_message=_EMAIL_CHANGE_SEND_FAILED,
+        )
+
+    body = updated if isinstance(updated, dict) else {}
+    now_email = str(body.get("email") or "").strip()
+    pending = str(body.get("new_email") or "").strip()
+    if now_email and _email_key(now_email) == _email_key(new_email) and not pending:
+        # GoTrue changed the address AT ONCE: this project has email confirmation off. Honest
+        # answer, and loud, because the double confirmation the design relies on is not happening.
+        logger.error(
+            "change-email: the address changed WITHOUT confirmation for user=%s — turn on "
+            "'Confirm email' and 'Secure email change' in Supabase (launch checklist §5b)", user_id,
+        )
+        await asyncio.to_thread(_mirror_public_email, supabase, user_id, now_email)
+        return EmailChangeResponse(
+            status=EMAIL_CHANGE_CHANGED, email=now_email, message=_EMAIL_CHANGE_DONE_MESSAGE,
+        )
+    logger.info("change-email: codes sent for user=%s", user_id)
+    return EmailChangeResponse(
+        status=EMAIL_CHANGE_CODES_SENT, email=new_email, message=_EMAIL_CHANGE_CODES_SENT_MESSAGE,
+    )
+
+
+@router.post("/change-email/confirm", response_model=EmailChangeResponse)
+async def confirm_email_change(
+    request: ConfirmEmailChangeRequest,
+    req: Request,
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
+):
+    """Finish an email change with the code sent to the current address and the one sent to the
+    new address. Each code is checked against the address GoTrue itself holds (current, and the
+    pending `new_email`), never one from the body.
+
+    Order-tolerant: Secure email change consumes each code as it confirms, so a retry after one
+    code was accepted cannot re-check that one. The current-address code is tried first; if the
+    change is not complete, the new-address code is tried too, and a "complete" from either
+    finishes the job. A refusal names the code that failed when the other one was accepted.
+    """
+    client_ip = trusted_client_ip(req)
+    _enforce_credential_limits(
+        (f"changeemail_confirm:ip:{client_ip}", *CONFIRM_EMAIL_CHANGE_LIMIT_PER_IP),
+        (f"changeemail_confirm:user:{user_id}", *CONFIRM_EMAIL_CHANGE_LIMIT_PER_USER),
+        detail="Too many attempts. Please wait a while, then try again.",
+    )
+
+    current, pending = await _read_auth_account(
+        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.get_user_by_id,
+        user_id, route="change-email/confirm",
+    )
+    if not pending:
+        # NOT a distinct answer (enumeration): a start aimed at another account's address leaves
+        # nothing pending, so "nothing to confirm" would tell the caller that address is
+        # registered. It reads exactly like two refused codes, after a pause like two verifies.
+        logger.info("change-email/confirm: nothing pending for user=%s", user_id)
+        await asyncio.sleep(random.uniform(*_CONFIRM_NOTHING_PENDING_PAUSE_SECONDS))
+        raise auth_error(
+            ErrorCode.AUTH_CODE_INVALID,
+            message="change-email/confirm: codes refused (nothing pending)",
+            user_message=_EMAIL_CHANGE_BOTH_CODES_REFUSED,
+        )
+
+    gotrue = _auth_of(auth_client, supabase)
+    first = await _verify_email_change_code(
+        gotrue.auth._request, current, request.current_code, user_id=user_id, which="current",
+    )
+    second = None
+    if first != "complete":
+        second = await _verify_email_change_code(
+            gotrue.auth._request, pending, request.new_code, user_id=user_id, which="new",
+        )
+
+    if "complete" in (first, second):
+        await asyncio.to_thread(_mirror_public_email, supabase, user_id, pending)
+        logger.info("change-email: completed for user=%s", user_id)
+        return EmailChangeResponse(
+            status=EMAIL_CHANGE_CHANGED, email=pending, message=_EMAIL_CHANGE_DONE_MESSAGE,
+        )
+
+    if first == "accepted" and second == "rejected":
+        user_message = (
+            f"The code sent to {pending} is incorrect or has expired. "
+            "Check the newest email at that address."
+        )
+    elif first == "rejected" and second == "accepted":
+        user_message = (
+            f"The code sent to {current} is incorrect or has expired. "
+            "Check the newest email at that address."
+        )
+    elif first == "accepted" and second == "accepted":
+        # Both halves confirmed and yet no session came back: GoTrue's answer is not the one this
+        # route was written against. Ours, and the codes are spent.
+        logger.error(
+            "change-email/confirm: both codes accepted but the change did not complete for user=%s",
+            user_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="change-email/confirm: both codes accepted, no completion",
+            user_message=(
+                "We couldn't finish the change. Check your profile, and start again if your "
+                "email hasn't changed."
+            ),
+        )
+    else:
+        user_message = _EMAIL_CHANGE_BOTH_CODES_REFUSED
+    raise auth_error(
+        ErrorCode.AUTH_CODE_INVALID,
+        message=f"change-email/confirm: codes refused (current={first}, new={second})",
+        user_message=user_message,
     )

@@ -273,9 +273,20 @@ def test_begin_signout_is_synchronous_and_disarms_the_client():
         "its result and re-arms the ended session")
     m = re.search(r"let\s+(\w+)\s*=\s*apiClient\.disarmAuthToken\(\)", body)
     assert m, "AuthService.beginSignOut no longer disarms the client"
-    assert re.search(rf"return\s+SignOutHandoff\(endedToken:\s*{m.group(1)},\s*epoch:\s*sessionEpoch\)",
-                     body), (
+    ret = re.search(rf"return\s+SignOutHandoff\(endedToken:\s*{m.group(1)},\s*epoch:\s*sessionEpoch\b[^)]*\)",
+                    body)
+    assert ret, (
         "AuthService.beginSignOut no longer hands the ended token and the epoch to finishSignOut")
+    # Migration 214: `/auth/logout` names the session by its REFRESH token, so it is taken from
+    # the in-memory mirror (never a main-thread Keychain read) before the clear drops it — with
+    # no await above — and handed off.
+    read = re.search(r"let\s+(\w+)\s*=\s*refreshTokenMirror\b", body)
+    clear = body.find("clearToken()")
+    assert read and 0 <= read.start() < clear, (
+        "AuthService.beginSignOut reads the refresh token after the Keychain clear (or not at all) "
+        "— the logout can no longer name the session it ends")
+    assert re.search(rf"endedRefreshToken:\s*{read.group(1)}\b", ret.group(0)), (
+        "AuthService.beginSignOut no longer hands the session's refresh token to finishSignOut")
 
 
 def test_disarm_swaps_the_token_out_synchronously():
@@ -333,8 +344,17 @@ def test_finish_signout_sends_the_detach_and_logout_with_the_ended_token():
         rf"PushNotificationManager\.shared\.unregisterCurrentDevice\(authenticatedAs:\s*{token}\)", after), (
         "sign-out no longer detaches the APNs token with the ended session's token — the device "
         "keeps getting the old account's alerts (or the DELETE goes out unauthenticated and 401s)")
-    assert re.search(rf"apiClient\.requestAuthenticated\(as:\s*{token},\s*endpoint:\s*\.signOut\)", after), (
+    assert re.search(rf"apiClient\.requestAuthenticated\(as:\s*{token},\s*endpoint:\s*\.signOut\(", after), (
         "sign-out no longer sends POST /auth/logout with the ended session's token")
+    assert re.search(r"\.signOut\(refreshToken:\s*handoff\.endedRefreshToken\)", after), (
+        "sign-out no longer sends the session's refresh token to /auth/logout — the server can "
+        "only fall back to the bearer's sid (migration 214)")
+    # "Sign out of all devices" already ended every session server-side: the detach and the
+    # logout are skipped BEFORE the branch that sends them.
+    skip = re.search(r"if\s+handoff\.endedByServer\s*\{", body)
+    assert skip and skip.start() < m.start(), (
+        "sign-out no longer skips the detach and the logout after a server-side sign-out-all — "
+        "both would 401 against the token the server just evicted")
 
     push = _block(_code(_PUSH), _UNREGISTER_DECL)
     assert re.search(r"repository\.unregisterDevice\(token:\s*\w+,\s*authenticatedAs:\s*sessionToken\)", push), (
@@ -452,10 +472,12 @@ _B_HEAD = "    func beginSignOut() -> SignOutHandoff {\n"
 _B_EPOCH = f"{_B_HEAD}{_I8}sessionEpoch += 1\n"
 _B_CLEAR = f"{_I8}clearToken()\n"
 _B_DISARM = f"{_I8}let endedToken = apiClient.disarmAuthToken()\n"
-_B_RETURN = "return SignOutHandoff(endedToken: endedToken, epoch: sessionEpoch)"
-_F_TAKE = f"{_I8}if let endedToken = handoff.endedToken {{\n"
+_B_RETURN = "return SignOutHandoff(endedToken: endedToken, epoch: sessionEpoch, endedRefreshToken: endedRefreshToken, endedByServer: endedByServer)"
+_B_READ_REFRESH = f"{_I8}let endedRefreshToken = refreshTokenMirror\n"
+_F_TAKE = "} else if let endedToken = handoff.endedToken {\n"
+_F_SKIP = f"{_I8}if handoff.endedByServer {{\n"
 _F_DETACH = f"{_I12}await PushNotificationManager.shared.unregisterCurrentDevice(authenticatedAs: endedToken)\n"
-_F_LOGOUT = f"{_I16}try await apiClient.requestAuthenticated(as: endedToken, endpoint: .signOut)\n"
+_F_LOGOUT = f"{_I16}try await apiClient.requestAuthenticated(as: endedToken, endpoint: .signOut(refreshToken: handoff.endedRefreshToken))\n"
 _F_GUARD = f"{_I8}guard handoff.epoch == sessionEpoch else {{ return }}\n"
 _F_BACKSTOP = f"{_F_GUARD}{_I8}await apiClient.setAuthToken(nil)\n"
 # APIClient
@@ -515,6 +537,12 @@ _MUTATIONS = [
     ("begin-drops-the-token", _AUTH_SERVICE,
      ((_B_RETURN, "return SignOutHandoff(endedToken: nil, epoch: sessionEpoch)"),),
      _T_BEGIN, "no longer hands the ended token and the epoch to finishSignOut"),
+    ("refresh-read-after-clear", _AUTH_SERVICE,
+     ((_B_READ_REFRESH, ""), (_B_CLEAR, f"{_B_CLEAR}{_B_READ_REFRESH}")),
+     _T_BEGIN, "reads the refresh token after the Keychain clear"),
+    ("refresh-not-handed-off", _AUTH_SERVICE,
+     ((_B_RETURN, "return SignOutHandoff(endedToken: endedToken, epoch: sessionEpoch, endedRefreshToken: nil, endedByServer: endedByServer)"),),
+     _T_BEGIN, "no longer hands the session's refresh token to finishSignOut"),
     ("disarm-not-nonisolated", _CLIENT, ((_C_DISARM_HEAD, "    func disarmAuthToken() -> String? {\n"),),
      _T_DISARM, "APIClient.disarmAuthToken is no longer nonisolated and synchronous"),
     ("disarm-keeps-token", _CLIENT, ((_C_DISARM_CLEAR, f"{_I12}token = endedToken\n"),),
@@ -537,6 +565,11 @@ _MUTATIONS = [
      _T_EXPLICIT, "sign-out no longer detaches the APNs token with the ended session's token"),
     ("logout-dropped", _AUTH_SERVICE, ((_F_LOGOUT, f"{_I16}_ = endedToken\n"),),
      _T_EXPLICIT, "sign-out no longer sends POST /auth/logout with the ended session's token"),
+    ("logout-without-refresh-token", _AUTH_SERVICE,
+     ((_F_LOGOUT, f"{_I16}try await apiClient.requestAuthenticated(as: endedToken, endpoint: .signOut(refreshToken: nil))\n"),),
+     _T_EXPLICIT, "sign-out no longer sends the session's refresh token"),
+    ("server-ended-not-skipped", _AUTH_SERVICE, ((_F_SKIP, f"{_I8}if false {{\n"),),
+     _T_EXPLICIT, "sign-out no longer skips the detach and the logout after a server-side sign-out-all"),
     ("push-drops-the-token", _PUSH,
      ((_P_CALL, "repository.unregisterDevice(token: token, authenticatedAs: \"\")"),),
      _T_EXPLICIT, "no longer hands the ended session's token to the repository"),

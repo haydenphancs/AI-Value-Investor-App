@@ -15,7 +15,7 @@ struct PrivacyPolicyView: View {
     var body: some View {
         LegalDocumentView(
             title: "Privacy Policy",
-            lastUpdated: "October 28, 2026",
+            lastUpdated: "November 26, 2026",
             // The summary is deliberately FIRST and in the intro rather than as a numbered
             // section: "we don't sell your data" is the single thing users most want to know,
             // and burying it in §5 (where it lived) meant almost nobody ever read it. The
@@ -96,6 +96,7 @@ struct PrivacyPolicyView: View {
                 "Content you create \u{2014} chat conversations, generated research reports, watchlists, holdings, learning progress, and bookmarks \u{2014} is kept until you delete it or delete your account. We do not expire it on a timer, so that your saved research stays available. You can delete individual conversations and reports at any time.",
                 "Short-lived operational records are cleared automatically: fair-usage counters are deleted after 7 days, anonymous search counts after 14 days, and cached market data expires on its own schedule.",
                 "Deleting your account removes your account record and everything linked to it: chat conversations and messages, research reports and their generated PDF files, watchlists, portfolios and holdings, saved items, followed entities, settings, learning progress, notification tokens, credit balance, and credit history. This happens immediately, not on a delay. Error-monitoring records may persist for a short retention period at our monitoring provider; these contain diagnostic information and a pseudonymous account identifier, not your name or email. Emails you send to support, including Help Us Improve reports, are kept in our support mailbox and are not deleted with your account; ask us at support@caydexinvest.com to delete them.",
+                "When you delete your account we keep one thing for 90 days: a one-way, keyed fingerprint of its email address and of its Apple or Google sign-in ID. It cannot be turned back into your email or linked to the deleted account, and it is used only to decide whether a new account created with the same email, Apple ID or Google account receives the free welcome credits again. After 90 days it is no longer used, and it is removed the next time an account is created or deleted.",
                 "You can delete your account in the App under Profile \u{2192} Settings \u{2192} Delete Account."
             ]
         ),

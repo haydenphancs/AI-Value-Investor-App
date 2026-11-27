@@ -33,8 +33,55 @@ class Settings(BaseSettings):
     # Security
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24       # 24 hours
-    REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    # 60 minutes, CAPPED (CC-10, 2026-11-26). The market-data routers gate on the token alone
+    # (`get_current_user_id`, no users read), so an access token is the eviction window there: it
+    # used to be 24 h, during which a deleted account, a reset password, a sign-out-all or a
+    # revoked session kept reading FMP data. iOS refreshes a token before it expires (APIClient's
+    # pre-flight), so a shorter life costs one refresh per hour of use, not a sign-in. A higher
+    # value in the environment (`.env.example` long said 1440) is clamped with a WARNING rather
+    # than failing the deploy — see `_cap_access_token_life`.
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    REFRESH_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days, sliding (each refresh renews it)
+
+    # Server-side sessions (migration 214, SEC-3). A refresh token is single-use: presenting a
+    # retired one again revokes its whole session (reuse detection) — unless it comes back within
+    # this many seconds of its first use, when a sibling is issued instead. That covers a refresh
+    # whose response was lost and is retried (APIClient's failover re-send, the restore loop) and
+    # the app's restore and pre-flight refreshes racing on one token. 0 turns the grace off.
+    REFRESH_TOKEN_REUSE_GRACE_SECONDS: int = Field(default=120, ge=0, le=600)
+    # Successors one refresh token may have: its rotation plus grace re-issues. Past this, a
+    # further presentation is reuse even inside the window (a loop replaying one token).
+    REFRESH_TOKEN_MAX_CHILDREN: int = Field(default=3, ge=1, le=10)
+
+    # Account deletion re-authentication (SEC-11). A request that carries a re-authentication
+    # proof (`X-Caydex-Reauth`, minted by POST /auth/reauthenticate) is always checked. A request
+    # WITHOUT one — every shipped build up to 1.03 — is accepted while this is False, so in-app
+    # deletion keeps working there (App Review 5.1.1(v)); set it True once those builds are below
+    # the minimum supported version. A session that signed in within
+    # ACCOUNT_DELETE_RECENT_AUTH_SECONDS counts as re-authenticated either way.
+    ACCOUNT_DELETE_REQUIRE_REAUTH: bool = False
+    ACCOUNT_DELETE_RECENT_AUTH_SECONDS: int = Field(default=600, ge=60, le=3600)
+    REAUTH_TOKEN_EXPIRE_SECONDS: int = Field(default=300, ge=60, le=900)
+
+    @field_validator("ACCESS_TOKEN_EXPIRE_MINUTES", mode="after")
+    @classmethod
+    def _cap_access_token_life(cls, value: int) -> int:
+        """At most 60 minutes, at least 5 (CC-10). Clamped with a WARNING, never a failed deploy:
+        Railway may still carry the old `ACCESS_TOKEN_EXPIRE_MINUTES=1440` from `.env.example`, and
+        refusing to boot over it would take the API down for a setting whose safe value is known.
+        Below 5 every request would pre-flight a refresh."""
+        import logging
+
+        if value > 60:
+            logging.getLogger(__name__).warning(
+                "ACCESS_TOKEN_EXPIRE_MINUTES=%s is above the 60-minute cap (CC-10, 2026-11-26) — "
+                "using 60. Remove the variable from the environment to silence this.", value)
+            return 60
+        if value < 5:
+            logging.getLogger(__name__).warning(
+                "ACCESS_TOKEN_EXPIRE_MINUTES=%s is below the 5-minute floor — using 5", value)
+            return 5
+        return value
 
     # Admin trigger token — when set, accepted via `X-Admin-Token` header
     # as an alternative to the email-based admin allowlist on admin
@@ -492,6 +539,19 @@ class Settings(BaseSettings):
     # Settings rather than literals so a rename or a second bundle (staging) is a config change.
     APPLE_TEAM_ID: str = "WG697LVCS9"
     APPLE_BUNDLE_ID: str = "com.phan.caydex"
+
+    # ── Sign in with Apple: token revocation (SOC-04, 2026-11-26) ──────────────
+    # Account deletion revokes the user's Sign in with Apple grant (Apple's account-deletion
+    # guidance). That needs Apple's REST API (`integrations/apple_id.py`), which authenticates
+    # with an ES256 client_secret signed by a Sign in with Apple `.p8` key — a DIFFERENT key
+    # from APNs' unless that key was created with both services ticked. Team id is
+    # APPLE_TEAM_ID, client id is APPLE_BUNDLE_ID (the native app's identity tokens carry it as
+    # `aud`). With either value unset the feature is OFF: `/auth/oauth` stores no Apple refresh
+    # token and `DELETE /users/me` logs a WARNING that the grant was not revoked — sign-in and
+    # deletion themselves are unaffected. Set the key to the `.p8` file's CONTENTS (a one-line
+    # value with literal `\n` escapes is accepted). Owner task: OWNER_TASKS.md.
+    APPLE_SIGN_IN_KEY_ID: Optional[str] = None
+    APPLE_SIGN_IN_PRIVATE_KEY: Optional[str] = None
     # StoreKit product id → tier. The product ids must match App Store Connect exactly.
     # Kept in config rather than the DB so a typo can't silently grant the wrong tier.
     IAP_PRODUCT_PRO_MONTHLY: str = "com.phan.caydex.pro.monthly"

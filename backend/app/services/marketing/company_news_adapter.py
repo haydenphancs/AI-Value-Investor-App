@@ -278,6 +278,7 @@ from app.services._insider_buys_common import (
 from app.services._earnings_common import eps_digit_shift_suspect
 from app.services._insider_common import (
     classify_insider_transaction, distinct_trades, insider_reporter_key, is_common_stock, officer_title,
+    symbol_share_class,
 )
 from app.services._whale_common import (
     MAX_SPLIT_LOOKUPS, is_13f_non_share_row, select_13f_comparison, thirteen_f_share_positions,
@@ -2287,6 +2288,24 @@ def _issuer_lines(ctx: _Ctx, sym: str, profile: Any, kept: Sequence[Any], amende
             ctx.reject("record_invalid")      # a buy with no trade date is not dated news
             continue
         good.append(b)
+    # One stock per company: FMP files every share class of an issuer under one symbol, so lines of two classes (or a
+    # classed and an unclassed label) would be summed into one share count and one price range that are no single
+    # security's — Biglari's Class A at $1,823.63 and Class B at $356.63 printed as "$356.63–$1,823.63 a share"
+    # (2026-11-26). The whole company is refused, for every person, in the roundups and the spotlight alike.
+    classes = {getattr(b, "share_class", "") for b in good}
+    own = symbol_share_class(sym)
+    if own is not None and any(c and c != own for c in classes):
+        # a listed two-class symbol (`_insider_common._SYMBOL_CLASS`: BH is Biglari's CLASS B) whose lines are another
+        # class's: a Class A purchase at ~$1,800 would print beside BH's Class B ticker (review of 2026-11-27)
+        logger.info("company news insider: %s refused — its purchase lines are %s, not the symbol's own %s", sym,
+                    ", ".join(sorted(c for c in classes if c)), own)
+        ctx.reject("share_class_overlap")
+        return None
+    if len(classes) > 1:
+        logger.info("company news insider: %s refused — its purchase lines span %d share classes (%s)", sym,
+                    len(classes), ", ".join(sorted(c or "unclassed" for c in classes)))
+        ctx.reject("share_class_overlap")
+        return None
     return company, issuer, good
 
 

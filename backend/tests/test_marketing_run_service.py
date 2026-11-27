@@ -12,6 +12,7 @@ import json
 import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -7664,18 +7665,94 @@ _SPOT_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"
 
 
 def _spot(monkeypatch, *, on=True, days="tue,thu,sat", classes="A,C,F", hour=10, attempts=6, run_hour=16,
-          series=_SPOT_SERIES):
-    """The spotlight lane's settings (open by default: 10 + 6 <= 16, a news class and a spotlight series)."""
+          series=_SPOT_SERIES, real_start_window=False):
+    """The spotlight lane's settings (open by default: 10 + 6 <= 16, a news class and a spotlight series). NOW is 17:30
+    ET, past the lane's START window (`spotlight_start_closed`, 2026-11-26), so the start window is held open here
+    unless `real_start_window` — the window's own tests (`test_the_spotlight_start_window_*`) use the real rule."""
     for name, value in (("MARKETING_SPOTLIGHT_ENABLED", on), ("MARKETING_SPOTLIGHT_WEEKDAYS", days),
                         ("MARKETING_CONTENT_CLASSES", classes), ("MARKETING_SPOTLIGHT_HOUR_ET", hour),
                         ("MARKETING_MAX_RUN_ATTEMPTS", attempts), ("MARKETING_RUN_HOUR_ET", run_hour),
                         ("MARKETING_NEWS_SERIES", series)):
         monkeypatch.setattr(mrs.settings, name, value)
+    if not real_start_window:
+        monkeypatch.setattr(mrs, "spotlight_start_closed", lambda run_date, now: False)
 
 
 async def _claim_lane(svc, lane, *, day=_SPOT_DAY, now=NOW, nonce=None, resume_only=False):
     return await svc.claim_run(day, worker_version="t", dry_run=False, now=now, claim_nonce=nonce or _n(),
                                resume_only=resume_only, lane=lane)
+
+
+
+# ── the spotlight START window (2026-11-26): the lane was switched on at 20:00 ET of a spotlight Thursday and the
+#    20:16 ET tick claimed — and posted — that day's spotlight; a NEW spotlight run now starts only before
+#    MARKETING_RUN_HOUR_ET of its date, while a run that already exists may still finish ──────────────────────────
+
+
+def _et(day: date, hour: int, minute: int = 0) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=ZoneInfo("America/New_York"))
+
+
+@pytest.mark.asyncio
+async def test_the_spotlight_start_window_closes_at_the_main_run_hour(svc, monkeypatch):
+    _spot(monkeypatch, real_start_window=True)
+    row, reason = await _claim_lane(svc, "spotlight", now=_et(_SPOT_DAY, 15, 59))
+    assert reason == CLAIMED and row["lane"] == "spotlight"                     # 15:59 ET: still the morning slot
+    svc.fake.tables[mrs.RUNS].rows.clear()
+    for late in (_et(_SPOT_DAY, 16, 0), _et(_SPOT_DAY, 20, 16), _et(_SPOT_DAY, 23, 59)):
+        row, reason = await _claim_lane(svc, "spotlight", now=late)
+        assert (row, reason) == (None, mrs.NOT_SCHEDULED), late
+    assert svc.fake.tables[mrs.RUNS].rows == []                                  # nothing inserted
+    # the main lane is never gated by it
+    main, r_main = await _claim_lane(svc, "main", now=_et(_SPOT_DAY, 20, 16))
+    assert r_main == CLAIMED and mrs.run_lane(main) == "main"
+
+
+@pytest.mark.asyncio
+async def test_the_spotlight_start_window_lets_an_existing_run_finish(svc, monkeypatch):
+    """Past the window the claim acts as a resume: a stale run of that date is re-claimed (the owner's "runs already in
+    progress would still be allowed to finish"), a live one stays its holder's, and a finished one answers its state."""
+    _spot(monkeypatch, real_start_window=True)
+    morning = _et(_SPOT_DAY, 10, 15)
+    started, _ = await _claim_lane(svc, "spotlight", now=morning)
+    late = _et(_SPOT_DAY, 17, 15)
+    row, reason = await _claim_lane(svc, "spotlight", now=_et(_SPOT_DAY, 10, 20))
+    assert reason == IN_PROGRESS and row["id"] == started["id"]                  # live: not hijacked
+    row, reason = await _claim_lane(svc, "spotlight", now=late)                  # 7 hours on: stale, re-claimed
+    assert reason == CLAIMED and row["id"] == started["id"] and row["attempts"] == 2
+    svc.fake.tables[mrs.RUNS].rows[0].update(status="media_ready", stage="assets_ready")
+    row, reason = await _claim_lane(svc, "spotlight", now=late)
+    assert reason not in (CLAIMED, mrs.NOT_SCHEDULED) and row["id"] == started["id"]
+    assert len(svc.fake.tables[mrs.RUNS].rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_spotlight_start_window_leaves_resume_only_claims_as_they_were(svc, monkeypatch):
+    """A resume-only claim never inserts anyway: with no run it is still NO_RUN, never NOT_SCHEDULED, at any hour."""
+    _spot(monkeypatch, real_start_window=True)
+    for when in (_et(_SPOT_DAY, 9, 15), _et(_SPOT_DAY, 21, 15)):
+        assert await _claim_lane(svc, "spotlight", now=when, resume_only=True) == (None, mrs.NO_RUN)
+
+
+@pytest.mark.parametrize("day, hour, closed", [
+    (date(2026, 7, 16), 15, False), (date(2026, 7, 16), 16, True),             # EDT
+    (date(2026, 12, 17), 15, False), (date(2026, 12, 17), 16, True),           # EST: the same local hour
+    (date(2026, 11, 1), 15, False), (date(2026, 11, 1), 16, True),             # the fall-back day
+    (date(2026, 3, 8), 15, False), (date(2026, 3, 8), 16, True),               # the spring-forward day
+])
+def test_the_spotlight_start_window_is_the_local_et_hour(monkeypatch, day, hour, closed):
+    monkeypatch.setattr(mrs.settings, "MARKETING_RUN_HOUR_ET", 16)
+    assert mrs.spotlight_start_closed(day, _et(day, hour, 0).astimezone(timezone.utc)) is closed
+    # a claim for an EARLIER date than the clock's is always closed (yesterday's run is never started today)
+    assert mrs.spotlight_start_closed(day - timedelta(days=1), _et(day, 0, 5)) is True
+
+
+@pytest.mark.parametrize("bad", ["16", None, True, -1, 24, 16.5, "x"])
+def test_an_unreadable_run_hour_closes_the_spotlight_start(monkeypatch, caplog, bad):
+    monkeypatch.setattr(mrs.settings, "MARKETING_RUN_HOUR_ET", bad)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        closed = mrs.spotlight_start_closed(_SPOT_DAY, _et(_SPOT_DAY, 9, 0))
+    assert closed is True and any("no new spotlight run" in r.getMessage() for r in caplog.records)
 
 
 # ── pure: keys, paths, labels ─────────────────────────────────────────────────
@@ -8554,6 +8631,29 @@ def art_store(svc, art_settings):
 
 
 # ── store_art: content-addressed, immutable, no asset row ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_store_art_retries_an_upload_that_lost_its_connection_once(svc, art_store, monkeypatch):
+    """The art upload shares the logo's one retry on a dropped connection (2026-11-26/27, review: it had no test)."""
+    import httpx
+
+    monkeypatch.setattr(mrs, "STORAGE_TRANSPORT_RETRY_DELAY_SECONDS", 0)
+    real = art_store.upload
+    drops = [httpx.RemoteProtocolError("Server disconnected")]
+
+    def flaky(path, data, options=None):
+        if drops:
+            art_store.uploads.append((path, dict(options or {})))
+            raise drops.pop(0)
+        return real(path, data, options)
+
+    monkeypatch.setattr(art_store, "upload", flaky)
+    data = _jpeg()
+    entry = await svc.store_art(data, width=1376, height=774)
+    assert entry is not None and entry["sha256"] == hashlib.sha256(data).hexdigest()
+    assert len(art_store.uploads) == 2 and list(art_store.objects) == [entry["path"]]
+
 
 
 @pytest.mark.asyncio

@@ -9252,7 +9252,10 @@ SPOT_MON, SPOT_TUE, SPOT_WED, SPOT_THU = date(2026, 11, 16), date(2026, 11, 17),
 _SPOT_NIGHT = _et(2026, 11, 17, 22, 0)        # Tue's nightly check
 _SPOT_FINAL = _et(2026, 11, 18, 16, 0)        # Wed: Tue's final word
 _NO_RETRY_SPOT = "no retry is left (the worker resumes a day only until 10:00 ET the next day)"
-_HINT_SPOT = "Check the marketing-worker cron on Railway (hourly from 10:15 ET) and its last logs"
+# 2026-11-27: the spotlight hint also names the late switch-on (no new spotlight run starts at or after 16:00 ET)
+_HINT_SPOT = ("Check the marketing-worker cron on Railway (hourly from 10:15 ET) and its last logs, unless the "
+              "spotlight was switched on at or after 16:00 ET that day (no new spotlight run starts that late; then "
+              "nothing is wrong)")
 
 
 _SPOT_LANE_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"

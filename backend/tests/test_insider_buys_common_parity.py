@@ -282,7 +282,7 @@ def test_the_copied_constants_equal_signals():
     assert ib.SYMBOL_RE.pattern == ssvc._CEO_SYMBOL_RE.pattern
     assert ib.BAD_SYMBOLS == frozenset(ssvc._BAD_SYMBOLS)
     assert list(ib.InsiderBuy._fields[:11]) == list(ssvc._CeoBuy._fields)
-    assert ib.InsiderBuy._fields[11:] == ("role", "company_cik")
+    assert ib.InsiderBuy._fields[11:] == ("role", "company_cik", "share_class")
 
 
 @pytest.mark.parametrize("raw, cik", [
@@ -297,6 +297,21 @@ def test_the_issuer_cik_rides_along_and_changes_nothing(raw, cik):
     assert sorted((b.symbol, b.company_cik) for b in got) == [("AAA", cik), ("GME", cik)]
     plain = _mine([{k: v for k, v in r.items() if k != "companyCik"} for r in rows], NOW, 30)
     assert _multiset(got) == _multiset(plain) and all(b.company_cik is None for b in plain)
+
+
+
+@pytest.mark.parametrize("security, token", [
+    ("Class A Common Stock", "class-a"), ("Class B Common Stock", "class-b"), ("Common Stock", ""),
+    ("Series C Common Stock", "series-c"), ("Common Stock, par value $0.01", ""),
+])
+def test_the_share_class_rides_along_and_changes_nothing(security, token):
+    """Appended after the compared fields (2026-11-26): the line's class or series token from `securityName`, read by
+    the marketing adapter only (an issuer whose lines span two classes is refused there); extraction, supersession and
+    ranking never read it."""
+    got = _mine([_r(securityName=security)], NOW, 30)
+    assert [b.share_class for b in got] == [token]
+    plain = _mine([_r()], NOW, 30)
+    assert [b[:11] for b in got] == [b[:11] for b in plain]          # the compared fields are what they were
 
 
 # ── roles ─────────────────────────────────────────────────────────────────────

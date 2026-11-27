@@ -569,6 +569,11 @@ def _open_lane(monkeypatch, *, on=True, days="tue,thu,sat", classes="A,C,F",
                         ("MARKETING_RUN_HOUR_ET", 16), ("MARKETING_CONTENT_CLASSES", classes),
                         ("MARKETING_NEWS_SERIES", series)):
         monkeypatch.setattr(settings, name, value)
+    # the endpoint reads the REAL clock: the lane's start window (`spotlight_start_closed`, 2026-11-26) is held open
+    # here and pinned by tests/test_marketing_run_service.py::test_the_spotlight_start_window_*
+    from app.services.marketing import run_service as mrs
+
+    monkeypatch.setattr(mrs, "spotlight_start_closed", lambda run_date, now: False)
 
 
 @pytest.mark.parametrize("why", ["switch_off", "not_a_spotlight_weekday", "no_news_class", "hours_overlap",

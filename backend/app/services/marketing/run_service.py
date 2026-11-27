@@ -273,6 +273,21 @@ def run_date_et(now: Optional[datetime] = None) -> date:
     return now.astimezone(ET).date()
 
 
+def spotlight_start_closed(run_date: date, now: datetime) -> bool:
+    """True once `now` is at or past MARKETING_RUN_HOUR_ET (ET) on `run_date`: from then on no NEW spotlight run of that
+    date may be created — the lane is the MORNING post (owner, 2026-11-15: "its own morning slot"), and on 2026-11-26 the
+    lane switched on at 20:00 ET of a spotlight day was claimed by the 20:16 ET tick and posted that evening. A run that
+    already exists may still be re-claimed and finish (the owner's "Runs already in progress would still be allowed to
+    finish"). An unreadable run hour closes the start (fail closed: no new spotlight run, the main lane unaffected)."""
+    hour = settings.MARKETING_RUN_HOUR_ET
+    if type(hour) is not int or not 0 <= hour <= 23:     # Settings holds a validated int: anything else closes
+        logger.error("marketing claim: MARKETING_RUN_HOUR_ET=%r is not a whole ET hour 0-23 — no new spotlight run is "
+                     "started", str(hour)[:40])
+        return True
+    closes = datetime(run_date.year, run_date.month, run_date.day, hour, tzinfo=ET)
+    return now.astimezone(ET) >= closes
+
+
 def claim_window_ok(run_date: date, today: date) -> bool:
     """A worker may claim only TODAY (ET) or YESTERDAY (the out-of-window resume). A future
     date would claim the real day before it arrives (the claim is UNIQUE (run_date, lane), so
@@ -1613,7 +1628,7 @@ class MarketingRunService:
         lane first asks `selection.spotlight_day_problem(run_date)` — read now: the lane's switch, its weekdays, its
         hours rule, a news class and a spotlight series left once the main lane's are dropped (C0) — and answers
         (None, NOT_SCHEDULED) when it is not one, BEFORE the sweep or any
-        other read or write, `resume_only` included (a resume of yesterday's spotlight run is allowed exactly
+        other read or write — when the LANE is closed for the date — `resume_only` included (a resume of yesterday's spotlight run is allowed exactly
         while yesterday is still a spotlight day; one closed under it is swept later like any abandoned run).
 
         `capabilities` (drop 1) is what the CLAIMING worker declared it can render
@@ -1632,9 +1647,16 @@ class MarketingRunService:
         `resume_only` never inserts: it is the out-of-window tick finishing a run that was
         killed after the last in-window tick, and (None, NO_RUN) means there is nothing.
 
+        A SPOTLIGHT claim at or after MARKETING_RUN_HOUR_ET (ET) of its date (`spotlight_start_closed`, 2026-11-26) is
+        treated as a resume: an existing spotlight run of that date may still be re-claimed and finish, but no new one
+        is inserted, and with none to take the answer is (None, NOT_SCHEDULED) — after the sweep, which a late claim
+        still runs.
+
         Every claim — of any date and lane, resume or not — first sweeps runs abandoned OUTSIDE the claim
         window (`_sweep_abandoned`, every lane): nothing else could ever close them. A NOT_SCHEDULED
-        spotlight claim sweeps nothing (it reads and writes nothing at all).
+        spotlight claim of a closed lane sweeps nothing (it reads and writes nothing at all); a late spotlight START
+        (`spotlight_start_closed`) answers NOT_SCHEDULED after the sweep and its row read. MARKETING_FORCE on the
+        worker bypasses only the WORKER's hour gate: no new spotlight run starts at or after MARKETING_RUN_HOUR_ET ET.
         """
         lane = _check_lane(lane, op="claim_run")
         problem = selection.spotlight_day_problem(run_date) if lane == RUN_LANE_SPOTLIGHT else None
@@ -1646,6 +1668,11 @@ class MarketingRunService:
                         "scheduled for that day: %s)", run_date, lane, NOT_SCHEDULED, problem)
             return None, NOT_SCHEDULED
         now = now or datetime.now(timezone.utc)
+        start_closed = lane == RUN_LANE_SPOTLIGHT and not resume_only and spotlight_start_closed(run_date, now)
+        if start_closed:
+            # Past the main run hour of that date: a spotlight run that already exists may be re-claimed (below), but no
+            # new one is inserted (`spotlight_start_closed`); with none to take, the day is not scheduled.
+            resume_only = True
         stamp = now.isoformat()
         claim_meta: Dict[str, Any] = {"claim_nonce": claim_nonce} if claim_nonce else {}
         declared = sorted({c for c in capabilities if c in WORKER_CAPABILITIES})
@@ -1685,6 +1712,11 @@ class MarketingRunService:
 
         existing = await self.get_run_by_date(run_date, lane)
         if existing is None:
+            if start_closed:
+                logger.info("marketing run NOT claimed run_date=%s lane=%s reason=%s (no new spotlight run starts at or "
+                            "after %s:00 ET of its day — the lane is the morning post; nothing to resume)", run_date,
+                            lane, NOT_SCHEDULED, settings.MARKETING_RUN_HOUR_ET)
+                return None, NOT_SCHEDULED
             if resume_only:
                 return None, NO_RUN
             # the row vanished between the 23505 and the read — treat as busy
@@ -2550,8 +2582,9 @@ class MarketingRunService:
         bucket = settings.MARKETING_MEDIA_BUCKET
         prefix, _, name = path.rpartition("/")
         try:
-            listing = await sb_exec_storage(
-                lambda: self.sb.storage.from_(bucket).list(prefix, {"limit": 100, "search": name})
+            listing = await sb_exec_storage_retrying(
+                lambda: self.sb.storage.from_(bucket).list(prefix, {"limit": 100, "search": name}),
+                what=f"LIST {path}",
             )
         except Exception as e:
             raise MarketingRunError(f"storage LIST failed for {path}: {type(e).__name__}: {e}") from e
@@ -2620,8 +2653,9 @@ class MarketingRunService:
             if there is False:
                 return None
             try:
-                await sb_exec_storage(lambda: self.sb.storage.from_(bucket).upload(
-                    path, data, {"content-type": content_type, "cache-control": "31536000", "upsert": "false"}))
+                await sb_exec_storage_retrying(lambda: self.sb.storage.from_(bucket).upload(
+                    path, data, {"content-type": content_type, "cache-control": "31536000", "upsert": "false"}),
+                    what=f"upload {path}")
             except Exception as e:
                 if not _is_storage_conflict(e):
                     logger.warning("marketing logo: upload of %s failed (%s: %s) — wordmark", path,
@@ -2711,8 +2745,9 @@ class MarketingRunService:
             if there is False:
                 return None
             try:
-                await sb_exec_storage(lambda: self.sb.storage.from_(bucket).upload(
-                    path, data, {"content-type": content_type, "cache-control": "31536000", "upsert": "false"}))
+                await sb_exec_storage_retrying(lambda: self.sb.storage.from_(bucket).upload(
+                    path, data, {"content-type": content_type, "cache-control": "31536000", "upsert": "false"}),
+                    what=f"upload {path}")
             except Exception as e:
                 if not _is_storage_conflict(e):
                     logger.warning("marketing art: upload of %s failed (%s: %s) — no art", path, type(e).__name__,
@@ -4665,6 +4700,52 @@ async def sb_exec_storage(fn):
     import asyncio
 
     return await asyncio.to_thread(fn)
+
+
+#: ONE more try for a Storage call that died on a dropped connection (2026-11-26: the first spotlight run's four logo
+#: calls — three uploads and one LIST — all failed in the same millisecond with httpx `RemoteProtocolError: Server
+#: disconnected`, and the picture drew five wordmarks). The shared Supabase client keeps a pooled HTTP/2 connection to
+#: Storage that the gateway can idle-close; every request that reuses it then fails at once. httpx discards the dead
+#: connection on that error, so the retry opens a fresh one. Only fast transport failures (`httpx.TransportError` but
+#: never a timeout, anywhere in the exception's cause chain) are retried — never an HTTP answer (a 4xx/5xx, a 409).
+STORAGE_TRANSPORT_RETRY_DELAY_SECONDS = 0.25
+
+
+def _is_storage_transport_error(exc: BaseException) -> bool:
+    """True when `exc` — or anything in its __cause__ / __context__ chain — is an httpx transport failure that fails
+    FAST (the connection dropped or could not be opened), i.e. the request may never have been answered. A TIMEOUT is
+    not retried (review of 2026-11-27): storage3 waits 20 s a call, so a retry would only double a hang the template
+    build's budget cannot afford."""
+    import httpx
+
+    seen = set()
+    e: Optional[BaseException] = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if isinstance(e, httpx.TimeoutException):
+            return False
+        if isinstance(e, httpx.TransportError):
+            return True
+        e = e.__cause__ or e.__context__
+    return False
+
+
+async def sb_exec_storage_retrying(fn, *, what: str):
+    """`sb_exec_storage(fn)`, tried once more after a transport failure (STORAGE_TRANSPORT_RETRY_DELAY_SECONDS apart);
+    any other exception, and a second failure of any kind, propagates unchanged. Only for calls that are safe to repeat:
+    a LIST, or an `x-upsert: false` upload (a first attempt that landed answers the retry with a 409 conflict, which
+    the caller already reads as "stored by a concurrent writer" and re-checks)."""
+    import asyncio
+
+    try:
+        return await sb_exec_storage(fn)
+    except Exception as e:
+        if not _is_storage_transport_error(e):
+            raise
+        logger.warning("marketing storage: %s hit a dropped connection (%s: %s) — one retry on a fresh connection",
+                       what, type(e).__name__, str(e)[:160])
+    await asyncio.sleep(STORAGE_TRANSPORT_RETRY_DELAY_SECONDS)
+    return await sb_exec_storage(fn)
 
 
 _service: Optional[MarketingRunService] = None

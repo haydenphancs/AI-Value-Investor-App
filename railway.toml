@@ -1,15 +1,19 @@
-# ⚠️ Probably NOT the file production reads. The Railway service's Root Directory is
-# `/backend`, and `backend/railway.toml` (builder = dockerfile, `/health/pdf`) is the
-# deploy config; there the Dockerfile CMD is the start command. Railway resolves a config
-# file from the REPO root unless the service sets a custom config path, so if this file
-# were ever the one applied, its `startCommand` would replace the Dockerfile CMD. It is
-# therefore kept IDENTICAL in effect: same command (single worker, bounded graceful
+# ⚠️ NOT the file production reads. The Railway service's Root Directory is `/backend`, and
+# Railway finds `backend/railway.toml` there by itself (builder = dockerfile, `/health/pdf`;
+# every deploy's details name it, 2026-11-27). No Railway Config File path is set: keep that
+# box EMPTY (a stored path plus a deleted file fails the build). Railway stops reading both
+# files on 2027-01-01; the settings that matter are already saved on the service (OWNER_TASKS,
+# "Railway variables").
+# Never delete `backend/railway.toml` while this file stays: Railway may then read this one,
+# and on a Dockerfile service its `startCommand` replaces the Dockerfile CMD in exec form,
+# where `$PORT` does NOT expand (docs.railway.com/deployments/start-command), so the new
+# deploy would fail its health check. Remove both files together.
+# The command mirrors the Dockerfile CMD and the Procfile: single worker, bounded graceful
 # shutdown — without it one live SSE stream kept the old instance alive until SIGKILL and
-# the durable job claims stayed parked) and the same health check — which also waits, at
-# most HOME_BOOT_WARM_MAX_WAIT_SECONDS (45 s), for the Home first-paint warm, answering 503
+# the durable job claims stayed parked; the health check also waits, at most
+# HOME_BOOT_WARM_MAX_WAIT_SECONDS (45 s), for the Home first-paint warm, answering 503
 # "warming" until then (see backend/railway.toml).
-# Pinned by backend/tests/test_deploy_command_parity.py. Owner check: Railway → service →
-# Settings → Config-as-code path should read `/backend/railway.toml`.
+# Pinned by backend/tests/test_deploy_command_parity.py.
 [build]
 # The same watch path as backend/railway.toml: redeploy only when the backend changes.
 watchPatterns = ["/backend/**"]

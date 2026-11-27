@@ -450,11 +450,14 @@ def test_design_doc_describes_the_code_flow_and_keeps_its_corrections():
     assert _PATHS[0] in sec, "§9.1 must name the canonical Confirm-signup template"
     assert "POST /auth/confirm-email" in sec and "GET /auth/confirm" in sec
     assert not re.search(r"\b6-digit\b", sec), "§9.1 says 6-digit; the code is 8 (backend 6–12)"
-    # Audit SEC-3: refresh tokens are re-issued, never rotated. Audit SEC-2: the password stamp
-    # is not checked by the router-level gate, so "any JWT … is rejected" was an overclaim.
+    # Audit SEC-2: the password stamp is not checked by the router-level gate, so "any JWT … is
+    # rejected" was an overclaim. Audit SEC-3: refresh tokens used to be re-issued, never rotated;
+    # since migration 214 they are single-use with reuse detection, and the doc must say so — and
+    # must keep saying the gate reads no row (the bound is the 60-minute access token).
     assert "refresh tokens 7 d and rotate" not in sec
     assert "any JWT minted before the change is rejected" not in sec
-    assert "re-issued, not rotated" in sec
+    assert "A refresh token is single-use" in sec and "reuse" in sec.lower()
+    assert "does NOT read the stamps" in sec and "at most 60 minutes" in sec
 
 
 # ─────────────────────────────────────────────────────────────────────────────

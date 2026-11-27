@@ -166,6 +166,10 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # 213: Sign in with Apple refresh tokens, kept only so account deletion can revoke the grant
     # (SOC-04). A credential; read and written only by the backend, as service_role.
     "213": ("apple_sign_in_grants",),
+    # 214: server-side app sessions — one row per session (refresh-token family) and one per
+    # refresh token. Credential state: a client grant would let any holder of a user JWT plus
+    # the shipped anon key read or revoke sessions. Only the backend's RPCs touch them.
+    "214": ("auth_refresh_families", "auth_refresh_tokens"),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

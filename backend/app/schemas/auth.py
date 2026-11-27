@@ -475,6 +475,57 @@ class RefreshTokenRequest(BaseModel):
     refresh_token: str = Field(max_length=TOKEN_MAX_LENGTH, repr=False)
 
 
+class LogoutRequest(BaseModel):
+    """Optional body of `POST /auth/logout` (migration 214).
+
+    The device's refresh token, so the server can end THAT session even when the bearer is an
+    older token. Optional: builds up to 1.03 send no body, and the bearer's `sid` claim names the
+    session for them.
+    """
+
+    refresh_token: Optional[str] = Field(default=None, max_length=TOKEN_MAX_LENGTH, repr=False)
+
+
+class LogoutResponse(BaseModel):
+    message: str
+    # Server-side sessions ended by this call: 0 for a pre-214 token (nothing to revoke).
+    sessions_revoked: int = 0
+
+
+class ReauthenticateRequest(BaseModel):
+    """Re-enter a credential before a sensitive action (account deletion, SEC-11).
+
+    Exactly ONE of: `password`; `provider` + `id_token` (+ `nonce` for Apple), as on
+    `/auth/oauth`; or `supabase_access_token` (the web Google flow), as on
+    `/auth/session-exchange`. The credential must belong to the caller's own account.
+    """
+
+    password: Optional[str] = Field(default=None, max_length=SIGN_IN_SECRET_MAX_LENGTH, repr=False)
+    provider: Optional[str] = Field(default=None, pattern="^(apple|google)$")
+    id_token: Optional[str] = Field(default=None, min_length=16, max_length=TOKEN_MAX_LENGTH, repr=False)
+    nonce: Optional[str] = Field(default=None, max_length=TOKEN_MAX_LENGTH, repr=False)
+    supabase_access_token: Optional[str] = Field(
+        default=None, min_length=16, max_length=TOKEN_MAX_LENGTH, repr=False,
+    )
+
+    def credential_kind(self) -> Optional[str]:
+        """`password` / `id_token` / `supabase_token`, or None when the body is not exactly one."""
+        kinds = []
+        if self.password:
+            kinds.append("password")
+        if self.provider or self.id_token:
+            kinds.append("id_token" if (self.provider and self.id_token) else "incomplete")
+        if self.supabase_access_token:
+            kinds.append("supabase_token")
+        return kinds[0] if len(kinds) == 1 and kinds[0] != "incomplete" else None
+
+
+class ReauthenticateResponse(BaseModel):
+    # The proof for `DELETE /users/me`'s `X-Caydex-Reauth` header. Short-lived, one purpose.
+    reauth_token: str = Field(repr=False)
+    expires_in: int
+
+
 class TokenResponse(BaseModel):
     access_token: str = Field(repr=False)
     refresh_token: str = Field(repr=False)

@@ -678,6 +678,10 @@ _PENDING_MIGRATION_TABLES: set[str] = {
     "public.deleted_account_fingerprints",
     # 213 (2026-11-26): Sign in with Apple refresh tokens for the account-deletion revoke (SOC-04).
     "public.apple_sign_in_grants",
+    # 214 (2026-11-26): server-side sessions. Leave the list once 214 is applied and re-dumped —
+    # and then add `sessions_revoked_at` to public.users' key in schema_curation.py.
+    "public.auth_refresh_families",
+    "public.auth_refresh_tokens",
 }
 # 2026-10-29: 205's Trillion Club stake-finder ledger (trillion_club_stake_findings) was applied
 # and re-dumped, so it left the list.

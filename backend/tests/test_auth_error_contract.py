@@ -206,6 +206,11 @@ _EXPECTED_ACTIONS = {
     # the identical request, never a session action.
     ErrorCode.AUTH_EMAIL_UNCHANGED: "fix_input",
     ErrorCode.AUTH_EMAIL_REJECTED: "fix_input",
+    # Account deletion needs fresh proof of identity (SEC-11). The session is fine and the user is
+    # on the screen that offers "confirm it's you": fix_input. NOT sign_in (a circle for a
+    # signed-in user; and its 403 must never read as a session failure) and NOT retry_later (the
+    # identical request is refused until they confirm).
+    ErrorCode.AUTH_REAUTH_REQUIRED: "fix_input",
     # Sign-in refused until the address is confirmed: the action opens the confirmation step.
     ErrorCode.EMAIL_NOT_CONFIRMED: "confirm_email",
 }

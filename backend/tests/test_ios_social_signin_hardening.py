@@ -69,7 +69,8 @@ _STORE_LINKED = "static func appleUserID(linkedTo accountId: String, keychain: K
 _STORE_NORMALISE = "static func normalisedName(_ raw: String?) -> String?"
 _ENDPOINT_BODY_CASE = "case .oauthSignIn(let provider, let idToken, let nonce, let displayName, let authorizationCode):"
 _ENDPOINT_STRUCT = "nonisolated struct OAuthSignInRequest: Encodable, Sendable"
-_SETTINGS_DELETE = "private func deleteAccount() {"
+# Since migration 214 (server-side sessions) deletion takes the re-authentication proof.
+_SETTINGS_DELETE = "private func deleteAccount(reauthToken: String) {"
 _VM_DELETE = "func deleteAccount() {"
 
 
@@ -258,8 +259,8 @@ def _t_google_session_end() -> None:
     assert _in_order(after, ("SocialSignInService.disconnectGoogleGrant()", "signOut()")), (
         "account deletion no longer disconnects Google BEFORE signing out — the sign-out clears "
         "the token the disconnect needs")
-    for path, header, request in ((_SETTINGS, _SETTINGS_DELETE, "request(endpoint: .deleteAccount)"),
-                                  (_PROFILE_VM, _VM_DELETE, "request(endpoint: .deleteAccount)")):
+    for path, header, request in ((_SETTINGS, _SETTINGS_DELETE, "request(endpoint: .deleteAccount("),
+                                  (_PROFILE_VM, _VM_DELETE, "request(endpoint: .deleteAccount(")):
         body = _block(_code(path), header)
         tail = body[body.index(request):]
         assert "signOutAfterAccountDeletion()" in tail and not re.search(r"\.signOut\(\)", tail), (

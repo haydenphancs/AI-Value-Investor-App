@@ -83,7 +83,7 @@ def test_profile_applies_the_error_host():
 # ── the three call sites ─────────────────────────────────────────────────────
 
 def test_delete_account_does_not_report_through_the_root_error_surface():
-    body = _braced_block(_read(_SETTINGS), "private func deleteAccount() {")
+    body = _braced_block(_read(_SETTINGS), "private func deleteAccount(reauthToken: String) {")
     assert "appState.currentError" not in body, (
         "AppSettingsView.deleteAccount() reports through appState.currentError, which renders "
         "on the ROOT view — behind the Account fullScreenCover this screen lives in. A failed "
@@ -93,7 +93,7 @@ def test_delete_account_does_not_report_through_the_root_error_surface():
 
 
 def test_delete_account_cannot_be_fired_twice():
-    body = _braced_block(_read(_SETTINGS), "private func deleteAccount() {")
+    body = _braced_block(_read(_SETTINGS), "private func deleteAccount(reauthToken: String) {")
     assert "guard !isDeleting" in body, (
         "no in-flight guard: a double tap on 'Delete Forever' fires two DELETEs, and the "
         "second 401s because the first removed the auth row — telling the user the deletion "
@@ -123,10 +123,10 @@ def test_the_danger_zone_is_hidden_from_guests():
 def test_the_guards_would_fail_on_the_old_code():
     """Each assertion above must be sensitive to the shipped defect, not merely true."""
     settings = _read(_SETTINGS)
-    body = _braced_block(settings, "private func deleteAccount() {")
+    body = _braced_block(settings, "private func deleteAccount(reauthToken: String) {")
     # The window must actually be the function, not the whole file — otherwise
     # "appState.currentError not in body" is satisfied by any file that never mentions it.
-    assert "apiClient.request(endpoint: .deleteAccount)" in body, (
+    assert "apiClient.request(endpoint: .deleteAccount(reauthToken: reauthToken))" in body, (
         "the brace-bounded window does not contain the delete call, so it is not the "
         "function body and every assertion scoped to it is meaningless"
     )

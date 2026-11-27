@@ -25,6 +25,12 @@ struct AppSettingsView: View {
     @State private var appLockEnabled: Bool = AppLockManager.shared.isEnabled
 
     @State private var showDeleteConfirmation = false
+    /// "Confirm it's you" before the deletion (SEC-11): the sheet that gets the re-auth proof.
+    @State private var showConfirmIdentity = false
+    /// "Sign out of all devices" (migration 214): its confirmation, in-flight guard and failure.
+    @State private var showSignOutEverywhereConfirmation = false
+    @State private var isSigningOutEverywhere = false
+    @State private var signOutEverywhereError: String?
     /// In-flight guard for account deletion + the local failure message. See `deleteAccount()`
     /// for why the failure cannot go through `appState.currentError` from this screen.
     @State private var isDeleting = false
@@ -59,7 +65,7 @@ struct AppSettingsView: View {
     // type-check this expression in reasonable time" — once the per-row pushes were added.
     // `settingsScreen` carries the content and its change handlers; `body` adds the alerts.
     var body: some View {
-        settingsScreen
+        accountActions(settingsScreen)
             .alert("No App Store", isPresented: $appStoreUnavailable) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -99,15 +105,35 @@ struct AppSettingsView: View {
             } message: {
                 Text(restoreMessage ?? "")
             }
+    }
+
+    /// The account-ending actions' presentations — deletion (its confirmation, the "confirm it's
+    /// you" sheet, its failure) and sign-out-everywhere — kept OUT of `body`'s modifier chain for
+    /// the type-checker budget described above it.
+    private func accountActions<Content: View>(_ content: Content) -> some View {
+        content
             .alert("Delete Account", isPresented: $showDeleteConfirmation) {
                 Button("Cancel", role: .cancel) {}
-                Button("Delete Forever", role: .destructive) { deleteAccount() }
+                // Not the deletion itself: the re-authentication step first (SEC-11).
+                Button("Delete Forever", role: .destructive) { showConfirmIdentity = true }
                     .disabled(isDeleting)
             } message: {
                 // The subscription sentence is Apple's account-deletion guidance for apps that sell
                 // auto-renewable subscriptions: billing is Apple's, so deleting the account here
                 // cannot stop it, and the user must be told how to.
                 Text("This action is permanent and cannot be undone. All your research reports, watchlists, and settings will be deleted.\n\nDeleting your account does not cancel a Pro or Max subscription billed by Apple. Cancel it first under Manage Subscription, or in Settings › your name › Subscriptions.\n\nA new account made with the same email, Apple ID or Google account within 90 days won't get the free welcome credits again.")
+            }
+            .sheet(isPresented: $showConfirmIdentity) {
+                ConfirmIdentityView(
+                    viewModel: ConfirmIdentityViewModel(authService: appState.authService),
+                    // Unknown (nil) shows the field: hiding it from a password account would leave
+                    // only provider buttons that are not theirs.
+                    showsPassword: appState.user.profile?.hasPassword != false,
+                    accountEmail: appState.user.profile?.email ?? "",
+                    onConfirmed: { proof in deleteAccount(reauthToken: proof) }
+                )
+                // A sheet does not inherit this screen's `\.appState` (ios-swiftui.md).
+                .environment(\.appState, appState)
             }
             // Local, for the reason spelled out in `deleteAccount()`: `appState.currentError` renders
             // on the root, which this fullScreenCover is drawn above.
@@ -121,6 +147,24 @@ struct AppSettingsView: View {
                 Button("OK", role: .cancel) { deleteError = nil }
             } message: {
                 Text(deleteError ?? "")
+            }
+            .alert("Sign Out of All Devices?", isPresented: $showSignOutEverywhereConfirmation) {
+                Button("Cancel", role: .cancel) {}
+                Button("Sign Out Everywhere", role: .destructive) { signOutEverywhere() }
+                    .disabled(isSigningOutEverywhere)
+            } message: {
+                Text("This signs your account out on every device, including this iPhone — use it if you've lost a device or see activity you don't recognize. You'll need to sign in again.")
+            }
+            .alert(
+                "Couldn't sign out everywhere",
+                isPresented: Binding(
+                    get: { signOutEverywhereError != nil },
+                    set: { if !$0 { signOutEverywhereError = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { signOutEverywhereError = nil }
+            } message: {
+                Text(signOutEverywhereError ?? "")
             }
     }
 
@@ -555,6 +599,8 @@ struct AppSettingsView: View {
             }
             .padding(.leading, AppSpacing.xs)
 
+            signOutEverywhereRow
+
             Button(action: { showDeleteConfirmation = true }) {
                 HStack(spacing: AppSpacing.md) {
                     Image(systemName: "person.crop.circle.badge.xmark")
@@ -604,6 +650,48 @@ struct AppSettingsView: View {
             .opacity(isDeleting ? 0.5 : 1)
         }
         .padding(.horizontal, AppSpacing.lg)
+    }
+
+    /// "Sign out of all devices" (migration 214). In the danger zone because it ends THIS session
+    /// too — the lever for a lost phone or a session the user does not recognize, and the only
+    /// one an Apple/Google account has (it has no password to change).
+    private var signOutEverywhereRow: some View {
+        Button(action: { showSignOutEverywhereConfirmation = true }) {
+            HStack(spacing: AppSpacing.md) {
+                Image(systemName: "rectangle.portrait.and.arrow.right")
+                    .font(AppTypography.iconDefault)
+                    .foregroundColor(AppColors.textPrimary)
+                    .frame(width: 28, height: 28)
+
+                VStack(alignment: .leading, spacing: AppSpacing.xxs) {
+                    Text("Sign Out of All Devices")
+                        .font(AppTypography.body)
+                        .foregroundColor(AppColors.textPrimary)
+                    Text("Ends every session, including this one")
+                        .font(AppTypography.caption)
+                        .foregroundColor(AppColors.textMuted)
+                }
+
+                Spacer()
+
+                if isSigningOutEverywhere {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(AppColors.textMuted)
+                } else {
+                    Image(systemName: "chevron.right")
+                        .font(AppTypography.iconSmall).fontWeight(.semibold)
+                        .foregroundColor(AppColors.textMuted)
+                }
+            }
+            .padding(.horizontal, AppSpacing.lg)
+            .padding(.vertical, AppSpacing.md)
+            .background(RoundedRectangle(cornerRadius: AppCornerRadius.large).cardFill())
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PlainButtonStyle())
+        .disabled(isSigningOutEverywhere || isDeleting)
+        .opacity(isSigningOutEverywhere ? 0.5 : 1)
     }
 
     // MARK: - Builders
@@ -863,7 +951,26 @@ struct AppSettingsView: View {
         }
     }
 
-    private func deleteAccount() {
+    /// Sign out of all devices. The local sign-out runs only after the SERVER confirmed — telling
+    /// someone a thief was signed out when the call failed would be the worst kind of silent
+    /// failure — and a failure stays on this screen in a local alert (same reason as deletion).
+    private func signOutEverywhere() {
+        guard !isSigningOutEverywhere else { return }
+        isSigningOutEverywhere = true
+        Task {
+            defer { isSigningOutEverywhere = false }
+            do {
+                try await appState.signOutEverywhere()
+            } catch {
+                guard !Task.isCancelled else { return }
+                let appError = AppError.from(error)
+                Self.log.warning("sign-out-all failed: \(appError.analyticsCode, privacy: .public)")
+                signOutEverywhereError = appError.message
+            }
+        }
+    }
+
+    private func deleteAccount(reauthToken: String) {
         // Actually delete the account server-side (cascades all user data) BEFORE
         // signing out. Surface a failure instead of silently signing out.
         //
@@ -885,7 +992,7 @@ struct AppSettingsView: View {
         Task {
             defer { isDeleting = false }
             do {
-                try await appState.apiClient.request(endpoint: .deleteAccount)
+                try await appState.apiClient.request(endpoint: .deleteAccount(reauthToken: reauthToken))
                 // Revokes this device's Google grant, then signs out (SOC-04).
                 appState.signOutAfterAccountDeletion()
             } catch {

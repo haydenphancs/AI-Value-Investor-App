@@ -211,6 +211,19 @@ CURATION: dict[str, TableDoc] = {
         purpose="APNs device tokens for push. One row per install per user; `environment` "
                 "separates sandbox from production so a TestFlight token never gets a prod push.",
         key=("user_id", "token", "platform", "environment")),
+    "public.auth_refresh_families": T("identity",
+        key=("family_id", "user_id", "auth_time", "revoked_at", "revoke_reason"),
+        note="One row per app SESSION (a sign-in on one device); its id is the `sid` claim in "
+             "every token. Revoked by /auth/logout, by reuse of a retired refresh token, or by "
+             "sign-out-all (migration 214). Written only by the 214 RPCs, under a per-user "
+             "advisory lock."),
+    "public.auth_refresh_tokens": T("identity",
+        key=("jti", "family_id", "user_id", "parent_jti", "expires_at", "revoked_at",
+             "replaced_by", "child_count"),
+        note="One row per refresh token (`jti`). Single-use: a retired token presented again "
+             "outside the 120 s grace window revokes its whole family. Pre-214 tokens are "
+             "recorded on first use under an id derived from their hash (`legacy`). Expired "
+             "rows are pruned per user by the 214 RPCs; no job."),
 
     # ----------------------------------------------------------------- billing
     "public.user_credits": T("billing",

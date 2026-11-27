@@ -321,6 +321,13 @@ class ErrorCode(str, Enum):
     # 403, and explicitly NOT an auth error on the client — re-authenticating cannot help, so
     # nothing about the stored session should change.
     AUTH_FORBIDDEN = "AUTH_FORBIDDEN"
+    # A permanent action (account deletion) needs FRESH proof of identity — the password, or an
+    # Apple/Google sign-in linked to the account (`POST /auth/reauthenticate`) — or a recent sign-in,
+    # and the request had neither, or carried a proof that is wrong or expired (SEC-11, 2026-11-26).
+    # 403: the credential is fine, the action is not allowed WITHOUT more. NOT an auth error on the
+    # client — the session is untouched and must never be cleared over it; the cure is to confirm
+    # identity and retry. `fix_input`, not `sign_in`: the confirm step is right there on screen.
+    AUTH_REAUTH_REQUIRED = "AUTH_REAUTH_REQUIRED"
     # The identity store could not be READ (Supabase/PostgREST blip). Load-bearing that this is
     # separable from "your token is bad": it is retryable and the client MUST keep its
     # credential. Previously this surfaced as a bare 500 from `get_current_user`, which iOS does
@@ -654,6 +661,13 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.AUTH_FORBIDDEN: (
         "You don't have access to this."
     ),
+    # Written to work on a build that has no "confirm it's you" step too (it shows this verbatim):
+    # a fresh sign-in counts as re-authentication for ACCOUNT_DELETE_RECENT_AUTH_SECONDS.
+    ErrorCode.AUTH_REAUTH_REQUIRED: (
+        "For your security, please confirm it's you before deleting your account. If you "
+        "don't see that option, sign out, sign back in, and delete your account within 10 "
+        "minutes."
+    ),
     ErrorCode.AUTH_UNAVAILABLE: (
         "We couldn't verify your account just now. Please try again in a moment."
     ),
@@ -749,6 +763,7 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     # Deliberately NOT sign_in: the caller is already signed in, and offering sign-in for a
     # permission wall sends them in a circle.
     ErrorCode.AUTH_FORBIDDEN: "contact_support",
+    ErrorCode.AUTH_REAUTH_REQUIRED: "fix_input",
     ErrorCode.AUTH_UNAVAILABLE: "retry_later",
     # Same reasoning as AUTH_FORBIDDEN, different circle: the user is looking at the form they
     # just submitted, so the useful affordance is "correct the field", not "sign in".
@@ -876,6 +891,9 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.AUTH_ACCOUNT_NOT_FOUND: 401,
     # 403 is correct HERE and only here: identity is established, authorization is not.
     ErrorCode.AUTH_FORBIDDEN: 403,
+    # 403, never 401: a 401 would send iOS through refresh-and-retry for a request a refresh
+    # cannot help, and AUTH_SESSION_EXPIRED-style handling could clear a perfectly good session.
+    ErrorCode.AUTH_REAUTH_REQUIRED: 403,
     # Same reasoning as WATCHLIST_UNAVAILABLE — retryable, and distinguishable from "your
     # credential is bad" so the client keeps the token instead of signing the user out.
     ErrorCode.AUTH_UNAVAILABLE: 503,

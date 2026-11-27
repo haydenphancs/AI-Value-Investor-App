@@ -830,6 +830,18 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "AUTH_FORBIDDEN" {
                 return .forbidden
             }
+            // 403 AUTH_REAUTH_REQUIRED (SEC-11): deleting the account needs a FRESH proof of
+            // identity, and the request had none or carried a stale one. The session is fine —
+            // `.validationFailed` is outside `isAuthError` (nothing clears the Keychain), keeps the
+            // server's wording and points at the confirm step (`.fixInput`). Never `.forbidden`,
+            // whose "Access Denied" + goBack would tell the user they may not delete at all.
+            if code == "AUTH_REAUTH_REQUIRED" {
+                return .validationFailed(
+                    message: message.isEmpty
+                        ? "For your security, please confirm it's you before deleting your account."
+                        : message
+                )
+            }
             // 503 AUTH_UNAVAILABLE can also arrive on the businessError path (the default arm of
             // validateResponse handles non-401 statuses).
             if code == "AUTH_UNAVAILABLE" {

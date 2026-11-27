@@ -14,10 +14,12 @@ from typing import Optional
 from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.api.v1.endpoints.auth import _enforce_credential_limits
 from app.core.security import trusted_client_ip
+from app.config import settings
 from app.database import (
     get_admin_client, get_auth_client, get_supabase, resolve_admin_client,
 )
 from app.dependencies import (
+    get_access_token_claims,
     AvatarRateLimit,
     ProfileRateLimit,
     get_current_user,
@@ -1578,6 +1580,50 @@ def _record_deleted_account(supabase: Client, user_id: str) -> Optional[int]:
     return written
 
 
+#: The header carrying `POST /auth/reauthenticate`'s proof (SEC-11).
+REAUTH_HEADER = "X-Caydex-Reauth"
+
+
+def _deletion_reauth_refusal(user_id: str, proof: Optional[str], claims: dict) -> Optional[str]:
+    """None when this deletion may go ahead; otherwise why not (for the log line).
+
+    ADDITIVE by design (SEC-11): builds up to 1.03 send no proof and App Review 5.1.1(v)
+    requires their in-app deletion to keep working, so a request with NO proof is accepted while
+    `ACCOUNT_DELETE_REQUIRE_REAUTH` is off. What is never accepted: a proof that is present but
+    wrong (expired, another account's, another purpose) — a client that sends one asked to be
+    checked. A session whose sign-in is recent (`auth_time` within
+    ACCOUNT_DELETE_RECENT_AUTH_SECONDS) counts as re-authenticated: that is also the way through
+    for an old build once the switch is on ("sign out, sign in, delete").
+    """
+    from app.core.security import decode_reauth_token
+    from app.services.auth_session_service import AUTH_TIME_CLAIM, auth_time_of
+
+    # Any header at all — blank included — asked to be checked; only an ABSENT one is "no proof".
+    if isinstance(proof, str):
+        if decode_reauth_token(proof, user_id):
+            logger.info("Account deletion re-authenticated by proof for user=%s", user_id)
+            return None
+        return "the re-authentication proof was invalid or expired"
+
+    signed_in_at = auth_time_of(claims.get(AUTH_TIME_CLAIM)) if isinstance(claims, dict) else None
+    if signed_in_at is not None:
+        age = datetime.now(timezone.utc).timestamp() - signed_in_at
+        if -60 <= age <= settings.ACCOUNT_DELETE_RECENT_AUTH_SECONDS:
+            logger.info(
+                "Account deletion re-authenticated by a recent sign-in (%.0fs ago) for user=%s",
+                age, user_id,
+            )
+            return None
+
+    if settings.ACCOUNT_DELETE_REQUIRE_REAUTH:
+        return "no re-authentication proof and no recent sign-in"
+    logger.info(
+        "Account deletion WITHOUT re-authentication for user=%s (a pre-1.04 client; "
+        "ACCOUNT_DELETE_REQUIRE_REAUTH is off)", user_id,
+    )
+    return None
+
+
 @router.delete("/me")
 async def delete_account(
     user: dict = Depends(get_current_user),
@@ -1585,6 +1631,8 @@ async def delete_account(
     auth_client: Client = Depends(get_auth_client),
     admin_client: Client = Depends(get_admin_client),
     _rate: None = AccountDeletionRateLimit,
+    claims: dict = Depends(get_access_token_claims),
+    reauth: Optional[str] = Header(None, alias=REAUTH_HEADER),
 ):
     """Permanently delete the CALLER'S OWN account and all of their data.
 
@@ -1628,6 +1676,21 @@ async def delete_account(
             ErrorCode.AUTH_FORBIDDEN,
             message="refusing to delete the shared guest account",
             user_message="This account can't be deleted.",
+        )
+
+    # Re-authentication (SEC-11), BEFORE anything is deleted. `isinstance` because the suite calls
+    # this handler directly, where an unsupplied `Header(...)` / `Depends(...)` default arrives
+    # as the marker object rather than None.
+    refusal = _deletion_reauth_refusal(
+        user_id,
+        reauth if isinstance(reauth, str) else None,
+        claims if isinstance(claims, dict) else {},
+    )
+    if refusal:
+        logger.info("Account deletion refused for user=%s: %s", user_id, refusal)
+        raise auth_error(
+            ErrorCode.AUTH_REAUTH_REQUIRED,
+            message=f"account deletion needs re-authentication: {refusal}",
         )
 
     failures: dict[str, str] = {}

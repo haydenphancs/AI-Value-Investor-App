@@ -140,7 +140,8 @@ hours later its row read revenue in line and EPS missed by 12%. The record follo
 cannot be changed and is not buzzed again (one push per report). So for each report a push of this
 process told, each kind, its ticker watched or not (`_told_off_the_list`), the sender keeps every
 text the report's inbox rows may hold (`_Told`): the push's, each correction's, and the record's own
-as each look saw it, since a held row's wake writes the record's words. A result past `MIN_SURPRISE`
+as each look saw it, since a held row's wake writes the record's words (with every revenue surprise
+those words stood at, round by round, looked at or not: `_seen_at_its_surprise`). A result past `MIN_SURPRISE`
 is spelled as `result_copy` spells it from the unrounded surprise, the words a wake, a re-kind and
 the 16:00 ET pass write it in (`_said_now`). Each look (the record's words changed, or rows were
 still held at the last one) finds the texts the record now contradicts (`_changed`: a stated verdict
@@ -937,6 +938,20 @@ def _note_told(kind: str, snap: LiveSnapshot, title: str, body: str) -> None:
             live.title, {live.body: _words_of(live)}, live.body)
 
 
+def _seen_at_its_surprise(told: Dict[str, _Told], track: str, then: _Told, said: _Said) -> _Told:
+    """The record's words, already known, at a revenue surprise they were not known at yet: kept
+    every round, though no look is owed (the words did not change), since a held row's wake may
+    write them at it now, and a correction then judges that row at it too (`_Words.revenue_pcts`;
+    the ninth 2026-11-26 review). Returns the track as it now stands."""
+    words = then.known.get(said.body)
+    if words is None or said.revenue_pct is None or said.revenue_pct in words.revenue_pcts:
+        return then
+    known = dict(then.known)
+    _know(known, said.body, _words_of(said))
+    told[track] = replace(then, known=known)
+    return told[track]
+
+
 async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
     """A RESULT FMP CHANGES (module docstring): look again at each followed report whose record's
     words changed since the last look, or whose rows were still held then (every
@@ -954,13 +969,14 @@ async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
         told = _told.get((snap.symbol, snap.day))
         if not told:
             continue
-        for track, then in told.items():
+        for track, then in list(told.items()):
             again = (snap.symbol, snap.day, track)
             if _failed_until.get(again, 0.0) > mono:
                 continue
             said = _said_now(_TRACKS[track][1], snap)
             if said is None:
                 continue
+            then = _seen_at_its_surprise(told, track, then, said)
             due = _revise_after.get(again, 0.0)
             if said.body != then.seen:
                 owed.append((0, 0.0, len(owed), snap, track, then, said))

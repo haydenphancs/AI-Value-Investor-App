@@ -351,7 +351,10 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
   status too, so the card reads `reported`, with no "is reporting" and no Tracking-round ask (the
   seventh 2026-11-26 review). Its figures stay its own, and so does its 30 s poll while they fill,
   so an open sheet still takes the rest, and a true report a restart reads as a leftover (the
-  residual below) still updates.
+  residual below) still updates. A leftover with no figure of its own reads as the report before
+  from its own next fold, and until then as its own, LIVE (minutes: an after-close company's day
+  is asked every 15 min in the morning), never `reported` with nothing in it; a read never notes
+  the report before itself, or a true report would read as a stale row, its poll ended.
   Which row is the report follows the push where this process saw the landings
   (`_the_report_before`): an earlier row it saw land outside its own result window (a stale Friday
   row FMP filled on Monday morning, beside Monday's true report) is the one the push skipped, so
@@ -2575,12 +2578,12 @@ class EarningsLiveService:
         if rec is None:
             return None
         n = et_now(now)
-        if not has_results(eps_metric(rec), revenue_metric(rec)):
-            # A row with no figures of its own reads as the report before it as soon as that
-            # report holds one, not at its own next fold, which for an after-close company's
-            # leftover can be 15 min after the report landed (the 2026-11-26 review).
-            self._note_report_before(rec)
         snap = snapshot_of(rec, n.date(), n)
+        # Only a row showing figures of its own: one with none reads as the report before it from
+        # its own next fold (`_note_landing`), and until then reads as its own, LIVE and asking
+        # every 30 s. A read never notes that report itself: it would read a TRUE report, whose next
+        # fold brings its own figures, as a stale earlier row with its poll ended, a sheet frozen
+        # on the wrong figures (the ninth 2026-11-26 review).
         if (snap.status == STATUS_LIVE or snap.live_label) and snap.reads_as is None and (
                 has_results(snap.eps, snap.revenue)) and (
                 (rec.report_before is not None and _the_report_before(rec.report_before))

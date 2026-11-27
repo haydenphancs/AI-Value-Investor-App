@@ -153,7 +153,13 @@ tick hands the watcher a second list (`EarningsLiveService.late_filing_symbols`,
     (`_Watch.cut_on`). Tried again, the call keeps the whole deadline unless it is judged busy
     again as it starts, and is cut again then (each such try is paid for), so a release the model
     needs longer for still gives its outlook in a calm stretch. A cut filing later settled another
-    way (not the release, or out of attempts) leaves nothing waiting. A burst of releases FMP beat neither stretches a round nor
+    way (not the release, or out of attempts) leaves nothing waiting; a failed read settles nothing,
+    and a late twin reaching a filing still cut in a busy round waits with it, with no call of its
+    own (`result=late_wait`). Residuals: a class waiting on a cut filing that is not the release (an
+    earlier same-day 2.02 8-K a restart or a late add left unread) waits for a calm round even once
+    another class has read the real release; and the twin's wait is judged before its filing's two
+    SEC reads, so in the seconds before a window closes it waits its next late read for a call that
+    would have started calm. A burst of releases FMP beat neither stretches a round nor
     crowds the model chat and reports share;
   * a release read late lands on a record that holds FMP's figures and its landing already:
     it adds its outlook and its link alone. Its figures are dropped before they reach the record

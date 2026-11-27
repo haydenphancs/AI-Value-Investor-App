@@ -9923,16 +9923,18 @@ def test_fmps_later_figures_are_logged_for_a_watched_report_only(caplog, watched
 # ── The eighth 2026-11-26 review (of the seventh's fixes) ─────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_a_leftover_with_no_figures_reads_as_the_report_before_as_soon_as_it_lands(
+async def test_a_leftover_with_no_figures_reads_live_until_its_own_fold_then_as_the_report_before(
         monkeypatch, windows):
-    """The eighth review: INTC reported after Wednesday's close and FMP filled the Wednesday row
-    only on Thursday morning. Thursday's pending leftover noted no report before it (Wednesday had
-    no figure then), and an after-close company's day is fetched every 15 min, so for minutes after
-    Wednesday landed the leftover read `reported` with no figure at all. It reads as the report
-    before as soon as that report holds one."""
+    """INTC reported after Wednesday's close and FMP filled the Wednesday row only on Thursday
+    morning. Thursday's pending leftover noted no report before it (Wednesday had no figure then),
+    and an after-close company's day is asked every 15 min, so for minutes after Wednesday lands
+    the leftover has no figure and no report before. The eighth review found it read `reported`
+    with nothing in it; the ninth found that noting the report before on a read froze a TRUE
+    report's sheet on a stale row (the next tests). It reads as its own, LIVE and asking every
+    30 s, until its own next fold notes the report before; never `reported` with nothing."""
     windows["INTC"] = _CLOSE
     fmp = _FMP({PREV: [_row("INTC", PREV)], REPORT: [_row("INTC", REPORT)]})
-    seen: List[Tuple[str, Any]] = []
+    seen: List[Tuple[str, Any, bool]] = []
 
     def _on_tick(at):
         if at >= _et(REPORT, 6, 10):
@@ -9944,17 +9946,91 @@ async def test_a_leftover_with_no_figures_reads_as_the_report_before_as_soon_as_
         seen.append((els.et_now(at).strftime("%H:%M"), _svc().snapshot("INTC", REPORT, later),
                      wednesday is not None and els.has_results(wednesday.eps, wednesday.revenue)))
 
-    await _calls_per_day(monkeypatch, fmp, _et(REPORT, 6), _et(REPORT, 6, 17), ["INTC"],
+    await _calls_per_day(monkeypatch, fmp, _et(REPORT, 6), _et(REPORT, 6, 32), ["INTC"],
                          _on_tick, after_tick=_after)
     after_wednesday = [(minute, snap) for minute, snap, in_ in seen if in_]
-    assert after_wednesday and after_wednesday[0][0] < "06:15", "the gap this test is about"
-    for minute, snap in after_wednesday:
-        assert snap.reads_as == PREV, (minute, snap)
+    gap = [(minute, snap) for minute, snap in after_wednesday if snap.reads_as is None]
+    noted = [(minute, snap) for minute, snap in after_wednesday if snap.reads_as == PREV]
+    assert gap and noted, "the gap this test is about, then the leftover's own fold"
+    assert max(minute for minute, _ in gap) < min(minute for minute, _ in noted)
+    for minute, snap in gap:
+        assert (snap.status, snap.live_label, snap.poll_seconds) == (
+            els.STATUS_LIVE, True, els.EARNINGS_LIVE_POLL_SECONDS), (minute, snap)
+    for minute, snap in noted:
         assert (snap.status, snap.eps.actual, snap.live_label) == (
             els.STATUS_REPORTED, 0.44, False), (minute, snap)
     for minute, snap, _ in seen:
         assert not (snap.status == els.STATUS_REPORTED and snap.reads_as is None
                     and not els.has_results(snap.eps, snap.revenue)), (minute, snap)
+
+
+async def _two_rows_filled_in_one_update(monkeypatch, earlier: date, later: date, fill_at: datetime,
+                                         start: datetime, end: datetime) -> List[Tuple[str, Any]]:
+    """A report FMP lists under `earlier` too (a stale row, seen pending on its own day) and
+    under `later`, both filled in one update at `fill_at`, the real tick folding each day at its
+    own pace. Returns each tick's read of `later` 30 s on, beside whether `later` holds figures."""
+    _svc().observe_rows(earlier, [_row("INTC", earlier, eps_est=0.38)], _et(earlier, 16),
+                        fetched=True)
+    fmp = _FMP({earlier: [_row("INTC", earlier, eps_est=0.38)], later: [_row("INTC", later)]})
+
+    def _on_tick(at):
+        if at >= fill_at:
+            fmp.by_day[earlier] = [_row("INTC", earlier, eps=0.44, rev=17.1e9, eps_est=0.38)]
+            fmp.by_day[later] = [_row("INTC", later, eps=0.44, rev=17.1e9)]
+
+    seen: List[Tuple[str, Any, bool]] = []
+
+    async def _after(at):
+        rec = _svc()._records.get(("INTC", later))
+        own = rec is not None and els.has_results(els.eps_metric(rec), els.revenue_metric(rec))
+        seen.append((els.et_now(at).strftime("%H:%M"),
+                     _svc().snapshot("INTC", later, at + timedelta(seconds=30)), own))
+
+    await _calls_per_day(monkeypatch, fmp, start, end, ["INTC"], _on_tick, after_tick=_after)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_a_true_report_read_before_its_own_fold_never_reads_as_a_stale_row(
+        monkeypatch, windows):
+    """The ninth 2026-11-26 review: INTC moved its report from Friday to Monday and FMP filled the
+    stale Friday row in the same update as Monday's. Friday's day is asked every 3 min in the
+    morning, Monday's every 15, so for minutes Friday held figures and Monday none. A read that
+    noted the report before itself read Monday as Friday: `reported`, unlabelled, Friday's
+    consensus, its poll ended, an open sheet frozen. Friday landed outside its window, so Monday is
+    the report: LIVE, labelled and asking every 30 s until its own figures land."""
+    windows["INTC"] = _CLOSE
+    friday, monday = date(2026, 10, 30), date(2026, 11, 2)
+    seen = await _two_rows_filled_in_one_update(monkeypatch, friday, monday, _et(monday, 7, 10),
+                                                _et(monday, 6), _et(monday, 7, 31))
+    assert any(not own for _, _, own in seen) and any(own for _, _, own in seen)
+    for minute, snap, own in seen:
+        assert snap.reads_as is None, (minute, snap)
+        if not own:
+            assert (snap.status, snap.live_label, snap.poll_seconds) == (
+                els.STATUS_LIVE, True, els.EARNINGS_LIVE_POLL_SECONDS), (minute, snap)
+    assert seen[-1][1].eps.estimate == 0.41 and seen[-1][1].live_label
+
+
+@pytest.mark.asyncio
+async def test_a_true_report_beside_a_standing_stale_row_keeps_its_poll_until_its_own_fold(
+        monkeypatch, windows):
+    """The ninth review's critic: the same update with the stale row dated the calendar day before
+    the true report, where it stands (the documented residual: the true report then reads
+    `reported` while its figures fill). Before its own fold the true report has no figure; it must
+    never read as the stale row with its poll ended (a sheet would stay on the stale row's
+    surprise against another consensus). It keeps asking every 30 s until its own figures are in,
+    and then shows them, at its own consensus."""
+    windows["INTC"] = _CLOSE
+    seen = await _two_rows_filled_in_one_update(monkeypatch, PREV, REPORT, _et(REPORT, 16),
+                                                _et(REPORT, 15, 45), _et(REPORT, 16, 31))
+    assert any(own for _, _, own in seen) and any(not own for _, _, own in seen)
+    for minute, snap, own in seen:
+        assert snap.reads_as is None, (minute, snap)
+        if own:
+            assert (snap.eps.actual, snap.eps.estimate) == (0.44, 0.41), (minute, snap)
+        else:
+            assert snap.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS, (minute, snap)
 
 
 def test_a_real_leftover_filled_before_its_report_never_reads_live():

@@ -7127,7 +7127,9 @@ async def test_an_eps_landing_after_a_restart_tells_nobody_the_release_told(monk
     """EPS LANDS ON ITS OWN, across a deploy: a release with its revenue alone landed the report
     and was pushed; the table gives it back with no EPS, so FMP's EPS lands again in the new
     process. The ledger's key keeps u1, whom the release told, from hearing twice, and u2, who
-    takes Results & Surprises alone, hears once, of FMP's EPS."""
+    takes Results & Surprises alone, hears once, of FMP's EPS. The dispatcher's clock follows the
+    minutes (the ninth 2026-11-26 review: on the wall clock, after 22:00 ET the night hold kept
+    every buzz, and the test failed by the hour it ran)."""
     svc = _ledger_dispatcher(monkeypatch, users=("u1", "u2"),
                              prefs={"u2": {"notify_earnings_live": False}})
     delivered: List[Tuple[str, str]] = []
@@ -7138,15 +7140,19 @@ async def test_an_eps_landing_after_a_restart_tells_nobody_the_release_told(monk
 
     svc._deliver = _deliver
     market = _RevenueOnlyMarket(days=(OCT_29,))
-    await live_loop.minute(market, _et_time(OCT_29, 6))
+
+    async def _minute(at: datetime) -> None:
+        await live_loop.minute(market, _clock_at(monkeypatch, at))
+
+    await _minute(_et_time(OCT_29, 6))
     market.filings.append(_MORNING_8K)
-    await live_loop.minute(market, _et_time(OCT_29, 8, 1))
+    await _minute(_et_time(OCT_29, 8, 1))
     assert svc.supabase.told == {("u1", "earnings_result:INTC:2026-10-29")}
     live_loop.restart()
-    await live_loop.minute(market, _et_time(OCT_29, 9))
+    await _minute(_et_time(OCT_29, 9))
     market.fills(OCT_29, eps=0.60, revenue=17.1e9)
-    await live_loop.minute(market, _et_time(OCT_29, 9, 10))
-    await live_loop.minute(market, _et_time(OCT_29, 9, 13))
+    await _minute(_et_time(OCT_29, 9, 10))
+    await _minute(_et_time(OCT_29, 9, 13))
     assert svc.supabase.told == {("u1", "earnings_result:INTC:2026-10-29"),
                                  ("u2", "earnings_result:INTC:2026-10-29")}
     assert sorted((r["user_id"], r["kind"]) for r in svc.supabase.rows) == [
@@ -7819,3 +7825,49 @@ async def test_a_wakes_row_in_a_looks_words_is_judged_at_that_looks_surprise(dis
     rows = dispatch.rows[(key, KIND_EARNINGS_LIVE)]
     assert rows["u2"] == "Updated: Revenue beat consensus by 25% · EPS missed consensus by 12%."
     assert rows["u1"] == "Updated: Revenue reported · EPS missed consensus by 12%."
+
+
+# ── The ninth 2026-11-26 review ───────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_surprise_that_moves_without_moving_the_words_is_kept_for_a_wake(dispatch, live):
+    """The ninth review: FMP restated the revenue from +24.6% to +25.3%, the same words ("25%"), so
+    no look was owed and the new surprise was never kept; u2's held row then woke on those words
+    at +25.3%. When the revenue is held beside an EPS restated to +12.5%, a push of u2's pair
+    withholds the revenue verdict, so both rows holding the words do (they cannot be told apart)."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    await sender.dispatch_landings(_lands(live, at, eps=_EPS_PLUS_13, revenue=_REV_PLUS_24_6), at)
+    pushed = "Revenue beat consensus by 25% · EPS beat consensus by 13%."
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == pushed
+    t = at + timedelta(minutes=20)
+    await sender.dispatch_landings(_fmp_says(live, t, eps=_EPS_PLUS_13, revenue=_REV_PLUS_25_3), t)
+    assert dispatch.writes == [], "the same words: nothing to correct"
+    dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u2"] = pushed           # u2's wake at +25.3%
+    t2 = at + timedelta(minutes=60)
+    await sender.dispatch_landings(_fmp_says(live, t2, eps=0.46125, revenue=_REV_PLUS_25_3 / 10),
+                                   t2)
+    rows = dispatch.rows[(key, KIND_EARNINGS_LIVE)]
+    assert rows["u1"] == rows["u2"] == "Updated: Revenue reported · EPS beat consensus by 12%."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eps_meanwhile", [0.041, 0.4756], ids=["eps_held", "eps_unchanged"])
+async def test_the_records_own_revenue_beside_a_rows_own_eps_carries_the_records_surprise(
+        dispatch, live, eps_meanwhile):
+    """The ninth review (a test gap): `_merged` takes the record's revenue, and its surprise,
+    beside a row's own EPS. Pushed at revenue +30% beside EPS +16%; the revenue restated to +24%
+    (beside an EPS held, or unchanged): the row's revenue words now carry +24%, never the push's
+    +30%. With the revenue then held beside an EPS restated to -12%, a push of that pair keeps the
+    revenue verdict, and so does the row."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    await sender.dispatch_landings(_lands(live, at, eps=0.4756, revenue=16.6e9 * 1.30), at)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == (
+        "Revenue beat consensus by 30% · EPS beat consensus by 16%.")
+    t = at + timedelta(minutes=20)
+    await sender.dispatch_landings(_fmp_says(live, t, eps=eps_meanwhile, revenue=16.6e9 * 1.24), t)
+    t2 = at + timedelta(minutes=40)
+    await sender.dispatch_landings(_fmp_says(live, t2, eps=0.3608, revenue=16.6e9 * 1.24 / 10), t2)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == (
+        "Updated: Revenue beat consensus by 24% · EPS missed consensus by 12%.")

@@ -490,6 +490,11 @@ _CURATED_TABLES = {
     "trillion_club_stake_findings",
     # 2026-11-13: 209 applied and re-dumped; §11.8 names the live earnings filing cache.
     "earnings_filing_cache",
+    # 2026-11-27: 211, 213 and 214 applied and re-dumped. §9.1 names the Sign in with Apple
+    # grant table (213) and the two server-side session tables (214); §9b.13 names the
+    # deleted-account fingerprint ledger (211).
+    "apple_sign_in_grants", "auth_refresh_families", "auth_refresh_tokens",
+    "deleted_account_fingerprints",
 }
 
 

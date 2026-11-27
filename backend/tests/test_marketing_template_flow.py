@@ -4172,3 +4172,77 @@ async def test_review_1126_load_post_image_sends_the_older_pictures_alt_text(mon
         monkeypatch.setattr(mrs, "get_marketing_run_service", lambda: ledger)
         image = await outlet_base.load_post_image(row)
         assert image.title == want["title"] and list(image.paragraphs) == want["paragraphs"], caps
+
+
+# ══ Replacement runs (migration 215, owner decision 2026-11-27: "🔄 Next company"): from the build to create_posts ═══
+# A replacement run's build is a template day like any other, keyed by its own run: its frozen per-run decisions
+# (formats, the extra video posts, the video features, the art step) are exactly what a FRESH run drawing the same
+# company would freeze, its output re-checks clean as stored, and create_posts records it under the replacement's own
+# keys (`<date>:r<n>:<platform>:<format>`) — the day's own run's keys untouched.
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_money_map_from_the_build_to_create_posts_is_a_fresh_runs(tworld, monkeypatch):
+    sb, runs = tworld
+    _today(monkeypatch, THU)
+    for name, value in (("MARKETING_VIDEO_EXTRA_PLATFORMS", "facebook,linkedin,threads"),
+                        ("MARKETING_VIDEO_FEATURES", "data_card,push_in"),
+                        ("MARKETING_ART_ENABLED", True), ("MARKETING_ART_MONTHLY_BUDGET_USD", 30.0),
+                        ("MARKETING_REPLACE_ENABLED", True)):
+        monkeypatch.setattr(mrs.settings, name, value)
+    caps = [*DROP2_CAPS, "video_v2"]
+    walmart = costco(company=co("WMT", "Walmart"))
+    # the day's own run drew Costco; the owner tapped Next on it
+    gen0 = _run(sb, THU, caps=caps)
+    first = await _svc(runs, FakeNews({"money_map": cands("money_map", costco(), walmart)})).kick(
+        gen0, claim=_claim(sb, gen0))
+    assert first["source_ref"] == "news:money_map:COST:2025"
+    _run_row(sb, gen0)["status"] = "media_ready"
+    gen0_row = copy.deepcopy(_script(sb, gen0))
+    # the replacement, offered the same pool: the next company
+    rid = _run(sb, THU, caps=caps, replacement=1, replaces_run_id=gen0)
+    state = await _svc(runs, FakeNews({"money_map": cands("money_map", costco(), walmart)})).kick(
+        rid, claim=_claim(sb, rid))
+    assert state["status"] == "accepted" and state["source_ref"] == "news:money_map:WMT:2025", state
+    row = _script(sb, rid)
+    out = row["output"]
+    assert row["replacement"] == 1 and "replacement" not in gen0_row and _script(sb, gen0) == gen0_row
+    assert news_templates.revalidate(out, fact_sheet=row["fact_sheet"], run_date=THU) == []
+    # a FRESH day's own run that drew Walmart first, in a ledger of its own
+    sb2 = FakeSB()
+    sb2.storage = FakeStorage()
+    runs2 = mrs.MarketingRunService(supabase=sb2)
+    fresh_id = _run(sb2, THU, caps=caps)
+    fresh_state = await _svc(runs2, FakeNews({"money_map": cands("money_map", walmart)})).kick(
+        fresh_id, claim=_claim(sb2, fresh_id))
+    assert fresh_state["source_ref"] == state["source_ref"]
+    fresh = _script(sb2, fresh_id)["output"]
+    for key in ("post_formats", "extra_post_formats", "video_posts", "video_features", "posts", "picture_outlets",
+                "first_line_prefix_on", "image_spec", "opening_card", "image_footer", "hook", "content_class",
+                "authorship", "series"):
+        assert out.get(key) == fresh.get(key), key
+    assert out["extra_post_formats"] == {"facebook": "video", "linkedin": "video", "threads": "video"}
+    assert out["video_features"] and set(out["video_features"]) <= {"data_card", "push_in"}
+    # the art step ran as for any run (Money Map pictures no art: every shipped series is NEVER_ART_SERIES)
+    assert out["art"]["reason"] == fresh["art"]["reason"] == "not_a_company_series"
+    assert out["art"]["status"] == fresh["art"]["status"]
+    # the worker's read-back is a fresh run's too
+    assert {k: v for k, v in state["script"].items() if k != "logos"} == {
+        k: v for k, v in fresh_state["script"].items() if k != "logos"}
+    # create_posts: the replacement's own keys, the extras included
+    script = state["script"]
+    video = _ready(sb, rid, "video", metadata={"data_card_slot": script.get("data_card_slot")})
+    card = _ready(sb, rid, "card", image_role="post_image")
+    _run_row(sb, rid)["metadata"].update({"video_asset_id": video, "image_asset_id": card})
+    specs = [{"platform": p, "format": f, **({"asset_ids": [video if f == "video" else card]} if f != "text" else {})}
+             for p, f in sorted(out["post_formats"].items())]
+    posts = await runs.create_posts(rid, specs, claim=_claim(sb, rid))
+    want = [mrs.idempotency_key_for(THU, s["platform"], s["format"], replacement=1) for s in specs] + [
+        mrs.idempotency_key_for(THU, p, "video", replacement=1) for p in sorted(out["extra_post_formats"])]
+    assert [p["idempotency_key"] for p in posts] == want
+    assert all(k.startswith("2026-11-19:r1:") for k in want)
+    for p in posts:
+        assert p["status"] == "pending_review" and p["run_id"] == rid
+        assert (p["metadata"]["series"], p["metadata"]["content_class"]) == ("money_map", "F")
+    # nothing was recorded for the replaced run
+    assert not [p for p in sb.tables[mrs.POSTS].rows if p["run_id"] == gen0]

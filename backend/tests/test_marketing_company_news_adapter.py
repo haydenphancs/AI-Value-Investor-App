@@ -120,6 +120,7 @@ import dataclasses
 import json
 import logging
 import re
+import sys
 import time
 import uuid
 from collections import Counter
@@ -4092,7 +4093,12 @@ async def test_the_reads_figure_gate_and_the_templates_agree_on_every_profit_and
                     NT.compose(rec, run_date=MM_RUN, store_state="live", allow_x_url=False)
                     shapes += 1
                     continue
-                assert got.rejections == {"money_map_loss_above_revenue": 1}, (shape, got.rejections)
+                # owner decision 2026-11-27: a loss year whose costs bar cannot be split is refused at the read too
+                # (`money_map_costs_undivided`) — each read refusal is exactly the template's own code
+                assert got.rejections in ({"money_map_loss_above_revenue": 1}, {"money_map_costs_undivided": 1}), (
+                    shape, got.rejections)
+                code = {"money_map_loss_above_revenue": "implausible_figures",
+                        "money_map_costs_undivided": "costs_undivided"}[next(iter(got.rejections))]
                 kept_op = None if operating is None or (gross is not None and operating > gross) else operating
                 would_be = R.MoneyMap(
                     series="money_map", company=R.CompanyRef(symbol="LA", name="Lumen Biologics"), fiscal_year="2025",
@@ -4102,7 +4108,7 @@ async def test_the_reads_figure_gate_and_the_templates_agree_on_every_profit_and
                     operating_profit_usd=None if kept_op is None else kept_op * rev, net_income_usd=net * rev)
                 with pytest.raises(NT.NewsTemplateRefused) as err:
                     NT.compose(would_be, run_date=MM_RUN, store_state="live", allow_x_url=False)
-                assert err.value.code == "implausible_figures", shape
+                assert err.value.code == code, shape
                 shapes += 1
     assert shapes == 80
 
@@ -4181,6 +4187,39 @@ async def _template_days(fmp, world, set_day, days, posted, *, report):
         out.append(([(r.company.symbol, r.fiscal_year) for r in got.records], refusals, chosen,
                     list(world["revenue"].calls), list(world["profit"].calls), dict(got.rejections)))
     return out
+
+
+@pytest.mark.asyncio
+async def test_owner_1127_an_undivided_cost_loss_year_is_refused_at_the_read_and_the_next_company_posts(monkeypatch):
+    """Owner decision 2026-11-27 ("i don't think we need to post for these companies. so, post the other one"): a loss
+    year whose costs bar cannot be split (operating income equal to gross profit: no operating-expenses part) and whose
+    interest, tax and other items were a COST is refused at its first read (`money_map_costs_undivided`, a content
+    refusal), the next company posts THE SAME DAY, and the refused one waits at the back answered from the memo (no
+    fan-out) — never offered to the template. Its record is exactly one the template refuses (``costs_undivided``).
+    Mutation-checked by hand (2026-11-27): without the read's gate the record reaches the template, which refuses it
+    (day 1's rejections then read {} and the walk spends a candidate on it)."""
+    shape = dict(revenue=3.236e9, gross=-0.5e9, operating=-0.5e9, net=-0.8e9)
+    monkeypatch.setattr(sys.modules[__name__], "_MRNA_SHAPE", shape)
+    fmp, world, set_day = _template_wall_pool(monkeypatch, ("LA",), ("PA", "PB"), ())
+    posted: set = set()
+    days = [date(2027, 3, 1) + timedelta(days=k) for k in range(2)]
+    d1, d2 = await _template_days(fmp, world, set_day, days, posted, report=False)
+    assert d1[3] == ["LA", "PA", "PB"] and d1[5] == {"money_map_costs_undivided": 1}
+    # the template is never offered LA: no refusal of its own, and the next company posts the same day
+    assert (d1[0], d1[1], d1[2]) == ([("PA", "2026"), ("PB", "2026")], [], "news:money_map:PA:2026")
+    assert A._money_map_refused("LA")[:2] == ("2026", "money_map_costs_undivided")          # remembered
+    # day 2: LA waits behind every company that can publish, answered from the memo (one breakdown read, no fan-out)
+    assert d2[3] == ["PB", "LA", "PA"] and d2[4] == ["PB"] and d2[2] == "news:money_map:PB:2026"
+    assert d2[5]["money_map_costs_undivided"] == 1
+    company = R.CompanyRef(symbol="LA", name="La Corporation")
+    rec = R.MoneyMap(series="money_map", company=company, fiscal_year="2026", period_end=date(2026, 12, 31),
+                     segments=(R.Segment("Vaccines", 3.0e9), R.Segment("Collaborations", 0.236e9)), other_usd=None,
+                     eliminations_usd=None, revenue_usd=shape["revenue"], gross_profit_usd=shape["gross"],
+                     operating_profit_usd=shape["operating"], net_income_usd=shape["net"])
+    assert R.money_map_costs_undivided(rec) is True
+    with pytest.raises(NT.NewsTemplateRefused) as err:
+        NT.compose(rec, run_date=days[0], store_state="live", allow_x_url=False)
+    assert err.value.code == "costs_undivided"
 
 
 @pytest.mark.asyncio

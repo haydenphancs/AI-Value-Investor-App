@@ -929,3 +929,54 @@ async def test_spotlight_every_feed_line_names_a_spotlight_posts_run(ledger, tg)
 ])
 def test_spotlight_the_feed_run_label_is_the_key_date_plus_the_spotlight_lane(key, label):
     assert feed._run_date({"idempotency_key": key}) == label
+
+
+# ── Replacement runs (migration 215): the owner's "🔄 Next company" ──────────────────────────────────────────────────
+# A replacement run's post key is `<date>[:spotlight]:r<n>:<platform>:<format>` (`run_service.idempotency_key_for`):
+# every feed line names its run "<date> · replacement <n>" (or "<date> · spotlight · replacement <n>") through
+# `run_service.post_run_label` (amendment A12) — the owner tells the next company's post from the one it replaced. The
+# replaced run's own posts were rejected by the tap and never post, so they never reach the feed. No feed code
+# changes for it (DESIGN §3.9): these tests pin that.
+
+
+@pytest.mark.asyncio
+async def test_replacement_every_feed_line_names_a_replacement_posts_run(ledger, tg):
+    posted = _seed(ledger, run_date="2026-11-27")
+    retracted = _seed(ledger, status="retracted", fmt="image", run_date="2026-11-27")
+    alerted = _seed(ledger, status="failed", fmt="video", external_id=None, run_date="2026-11-27",
+                    extra_meta={"alert_kind": "failed", "alert_text": "❌ refused"})
+    spot = _seed(ledger, run_date="2026-11-27")
+    for pid in (posted, retracted, alerted):
+        row = _post(ledger, pid)
+        row["idempotency_key"] = f"2026-11-27:r1:{row['platform']}:{row['format']}"
+    _post(ledger, spot)["idempotency_key"] = "2026-11-27:spotlight:r2:x:text"
+    day_run = _seed(ledger, run_date="2026-11-27")
+    assert _post(ledger, day_run)["idempotency_key"].startswith("2026-11-27:x:text")
+    counters = await feed.feed_cycle()
+    assert (counters["posted"], counters["retracted"], counters["alerts"], counters["failed"]) == (3, 1, 1, 0)
+    texts = [p["text"] for p in tg.of("sendMessage")]
+    assert f"✅ Posted on X · text · run 2026-11-27 · replacement 1\n{X_URL}" in texts
+    assert f"✅ Posted on X · text · run 2026-11-27 · spotlight · replacement 2\n{X_URL}" in texts
+    assert f"✅ Posted on X · text · run 2026-11-27\n{X_URL}" in texts                    # the day run: as before
+    assert "❌ refused\n(X · video · run 2026-11-27 · replacement 1)" in texts
+    assert any(re.fullmatch(_RETRACTED_RE + r" · X · image · run 2026-11-27 · replacement 1", t) for t in texts)
+    _no_parse_mode(tg)
+
+
+@pytest.mark.parametrize("key, label", [
+    ("2026-11-27:r1:x:text", "2026-11-27 · replacement 1"),
+    ("2026-11-27:r2:facebook:video", "2026-11-27 · replacement 2"),
+    ("2026-11-27:spotlight:r1:x:text", "2026-11-27 · spotlight · replacement 1"),
+    ("2026-11-27:spotlight:r2:threads:video", "2026-11-27 · spotlight · replacement 2"),
+    # a number that does not read back (r0, past the cap, upper case, zero-padded, a lane after it): its date alone
+    ("2026-11-27:r0:x:text", "2026-11-27"),
+    ("2026-11-27:r3:x:text", "2026-11-27"),
+    ("2026-11-27:R1:x:text", "2026-11-27"),
+    ("2026-11-27:r01:x:text", "2026-11-27"),
+    ("2026-11-27:r1:spotlight:x:text", "2026-11-27"),
+    ("2026-11-27:main:r1:x:text", "2026-11-27"),
+    ("2026-11-27:spotlight:r1:x:text:extra", "2026-11-27"),
+    ("2026-11-27:r1:nope:text", "2026-11-27"),
+])
+def test_replacement_the_feed_run_label_is_the_key_date_plus_lane_and_number(key, label):
+    assert feed._run_date({"idempotency_key": key}) == label

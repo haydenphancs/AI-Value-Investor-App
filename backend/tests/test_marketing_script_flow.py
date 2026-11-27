@@ -58,7 +58,8 @@ def _same(stored: Any, wanted: Any) -> bool:
 #: Columns the fake reads as their NOT NULL DEFAULT when a row lacks them (a row a test appends straight to `.rows`,
 #: bypassing `insert`'s defaults) — `lane` (migration 210: `TEXT NOT NULL DEFAULT 'main'` on marketing_runs and
 #: marketing_scripts), so every row written before the lanes, and every main-lane INSERT, is the main lane's.
-_READ_DEFAULTS: Dict[str, Any] = {"lane": "main"}
+#: Migration 215: `replacement` (NOT NULL DEFAULT 0 on both tables) reads as 0 the same way — a day's own run.
+_READ_DEFAULTS: Dict[str, Any] = {"lane": "main", "replacement": 0}
 
 
 def _cell(row: Dict[str, Any], col: str) -> Any:
@@ -100,19 +101,20 @@ class _Q:
 
     def lt(self, c, v):
         self._check_plain()
-        self.filters.append(lambda r, c=c, v=v: r.get(c) is not None and str(r.get(c)) < str(v))
+        self.filters.append(lambda r, c=c, v=v: _cell(r, c) is not None and str(_cell(r, c)) < str(v))
         return self
 
     # `gte` / `lte` (the spotlight lane's cross-lane read, `lane_scripts_between`): NULL never matches, like `lt`;
-    # only ISO dates are compared here, whose string order is their order.
+    # only ISO dates and single-digit replacement numbers (migration 215) are compared here, whose string order is
+    # their order. A `_READ_DEFAULTS` column a row lacks compares as its default.
     def gte(self, c, v):
         self._check_plain()
-        self.filters.append(lambda r, c=c, v=v: r.get(c) is not None and str(r.get(c)) >= str(v))
+        self.filters.append(lambda r, c=c, v=v: _cell(r, c) is not None and str(_cell(r, c)) >= str(v))
         return self
 
     def lte(self, c, v):
         self._check_plain()
-        self.filters.append(lambda r, c=c, v=v: r.get(c) is not None and str(r.get(c)) <= str(v))
+        self.filters.append(lambda r, c=c, v=v: _cell(r, c) is not None and str(_cell(r, c)) <= str(v))
         return self
 
     def order(self, col, *, desc=False, **_k):
@@ -191,7 +193,8 @@ class FakeSB:
         self.tables = {
             # migration 210: one run per (day, lane). `lane` (NOT NULL DEFAULT 'main') is NOT stored by the fake
             # when an INSERT omits it — it reads as 'main' (`_cell`) — so a test can see what the INSERT sent.
-            mrs.RUNS: _T([("run_date", "lane")], {"status": "planned", "stage": "planned", "metadata": {},
+            # Migration 215: the key is (day, lane, replacement); `replacement` reads as 0 when absent, like `lane`.
+            mrs.RUNS: _T([("run_date", "lane", "replacement")], {"status": "planned", "stage": "planned", "metadata": {},
                                                   "timings": {}, "attempts": 0, "dry_run": True}),
             mrs.ASSETS: _T([("storage_path",)], {"status": "pending_upload", "metadata": {}}),
             mrs.POSTS: _T([("idempotency_key",)], {"metadata": {}, "attempts": 0}),
@@ -6838,3 +6841,495 @@ def test_week_cap_theme_week_fallbacks_counts_only_this_weeks_backups(caplog):
         got = fb([row("not-a-date", "spotlight")], CAP_THU, "spotlight", run_id="me")
     assert [b["run_date"] for b in got] == ["not-a-date"]
     assert any("does not read back" in r.getMessage() and "fail closed" in r.getMessage() for r in caplog.records)
+
+
+# ══ Replacement runs (migration 215, owner decision 2026-11-27: "🔄 Next company") — the build ════════════════════
+# A replacement run (replacement 1 or 2, either lane) builds ONLY Money Map: `selection.replacement_chain` read NOW,
+# ``(money_map, SKIP)`` — never the day's calendar, never the lesson. It keeps away from everything its own (day, lane)
+# already drew: the replaced run's and every earlier replacement's ledger keys join the exclude set (the source refuses
+# them `already_posted`), and a candidate whose LEAD company one of them drew — a share-class twin included — is
+# EXCLUDED as `replaced_company` (never a template refusal, never reported to the refusal memo). Nothing left → the
+# `nothing_qualified` skip with its trail, never the lesson. Amendment A3: a replacement that cannot ask Money Map at
+# all (switched off now, or a holder that cannot draw it) skips with its OWN trail outcome under `money_map` —
+# `switched_off` / `worker_capability`, infrastructure outcomes, never "no company qualified". A day's own run
+# (replacement 0) reads nothing new: every test above is its byte-for-byte pin.
+
+#: Monday 2026-11-16: a main posting day whose calendar LEADS with the CEO roundup (Money Map comes later in its chain).
+REP_MON = date(2026, 11, 16)
+assert REP_MON.weekday() == 0
+
+
+def _rep_run(sb: FakeSB, day: date, n: int, *, lane: str = "main", caps=None, replaces: Optional[str] = None) -> str:
+    """A HELD replacement run `n` of (`day`, `lane`) — what the existing claim makes of the `planned` row the request
+    function inserted (`replaces_run_id`, the request stamp in its metadata)."""
+    meta: Dict[str, Any] = {"claim_nonce": NONCE, "worker_capabilities": list(_SPOT_CAPS if caps is None else caps),
+                            "replacement_request": {"by": "owner", "at": "2026-11-16T18:00:00+00:00"}}
+    extra: Dict[str, Any] = {"metadata": meta, "worker_version": "replacement-test", "replacement": n}
+    if replaces is not None:
+        extra["replaces_run_id"] = replaces
+    if lane != "main":
+        extra["lane"] = lane
+    return _run(sb, day, **extra)
+
+
+def _ledger_news(answers: Dict[str, Any]):
+    """The fake source (template_flow's, with the refusal hook) that ALSO models the adapter's ledger rule: a record
+    whose ledger key is in the build's `exclude` set is refused `already_posted` before it is offered (the real
+    `_collect_money_map` refuses an excluded `news:money_map:<SYM>:<FY>` before any profile call)."""
+    TF = _tf()
+
+    class LedgerNews(TF.ReportingNews):
+        async def candidates(self, series, *, run_date, exclude, limit, deadline, **kw):
+            got = await super().candidates(series, run_date=run_date, exclude=exclude, limit=limit, deadline=deadline,
+                                           **kw)
+            kept = tuple(r for r in got.records if news_rules.ledger_key(r) not in exclude)
+            dropped = len(got.records) - len(kept)
+            if not dropped:
+                return got
+            rejections = dict(got.rejections)
+            rejections["already_posted"] = rejections.get("already_posted", 0) + dropped
+            return TF.cands(series, *kept, skip=f"{series}_all_posted", rejections=rejections)
+
+    return LedgerNews(answers)
+
+
+async def _gen0(sb: FakeSB, runs, day: date, lane: str, *records) -> str:
+    """The day's own run of `lane`, built through the REAL kick with Money Map offering `records` (every other series
+    finds nothing): its accepted Money Map is what a replacement replaces. Returns its run id."""
+    TF = _tf()
+    news = TF.FakeNews({"money_map": TF.cands("money_map", *records)})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, day, lane=lane)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert state["status"] == "accepted" and state["template_id"] == "money_map", state
+    _run_row(sb, rid)["status"] = "media_ready"
+    return rid
+
+
+def _forbid_the_calendar_and_the_lesson(monkeypatch) -> None:
+    """A replacement never reads the day's calendar, the spotlight lane's predicate or the lesson pool."""
+    def boom(*_a, **_k):
+        raise AssertionError("a replacement run never reads the day's calendar or the lesson")
+
+    async def aboom(*_a, **_k):
+        raise AssertionError("a replacement run never selects the lesson or the spotlight calendar")
+
+    for name in ("plan_for", "spotlight_plan_for", "spotlight_day_problem", "spotlight_chain", "spotlight_chain_now"):
+        monkeypatch.setattr(selection, name, boom)
+    monkeypatch.setattr(content_pool, "eligible_keys", boom)
+    monkeypatch.setattr(ss.MarketingScriptService, "_select_lesson", aboom)
+    monkeypatch.setattr(ss.MarketingScriptService, "_select_spotlight", aboom)
+
+
+#: (lane, day): the main lane on a Monday (its calendar leads with the CEO roundup) and the spotlight lane on the 13F
+#: season's Saturday (its calendar leads with the 13F spotlight).
+_REP_LANES = [("main", REP_MON), ("spotlight", SPOT_SAT)]
+
+
+def test_replacement_the_constants_and_the_owner_words():
+    from app.services.marketing import digest_service as ds
+
+    assert ss.SERIES_OUTCOMES[-3:] == ("replaced", "switched_off", "worker_capability")        # appended LAST
+    assert (ss.REPLACED, ss.REPLACEMENT_SWITCHED_OFF, ss.REPLACEMENT_WORKER_CAPABILITY) == ss.SERIES_OUTCOMES[-3:]
+    assert ss.REPLACED_COMPANY == "replaced_company" and ss.REPLACED_COMPANY != ss.OTHER_LANE_COMPANY
+    for reason in (ss.REPLACED_COMPANY, ss.REPLACEMENT_MONEY_MAP_OFF, ss.REPLACEMENT_NO_TEMPLATES,
+                   ss.REPLACEMENT_NO_LAYOUT):
+        assert 0 < len(reason) <= 60                                                # a trail reason is cut at 60
+    assert selection.REPLACEMENT_PLAN_REASON == "replacement"
+    # `replaced` is a content outcome (a quiet "no other company" — notice N1); the two configuration skips are
+    # infrastructure (amendment A3: they alert with operator words — notice N2 — never "no company qualified")
+    assert ss.REPLACED in ds._CONTENT_OUTCOMES and ss.REPLACED not in ds._INFRA_OUTCOMES
+    for code in (ss.REPLACEMENT_SWITCHED_OFF, ss.REPLACEMENT_WORKER_CAPABILITY):
+        assert code in ds._INFRA_OUTCOMES and code not in ds._CONTENT_OUTCOMES
+    for outcome, quiet in ((ss.REPLACED, True), (ss.REPLACEMENT_SWITCHED_OFF, False),
+                           (ss.REPLACEMENT_WORKER_CAPABILITY, False)):
+        run = {"metadata": {"series": selection.SKIP, "series_trail": [{"series": "money_map", "outcome": outcome}]}}
+        assert ds._quiet_nothing_qualified(run) is quiet, outcome
+        assert "Money Map: " + ds._SERIES_OUTCOME_WORDS[outcome] in ds._series_note(run)
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.asyncio
+async def test_replacement_builds_only_money_map_never_the_calendar_or_the_lesson(spot_world, monkeypatch, caplog,
+                                                                                  lane, day):
+    """The day's own run fell back to Money Map (Costco); the owner tapped Next. The replacement asks ONLY Money Map —
+    never the CEO roundup the Monday calendar leads with, never the 13F spotlight the Saturday's leads with, never
+    the lesson — and posts the NEXT company (Walmart): plan `replacement`, chain (money_map, skip), its script row
+    carrying its lane and replacement number, the writer never called."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    gen0 = await _gen0(sb, runs, day, lane, TF.costco())
+    before = copy.deepcopy(_script_row(sb, gen0))
+    _forbid_the_calendar_and_the_lesson(monkeypatch)
+    news = TF.ReportingNews({"ceo_buys": TF.cands("ceo_buys", TF.ceo_week(day)),
+                             "money_map": TF.cands("money_map", TF.costco(), _mm("WMT", "Walmart"))})
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer, news=news)
+    rid = _rep_run(sb, day, 1, lane=lane, replaces=gen0)
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "accepted" and state["template_id"] == "money_map", state
+    assert state["source_ref"] == "news:money_map:WMT:2025"
+    assert [c["series"] for c in news.calls] == ["money_map"] and writer.calls == [] and news.reported == []
+    row = _script_row(sb, rid)
+    assert row["replacement"] == 1 and row.get("lane", "main") == lane
+    assert row["fact_sheet"]["selection"] == {"plan": "replacement", "chain": ["money_map", "skip"],
+                                              "trail": [{"series": "money_map", "outcome": "chosen"}]}
+    run = _run_row(sb, rid)
+    assert (run["template_id"], run["content_class"], run["metadata"]["series"]) == ("money_map", "F", "money_map")
+    assert _script_row(sb, gen0) == before                                     # the replaced run's row untouched
+    assert any("replacement 1" in r.getMessage() and "keeps away" in r.getMessage() and "COST" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.asyncio
+async def test_replacement_the_same_pool_gives_the_second_company(spot_world, monkeypatch, lane, day):
+    """§3.1's bug, on the adapter's own ledger rule: the replacement is offered the SAME pool as the run it replaces.
+    `recent_source_refs` never reads the caller's own lane on its run date, so before migration 215's build the main
+    lane re-picked Costco. Now the replaced run's ledger key is in the source's exclude set — Costco is refused
+    `already_posted` at the source — and the next company (Walmart) posts. Nothing reaches the refusal memo."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    gen0 = await _gen0(sb, runs, day, lane, TF.costco(), _mm("WMT", "Walmart"))
+    assert _script_row(sb, gen0)["source_ref"] == "news:money_map:COST:2025"
+    news = _ledger_news({"money_map": TF.cands("money_map", TF.costco(), _mm("WMT", "Walmart"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _rep_run(sb, day, 1, lane=lane, replaces=gen0)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "accepted" and state["source_ref"] == "news:money_map:WMT:2025", state
+    (call,) = news.calls
+    assert "news:money_map:COST:2025" in call["exclude"]
+    row = _script_row(sb, rid)
+    assert row["fact_sheet"]["rejections"] == {"already_posted": 1}
+    assert row["fact_sheet"]["selection"]["trail"] == [{"series": "money_map", "outcome": "chosen"}]
+    assert news.reported == []
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.asyncio
+async def test_replacement_a_share_class_twin_of_the_replaced_company_is_excluded_never_refused(
+        spot_world, monkeypatch, caplog, lane, day):
+    """The replaced company drew GOOGL; its twin GOOG has another ledger key, so the source offers it — but its LEAD is
+    the same issuer (root GOOG), so it is EXCLUDED `replaced_company` (checked before the cross-lane rule: on the
+    spotlight lane the replaced lead is in both sets, and it is named as the replaced company) and the next company
+    posts. Never a template refusal, never reported to the source's refusal memo."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    gen0 = await _gen0(sb, runs, day, lane, _mm("GOOGL", "Alphabet"))
+    twin, nxt = _mm("GOOG", "Alphabet Class C"), _mm("MSFT", "Microsoft")
+    news = _ledger_news({"money_map": TF.cands("money_map", twin, nxt)})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _rep_run(sb, day, 1, lane=lane, replaces=gen0)
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["source_ref"] == "news:money_map:MSFT:2025", state
+    assert news.reported == []
+    assert any("EXCLUDED" in r.getMessage() and "GOOG" in r.getMessage() and "already drawn by this lane" in
+               r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.asyncio
+async def test_replacement_only_the_replaced_company_left_skips_replaced_never_the_lesson(spot_world, monkeypatch,
+                                                                                         lane, day):
+    """A source that does NOT model the ledger offers the replaced company again (Costco) and its twin: both are
+    excluded at compose (`replaced_company`), the trail says `replaced` — not `other_lane`, even on the spotlight lane
+    whose cross-lane set holds the same lead — and the run SKIPS: ONE `rejected` / `nothing_qualified` row, last_error
+    "replacement 1: no other company qualified", never the lesson, nothing reported."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    gen0 = await _gen0(sb, runs, day, lane, _mm("GOOGL", "Alphabet"))
+    _forbid_the_calendar_and_the_lesson(monkeypatch)
+    news = TF.ReportingNews({"money_map": TF.cands("money_map", _mm("GOOGL", "Alphabet"),
+                                                    _mm("GOOG", "Alphabet Class C"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _rep_run(sb, day, 1, lane=lane, replaces=gen0)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state == {"status": "rejected", "source_ref": None, "template_id": None, "reason": "nothing_qualified",
+                     "violations": []}
+    row = _script_row(sb, rid)
+    assert (row["status"], row["reject_reason"], row["last_error"], row["replacement"]) == (
+        "rejected", "nothing_qualified", "replacement 1: no other company qualified", 1)
+    assert row["fact_sheet"]["selection"] == {"plan": "replacement", "chain": ["money_map", "skip"], "trail": [
+        {"series": "money_map", "outcome": "replaced", "reason": "replaced_company"},
+        {"series": "skip", "outcome": "no_candidates"}]}
+    assert news.reported == []
+    assert _run_row(sb, rid)["metadata"]["series"] == selection.SKIP          # the skip mirror: never the lesson
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_main_run_with_nothing_left_skips_never_the_weekly_lesson(spot_world, monkeypatch, caplog):
+    """D8: the MAIN lane's chain ends in the lesson — a replacement's never does. The pool holds only the replaced
+    company, which the source refuses `already_posted`: ONE `rejected` / `nothing_qualified` row (the trail's
+    `all_recent` step, then the SKIP), the kick answers the skip (the worker closes the run `skipped` — notice N1),
+    the lesson is never selected and the writer never called."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: REP_MON)
+    gen0 = await _gen0(sb, runs, REP_MON, "main", TF.costco())
+    _forbid_the_calendar_and_the_lesson(monkeypatch)
+    news = _ledger_news({"money_map": TF.cands("money_map", TF.costco())})
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer, news=news)
+    rid = _rep_run(sb, REP_MON, 1, replaces=gen0)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified", state
+    assert writer.calls == [] and [c["series"] for c in news.calls] == ["money_map"]
+    rows = [r for r in sb.tables[mrs.SCRIPTS].rows if r["run_id"] == rid]
+    assert len(rows) == 1 and "lane" not in rows[0]                        # a main INSERT never sends the lane
+    assert (rows[0]["reject_reason"], rows[0]["last_error"], rows[0]["replacement"]) == (
+        "nothing_qualified", "replacement 1: no other company qualified", 1)
+    assert rows[0]["fact_sheet"]["selection"]["trail"] == [
+        {"series": "money_map", "outcome": "all_recent", "reason": "money_map_all_posted"},
+        {"series": "skip", "outcome": "no_candidates"}]
+    assert any("NOTHING QUALIFIED" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+    # idempotent: the next kick answers the same row, nothing rebuilt
+    assert await svc.kick(rid, claim=_holder(svc, rid)) == state and len(news.calls) == 1
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.asyncio
+async def test_replacement_the_second_excludes_both_earlier_records(spot_world, monkeypatch, lane, day):
+    """Replacement 2 keeps away from replacement 0 (Costco) AND replacement 1 (Walmart): both ledger keys reach the
+    source's exclude set, and — with a source that does not model the ledger — both companies are excluded at compose
+    (`replaced_company`), so Target posts."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    gen0 = await _gen0(sb, runs, day, lane, TF.costco())
+    news1 = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco(), _mm("WMT", "Walmart"))})
+    svc1 = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news1)
+    gen1 = _rep_run(sb, day, 1, lane=lane, replaces=gen0)
+    assert (await svc1.kick(gen1, claim=_holder(svc1, gen1)))["source_ref"] == "news:money_map:WMT:2025"
+    _run_row(sb, gen1)["status"] = "media_ready"
+    pool = (TF.costco(), _mm("WMT", "Walmart"), _mm("TGT", "Target"))
+    for news in (_ledger_news({"money_map": TF.cands("money_map", *pool)}),
+                 TF.ReportingNews({"money_map": TF.cands("money_map", *pool)})):
+        sb.tables[mrs.SCRIPTS].rows[:] = [r for r in sb.tables[mrs.SCRIPTS].rows if r.get("replacement") != 2]
+        sb.tables[mrs.RUNS].rows[:] = [r for r in sb.tables[mrs.RUNS].rows if r.get("replacement") != 2]
+        svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+        rid = _rep_run(sb, day, 2, lane=lane, replaces=gen1)
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+        assert state["source_ref"] == "news:money_map:TGT:2025", (type(news).__name__, state)
+        assert {"news:money_map:COST:2025", "news:money_map:WMT:2025"} <= news.calls[0]["exclude"]
+        assert _script_row(sb, rid)["replacement"] == 2 and news.reported == []
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.parametrize("caps", [["post_image"], [], ["layouts_2b", "post_image", "look_v23"]])
+@pytest.mark.asyncio
+async def test_replacement_a_holder_that_cannot_draw_a_template_skips_worker_capability(spot_world, monkeypatch, caplog,
+                                                                                       lane, day, caps):
+    """Amendment A3: a holder without `news_templates` cannot draw Money Map, and a replacement never falls to the
+    lesson: the run skips with ONE trail step under `money_map` — outcome `worker_capability` (an infrastructure
+    outcome: notice N2 with operator words, never "no other company qualified"). The source and the writer are never
+    asked; no build task starts; WARNING naming the worker."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    gen0 = await _gen0(sb, runs, day, lane, TF.costco())
+    _forbid_the_calendar_and_the_lesson(monkeypatch)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", _mm("WMT", "Walmart"))})
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer, news=news)
+    rid = _rep_run(sb, day, 1, lane=lane, caps=caps, replaces=gen0)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified"
+    assert news.calls == [] and writer.calls == [] and svc._builds == {}
+    row = _script_row(sb, rid)
+    assert row["last_error"] == "replacement 1: the worker cannot draw a template"
+    assert row["fact_sheet"]["selection"] == {"plan": "replacement", "chain": ["money_map", "skip"], "trail": [
+        {"series": "money_map", "outcome": "worker_capability", "reason": "worker_without_news_templates"}]}
+    assert _run_row(sb, rid)["metadata"]["series"] == selection.SKIP
+    assert any(r.levelno == logging.WARNING and "replacement-test" in r.getMessage()
+               and "never falls to the lesson" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("patched_set", ["LAYOUTS_2B_SERIES", "FEATURE_LAYOUT_SERIES", "LOOK_V23_SERIES"])
+@pytest.mark.asyncio
+async def test_replacement_a_holder_that_cannot_draw_money_maps_picture_skips_worker_capability(spot_world,
+                                                                                               monkeypatch,
+                                                                                               patched_set):
+    """The layout narrowings every selection applies (no-ops for Money Map today) keep their one place: were Money
+    Map's picture ever a layout the holder did not declare, the replacement would skip `worker_capability` —
+    never the lesson, never a picture the worker refuses."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: REP_MON)
+    gen0 = await _gen0(sb, runs, REP_MON, "main", TF.costco())
+    monkeypatch.setattr(ss, patched_set, frozenset({*getattr(ss, patched_set), "money_map"}))
+    news = TF.FakeNews({"money_map": TF.cands("money_map", _mm("WMT", "Walmart"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _rep_run(sb, REP_MON, 1, caps=["news_templates", "post_image"], replaces=gen0)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified" and news.calls == []
+    row = _script_row(sb, rid)
+    assert row["last_error"] == "replacement 1: the worker cannot draw Money Map"
+    assert row["fact_sheet"]["selection"]["trail"] == [
+        {"series": "money_map", "outcome": "worker_capability", "reason": "worker_cannot_draw_its_layout"}]
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.parametrize("why, classes, series", [
+    ("money_map left MARKETING_NEWS_SERIES", "A,C,F", "ceo_buys,insider_buys,thirteen_f"),
+    ("class F went off", "A,C", "ceo_buys,insider_buys,thirteen_f,money_map"),
+    ("the lesson alone", "A", "ceo_buys,insider_buys,thirteen_f,money_map"),
+    ("an empty series list", "A,C,F", ""),
+])
+@pytest.mark.asyncio
+async def test_replacement_with_money_map_switched_off_skips_switched_off(spot_world, monkeypatch, caplog, lane, day,
+                                                                          why, classes, series):
+    """Amendment A3: Money Map switched off after the tap (A2 refuses the tap itself once it is off) — the replacement
+    reads the switches NOW, cannot ask Money Map and SKIPS with ONE trail step `money_map` / `switched_off` (reason
+    `money_map_off`): configuration, never "no other company qualified", never the lesson, nothing asked."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    gen0 = await _gen0(sb, runs, day, lane, TF.costco())
+    _forbid_the_calendar_and_the_lesson(monkeypatch)
+    monkeypatch.setattr(mrs.settings, "MARKETING_CONTENT_CLASSES", classes)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", series)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", _mm("WMT", "Walmart"))})
+    writer = FakeWriter(["accepted"])
+    svc = ss.MarketingScriptService(runs, writer=writer, news=news)
+    rid = _rep_run(sb, day, 1, lane=lane, replaces=gen0)
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified", why
+    assert news.calls == [] and writer.calls == [] and svc._builds == {}
+    row = _script_row(sb, rid)
+    assert row["last_error"] == "replacement 1: Money Map is switched off"
+    assert row["fact_sheet"]["selection"] == {"plan": "replacement", "chain": ["skip"], "trail": [
+        {"series": "money_map", "outcome": "switched_off", "reason": "money_map_off"}]}
+    assert any("switched off NOW" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.asyncio
+async def test_replacement_the_ledger_read_failing_raises_into_the_kick(spot_world, monkeypatch, caplog, lane, day):
+    """`runs.replaced_scripts` failing — or vouching for nothing (a replacement whose replaced run left no script) —
+    is never built on a guess: the build crashes into the kick (the worker retries), ERROR naming the run, no row is
+    written and the source is never asked; the next kick (the ledger back) builds afresh."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+    gen0 = await _gen0(sb, runs, day, lane, TF.costco())
+    real = runs.replaced_scripts
+
+    async def down(*_a, **_k):
+        raise mrs.MarketingRunError("replaced_scripts failed: RuntimeError: ledger down")
+
+    monkeypatch.setattr(runs, "replaced_scripts", down)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco(), _mm("WMT", "Walmart"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _rep_run(sb, day, 1, lane=lane, replaces=gen0)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        with pytest.raises(mrs.MarketingRunError, match="ledger down"):
+            await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert news.calls == [] and not [r for r in sb.tables[mrs.SCRIPTS].rows if r["run_id"] == rid]
+    assert any("the replacement's ledger read failed" in r.getMessage() and rid in r.getMessage()
+               for r in caplog.records)
+    # the ledger back: the next kick builds afresh, and the next company posts
+    monkeypatch.setattr(runs, "replaced_scripts", real)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["source_ref"] == "news:money_map:WMT:2025"
+
+    # a ledger that cannot vouch for what it replaces: the replaced run's script is gone (hand-deleted)
+    sb.tables[mrs.SCRIPTS].rows[:] = [r for r in sb.tables[mrs.SCRIPTS].rows if r["run_id"] not in (gen0, rid)]
+    svc2 = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=TF.FakeNews({}))
+    with pytest.raises(mrs.MarketingRunError, match="refusing to build on a guess"):
+        await svc2.kick(rid, claim=_holder(svc2, rid))
+    await _drain(svc2)
+    assert not [r for r in sb.tables[mrs.SCRIPTS].rows if r["run_id"] == rid]
+
+
+@pytest.mark.asyncio
+async def test_replacement_rule_c_the_other_lane_posted_money_map_today_skips_other_lane(spot_world, monkeypatch):
+    """Rule (c) still holds for a replacement: the spotlight lane posted a Money Map today, so the MAIN replacement's
+    Money Map falls back `other_lane` before the source is asked — and the run SKIPS (the main lane's own day would
+    have fallen to the lesson; a replacement never does)."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: REP_MON)
+    gen0 = await _gen0(sb, runs, REP_MON, "main", TF.costco())
+    _drawn(sb, REP_MON, "NVDA", template="money_map", ref="news:money_map:NVDA:2025")
+    _forbid_the_calendar_and_the_lesson(monkeypatch)
+    news = TF.FakeNews({"money_map": TF.cands("money_map", _mm("WMT", "Walmart"))})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _rep_run(sb, REP_MON, 1, replaces=gen0)
+    state = await svc.kick(rid, claim=_holder(svc, rid))
+    assert state["status"] == "rejected" and state["reason"] == "nothing_qualified" and news.calls == []
+    assert _script_row(sb, rid)["fact_sheet"]["selection"]["trail"] == [
+        {"series": "money_map", "outcome": "other_lane", "reason": "posted by the other lane today"},
+        {"series": "skip", "outcome": "no_candidates"}]
+
+
+@pytest.mark.parametrize("lane, day", _REP_LANES)
+@pytest.mark.asyncio
+async def test_replacement_a_days_own_run_reads_nothing_new(spot_world, monkeypatch, lane, day):
+    """Generation 0 byte for byte: a day's own run never enters `_select_replacement` and never reads the replacement
+    ledger (`replaced_scripts`) — its build is exactly what every test above pins."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: day)
+
+    async def boom(*_a, **_k):
+        raise AssertionError("a day's own run never reads the replacement ledger")
+
+    monkeypatch.setattr(runs, "replaced_scripts", boom)
+    monkeypatch.setattr(ss.MarketingScriptService, "_select_replacement", boom)
+    monkeypatch.setattr(ss.MarketingScriptService, "_replaced", boom)
+    gen0 = await _gen0(sb, runs, day, lane, TF.costco())
+    row = _script_row(sb, gen0)
+    assert "replacement" not in row and row["source_ref"] == "news:money_map:COST:2025"
+    assert row["fact_sheet"]["selection"]["plan"] != selection.REPLACEMENT_PLAN_REASON
+
+
+@pytest.mark.parametrize("bad", ["1", True, 3, -1, 1.0, "r1"])
+@pytest.mark.asyncio
+async def test_replacement_an_unreadable_number_is_refused_before_any_selection(spot_world, monkeypatch, caplog, bad):
+    """A replacement number that does not read back is never guessed (what the build may draw and what it must keep
+    away from depend on it): MarketingRequestInvalid (a 422), ERROR naming the run, nothing written, nothing asked."""
+    TF = _tf()
+    sb, runs = spot_world
+    news = TF.FakeNews({"money_map": TF.cands("money_map", TF.costco())})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _rep_run(sb, SPOT_THU, 1)
+    _run_row(sb, rid)["replacement"] = bad
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        with pytest.raises(mrs.MarketingRequestInvalid):
+            await svc.kick(rid, claim=_holder(svc, rid))
+    assert sb.tables[mrs.SCRIPTS].rows == [] and news.calls == []
+    assert any("REFUSED" in r.getMessage() and rid in r.getMessage() for r in caplog.records)
+
+
+def test_replacement_replaced_lead_keys_reads_the_output_and_the_ledger_key(caplog):
+    """The pure union: each replaced script's output leads (issuer root + display name) AND the issuer root of its
+    Money Map ledger key — so a script whose stored output does not read back still keeps its company and its twin
+    out; a script naming no company at all is a WARNING (its exact ledger key is still excluded)."""
+    out = {"image_spec": {"layout": "bars", "header": {"logo": "GOOGL"}}, "logo_refs": [{"key": "GOOGL",
+                                                                                         "name": "Alphabet"}]}
+    keys = ss.replaced_lead_keys([{"run_id": "a", "replacement": 0, "source_ref": "news:money_map:GOOGL:2025",
+                                   "output": out}])
+    assert keys == {"root:GOOG", "name:alphabet"}
+    # the output does not read back: the ledger key's issuer root alone
+    assert ss.replaced_lead_keys([{"source_ref": "news:money_map:BRK-B:2025", "output": None}]) == {"root:BRK"}
+    # two replaced runs: the union
+    both = ss.replaced_lead_keys([{"source_ref": "news:money_map:COST:2025", "output": "junk"},
+                                  {"source_ref": "news:money_map:WMT:2025", "output": {}}])
+    assert both == {"root:COST", "root:WMT"}
+    # junk never raises; a script with no company is logged
+    with caplog.at_level(logging.WARNING, logger=ss.logger.name):
+        assert ss.replaced_lead_keys([None, "x", 7, {"source_ref": "news:ceo_buys:2026-11-09", "output": None},
+                                      {"source_ref": None}, {"source_ref": "news:money_map::2025"}]) == frozenset()
+    assert sum("names no lead company" in r.getMessage() for r in caplog.records) == 3
+    assert ss.replaced_lead_keys([]) == frozenset()

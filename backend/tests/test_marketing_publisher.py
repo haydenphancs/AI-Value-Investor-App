@@ -4159,3 +4159,86 @@ async def test_spotlight_a_finished_spotlight_run_closes_beside_its_days_main_ru
     assert counters["expired"] == 1 and counters["runs_closed"] == 2
     status = {r["id"]: r["status"] for r in env.runs.rows}
     assert (status[main_run], status[spot_run]) == ("published", "skipped")
+
+
+# ── Replacement runs (migration 215): the owner's "🔄 Next company" makes another run of the same (day, lane) ────────
+# A replacement run's post key is `<run_date>[:spotlight]:r<n>:<platform>:<format>`: its first 10 characters are still
+# the run date, so it expires on the same rule as its day's own posts; the expiry alert names the run with its number
+# (`post_run_label`, amendment A12); every per-run read (an extra's primary, a run's close) stays per RUN — the day run
+# the owner replaced and its replacement are two runs of one (day, lane) and never hold each other's posts. No publisher
+# code changes for it (DESIGN §3.9): these tests pin that.
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_post_expires_by_its_keys_date_and_its_alert_names_the_replacement(env):
+    today = mrs.run_date_et()
+    stale = today - timedelta(days=3)
+    main = env.seed(day=stale, key=f"{stale.isoformat()}:r1:x:text")
+    spot = env.seed(day=stale, key=f"{stale.isoformat()}:spotlight:r2:x:text")
+    day_run = env.seed(day=stale, key=f"{stale.isoformat()}:x:text")
+    fresh = env.seed(day=today, key=f"{today.isoformat()}:r1:x:text")
+    yesterday = today - timedelta(days=1)
+    kept = env.seed(day=yesterday, key=f"{yesterday.isoformat()}:spotlight:r1:x:text")
+    await pub._expire_step()
+    assert env.row(main)["status"] == env.row(spot)["status"] == env.row(day_run)["status"] == "skipped"
+    assert env.row(main)["metadata"]["alert_text"].startswith(
+        f"⏰ X post expired UNPUBLISHED (run {stale.isoformat()} · replacement 1) — it was approved")
+    assert env.row(spot)["metadata"]["alert_text"].startswith(
+        f"⏰ X post expired UNPUBLISHED (run {stale.isoformat()} · spotlight · replacement 2) — it was approved")
+    # the day run's own post: its alert is the text of before, byte for byte
+    assert env.row(day_run)["metadata"]["alert_text"].startswith(
+        f"⏰ X post expired UNPUBLISHED (run {stale.isoformat()}) — it was approved")
+    assert env.row(fresh)["status"] == env.row(kept)["status"] == "approved"   # its day or the next
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key, label", [("{d}:r0:x:text", "{d}"), ("{d}:r3:x:text", "{d}"), ("{d}:R1:x:text", "{d}"),
+                                        ("{d}:r01:x:text", "{d}"), ("{d}:spotlight:r1:nope:text", "{d}")])
+async def test_replacement_a_key_whose_number_does_not_read_back_is_named_by_its_date_alone(env, key, label):
+    stale = (mrs.run_date_et() - timedelta(days=3)).isoformat()
+    pid = env.seed(day=date.fromisoformat(stale), key=key.format(d=stale))
+    await pub._expire_step()
+    assert env.row(pid)["status"] == "skipped"
+    assert env.row(pid)["metadata"]["alert_text"].startswith(
+        f"⏰ X post expired UNPUBLISHED (run {label.format(d=stale)}) — it was approved")
+
+
+@pytest.mark.asyncio
+async def test_replacement_an_extra_waits_only_for_its_own_runs_primary_never_the_replaced_runs(env):
+    """The replaced day run (replacement 0) and its replacement (replacement 1) post to the same platform on the same
+    (day, lane): the replacement's extra video is held by ITS run's open picture/text post only — never by a post of
+    the run it replaced (the sibling read is per run_id), and the replaced run's extra never by the replacement's."""
+    day = mrs.run_date_et().isoformat()
+    gen0, gen1 = str(uuid.uuid4()), str(uuid.uuid4())
+    extra = env.seed(platform="linkedin", format="video", run_id=gen1, key=f"{day}:r1:linkedin:video")
+    replaced_primary = env.seed(platform="linkedin", status="pending_review", run_id=gen0, key=f"{day}:linkedin:text")
+    row = env.row(extra)
+    assert await pub._extra_waits(env.svc, row) is False               # the replaced run's open primary: not ours
+    own_primary = env.seed(platform="linkedin", status="pending_review", run_id=gen1, key=f"{day}:r1:linkedin:text")
+    assert await pub._extra_waits(env.svc, row) is True                # its own run's open primary holds it
+    env.raw(own_primary)["status"] = "published"
+    assert await pub._extra_waits(env.svc, row) is False
+    old_extra = env.seed(platform="linkedin", format="video", run_id=gen0, key=f"{day}:linkedin:video")
+    env.raw(replaced_primary)["status"] = "rejected"                   # what the request function leaves
+    env.raw(own_primary)["status"] = "pending_review"
+    assert await pub._extra_waits(env.svc, env.row(old_extra)) is False
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_replaced_day_run_and_its_replacement_close_as_two_runs(env):
+    """D+2: the replaced day run (all its posts rejected by the tap) and its replacement (published) of one (day, lane)
+    close independently — the replaced one `skipped` with reason `replaced`, the replacement `published`."""
+    today = mrs.run_date_et()
+    d3 = today - timedelta(days=3)
+    gen0, gen1 = _run(env, d3), _run(env, d3)
+    next(r for r in env.runs.rows if r["id"] == gen1).update(replacement=1, replaces_run_id=gen0)
+    env.seed(status="rejected", day=d3, run_id=gen0, meta={"dry_run": False, "review": {
+        "decision": "rejected", "by": f"telegram:{OWNER}", "at": REVIEW_AT, "replaced_by_run_id": gen1,
+        "replacement": 1}})
+    env.seed(status="published", day=d3, run_id=gen1, key=f"{d3.isoformat()}:r1:x:text")
+    counters = await pub._expire_step()
+    assert counters["runs_closed"] == 2
+    rows = {r["id"]: r for r in env.runs.rows}
+    assert (rows[gen0]["status"], rows[gen1]["status"]) == ("skipped", "published")
+    assert rows[gen0]["metadata"]["closed"]["reason"] == "replaced"
+    assert rows[gen1]["metadata"]["closed"]["reason"] == "posted"

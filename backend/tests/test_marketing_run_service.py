@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+from _replacement_rpc_fake import ReplacementRpcFake
 from app.schemas import marketing as schemas
 from app.services.marketing import run_service as mrs
 from app.services.marketing.run_service import (
@@ -189,6 +190,15 @@ def _order_key(value: Any) -> Any:
     return (1, text)
 
 
+def _sort_value(value: Any) -> Any:
+    """An ORDER BY key: a timestamp string by its instant, anything else as itself (one column holds one type)."""
+    if isinstance(value, str) and "T" in value:
+        ts = mrs._parse_ts(value)
+        if ts is not None:
+            return (0, ts)
+    return (1, value)
+
+
 def _compare(stored: Any, wanted: Any, op: str) -> bool:
     """`col <op> value` with SQL NULL semantics (a NULL column matches no comparison)."""
     if stored is None:
@@ -201,9 +211,12 @@ def _compare(stored: Any, wanted: Any, op: str) -> bool:
 
 #: Columns the fake reads as their NOT NULL DEFAULT when a row lacks them — mirroring the column default for rows a
 #: test appends straight to `.rows` (bypassing `insert`, which applies the table defaults itself). `lane` (migration
-#: 210: `marketing_runs.lane` / `marketing_scripts.lane TEXT NOT NULL DEFAULT 'main'`) is the only one: every row
-#: written before the lanes, and every main-lane INSERT (which never sends the column), is the main lane's.
-_READ_DEFAULTS: Dict[str, Any] = {"lane": schemas.RUN_LANE_MAIN}
+#: 210: `marketing_runs.lane` / `marketing_scripts.lane TEXT NOT NULL DEFAULT 'main'`): every row written before the
+#: lanes, and every main-lane INSERT (which never sends the column), is the main lane's. `replacement` (migration 215:
+#: `marketing_runs.replacement` / `marketing_scripts.replacement SMALLINT NOT NULL DEFAULT 0`): every row the engine
+#: wrote before replacements, and every INSERT but a replacement's, is a day's own run (0) — the fake does NOT store
+#: it when an INSERT omits it, so a test sees exactly what the INSERT sent.
+_READ_DEFAULTS: Dict[str, Any] = {"lane": schemas.RUN_LANE_MAIN, "replacement": 0}
 
 
 def _col(row: Dict[str, Any], col: str) -> Any:
@@ -302,12 +315,15 @@ class _Query:
 
     def _sorted(self, rows):
         # ORDER BY is applied BEFORE LIMIT, as in Postgres, with its NULL placement defaults
-        # (ASC → NULLS LAST, DESC → NULLS FIRST). Stable, so earlier keys stay primary.
+        # (ASC → NULLS LAST, DESC → NULLS FIRST). Stable, so earlier keys stay primary. A `_READ_DEFAULTS` column a row
+        # lacks orders as its default, as the real column would (migration 215: ORDER BY replacement).
+        # A timestamptz orders by INSTANT, as in Postgres (`…-04:00` and `…+00:00` stamps of one run date compare as
+        # times, not as text — the request function stamps a replacement's created_at in its own clock's zone).
         for col, desc, nullsfirst in reversed(self._order):
             nulls_first = desc if nullsfirst is None else nullsfirst
-            present = sorted((r for r in rows if r.get(col) is not None),
-                             key=lambda r: r[col], reverse=desc)
-            absent = [r for r in rows if r.get(col) is None]
+            present = sorted((r for r in rows if _col(r, col) is not None),
+                             key=lambda r, c=col: _sort_value(_col(r, c)), reverse=desc)
+            absent = [r for r in rows if _col(r, col) is None]
             rows = absent + present if nulls_first else present + absent
         return rows
 
@@ -324,6 +340,11 @@ class _Query:
             # meet an existing main row (migration 210).
             for k, v in self.t.defaults.items():
                 row.setdefault(k, v() if callable(v) else v)
+            if self.t.stamp_created:
+                # `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`: the INSERT's own clock — the stamp the service sent
+                # (the test's NOW), else the wall clock. `get_run_by_date` orders by it (migration 215, review L7a).
+                row.setdefault("created_at", row.get("updated_at") or row.get("started_at")
+                               or datetime.now(timezone.utc).isoformat())
             for cols in self.t.unique:
                 key = tuple(str(_col(row, c)) for c in cols)
                 if any(tuple(str(_col(r, c)) for c in cols) == key for r in self.t.rows):
@@ -345,10 +366,13 @@ class _Query:
 
 
 class _Table:
-    def __init__(self, unique, defaults=None, *, generated_id=True):
+    def __init__(self, unique, defaults=None, *, generated_id=True, stamp_created=False):
         self.rows: List[Dict[str, Any]] = []
         self.unique = unique
         self.defaults = defaults or {}
+        #: True for a table whose INSERT stamps `created_at` (marketing_runs: the newest run of a (day, lane) is read by
+        #: it, migration 215).
+        self.stamp_created = stamp_created
         # False for a table whose PK is a natural key (marketing_scripts: run_id) — it has no
         # `id` column, so the fake must not invent one a caller could come to rely on.
         self.generated_id = generated_id
@@ -418,9 +442,11 @@ class FakeSupabase:
         self.tables = {
             # migration 210: one run per (day, lane). `lane` (NOT NULL DEFAULT 'main') is NOT stored by the fake
             # when an INSERT omits it — it reads as 'main' (`_col`, `_READ_DEFAULTS`) — so a test can see exactly
-            # what the INSERT sent (the main lane's never sends it).
-            mrs.RUNS: _Table([("run_date", "lane")], {"stage": "planned", "status": "planned", "attempts": 0,
-                                                       "timings": dict, "metadata": dict, "content_class": "A"}),
+            # what the INSERT sent (the main lane's never sends it). Migration 215: the key is (day, lane,
+            # replacement); `replacement` (NOT NULL DEFAULT 0) reads as 0 when absent, exactly like `lane`.
+            mrs.RUNS: _Table([("run_date", "lane", "replacement")],
+                             {"stage": "planned", "status": "planned", "attempts": 0,
+                              "timings": dict, "metadata": dict, "content_class": "A"}, stamp_created=True),
             mrs.ASSETS: _Table([("storage_path",)], {"metadata": dict}),
             # `metrics` defaults to {} like the real column (migration 170: NOT NULL DEFAULT '{}').
             mrs.POSTS: _Table([("idempotency_key",), ("run_id", "platform", "format")],
@@ -436,9 +462,19 @@ class FakeSupabase:
             mrs.LINK_HITS: _Table([("campaign", "day")], {"hits": 0}, generated_id=False),
         }
         self.storage = _Storage(self.objects, self.object_meta, self.tables[mrs.ASSETS])
+        #: Migration 215's two functions (`rpc`), modelled statement by statement over THIS fake's own rows
+        #: (tests/_replacement_rpc_fake.py), so their writes land where the service reads. Its clock is `rpc_clock`
+        #: (a test sets it; the wall clock otherwise).
+        self.rpc_clock: Optional[datetime] = None
+        self.replacement_rpc = ReplacementRpcFake(
+            self.tables[mrs.RUNS].rows, self.tables[mrs.SCRIPTS].rows, self.tables[mrs.POSTS].rows,
+            clock=lambda: self.rpc_clock or datetime.now(timezone.utc))
 
     def table(self, name):
         return self.tables[name]
+
+    def rpc(self, name, params):
+        return self.replacement_rpc.rpc(name, params)
 
 
 def _declared_spotlight_lane(monkeypatch, settings_obj) -> None:
@@ -1309,9 +1345,37 @@ def test_the_server_owned_run_metadata_keys():
     Drop 1 (compat F2): so is `worker_capabilities` — what the claiming worker declared it can render."""
     # Drop 2: `series` / `series_trail` (the day's news series and its fallback chain, mirrored from
     # the script's fact sheet) are the server's too.
+    # Migration 215 (owner decision 2026-11-27, "🔄 Next company"): the replacement keys, appended LAST — what a run
+    # was replaced by / restored from, and on the replacement what it replaces, its notice and why it was closed unrun.
     assert set(schemas.SERVER_OWNED_RUN_METADATA) == {"claim_nonce", "closed", "worker_capabilities",
-                                                      "series", "series_trail"}
+                                                      "series", "series_trail", "replaced_by", "replacement_request",
+                                                      "replacement_reported", "replacement_expired", "restored_from"}
+    assert len(set(schemas.SERVER_OWNED_RUN_METADATA)) == len(schemas.SERVER_OWNED_RUN_METADATA)
     assert schemas.RUN_WORKER_CAPABILITIES_KEY in schemas.SERVER_OWNED_RUN_METADATA
+
+
+@pytest.mark.asyncio
+async def test_a_worker_patch_can_never_write_the_replacement_keys(svc, caplog):
+    """Migration 215: the worker HOLDS a replacement run, whose metadata says what it replaces (and, later, that the
+    owner was told how it ended). A worker PATCH carrying any replacement key is stripped (logged WARNING); the
+    keys the server wrote stay, and every other key lands."""
+    import logging
+
+    row, _ = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    rid = row["id"]
+    stored = svc.fake.tables[mrs.RUNS].rows[0]
+    stored["metadata"]["replacement_request"] = {"at": "2026-09-17T20:00:00+00:00", "from_run_id": "r0",
+                                                 "from_source_ref": "news:money_map:NVDA:2026"}
+    planted = {key: {"planted": True} for key in schemas.SERVER_OWNED_RUN_METADATA[5:]}
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        upd = await svc.update_run(rid, metadata={**planted, "note": "kept"}, worker=True, claim=_holder(svc, rid))
+    meta = upd["metadata"]
+    assert meta["note"] == "kept"
+    assert meta["replacement_request"]["from_source_ref"] == "news:money_map:NVDA:2026"
+    for key in ("replaced_by", "replacement_reported", "replacement_expired", "restored_from"):
+        assert key not in meta, key
+    warned = [r.getMessage() for r in caplog.records if "server-owned metadata" in r.getMessage()]
+    assert warned and all(k in warned[0] for k in planted)
 
 
 @pytest.mark.asyncio
@@ -4183,7 +4247,9 @@ async def test_script_tokens_between_is_inclusive_projected_and_ordered(svc, mon
                    {"run_date": "2026-09-30", "lane": "main", "tokens_used": "12", "claude_usage": None},
                    {"run_date": "2026-10-01", "lane": "main", "tokens_used": None, "claude_usage": None},
                    {"run_date": "2026-10-04", "lane": "main", "tokens_used": 22_100, "claude_usage": None}]
-    assert selects == [("run_date,lane,tokens_used,claude_usage",)]
+    # migration 215: `replacement` is read too (the double-count guard's third key); a day's own run's row comes back
+    # with exactly its four keys, as before
+    assert selects == [("run_date,lane,replacement,tokens_used,claude_usage",)]
     assert await svc.script_tokens_between("2026-09-28", "2026-10-04") == got             # ISO strings
     assert await svc.script_tokens_between(date(2026, 10, 5), date(2026, 10, 5)) == [
         {"run_date": "2026-10-05", "lane": "main", "tokens_used": 5, "claude_usage": None}]   # a one-day window
@@ -5764,7 +5830,10 @@ def test_once_210_is_in_the_snapshot_its_lane_checks_and_claim_key_hold_there_to
     for table in ("marketing_runs", "marketing_scripts"):
         m = _re_d1.search(rf"CONSTRAINT {table}_lane_valid CHECK \(\(lane = ANY \(ARRAY\[([^\]]*)\]", snapshot)
         assert m and set(_re_d1.findall(r"'([a-z_]+)'::text", m.group(1))) == set(schemas.RUN_LANES), table
-    assert "UNIQUE (run_date, lane)" in snapshot
+    # The claim key leads with (run_date, lane): 210's own, or 215's UNIQUE (run_date, lane, replacement) once the
+    # re-dump carries it (tests/test_marketing_replacement_sql.py pins which one, and that never both).
+    assert _re_d1.search(r"ONLY public\.marketing_runs\s+ADD CONSTRAINT \w+ UNIQUE \(run_date, lane(?:, replacement)?\);",
+                         snapshot)
     assert not _re_d1.search(r"ONLY public\.marketing_runs\s+ADD CONSTRAINT \w+ UNIQUE \(run_date\);", snapshot)
 
 
@@ -8196,7 +8265,9 @@ async def test_list_runs_between_reads_both_lanes_main_first_within_a_day(svc, m
     got = await svc.list_runs_between(date(2026, 9, 16), date(2026, 9, 17))
     assert [(r["run_date"], mrs.run_lane(r)) for r in got] == [
         ("2026-09-16", "main"), ("2026-09-16", "spotlight"), ("2026-09-17", "main"), ("2026-09-17", "spotlight")]
-    assert reads == [4]                                    # the window's days × the lanes, exactly
+    # the window's days × RUNS_PER_DAY_MAX (migration 215: a day's own run of each lane plus the owner's replacements;
+    # was days × lanes — review L7(c), the looser bound accepted)
+    assert reads == [2 * schemas.RUNS_PER_DAY_MAX]
     assert [mrs.run_lane(r) for r in await svc.list_runs_between("2026-09-17", "2026-09-17")] == ["main", "spotlight"]
 
 
@@ -8250,10 +8321,12 @@ async def test_lane_scripts_between_reads_the_accepted_scripts_of_both_lanes_bou
     got = await svc.lane_scripts_between(d0, d1)
     assert [(r["run_date"], r["lane"], r["source_ref"]) for r in got] == [
         ("2026-09-16", "main", "news:money_map:AAA:2025"), ("2026-09-17", "spotlight", "news:money_map:BBB:2025")]
-    assert set(got[0]) == {"run_id", "run_date", "lane", "source_ref", "template_id", "output"}
+    # migration 215: each row also names its run's replacement number (0: a day's own run)
+    assert set(got[0]) == {"run_id", "run_date", "lane", "replacement", "source_ref", "template_id", "output"}
+    assert [r["replacement"] for r in got] == [0, 0]
     assert await svc.lane_scripts_between(d1, d0) == []
-    # past the (days × lanes) bound: refused, never a partial window
-    for _ in range(3):
+    # past the (days × RUNS_PER_DAY_MAX) bound: refused, never a partial window
+    for _ in range(schemas.RUNS_PER_DAY_MAX):
         svc.fake.tables[mrs.SCRIPTS].rows.append({"run_id": str(uuid.uuid4()), "run_date": "2026-09-17",
                                                   "status": "accepted", "source_ref": "x"})
     with pytest.raises(mrs.MarketingRunError, match="lane_scripts_between"):
@@ -8817,11 +8890,15 @@ async def test_an_output_that_is_not_an_object_is_unreadable_never_skipped(svc, 
 
 @pytest.mark.asyncio
 async def test_the_art_spend_read_is_bounded_and_raises_past_the_bound(svc, art_settings, monkeypatch):
-    for lane in ("main", "spotlight"):                         # a full (day, lane) window: 2 rows on 1 day — fine
+    # migration 215: the bound is days × RUNS_PER_DAY_MAX (a day's own run of each lane plus the owner's replacements,
+    # review L7(c) — looser than the old days × lanes, accepted)
+    for lane in ("main", "spotlight"):                         # a day's own run of each lane: 2 rows on 1 day — fine
         _art_script(svc, "2026-11-02", art=_art_record(), lane=lane)
-    assert (await svc.art_spend_between(date(2026, 11, 2), date(2026, 11, 2)))["runs"] == 2
-    _art_script(svc, "2026-11-02", art=_art_record())           # a third row on one day: past days × lanes
-    with pytest.raises(mrs.MarketingRunError, match="art_usage_between: more than 2 scripts"):
+    for _ in range(schemas.REPLACEMENTS_PER_DAY):              # plus the day's replacements: the full day — fine
+        _art_script(svc, "2026-11-02", art=_art_record())
+    assert (await svc.art_spend_between(date(2026, 11, 2), date(2026, 11, 2)))["runs"] == schemas.RUNS_PER_DAY_MAX
+    _art_script(svc, "2026-11-02", art=_art_record())           # one row more on one day: past the bound
+    with pytest.raises(mrs.MarketingRunError, match=f"art_usage_between: more than {schemas.RUNS_PER_DAY_MAX} scripts"):
         await svc.art_spend_between(date(2026, 11, 2), date(2026, 11, 2))
     # the read asks for exactly bound + 1 rows: a truncated answer can never pass as the whole window
     limits: List[Optional[int]] = []
@@ -8833,8 +8910,8 @@ async def test_the_art_spend_read_is_bounded_and_raises_past_the_bound(svc, art_
         return await real(query, op=op, **ids)
 
     monkeypatch.setattr(mrs, "_exec", spy)
-    assert (await svc.art_spend_between(date(2026, 11, 1), date(2026, 11, 30)))["runs"] == 3   # 3 rows in 30 days
-    assert limits == [30 * 2 + 1]
+    assert (await svc.art_spend_between(date(2026, 11, 1), date(2026, 11, 30)))["runs"] == schemas.RUNS_PER_DAY_MAX + 1
+    assert limits == [30 * schemas.RUNS_PER_DAY_MAX + 1]
 
 
 @pytest.mark.asyncio
@@ -9560,3 +9637,1527 @@ def test_phase3_a_table_picture_is_default_closed_without_theme_angles(angle):
     with pytest.raises(MarketingRequestInvalid, match="theme_angles"):
         mrs.MarketingRunService._check_template_image_text("r1", output, drawn)
     mrs.MarketingRunService._check_template_image_text("r1", output, drawn, capabilities=frozenset({"theme_angles"}))
+
+
+# ══ Replacement runs (migration 215, owner decision 2026-11-27: "🔄 Next company") ═══════════════════════════════════
+# The owner's tap asks for a NEW run of the same (day, lane) — replacement 1 or 2 — through ONE Postgres function
+# (modelled statement by statement by tests/_replacement_rpc_fake.py over this fake's own rows); the worker's next tick
+# claims it through the EXISTING claim. Every key, path, INSERT body and label of replacement 0 stays byte for byte.
+
+import _replacement_rpc_fake as rpcfake  # noqa: E402
+
+_R_DAY = _SPOT_DAY                                    # Thursday 2026-09-17 (EDT)
+_R_REF = "news:money_map:COST:2025"
+_BY = "telegram:4242"
+_REP_SERIES = _SPOT_SERIES                            # money_map listed (and a spotlight series, for that lane's tests)
+
+
+def _replace(monkeypatch, *, on=True, classes="A,C,F", series=_REP_SERIES) -> None:
+    """MARKETING_REPLACE_ENABLED and the two switches a Money Map replacement needs (amendment A2), read NOW."""
+    for name, value in (("MARKETING_REPLACE_ENABLED", on), ("MARKETING_CONTENT_CLASSES", classes),
+                        ("MARKETING_NEWS_SERIES", series)):
+        monkeypatch.setattr(mrs.settings, name, value)
+
+
+def _money_map_script(run_id: str, *, ref: str = _R_REF, template: str = "money_map", klass: str = "F",
+                      **extra) -> Dict[str, Any]:
+    return {"run_id": run_id, "status": "accepted", "template_id": template, "source_ref": ref, "fact_sheet": {},
+            "output": {"posts": {p: _server_copy(p) for p in ("x", "bluesky")}, "content_class": klass,
+                       "authorship": "template", "series": template}, **extra}
+
+
+async def _money_map_day(svc, monkeypatch, *, lane: str = "main", at: Optional[datetime] = None, ref: str = _R_REF,
+                         manifest: bool = False) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    """A Money Map run of (_R_DAY, lane), media_ready, with two pending text posts — what the review bot offers. With
+    `manifest`, it registered the worker's preflight manifest (SHA) first, as every run does."""
+    monkeypatch.setattr(mrs.news_templates, "revalidate", lambda *_a, **_k: [])
+    at = at or (_et(_R_DAY, 16, 15) if lane == "main" else _et(_R_DAY, 10, 15))
+    row, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=at, claim_nonce=_n(), lane=lane)
+    assert reason == CLAIMED, reason
+    if manifest:
+        await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12,
+                                 claim=_holder(svc, row["id"]))
+    await svc.insert_script(_money_map_script(row["id"], ref=ref))
+    posts = await svc.create_posts(row["id"], _TEXT_SPECS, claim=_holder(svc, row["id"]))
+    await svc.update_run(row["id"], status="media_ready", stage="assets_ready")
+    return _stored(svc, row["id"]), posts
+
+
+async def _request(svc, run_id: str, *, at: datetime) -> mrs.ReplacementResult:
+    svc.fake.rpc_clock = at
+    return await svc.request_replacement(run_id, by=_BY, now=at)
+
+
+async def _replacement_claimed(svc, monkeypatch, *, lane="main", request_at=None, claim_at=None):
+    """Gen 0 media_ready → the owner's request → the next tick claims replacement 1. Returns (gen0, posts, r1 row)."""
+    gen0, posts = await _money_map_day(svc, monkeypatch, lane=lane)
+    request_at = request_at or (_et(_R_DAY, 18, 0) if lane == "main" else _et(_R_DAY, 14, 0))
+    res = await _request(svc, gen0["id"], at=request_at)
+    assert res.outcome == "requested", res
+    claim_at = claim_at or (_et(_R_DAY, 18, 15) if lane == "main" else _et(_R_DAY, 14, 15))
+    row, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=claim_at, claim_nonce=_n(),
+                                      lane=lane)
+    assert reason == CLAIMED and row["id"] == res.run_id, (reason, row)
+    return gen0, posts, row
+
+
+# ── pure: keys, paths, parsers, labels — replacement 0 byte for byte ─────────────────────────────────────────────────
+
+
+def test_replacement_0_keys_and_paths_are_byte_for_byte_every_kind_platform_and_format():
+    d = date(2026, 11, 27)
+    for lane in schemas.RUN_LANES:
+        for platform in schemas.POST_PLATFORMS:
+            for fmt in schemas.POST_FORMATS:
+                assert idempotency_key_for(d, platform, fmt, lane=lane, replacement=0) == \
+                    idempotency_key_for(d, platform, fmt, lane=lane)
+        for kind, exts in schemas.ASSET_KIND_EXTENSIONS.items():
+            for ext in exts:
+                assert storage_path_for(d, kind, SHA, ext, lane=lane, replacement=0) == \
+                    storage_path_for(d, kind, SHA, ext, lane=lane)
+    # the literal shapes every reader was written against
+    assert idempotency_key_for(d, "facebook", "video", replacement=0) == "2026-11-27:facebook:video"
+    assert idempotency_key_for(d, "x", "text", lane="spotlight", replacement=0) == "2026-11-27:spotlight:x:text"
+    assert storage_path_for(d, "manifest", SHA, "json", replacement=0) == "2026-11-27/manifest-aaaaaaaaaaaaaaaa.json"
+    assert storage_path_for(d, "video", SHA, "mp4", lane="spotlight", replacement=0) == \
+        "2026-11-27/spotlight/video-aaaaaaaaaaaaaaaa.mp4"
+
+
+def test_a_replacement_carries_r_n_after_the_lane_in_its_keys_and_paths():
+    d = date(2026, 11, 27)
+    assert idempotency_key_for(d, "x", "text", replacement=1) == "2026-11-27:r1:x:text"
+    assert idempotency_key_for(d, "facebook", "video", lane="spotlight", replacement=2) == \
+        "2026-11-27:spotlight:r2:facebook:video"
+    assert storage_path_for(d, "manifest", SHA, "json", replacement=1) == "2026-11-27/r1/manifest-aaaaaaaaaaaaaaaa.json"
+    assert storage_path_for(d, "video", SHA, "mp4", lane="spotlight", replacement=2) == \
+        "2026-11-27/spotlight/r2/video-aaaaaaaaaaaaaaaa.mp4"
+    longest = idempotency_key_for(d, "facebook", "video", lane="spotlight", replacement=2)
+    assert longest[:10] == "2026-11-27"                                   # key[:10] is still the run date
+    assert re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:\-]{0,199}", f"{longest}:a3")     # Upload-Post's request id
+    # every (lane, replacement) is its own folder: the worker's identical manifest never meets another run's row
+    paths = {storage_path_for(d, "manifest", SHA, "json", lane=lane, replacement=n)
+             for lane in schemas.RUN_LANES for n in range(schemas.RUN_REPLACEMENT_MAX + 1)}
+    assert len(paths) == len(schemas.RUN_LANES) * (schemas.RUN_REPLACEMENT_MAX + 1)
+
+
+@pytest.mark.parametrize("bad", [True, False, -1, 3, "1", 1.0, None, [1]])
+def test_a_replacement_number_that_is_not_an_int_0_to_2_is_refused_by_keys_and_paths(bad):
+    d = date(2026, 11, 27)
+    with pytest.raises(ValueError, match="replacement"):
+        idempotency_key_for(d, "x", "text", replacement=bad)
+    with pytest.raises(ValueError, match="replacement"):
+        storage_path_for(d, "video", SHA, "mp4", replacement=bad)
+
+
+@pytest.mark.parametrize("key, lane, replacement", [
+    ("2026-11-27:x:text", "main", 0), ("2026-11-27:spotlight:x:text", "spotlight", 0),
+    ("2026-11-27:r1:x:text", "main", 1), ("2026-11-27:r2:facebook:video", "main", 2),
+    ("2026-11-27:spotlight:r1:x:text", "spotlight", 1), ("2026-11-27:spotlight:r2:linkedin:video", "spotlight", 2),
+    # refused: r0, a leading zero, the wrong case, past the cap, a `main` segment, extra parts, the segments swapped,
+    # an unknown platform or format after the segment
+    ("2026-11-27:r0:x:text", None, None), ("2026-11-27:r01:x:text", None, None), ("2026-11-27:R1:x:text", None, None),
+    ("2026-11-27:r3:x:text", None, None), ("2026-11-27:r9:x:text", None, None),
+    ("2026-11-27:main:r1:x:text", None, None), ("2026-11-27:spotlight:r1:x:text:extra", None, None),
+    ("2026-11-27:r1:spotlight:x:text", None, None), ("2026-11-27:r1:myspace:text", None, None),
+    ("2026-11-27:r1:x:hologram", None, None), ("2026-11-27:r1:x", None, None), ("2026-11-27:spotlight:r1:x", None, None),
+    ("2026-11-27:r:x:text", None, None), ("2026-11-27:r1 :x:text", None, None), ("2026-11-27:r١:x:text", None, None),
+])
+def test_post_lane_and_post_replacement_read_the_four_key_shapes_and_nothing_else(key, lane, replacement):
+    post = {"idempotency_key": key}
+    assert mrs.post_lane(post) == lane
+    assert mrs.post_replacement(post) == replacement
+    if lane is not None:
+        assert mrs.post_run_date(post) == date(2026, 11, 27) and mrs.is_fresh(post, date(2026, 11, 28))
+
+
+@pytest.mark.parametrize("row, expected", [
+    ({}, 0), ({"replacement": None}, 0), ({"replacement": 0}, 0), ({"replacement": 1}, 1), ({"replacement": 2}, 2),
+    ({"replacement": 3}, ValueError), ({"replacement": True}, ValueError), ({"replacement": "1"}, ValueError),
+    ({"replacement": -1}, ValueError), ({"replacement": 1.0}, ValueError), (None, ValueError), ("x", ValueError),
+])
+def test_run_replacement_reads_a_missing_value_as_0_and_never_guesses(row, expected):
+    if expected is ValueError:
+        with pytest.raises(ValueError):
+            mrs.run_replacement(row)
+    else:
+        assert mrs.run_replacement(row) == expected
+
+
+def test_labels_name_a_replacement_and_leave_a_days_own_run_as_it_was():
+    assert mrs.lane_label("2026-11-27", "main", 0) == mrs.lane_label("2026-11-27", "main") == "2026-11-27"
+    assert mrs.lane_label("2026-11-27", "spotlight", 0) == "2026-11-27 · spotlight"
+    assert mrs.lane_label("2026-11-27", "main", 1) == "2026-11-27 · replacement 1"
+    assert mrs.lane_label("2026-11-27", "spotlight", 2) == "2026-11-27 · spotlight · replacement 2"
+    for junk in (None, True, 3, "1", -1):
+        assert mrs.lane_label("2026-11-27", "main", junk) == "2026-11-27 · replacement ?"
+    assert mrs.run_label({"run_date": "2026-11-27"}) == "2026-11-27"
+    assert mrs.run_label({"run_date": "2026-11-27", "replacement": 0, "lane": "spotlight"}) == "2026-11-27 · spotlight"
+    assert mrs.run_label({"run_date": "2026-11-27", "replacement": 1}) == "2026-11-27 · replacement 1"
+    assert mrs.run_label({"run_date": "2026-11-27", "lane": "spotlight", "replacement": 2}) == \
+        "2026-11-27 · spotlight · replacement 2"
+    assert mrs.run_label({"run_date": "2026-11-27", "replacement": "x"}) == "2026-11-27 · replacement ?"
+    assert mrs.run_label({"run_date": "2026-11-27", "lane": "bogus", "replacement": 1}) == "2026-11-27 · ?"
+    assert mrs.run_label({}) == "?" and mrs.run_label(None) == "? · ?"
+    assert mrs.post_run_label({"idempotency_key": "2026-11-27:x:text"}) == "2026-11-27"
+    assert mrs.post_run_label({"idempotency_key": "2026-11-27:r1:x:text"}) == "2026-11-27 · replacement 1"
+    assert mrs.post_run_label({"idempotency_key": "2026-11-27:spotlight:r2:x:text"}) == \
+        "2026-11-27 · spotlight · replacement 2"
+    # a malformed key still renders its first 10 characters, as every alert always did
+    assert mrs.post_run_label({"idempotency_key": "2026-11-27:r3:x:text"}) == "2026-11-27"
+    assert mrs.post_run_label({"idempotency_key": "not-a-key"}) == "not-a-key"
+
+
+# ── pure: the tap cutoff, the start window, the worker's tick ────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("day", [date(2026, 9, 17), date(2026, 12, 17), date(2026, 3, 8), date(2026, 11, 1)],
+                         ids=["edt", "est", "spring_forward", "fall_back"])
+def test_the_replacement_cutoff_is_22_10_main_and_an_hour_before_the_run_hour_minus_5_min_spotlight(monkeypatch, day):
+    monkeypatch.setattr(mrs.settings, "MARKETING_RUN_HOUR_ET", 16)
+    main = mrs.replacement_cutoff(day, "main")
+    assert main == _et(day, 22, 10) and (main.hour, main.minute) == (22, 10) and main.tzinfo is not None
+    assert mrs.replacement_cutoff(day, "spotlight") == _et(day, 15, 10)
+    monkeypatch.setattr(mrs.settings, "MARKETING_RUN_HOUR_ET", 15)
+    assert mrs.replacement_cutoff(day, "spotlight") == _et(day, 14, 10)
+    assert mrs.replacement_cutoff(day, "main") == _et(day, 22, 10)                       # the main lane's is fixed
+    # the start windows: the lane's last start tick + the grace
+    assert mrs.replacement_start_closes(day, "main") == _et(day, 23, 15 + mrs.REPLACEMENT_START_GRACE_MINUTES)
+    assert mrs.replacement_start_closes(day, "spotlight") == _et(day, 14, 15 + mrs.REPLACEMENT_START_GRACE_MINUTES)
+    with pytest.raises(ValueError):
+        mrs.replacement_cutoff(day, "noon")
+    with pytest.raises(ValueError):
+        mrs.replacement_start_closes(day, "noon")
+
+
+@pytest.mark.parametrize("bad", [0, None, True, "16", -1, 24, 16.0])
+def test_an_unreadable_run_hour_closes_the_spotlights_replacements(monkeypatch, caplog, bad):
+    monkeypatch.setattr(mrs.settings, "MARKETING_RUN_HOUR_ET", bad)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        cutoff = mrs.replacement_cutoff(_R_DAY, "spotlight")
+        closes = mrs.replacement_start_closes(_R_DAY, "spotlight")
+    start_of_day = _et(_R_DAY, 0, 0)
+    assert cutoff == closes == start_of_day                    # every tap and every start on that day is past it
+    assert any("replacements are closed" in r.getMessage() for r in caplog.records)
+    assert mrs.replacement_cutoff(_R_DAY, "main") == _et(_R_DAY, 22, 10)      # the main lane never reads the hour
+
+
+def test_the_tick_minute_is_the_workers_cron_minute():
+    import pathlib
+
+    toml = (pathlib.Path(__file__).resolve().parents[1] / "marketing" / "railway.toml").read_text(encoding="utf-8")
+    m = re.search(r'^cronSchedule\s*=\s*"(\d+) \* \* \* \*"', toml, re.MULTILINE)
+    assert m and int(m.group(1)) == mrs.WORKER_TICK_MINUTE == 15
+
+
+@pytest.mark.parametrize("now, expected", [
+    (_et(_R_DAY, 18, 0), _et(_R_DAY, 18, 15)), (_et(_R_DAY, 18, 15), _et(_R_DAY, 19, 15)),
+    (_et(_R_DAY, 23, 40), _et(_R_DAY + timedelta(days=1), 0, 15)),
+    (datetime(2026, 11, 1, 5, 20, tzinfo=timezone.utc), datetime(2026, 11, 1, 6, 15, tzinfo=timezone.utc)),  # DST end
+    (datetime(2026, 9, 17, 21, 30), datetime(2026, 9, 17, 22, 15, tzinfo=timezone.utc)),                     # naive: UTC
+])
+def test_the_next_worker_tick_is_the_next_quarter_past(now, expected):
+    got = mrs.next_worker_tick(now)
+    # compared as instants: an ET time in the fall-back fold never compares == across zones (PEP 495)
+    assert got.timestamp() == expected.timestamp() and got.minute == 15 and got.tzinfo is not None
+    assert got.timestamp() > (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def test_a_replacement_is_held_to_its_own_attempts_cap(monkeypatch):
+    for setting, gen0, rep in ((6, 6, 2), (2, 2, 2), (1, 1, 1), (0, 0, 2), (-3, -3, 2)):
+        monkeypatch.setattr(mrs.settings, "MARKETING_MAX_RUN_ATTEMPTS", setting)
+        assert mrs.run_attempts_cap({}) == mrs.run_attempts_cap({"replacement": 0}) == gen0
+        assert mrs.run_attempts_cap({"replacement": 1}) == mrs.run_attempts_cap({"replacement": 2}) == rep
+    with pytest.raises(ValueError):
+        mrs.run_attempts_cap({"replacement": "1"})
+
+
+def test_replacement_unstarted_is_planned_with_no_attempt():
+    assert mrs.replacement_unstarted({"replacement": 1, "status": "planned", "attempts": 0})
+    assert mrs.replacement_unstarted({"replacement": 2, "status": "planned"})                  # NULL attempts = 0
+    for row in ({"replacement": 0, "status": "planned", "attempts": 0},
+                {"replacement": 1, "status": "planned", "attempts": 1},
+                {"replacement": 1, "status": "failed", "attempts": 0},
+                {"replacement": 1, "status": "planned", "attempts": "0"},
+                {"replacement": 1, "status": "planned", "attempts": True}):
+        assert not mrs.replacement_unstarted(row), row
+
+
+def _never_read():
+    raise AssertionError("the switch is read only when it decides")
+
+
+@pytest.mark.parametrize("row, kw, switch, expected", [
+    # a replacement at assets_ready: its posts exist — never closed, any day inside the window (review L1)
+    ({"status": "failed", "stage": "assets_ready", "attempts": 1}, {"run_date": _R_DAY - timedelta(days=1)},
+     _never_read, None),
+    # its day is over: started or not
+    ({"status": "failed", "stage": "voiced", "attempts": 1}, {"run_date": _R_DAY - timedelta(days=1)}, _never_read,
+     "day_over"),
+    ({"status": "planned", "stage": "planned", "attempts": 0}, {"run_date": _R_DAY - timedelta(days=1)}, _never_read,
+     "day_over"),
+    # unstarted under a resume (the spotlight's start window): never started
+    ({"status": "planned", "stage": "planned", "attempts": 0}, {"resume_only": True}, _never_read,
+     "start_window_closed"),
+    ({"status": "planned", "stage": "planned", "attempts": 0}, {}, lambda: False, "switched_off"),
+    ({"status": "planned", "stage": "planned", "attempts": 0}, {}, lambda: True, None),
+    # started, its own day: it may finish (resume or not, switch or not)
+    ({"status": "failed", "stage": "voiced", "attempts": 1}, {"resume_only": True}, _never_read, None),
+    ({"status": "in_progress", "stage": "scripted", "attempts": 1}, {}, _never_read, None),
+])
+def test_the_claim_gate_of_a_replacement(row, kw, switch, expected):
+    args = {"run_date": _R_DAY, "today": _R_DAY, "resume_only": False, **kw}
+    assert mrs.replacement_claim_problem({"replacement": 1, **row}, switch_on=switch, **args) == expected
+
+
+_EXP_NOW = _et(_R_DAY, 18, 0)
+
+
+def _exp_row(**kw) -> Dict[str, Any]:
+    stamp = (_EXP_NOW - timedelta(hours=3)).isoformat()
+    return {"id": str(uuid.uuid4()), "run_date": _R_DAY.isoformat(), "replacement": 1, "status": "planned",
+            "stage": "planned", "attempts": 0, "started_at": None, "updated_at": stamp, "metadata": {}, **kw}
+
+
+@pytest.mark.parametrize("label, row, now, switch, lane_problem, expected", [
+    ("a day's own run", _exp_row(replacement=0), _EXP_NOW, _never_read, None, None),
+    ("media_ready", _exp_row(status="media_ready", attempts=1), _EXP_NOW, _never_read, None, None),
+    ("skipped", _exp_row(status="skipped"), _EXP_NOW, _never_read, None, None),
+    ("assets_ready", _exp_row(status="in_progress", stage="assets_ready", attempts=1,
+                              run_date=(_R_DAY - timedelta(days=1)).isoformat()), _EXP_NOW, _never_read, None, None),
+    ("failed at its cap", _exp_row(status="failed", stage="voiced", attempts=2,
+                                   run_date=(_R_DAY - timedelta(days=1)).isoformat()), _EXP_NOW, _never_read, None,
+     None),
+    ("unstarted, yesterday", _exp_row(run_date=(_R_DAY - timedelta(days=1)).isoformat()), _EXP_NOW, _never_read, None,
+     "day_over"),
+    ("unstarted spotlight, lane closed", _exp_row(lane="spotlight"), _et(_R_DAY, 11, 0), _never_read,
+     "lane_closed", "lane_closed"),
+    ("unstarted, switch off", _exp_row(), _EXP_NOW, lambda: False, None, "switched_off"),
+    ("unstarted main, before 23:35", _exp_row(), _et(_R_DAY, 23, 34), lambda: True, None, None),
+    ("unstarted main, at 23:35", _exp_row(), _et(_R_DAY, 23, 35), lambda: True, None, "start_window_closed"),
+    ("unstarted spotlight, before 15:35", _exp_row(lane="spotlight"), _et(_R_DAY, 15, 34), lambda: True, None, None),
+    ("unstarted spotlight, at 15:35", _exp_row(lane="spotlight"), _et(_R_DAY, 15, 35), lambda: True, None,
+     "start_window_closed"),
+    ("failed below cap, today, lane open", _exp_row(status="failed", stage="voiced", attempts=1), _EXP_NOW,
+     _never_read, None, None),
+    ("failed below cap, yesterday", _exp_row(status="failed", stage="voiced", attempts=1,
+                                             run_date=(_R_DAY - timedelta(days=1)).isoformat()), _EXP_NOW,
+     _never_read, None, "day_over"),
+    ("failed below cap, spotlight lane closed", _exp_row(status="failed", stage="voiced", attempts=1, lane="spotlight"),
+     _EXP_NOW, _never_read, "weekday_not_listed", "lane_closed"),
+    ("fresh in_progress, yesterday", _exp_row(status="in_progress", stage="voiced", attempts=1,
+                                              run_date=(_R_DAY - timedelta(days=1)).isoformat(),
+                                              updated_at=(_EXP_NOW - timedelta(minutes=5)).isoformat()),
+     _EXP_NOW, _never_read, None, None),
+    ("stale in_progress, yesterday", _exp_row(status="in_progress", stage="voiced", attempts=1,
+                                              run_date=(_R_DAY - timedelta(days=1)).isoformat()), _EXP_NOW,
+     _never_read, None, "day_over"),
+    ("stale in_progress, today", _exp_row(status="in_progress", stage="voiced", attempts=1), _EXP_NOW,
+     _never_read, None, None),
+])
+def test_the_web_expiry_judgement(monkeypatch, label, row, now, switch, lane_problem, expected):
+    monkeypatch.setattr(mrs.settings, "MARKETING_RUN_HOUR_ET", 16)
+    monkeypatch.setattr(mrs.settings, "MARKETING_MAX_RUN_ATTEMPTS", 6)
+    asked: List[date] = []
+
+    def lane(day):
+        asked.append(day)
+        return lane_problem
+
+    got = mrs.replacement_expiry_problem(row, now=now, switch_on=switch, lane_problem=lane, stale_seconds=3600)
+    assert got == expected, label
+    if mrs.run_lane(row) == "main":
+        assert asked == [], label                                  # the spotlight predicate is never asked for main
+
+
+@pytest.mark.parametrize("row", [_exp_row(replacement="x"), _exp_row(lane="morning"), _exp_row(run_date="soon"),
+                                 _exp_row(attempts="1")])
+def test_the_web_expiry_judgement_never_guesses_a_row_that_does_not_read_back(row):
+    with pytest.raises(ValueError):
+        mrs.replacement_expiry_problem(row, now=_EXP_NOW, switch_on=lambda: False, lane_problem=lambda d: None,
+                                       stale_seconds=3600)
+
+
+def test_close_summary_says_replaced_only_when_a_replacement_rejected_the_run():
+    rid = str(uuid.uuid4())
+    replaced = {"status": "rejected", "metadata": {"review": {"decision": "rejected", "replaced_by_run_id": rid}}}
+    plain = {"status": "rejected", "metadata": {"review": {"decision": "rejected"}}}
+    assert mrs.close_summary([replaced, dict(replaced)])["reason"] == "replaced"
+    assert mrs.close_summary([replaced, plain])["reason"] == "replaced"                 # the tap rejected the rest
+    assert mrs.close_summary([plain, plain])["reason"] == "all_rejected"               # a day with none: unchanged
+    junk = {"status": "rejected", "metadata": {"review": {"decision": "rejected", "replaced_by_run_id": "nope"}}}
+    assert mrs.close_summary([junk])["reason"] == "all_rejected"
+    published = {"status": "published", "metadata": {}}
+    assert mrs.close_summary([replaced, published])["reason"] == "posted"
+    assert mrs.CLOSE_REASONS[-1] == "replaced" and mrs.CLOSE_REASONS[:-1] == (
+        "posted", "all_rejected", "expired_unreviewed", "approved_unsent", "failed", "no_posts", "mixed")
+    assert mrs.replaced_by_run_id(replaced) == rid
+    for post in (plain, junk, {}, None, {"metadata": {"review": "x"}},
+                 {"metadata": {"review": {"replaced_by_run_id": rid.upper()}}}):
+        assert mrs.replaced_by_run_id(post) is None
+
+
+# ── the newest run of a (day, lane), and the claim of a replacement ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_get_run_by_date_reads_the_newest_run_by_created_at_then_id(svc, monkeypatch):
+    """Review L7(a): the newest run, ordered by created_at then id (no new column: the read works before AND after
+    215); `replacement=n` reads that one. A day with no replacement answers the same row as ever."""
+    orders: List[Any] = []
+    real_order = _Query.order
+
+    def spy(self, col, **kw):
+        orders.append((col, kw.get("desc", False)))
+        return real_order(self, col, **kw)
+
+    monkeypatch.setattr(_Query, "order", spy)
+    gen0, _ = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=_et(_R_DAY, 16, 15), claim_nonce=_n())
+    orders.clear()
+    assert (await svc.get_run_by_date(_R_DAY))["id"] == gen0["id"]
+    assert orders == [("created_at", True), ("id", True)]
+    # two later rows of the same (day, lane), stored OUT of order: the newest created_at wins, an equal one by id
+    rows = svc.fake.tables[mrs.RUNS].rows
+    r2 = {"id": "ffffffff-0000-4000-8000-000000000002", "run_date": _R_DAY.isoformat(), "replacement": 2,
+          "status": "planned", "created_at": _et(_R_DAY, 19, 0).isoformat(), "metadata": {}}
+    r1 = {"id": "00000000-0000-4000-8000-000000000001", "run_date": _R_DAY.isoformat(), "replacement": 1,
+          "status": "skipped", "created_at": _et(_R_DAY, 18, 0).astimezone(timezone.utc).isoformat(), "metadata": {}}
+    rows.extend([r2, r1])
+    assert (await svc.get_run_by_date(_R_DAY))["id"] == r2["id"]
+    assert (await svc.get_run_for_date(_R_DAY.isoformat()))["id"] == r2["id"]
+    assert (await svc.get_run_by_date(_R_DAY, replacement=1))["id"] == r1["id"]
+    assert (await svc.get_run_by_date(_R_DAY, replacement=0))["id"] == gen0["id"]
+    assert (await svc.get_run_for_date(_R_DAY, replacement=2))["id"] == r2["id"]
+    assert await svc.get_run_by_date(_R_DAY, "spotlight") is None
+    r2["created_at"] = r1["created_at"]                                   # a tie: the larger id wins
+    assert (await svc.get_run_by_date(_R_DAY))["id"] == r2["id"]
+    reads = _counting_reads(monkeypatch)
+    for bad in (3, -1, True, "1"):
+        with pytest.raises(MarketingRequestInvalid, match="replacement"):
+            await svc.get_run_by_date(_R_DAY, replacement=bad)
+    assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_the_next_tick_claims_a_planned_replacement_through_the_existing_claim(svc, monkeypatch):
+    _replace(monkeypatch)
+    inserted: List[Dict[str, Any]] = []
+    real_insert = svc.fake.tables[mrs.RUNS].insert
+
+    def spy(payload):
+        inserted.append(dict(payload))
+        return real_insert(payload)
+
+    monkeypatch.setattr(svc.fake.tables[mrs.RUNS], "insert", spy)
+    gen0, posts, r1 = await _replacement_claimed(svc, monkeypatch)
+    # the claim's INSERT (gen 0's, refused 23505 the second time) never names `replacement`: byte for byte
+    assert [sorted(p) for p in inserted] == [sorted(["run_date", "status", "stage", "worker_version", "dry_run",
+                                                     "attempts", "started_at", "updated_at", "metadata"])] * 2
+    assert (r1["replacement"], r1["replaces_run_id"], r1["status"], r1["attempts"]) == (1, gen0["id"], "in_progress", 1)
+    assert r1["metadata"]["replacement_request"] == {"at": _et(_R_DAY, 18, 0).isoformat(), "from_run_id": gen0["id"],
+                                                     "from_source_ref": _R_REF}
+    assert r1["metadata"]["claim_nonce"] and _BY not in json.dumps(r1)          # the worker never sees who asked
+    stored0 = _stored(svc, gen0["id"])
+    assert stored0["status"] == "media_ready" and stored0["metadata"]["replaced_by"]["run_id"] == r1["id"]
+    for p in posts:
+        live = _live_post(svc, p["id"])
+        assert live["status"] == "rejected" and mrs.replaced_by_run_id(live) == r1["id"]
+    # the holder's second tick meets its own fresh run
+    again, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=_et(_R_DAY, 18, 20),
+                                        claim_nonce=_n())
+    assert reason == IN_PROGRESS and again["id"] == r1["id"]
+
+
+@pytest.mark.asyncio
+async def test_a_planned_spotlight_replacement_is_closed_unrun_once_its_start_window_shut(svc, monkeypatch, caplog):
+    _spot(monkeypatch, real_start_window=True)
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch, lane="spotlight")
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 14, 50))
+    assert res.outcome == "requested"
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=mrs.logger.name):
+        row, reason = await _claim_lane(svc, "spotlight", now=_et(_R_DAY, 17, 15))     # past 16:00: a resume only
+    assert reason == ALREADY_DONE and row["id"] == res.run_id and row["status"] == "skipped"
+    meta = _stored(svc, res.run_id)["metadata"]
+    assert meta["skip_reason"] == schemas.REPLACEMENT_SKIP_REASON == "replacement_expired"
+    assert meta["replacement_expired"] == {"why": "start_window_closed", "at": _et(_R_DAY, 17, 15).isoformat(),
+                                           "was": "planned", "stage": "planned", "attempts": 0}
+    assert _stored(svc, res.run_id)["last_error"].startswith("replacement not run: the worker did not start it")
+    assert _stored(svc, res.run_id)["finished_at"]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]          # INFO: never "needs a human"
+    assert any("CLOSED UNRUN" in r.getMessage() and res.run_id in r.getMessage() for r in caplog.records)
+    assert _stored(svc, gen0["id"])["status"] == "media_ready"                       # the original is untouched
+
+
+@pytest.mark.asyncio
+async def test_a_failed_replacement_is_closed_on_the_next_days_resume(svc, monkeypatch):
+    _replace(monkeypatch)
+    _, _, r1 = await _replacement_claimed(svc, monkeypatch)
+    await svc.update_run(r1["id"], status="failed", last_error="render: ffmpeg exited 1", worker=True,
+                         claim=_holder(svc, r1["id"]))
+    tomorrow = _R_DAY + timedelta(days=1)
+    row, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=_et(tomorrow, 0, 15),
+                                      claim_nonce=_n(), resume_only=True)
+    assert reason == ALREADY_DONE and row["id"] == r1["id"] and row["status"] == "skipped"
+    stored = _stored(svc, r1["id"])
+    assert stored["metadata"]["replacement_expired"]["why"] == "day_over"
+    assert stored["metadata"]["replacement_expired"]["was"] == "failed"
+    assert stored["last_error"] == ("replacement not finished: its day ended before the worker finished it — last "
+                                    "error: render: ffmpeg exited 1")
+    assert stored["attempts"] == 1                                                 # the cap is left as it was
+
+
+@pytest.mark.asyncio
+async def test_a_planned_replacement_is_closed_when_the_switch_went_off_and_a_days_claim_never_reads_it(
+        svc, monkeypatch):
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    _replace(monkeypatch, on=False)
+    row, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=_et(_R_DAY, 18, 15),
+                                      claim_nonce=_n())
+    assert reason == ALREADY_DONE and row["status"] == "skipped"
+    assert _stored(svc, res.run_id)["metadata"]["replacement_expired"]["why"] == "switched_off"
+
+    # a day's own run never reads the switch: a claim of a fresh day, and of a media_ready one, with the read broken
+    def broken():
+        raise AssertionError("a day's own run reads no replacement switch")
+
+    monkeypatch.setattr(mrs.selection, "replacement_on", broken)
+    fresh, r_fresh = await svc.claim_run(_R_DAY + timedelta(days=1), worker_version="t", dry_run=True,
+                                         now=_et(_R_DAY + timedelta(days=1), 16, 15), claim_nonce=_n())
+    assert r_fresh == CLAIMED and "replacement" not in fresh
+    await svc.update_run(fresh["id"], status="media_ready")
+    _, r_ready = await svc.claim_run(_R_DAY + timedelta(days=1), worker_version="t", dry_run=True,
+                                     now=_et(_R_DAY + timedelta(days=1), 17, 15), claim_nonce=_n())
+    assert r_ready == MEDIA_READY
+
+
+@pytest.mark.asyncio
+async def test_a_started_spotlight_replacement_may_finish_after_the_start_window_within_its_own_cap(svc, monkeypatch):
+    _spot(monkeypatch, real_start_window=True)          # MARKETING_MAX_RUN_ATTEMPTS 6: a day's own run gets 6
+    _replace(monkeypatch)
+    _, _, r1 = await _replacement_claimed(svc, monkeypatch, lane="spotlight", request_at=_et(_R_DAY, 14, 50),
+                                          claim_at=_et(_R_DAY, 15, 15))
+    await svc.update_run(r1["id"], status="failed", worker=True, claim=_holder(svc, r1["id"]))
+    row, reason = await _claim_lane(svc, "spotlight", now=_et(_R_DAY, 17, 15))        # a resume, past 16:00
+    assert reason == CLAIMED and row["id"] == r1["id"] and row["attempts"] == 2
+    await svc.update_run(r1["id"], status="failed", worker=True, claim=_holder(svc, r1["id"]))
+    row, reason = await _claim_lane(svc, "spotlight", now=_et(_R_DAY, 18, 15))
+    assert reason == ATTEMPTS_EXHAUSTED and row["status"] == "failed" and row["attempts"] == 2   # 2, not 6
+    # a day's own run at 2 failed attempts is still re-claimed (its cap is the setting)
+    other = _seed_run(svc, _R_DAY, "failed", touched=NOW - timedelta(hours=2))
+    assert decide_claim(other, now=NOW, stale_seconds=3600, max_attempts=mrs.run_attempts_cap(other)) == CLAIMED
+
+
+@pytest.mark.asyncio
+async def test_a_live_replacement_under_the_next_days_resume_is_left_to_its_holder(svc, monkeypatch):
+    _replace(monkeypatch)
+    _, _, r1 = await _replacement_claimed(svc, monkeypatch, request_at=_et(_R_DAY, 22, 0),
+                                          claim_at=_et(_R_DAY, 23, 50))
+    before = dict(_stored(svc, r1["id"]))
+    tomorrow = _R_DAY + timedelta(days=1)
+    row, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=_et(tomorrow, 0, 15),
+                                      claim_nonce=_n(), resume_only=True)
+    assert reason == IN_PROGRESS and row["id"] == r1["id"]
+    assert _stored(svc, r1["id"]) == before
+
+
+@pytest.mark.parametrize("stage, status", [("assets_ready", "in_progress"), ("assets_ready", "failed")])
+@pytest.mark.asyncio
+async def test_a_replacement_whose_posts_exist_is_resumed_the_next_day_never_closed(svc, monkeypatch, stage, status):
+    """Review L1: at `assets_ready` its posts exist (the bundles may be offered): the next day's resume only PATCHes
+    media_ready — it is re-claimed, never closed unrun."""
+    _replace(monkeypatch)
+    _, _, r1 = await _replacement_claimed(svc, monkeypatch, request_at=_et(_R_DAY, 22, 0),
+                                          claim_at=_et(_R_DAY, 22, 15))
+    _stored(svc, r1["id"]).update(stage=stage, status=status, updated_at=_et(_R_DAY, 22, 40).isoformat())
+    tomorrow = _R_DAY + timedelta(days=1)
+    row, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=_et(tomorrow, 0, 15),
+                                      claim_nonce=_n(), resume_only=True)
+    assert reason == CLAIMED and row["id"] == r1["id"] and row["attempts"] == 2 and row["status"] == "in_progress"
+    assert "replacement_expired" not in row["metadata"]
+
+
+@pytest.mark.parametrize("label, concurrent, expected", [
+    ("another holder re-claimed it", lambda r: r.update(status="in_progress", attempts=1,
+                                                        started_at=_et(_R_DAY, 18, 15).isoformat(),
+                                                        updated_at=_et(_R_DAY, 18, 15).isoformat()), IN_PROGRESS),
+    ("the web closed it first", lambda r: r.update(status="skipped", updated_at=_et(_R_DAY, 18, 14).isoformat()),
+     ALREADY_DONE),
+    ("a write that leaves it claimable", lambda r: r.update(updated_at=_et(_R_DAY, 18, 14).isoformat()), IN_PROGRESS),
+])
+@pytest.mark.asyncio
+async def test_a_lost_close_is_judged_on_the_re_read_row(svc, monkeypatch, label, concurrent, expected):
+    """Review L3: the close of a replacement lost its CAS — the re-read row decides: ALREADY_DONE only for a terminal
+    row, IN_PROGRESS for a held one, and a row the matrix would still hand over is answered busy, never written."""
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    _replace(monkeypatch, on=False)                                    # the claim judges it `switched_off`
+    real_exec = mrs._exec
+
+    async def racing(query, *, op, **ids):
+        if op == "claim_run.expire_replacement":
+            concurrent(_stored(svc, res.run_id))                      # lands between the read and the close
+        return await real_exec(query, op=op, **ids)
+
+    monkeypatch.setattr(mrs, "_exec", racing)
+    row, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, now=_et(_R_DAY, 18, 15),
+                                      claim_nonce=_n())
+    assert reason == expected, label
+    stored = _stored(svc, res.run_id)
+    assert row["id"] == res.run_id and "replacement_expired" not in stored["metadata"], label
+    if label == "a write that leaves it claimable":
+        assert stored["status"] == "planned" and stored["attempts"] == 0          # nothing written
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_number_that_does_not_read_back_fails_only_its_lanes_claim(svc, monkeypatch, caplog):
+    """Review L9: the claim's 422 for such a row is per lane and deliberate (a key, a path and the gate depend on it)."""
+    _spot(monkeypatch)
+    main, _ = await _claim_lane(svc, "main")
+    _stored(svc, main["id"])["replacement"] = "one"            # past the CHECK: a hand edit
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(MarketingRequestInvalid, match="unknown replacement 'one'"):
+            await _claim_lane(svc, "main", resume_only=True)
+    assert any("REFUSED" in r.getMessage() and main["id"] in r.getMessage() for r in caplog.records)
+    _, reason = await _claim_lane(svc, "spotlight")
+    assert reason == CLAIMED
+
+
+# ── the sweep: a replacement past its day is closed unrun; a day's own run exactly as before ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_the_sweep_closes_an_old_replacement_unrun_and_a_days_own_run_as_before(svc, caplog):
+    long_ago = NOW - timedelta(hours=60)
+    gen0 = _seed_run(svc, _TODAY - timedelta(days=2), "in_progress", touched=long_ago)
+    unstarted = _seed_run(svc, _TODAY - timedelta(days=2), "planned", touched=long_ago, replacement=1, attempts=0,
+                          stage="planned", replaces_run_id=gen0["id"])
+    started = _seed_run(svc, _TODAY - timedelta(days=3), "in_progress", touched=long_ago, replacement=1,
+                        attempts=1, stage="voiced", lane="spotlight")
+    with_posts = _seed_run(svc, _TODAY - timedelta(days=4), "in_progress", touched=long_ago, replacement=2,
+                           attempts=1, stage="assets_ready")
+    with caplog.at_level(logging.INFO, logger=mrs.logger.name):
+        _, reason = await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    assert reason == CLAIMED
+    g = _stored(svc, gen0["id"])
+    assert g["status"] == "failed" and "abandoned outside the claim window" in g["last_error"]   # byte for byte
+    for row, words in ((unstarted, "replacement not run"), (started, "replacement not finished")):
+        s = _stored(svc, row["id"])
+        assert s["status"] == "skipped" and s["metadata"]["skip_reason"] == "replacement_expired", row
+        assert s["metadata"]["replacement_expired"]["why"] == "day_over" and s["last_error"].startswith(words)
+    w = _stored(svc, with_posts["id"])
+    assert w["status"] == "failed" and "abandoned outside the claim window" in w["last_error"]     # review L1
+    abandoned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING
+                 and "ABANDONED outside the claim window" in r.getMessage()]
+    assert len(abandoned) == 2 and not any(unstarted["id"] in m or started["id"] in m for m in abandoned)
+
+
+@pytest.mark.asyncio
+async def test_a_row_whose_replacement_does_not_read_back_is_left_alone_and_the_sweep_goes_on(svc, caplog):
+    long_ago = NOW - timedelta(hours=60)
+    odd = _seed_run(svc, _TODAY - timedelta(days=3), "planned", touched=long_ago, replacement=True, attempts=0)
+    dead = _seed_run(svc, _TODAY - timedelta(days=2), "in_progress", touched=long_ago)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        _, reason = await svc.claim_run(_TODAY, worker_version="t", dry_run=True, now=NOW, claim_nonce=_n())
+    assert reason == CLAIMED
+    assert _stored(svc, odd["id"])["status"] == "planned"
+    assert _stored(svc, dead["id"])["status"] == "failed"
+    assert any("sweep left run_id=" + odd["id"] in r.getMessage() for r in caplog.records)
+
+
+# ── register_asset / create_posts / insert_script of a replacement ───────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("lane", ["main", "spotlight"])
+@pytest.mark.asyncio
+async def test_a_replacement_registers_under_its_own_folder_and_identical_bytes_make_two_rows(svc, monkeypatch, lane):
+    if lane == "spotlight":
+        _spot(monkeypatch)
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch, lane=lane, manifest=True)
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18 if lane == "main" else 14, 0))
+    row, reason = await svc.claim_run(_R_DAY, worker_version="t", dry_run=True, claim_nonce=_n(), lane=lane,
+                                      now=_et(_R_DAY, 18 if lane == "main" else 14, 15))
+    assert reason == CLAIMED and row["id"] == res.run_id
+    a1, up = await svc.register_asset(row["id"], kind="manifest", ext="json", sha256=SHA, size_bytes=12,
+                                      claim=_holder(svc, row["id"]))
+    folder = "2026-09-17" if lane == "main" else "2026-09-17/spotlight"
+    assert a1["storage_path"] == f"{folder}/r1/manifest-aaaaaaaaaaaaaaaa.json" and up["path"] == a1["storage_path"]
+    paths = sorted(a["storage_path"] for a in svc.fake.tables[mrs.ASSETS].rows)
+    assert paths == [f"{folder}/manifest-aaaaaaaaaaaaaaaa.json", f"{folder}/r1/manifest-aaaaaaaaaaaaaaaa.json"]
+
+
+@pytest.mark.parametrize("lane", ["main", "spotlight"])
+@pytest.mark.asyncio
+async def test_a_replacements_posts_carry_r_n_in_their_keys_and_gen_0s_are_unchanged(svc, monkeypatch, lane):
+    if lane == "spotlight":
+        _spot(monkeypatch)
+    _replace(monkeypatch)
+    gen0, gen0_posts, r1 = await _replacement_claimed(svc, monkeypatch, lane=lane)
+    head = "2026-09-17" if lane == "main" else "2026-09-17:spotlight"
+    assert [p["idempotency_key"] for p in gen0_posts] == [f"{head}:x:text", f"{head}:bluesky:text"]
+    inserted: List[Dict[str, Any]] = []
+    real_insert = svc.fake.tables[mrs.SCRIPTS].insert
+
+    def spy(payload):
+        inserted.append(dict(payload))
+        return real_insert(payload)
+
+    monkeypatch.setattr(svc.fake.tables[mrs.SCRIPTS], "insert", spy)
+    await svc.insert_script(_money_map_script(r1["id"], ref="news:money_map:NVDA:2026"))
+    assert inserted[-1]["replacement"] == 1                                      # copied from the run, sent
+    posts = await svc.create_posts(r1["id"], _TEXT_SPECS, claim=_holder(svc, r1["id"]))
+    assert [p["idempotency_key"] for p in posts] == [f"{head}:r1:x:text", f"{head}:r1:bluesky:text"]
+    assert all(mrs.post_replacement(p) == 1 and mrs.post_lane(p) == lane and p["status"] == "pending_review"
+               for p in posts)
+    assert mrs.post_run_label(posts[0]) == ("2026-09-17 · replacement 1" if lane == "main"
+                                            else "2026-09-17 · spotlight · replacement 1")
+    # a retry adopts its own rows; gen 0's are untouched
+    again = await svc.create_posts(r1["id"], _TEXT_SPECS, claim=_holder(svc, r1["id"]))
+    assert [p["id"] for p in again] == [p["id"] for p in posts]
+    assert [_live_post(svc, p["id"])["idempotency_key"] for p in gen0_posts] == [f"{head}:x:text",
+                                                                                 f"{head}:bluesky:text"]
+
+
+@pytest.mark.asyncio
+async def test_a_replacement_records_no_post_once_replacing_is_switched_off(svc, monkeypatch, caplog):
+    from app.api.error_response import ErrorCode, classify_exception
+
+    _replace(monkeypatch)
+    _, _, r1 = await _replacement_claimed(svc, monkeypatch)
+    await svc.insert_script(_money_map_script(r1["id"], ref="news:money_map:NVDA:2026"))
+    _replace(monkeypatch, on=False)
+
+    async def no_asset_read(run_id):
+        raise AssertionError("the switch refusal comes before any asset read")
+
+    monkeypatch.setattr(svc, "list_assets", no_asset_read)
+    before = len(svc.fake.tables[mrs.POSTS].rows)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingTemplateRefused, match="MARKETING_REPLACE_ENABLED") as exc:
+            await svc.create_posts(r1["id"], _TEXT_SPECS, claim=_holder(svc, r1["id"]))
+    assert classify_exception(exc.value) == (ErrorCode.MARKETING_TEMPLATE_REFUSED, 409)
+    assert len(svc.fake.tables[mrs.POSTS].rows) == before
+    assert any("TEMPLATE REFUSED" in r.getMessage() and r1["id"] in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("template, klass", [("ceo_buys", "C"), ("theme_explainer", "F")])
+@pytest.mark.asyncio
+async def test_a_replacement_posts_money_map_only(svc, monkeypatch, template, klass):
+    _replace(monkeypatch)
+    _, _, r1 = await _replacement_claimed(svc, monkeypatch)
+    await svc.insert_script(_money_map_script(r1["id"], ref=f"news:{template}:X", template=template, klass=klass))
+    before = len(svc.fake.tables[mrs.POSTS].rows)
+    with pytest.raises(MarketingRequestInvalid, match="money_map only"):
+        await svc.create_posts(r1["id"], _TEXT_SPECS, claim=_holder(svc, r1["id"]))
+    assert len(svc.fake.tables[mrs.POSTS].rows) == before
+
+
+@pytest.mark.asyncio
+async def test_insert_script_copies_the_replacement_only_for_a_replacement_and_refuses_a_mismatch(svc, monkeypatch):
+    inserted: List[Dict[str, Any]] = []
+    real_insert = svc.fake.tables[mrs.SCRIPTS].insert
+
+    def spy(payload):
+        inserted.append(dict(payload))
+        return real_insert(payload)
+
+    monkeypatch.setattr(svc.fake.tables[mrs.SCRIPTS], "insert", spy)
+    gen0 = _seed_run(svc, _R_DAY, "in_progress", touched=NOW)
+    r1 = _seed_run(svc, _R_DAY, "in_progress", touched=NOW, replacement=1, replaces_run_id=gen0["id"])
+    await svc.insert_script({"run_id": gen0["id"], "status": "selected", "replacement": 0})
+    assert "replacement" not in inserted[-1] and "lane" not in inserted[-1]          # gen 0: byte for byte
+    for bad in (0, True, "1", 2, None):
+        with pytest.raises(mrs.MarketingRunError, match="replacement"):
+            await svc.insert_script({"run_id": r1["id"], "status": "selected", "replacement": bad}, run=r1)
+    created, ours = await svc.insert_script({"run_id": r1["id"], "status": "selected", "replacement": 1}, run=r1)
+    assert ours and inserted[-1]["replacement"] == 1 and created["replacement"] == 1
+    odd = _seed_run(svc, _R_DAY + timedelta(days=1), "in_progress", touched=NOW, replacement=7)
+    with pytest.raises(MarketingRequestInvalid, match="unknown replacement"):
+        await svc.insert_script({"run_id": odd["id"], "status": "selected"})
+
+
+# ── the ledger reads: bounds widened to RUNS_PER_DAY_MAX, the own-lane rules unchanged ───────────────────────────────
+
+
+def _script_at(svc, day: str, *, lane: str = "main", replacement: int = 0, **extra) -> Dict[str, Any]:
+    row = {"run_id": str(uuid.uuid4()), "run_date": day, "status": "accepted", "source_ref": f"news:money_map:{day}",
+           "tokens_used": 100, **extra}
+    if lane != "main":
+        row["lane"] = lane
+    if replacement:
+        row["replacement"] = replacement
+    svc.fake.tables[mrs.SCRIPTS].rows.append(row)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_a_days_replacements_count_once_each_in_the_cost_and_cross_lane_reads(svc):
+    for lane, n in (("main", 0), ("main", 1), ("spotlight", 0), ("main", 2)):
+        _script_at(svc, "2026-10-02", lane=lane, replacement=n)
+    got = await svc.script_tokens_between(date(2026, 10, 2), date(2026, 10, 2))
+    assert [(r["lane"], r.get("replacement", 0)) for r in got] == [("main", 0), ("main", 1), ("main", 2),
+                                                                   ("spotlight", 0)]
+    assert "replacement" not in got[0] and got[1]["replacement"] == 1                 # gen 0's row: four keys
+    lanes = await svc.lane_scripts_between(date(2026, 10, 2), date(2026, 10, 2))
+    assert [(r["lane"], r["replacement"]) for r in lanes] == [("main", 0), ("main", 1), ("main", 2), ("spotlight", 0)]
+    # two scripts of ONE (day, lane, replacement): a double count — refused
+    _script_at(svc, "2026-10-02", lane="main", replacement=1)
+    with pytest.raises(mrs.MarketingRunError, match="holds two of one replacement number"):
+        await svc.script_tokens_between(date(2026, 10, 2), date(2026, 10, 2))
+    with pytest.raises(mrs.MarketingRunError, match="lane_scripts_between"):           # 5 > RUNS_PER_DAY_MAX
+        await svc.lane_scripts_between(date(2026, 10, 2), date(2026, 10, 2))
+    # a replacement number that does not read back is never summed or listed
+    svc.fake.tables[mrs.SCRIPTS].rows[-1]["replacement"] = "x"
+    with pytest.raises(mrs.MarketingRunError, match="does not read back"):
+        await svc.script_tokens_between(date(2026, 10, 2), date(2026, 10, 2))
+    with pytest.raises(mrs.MarketingRunError, match="does not read back"):
+        await svc.lane_scripts_between(date(2026, 10, 1), date(2026, 10, 3))
+
+
+@pytest.mark.asyncio
+async def test_list_runs_between_orders_a_days_replacements_after_its_own_run(svc, monkeypatch):
+    for lane, n in (("spotlight", 1), ("main", 1), ("spotlight", 0), ("main", 0)):     # a full day: RUNS_PER_DAY_MAX
+        row = {"id": str(uuid.uuid4()), "run_date": "2026-10-02", "status": "skipped", "metadata": {}}
+        if lane != "main":
+            row["lane"] = lane
+        if n:
+            row["replacement"] = n
+        svc.fake.tables[mrs.RUNS].rows.append(row)
+    got = await svc.list_runs_between(date(2026, 10, 2), date(2026, 10, 2))
+    assert [(mrs.run_lane(r), mrs.run_replacement(r)) for r in got] == [
+        ("main", 0), ("main", 1), ("spotlight", 0), ("spotlight", 1)]
+
+
+@pytest.mark.asyncio
+async def test_the_same_day_read_sees_the_other_lanes_replacements_and_never_its_own_lane(svc, monkeypatch):
+    limits: List[int] = []
+    real_limit = _Query.limit
+
+    def spy(self, n):
+        limits.append(n)
+        return real_limit(self, n)
+
+    monkeypatch.setattr(_Query, "limit", spy)
+    day = date(2026, 10, 2)
+    _script_at(svc, "2026-10-02", lane="spotlight", source_ref="news:money_map:AAA:2025",
+               created_at="2026-10-02T14:00:00+00:00")
+    _script_at(svc, "2026-10-02", lane="spotlight", replacement=1, source_ref="news:money_map:BBB:2025",
+               created_at="2026-10-02T15:00:00+00:00")
+    _script_at(svc, "2026-10-02", lane="main", source_ref="news:money_map:CCC:2025",
+               created_at="2026-10-02T20:00:00+00:00")
+    _script_at(svc, "2026-10-02", lane="main", replacement=1, source_ref="news:money_map:DDD:2025",
+               created_at="2026-10-02T21:00:00+00:00")
+    assert await svc.recent_source_refs(day, 10, lane="main") == ["news:money_map:BBB:2025", "news:money_map:AAA:2025"]
+    assert await svc.recent_source_refs(day, 10, lane="spotlight") == ["news:money_map:DDD:2025",
+                                                                      "news:money_map:CCC:2025"]
+    assert limits.count(schemas.RUNS_PER_DAY_MAX) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_checked_window_read_never_counts_a_replacement(svc):
+    """A replacement builds Money Map alone and records no Form 4 window: the read takes the lane's own runs only, so
+    its bound (one script per day) holds however many replacements the days held."""
+    before = date(2026, 11, 24)
+    _checked_script(svc, "2026-11-19", window=("2026-11-16", "2026-11-18"))
+    _checked_script(svc, "2026-11-21", window=("2026-11-19", "2026-11-20"), replacement=1)   # never read
+    for day in ("2026-11-22", "2026-11-23"):
+        for n in (1, 2):
+            _checked_script(svc, day, replacement=n)
+    assert await svc.last_checked_window("spotlight", "insider_spotlight", before=before, within_days=5) == (
+        date(2026, 11, 16), date(2026, 11, 18))
+
+
+# ── request_replacement: the web's own refusals first, then ONE call of the function ─────────────────────────────────
+
+
+def _no_rpc(svc) -> None:
+    assert svc.fake.replacement_rpc.calls == [], svc.fake.replacement_rpc.calls
+
+
+@pytest.mark.asyncio
+async def test_a_request_is_recorded_in_one_call_with_the_lanes_cutoff(svc, monkeypatch, caplog):
+    _replace(monkeypatch)
+    gen0, posts = await _money_map_day(svc, monkeypatch)
+    with caplog.at_level(logging.INFO, logger=mrs.logger.name):
+        res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    assert (res.outcome, res.replacement, res.replacements_today, res.replayed) == ("requested", 1, 1, False)
+    assert sorted(res.rejected_post_ids) == sorted(p["id"] for p in posts)
+    assert res.from_source_ref == _R_REF and res.cutoff == _et(_R_DAY, 22, 10) and res.run["id"] == gen0["id"]
+    assert svc.fake.replacement_rpc.calls == [(rpcfake.REQUEST, {"p_run_id": gen0["id"], "p_by": _BY,
+                                                                 "p_not_after": "2026-09-17T22:10:00-04:00"})]
+    new = _stored(svc, res.run_id)
+    assert (new["run_date"], new["lane"], new["replacement"], new["replaces_run_id"], new["status"], new["attempts"]) \
+        == ("2026-09-17", "main", 1, gen0["id"], "planned", 0)
+    assert _BY not in json.dumps(new)
+    assert any("REQUESTED" in r.getMessage() and res.run_id in r.getMessage() for r in caplog.records)
+    # a second tap — or a retry whose first answer was lost — is answered again from the ledger, never written twice
+    again = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 1))
+    assert again.outcome == "requested" and again.replayed is True and again.run_id == res.run_id
+    assert sorted(again.rejected_post_ids) == sorted(res.rejected_post_ids) and again.replacements_today == 1
+    assert sum(1 for r in svc.fake.tables[mrs.RUNS].rows if mrs.run_replacement(r) >= 1) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lost_response_is_answered_from_the_ledger_on_the_retry(svc, monkeypatch, caplog):
+    _replace(monkeypatch)
+    gen0, posts = await _money_map_day(svc, monkeypatch)
+    svc.fake.replacement_rpc.lose_response.add(rpcfake.REQUEST)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingRunError, match=rpcfake.REQUEST):
+            await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    assert any("may have committed" in r.getMessage() for r in caplog.records)
+    svc.fake.replacement_rpc.lose_response.clear()
+    retry = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 1))
+    assert retry.outcome == "requested" and retry.replayed is True and retry.replacement == 1
+    assert sorted(retry.rejected_post_ids) == sorted(p["id"] for p in posts)
+
+
+@pytest.mark.parametrize("why", ["switch_off", "money_map_unlisted", "class_f_off", "lesson_only"])
+@pytest.mark.asyncio
+async def test_a_switch_refusal_reads_the_run_once_and_calls_nothing(svc, monkeypatch, why):
+    """The run is read (one round trip) only to tell a request that already landed; a run never replaced is refused by
+    the switch with nothing written and the function never called."""
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    _replace(monkeypatch, on=why != "switch_off",
+             series="ceo_buys,insider_buys" if why == "money_map_unlisted" else _REP_SERIES,
+             classes={"class_f_off": "A,C", "lesson_only": "A"}.get(why, "A,C,F"))
+    reads = _counting_reads(monkeypatch)
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    assert res.outcome == ("switched_off" if why == "switch_off" else "money_map_off")
+    assert res.outcome in schemas.REPLACEMENT_REFUSALS_LOCAL and res.run is None
+    assert len(reads) == 1
+    _no_rpc(svc)
+    # a junk id with the switch off is still the switch's answer, with nothing read
+    reads.clear()
+    assert (await svc.request_replacement("not-a-uuid", by=_BY, now=_et(_R_DAY, 18, 0))).outcome == res.outcome
+    assert reads == []
+
+
+# ── a request that already LANDED is answered from the ledger past every local refusal (review 2026-11-27) ──────────
+
+
+async def _landed_with_a_lost_response(svc, monkeypatch, *, at: datetime) -> Tuple[Dict[str, Any], List[Dict]]:
+    """Gen 0 offered, ✅ Yes at `at`: the function COMMITS and the response is lost (the bot showed R11)."""
+    _replace(monkeypatch)
+    gen0, posts = await _money_map_day(svc, monkeypatch)
+    svc.fake.replacement_rpc.lose_response.add(rpcfake.REQUEST)
+    with pytest.raises(mrs.MarketingRunError):
+        await _request(svc, gen0["id"], at=at)
+    svc.fake.replacement_rpc.lose_response.clear()
+    assert mrs.replacement_request_landed(_stored(svc, gen0["id"]))
+    return gen0, posts
+
+
+@pytest.mark.parametrize("why", ["past_cutoff", "next_day", "switch_off", "money_map_off"])
+@pytest.mark.asyncio
+async def test_a_retry_of_a_request_that_landed_is_the_replay_past_every_local_refusal(svc, monkeypatch, why):
+    """✅ Yes at 22:09:58 lands and its answer is lost; the retry comes after the 22:10 cutoff (or the next day, or after
+    a switch went off). It is answered `requested` (replayed) — never "too late" / "switched off" for a request that
+    rejected his posts and planned the 22:15 run. The function is called with the start of the run's day as its
+    cutoff, so it can only read back, and nothing is written."""
+    gen0, posts = await _landed_with_a_lost_response(svc, monkeypatch, at=_et(_R_DAY, 22, 9) + timedelta(seconds=58))
+    at = _et(_R_DAY, 22, 10) + timedelta(seconds=3)
+    if why == "next_day":
+        at = _et(_R_DAY + timedelta(days=1), 9, 0)
+    elif why == "switch_off":
+        _replace(monkeypatch, on=False)
+    elif why == "money_map_off":
+        _replace(monkeypatch, classes="A,C")
+    svc.fake.rpc_clock = at
+    before = copy.deepcopy((svc.fake.tables[mrs.RUNS].rows, svc.fake.tables[mrs.POSTS].rows))
+    res = await svc.request_replacement(gen0["id"], by=_BY, now=at)
+    assert (res.outcome, res.replayed, res.replacement, res.status) == ("requested", True, 1, "planned")
+    assert sorted(res.rejected_post_ids) == sorted(p["id"] for p in posts)
+    assert svc.fake.replacement_rpc.calls[-1][1]["p_not_after"] == "2026-09-17T00:00:00-04:00"
+    assert (svc.fake.tables[mrs.RUNS].rows, svc.fake.tables[mrs.POSTS].rows) == before
+
+
+@pytest.mark.asyncio
+async def test_a_local_refusal_never_lets_the_function_write_even_for_a_run_claiming_replaced_by(svc, monkeypatch,
+                                                                                             caplog):
+    """A run whose `replaced_by` names no replacement row (a hand edit) passes `replacement_request_landed`, so the
+    function is asked — with the start of its day as the cutoff: it answers `too_late`, writes nothing, and the tap
+    hears the LOCAL refusal."""
+    _replace(monkeypatch)
+    gen0, posts = await _money_map_day(svc, monkeypatch)
+    _stored(svc, gen0["id"])["metadata"]["replaced_by"] = {"run_id": str(uuid.uuid4())}
+    _replace(monkeypatch, on=False)
+    before = copy.deepcopy((svc.fake.tables[mrs.RUNS].rows, svc.fake.tables[mrs.POSTS].rows))
+    with caplog.at_level(logging.INFO, logger=mrs.logger.name):
+        res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    assert res.outcome == "switched_off" and res.replayed is False
+    assert (svc.fake.tables[mrs.RUNS].rows, svc.fake.tables[mrs.POSTS].rows) == before
+    assert any("the ledger answered too_late, nothing written" in r.getMessage() for r in caplog.records)
+    # past the cutoff, the same
+    _replace(monkeypatch)
+    late = await _request(svc, gen0["id"], at=_et(_R_DAY, 22, 30))
+    assert late.outcome == "too_late" and late.cutoff == _et(_R_DAY, 22, 10)
+    assert (svc.fake.tables[mrs.RUNS].rows, svc.fake.tables[mrs.POSTS].rows) == before
+
+
+@pytest.mark.asyncio
+async def test_a_run_restored_after_its_request_is_not_landed_and_gets_the_local_refusal(svc, monkeypatch):
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    _stored(svc, gen0["id"])["metadata"].update(replaced_by={"run_id": str(uuid.uuid4())},
+                                                restored_from={"run_id": "x"})
+    assert mrs.replacement_request_landed(_stored(svc, gen0["id"])) is False
+    _replace(monkeypatch, on=False)
+    assert (await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))).outcome == "switched_off"
+    _no_rpc(svc)
+
+
+@pytest.mark.parametrize("stamp", [None, {}, {"run_id": None}, {"run_id": 7}, {"run_id": "nope"},
+                                   {"run_id": "6A1F0C0E-6F8B-4C8E-9C4E-6E0D4A8D2F10"}, "x", []])
+def test_replacement_request_landed_needs_a_canonical_replaced_by_and_no_restore(stamp):
+    run = {"metadata": {} if stamp is None else {"replaced_by": stamp}}
+    assert mrs.replacement_request_landed(run) is False
+    assert mrs.replacement_request_landed({"metadata": "x"}) is False and mrs.replacement_request_landed(None) is False
+    good = {"metadata": {"replaced_by": {"run_id": str(uuid.uuid4())}}}
+    assert mrs.replacement_request_landed(good) is True
+
+
+@pytest.mark.asyncio
+async def test_a_switch_refusal_whose_run_read_fails_is_still_the_switch_s_answer(svc, monkeypatch, caplog):
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    _replace(monkeypatch, on=False)
+
+    async def broken(*_a, **_k):
+        raise mrs.MarketingRunError("get_run: connection reset")
+
+    monkeypatch.setattr(svc, "get_run", broken)
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        assert (await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))).outcome == "switched_off"
+    assert any(r.levelno == logging.WARNING and "could not be read" in r.getMessage() for r in caplog.records)
+    _no_rpc(svc)
+    # with the switch ON the same failure is the ledger error the bot answers with "tap again"
+    _replace(monkeypatch)
+    with pytest.raises(mrs.MarketingRunError):
+        await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+
+
+def test_restore_closes_at_the_end_of_the_run_s_own_et_day():
+    """Never the lane's tap cutoff (22:10 / 15:10): a replacement asked for at 21:30 starts at 22:15 and ends after it.
+    Across a DST change the close is still 00:00 ET of the next day."""
+    assert mrs.restore_closes(date(2026, 9, 17)) == datetime(2026, 9, 18, tzinfo=mrs.ET)
+    assert mrs.restore_closes(date(2026, 11, 1)) == datetime(2026, 11, 2, tzinfo=mrs.ET)          # the fall-back day
+    assert mrs.restore_closes(date(2026, 12, 31)) == datetime(2027, 1, 1, tzinfo=mrs.ET)
+    for lane in ("main", "spotlight"):
+        assert mrs.restore_closes(date(2026, 9, 17)) > mrs.replacement_start_closes(date(2026, 9, 17), lane)
+
+
+@pytest.mark.asyncio
+async def test_a_request_for_no_run_or_a_closed_day_never_calls_the_function(svc, monkeypatch):
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    reads = _counting_reads(monkeypatch)
+    for junk in ("not-a-uuid", gen0["id"].upper(), "", None, 42):
+        assert (await svc.request_replacement(junk, by=_BY, now=_et(_R_DAY, 18, 0))).outcome == "not_found"
+    assert reads == []                                                             # not a run id: nothing read
+    assert (await _request(svc, str(uuid.uuid4()), at=_et(_R_DAY, 18, 0))).outcome == "not_found"
+    for late in (_et(_R_DAY, 22, 10), _et(_R_DAY, 23, 0), _et(_R_DAY + timedelta(days=1), 9, 0),
+                 _et(_R_DAY - timedelta(days=1), 18, 0)):
+        res = await _request(svc, gen0["id"], at=late)
+        assert res.outcome == "too_late" and res.cutoff == _et(_R_DAY, 22, 10), late
+    assert (await _request(svc, gen0["id"], at=_et(_R_DAY, 22, 9))).outcome == "requested"    # one minute before
+    assert [c[0] for c in svc.fake.replacement_rpc.calls] == [rpcfake.REQUEST]
+
+
+@pytest.mark.asyncio
+async def test_a_spotlight_request_is_refused_once_its_lane_closed_for_the_date(svc, monkeypatch):
+    _spot(monkeypatch)
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch, lane="spotlight")
+    assert (await _request(svc, gen0["id"], at=_et(_R_DAY, 15, 10))).outcome == "too_late"     # 15:10 cutoff
+    _spot(monkeypatch, on=False)
+    _replace(monkeypatch)
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 14, 0))
+    assert res.outcome == "lane_closed" and res.detail == "lane_closed" and res.cutoff == _et(_R_DAY, 15, 10)
+    _no_rpc(svc)
+    _spot(monkeypatch)
+    _replace(monkeypatch)
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 14, 0))
+    assert res.outcome == "requested" and _stored(svc, res.run_id)["lane"] == "spotlight"
+    assert svc.fake.replacement_rpc.calls[-1][1]["p_not_after"] == "2026-09-17T15:10:00-04:00"
+
+
+@pytest.mark.asyncio
+async def test_every_refusal_of_the_function_reaches_the_caller(svc, monkeypatch):
+    """Through the statement-by-statement model: not_ready, member_decided (each blocking status), nothing_pending,
+    not_money_map, already_replaced, cap_reached (over both lanes) — each writes nothing."""
+    _spot(monkeypatch, days="mon,tue,wed,thu,fri,sat,sun")
+    _replace(monkeypatch)
+    at = _et(_R_DAY, 14, 0)
+    gen0, posts = await _money_map_day(svc, monkeypatch, lane="spotlight")
+    svc.fake.tables[mrs.RUNS].rows[0]["status"] = "in_progress"
+    res = await _request(svc, gen0["id"], at=at)
+    assert (res.outcome, res.status) == ("not_ready", "in_progress")
+    svc.fake.tables[mrs.RUNS].rows[0]["status"] = "media_ready"
+    for status in schemas.REPLACEMENT_BLOCKING_POST_STATUSES:
+        _live_post(svc, posts[0]["id"])["status"] = status
+        res = await _request(svc, gen0["id"], at=at)
+        assert (res.outcome, res.detail) == ("member_decided", status), status
+    for p in posts:
+        _live_post(svc, p["id"])["status"] = "rejected"
+    assert (await _request(svc, gen0["id"], at=at)).outcome == "nothing_pending"
+    for p in posts:
+        _live_post(svc, p["id"])["status"] = "pending_review"
+    script = next(s for s in svc.fake.tables[mrs.SCRIPTS].rows if s["run_id"] == gen0["id"])
+    script["template_id"] = "ceo_buys"
+    assert (await _request(svc, gen0["id"], at=at)).outcome == "not_money_map"
+    script["template_id"] = "money_map"
+    assert sum(1 for r in svc.fake.tables[mrs.RUNS].rows if mrs.run_replacement(r) >= 1) == 0     # nothing written
+    # the day's cap is over BOTH lanes: two main replacements leave the spotlight none
+    main0, _ = await _money_map_day(svc, monkeypatch, lane="main", at=_et(_R_DAY, 10, 20))
+    first = await _request(svc, main0["id"], at=at)
+    assert first.outcome == "requested"
+    _stored(svc, first.run_id).update(status="media_ready")
+    await svc.insert_script(_money_map_script(first.run_id, ref="news:money_map:NVDA:2026"))
+    _p5_post(svc, status="pending_review", run_id=first.run_id, key="2026-09-17:r1:x:text")
+    second = await _request(svc, first.run_id, at=at)
+    assert (second.outcome, second.replacement, second.replacements_today) == ("requested", 2, 2)
+    capped = await _request(svc, gen0["id"], at=at)
+    assert (capped.outcome, capped.replacements_today) == ("cap_reached", 2)
+    # the original of a lane already replaced twice over
+    stale = await _request(svc, main0["id"], at=at)
+    assert (stale.outcome, stale.run_id, stale.replacement, stale.status) == \
+        ("already_replaced", second.run_id, 2, "planned")
+
+
+@pytest.mark.parametrize("answer, match", [
+    (None, "not an object"), ([], "not an object"), ({"outcome": "maybe"}, "unknown outcome"),
+    ({"outcome": "requested", "run_id": "nope", "replacement": 1, "replacements_today": 1, "replayed": False},
+     "canonical uuid"),
+    ({"outcome": "requested", "run_id": "11111111-1111-4111-8111-111111111111", "replacement": 2,
+      "replacements_today": 1, "replayed": False}, "is not 1"),
+    ({"outcome": "requested", "run_id": "11111111-1111-4111-8111-111111111111", "replacement": True,
+      "replacements_today": 1, "replayed": False}, "is not 1"),
+    ({"outcome": "requested", "run_id": "11111111-1111-4111-8111-111111111111", "replacement": 1,
+      "replacements_today": 3, "replayed": False}, "replacements_today"),
+    ({"outcome": "requested", "run_id": "11111111-1111-4111-8111-111111111111", "replacement": 1,
+      "replacements_today": True, "replayed": False}, "replacements_today"),
+    ({"outcome": "requested", "run_id": "11111111-1111-4111-8111-111111111111", "replacement": 1,
+      "replacements_today": 1}, "replayed"),
+    ({"outcome": "requested", "run_id": "11111111-1111-4111-8111-111111111111", "replacement": 1,
+      "replacements_today": 1, "replayed": False, "rejected_post_ids": "x"}, "not a list"),
+])
+@pytest.mark.asyncio
+async def test_an_answer_that_does_not_read_back_is_a_ledger_error(svc, monkeypatch, caplog, answer, match):
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    monkeypatch.setattr(svc.fake.replacement_rpc, "marketing_request_replacement", lambda **_k: answer)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingRunError, match="unreadable answer"):
+            await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    assert any("does not read back" in r.getMessage() and match in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_only_whole_number_message_ids_and_uuid_post_ids_are_kept(svc, monkeypatch, caplog):
+    """Amendment A6: the sibling decision messages are edited by numeric id only; junk is dropped (WARNING) and the
+    request — already recorded — stands."""
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    pid = str(uuid.uuid4())
+    answer = {"outcome": "requested", "replayed": False, "run_id": str(uuid.uuid4()), "replacement": 1,
+              "replacements_today": 1, "rejected_post_ids": [pid, "nope", 7, pid.upper()],
+              "review_message_ids": [101, "102", True, 103.0, None, 104], "from_source_ref": _R_REF}
+    monkeypatch.setattr(svc.fake.replacement_rpc, "marketing_request_replacement", lambda **_k: answer)
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    assert res.outcome == "requested" and res.review_message_ids == (101, 104) and res.rejected_post_ids == (pid,)
+    assert sum("dropped" in r.getMessage() for r in caplog.records) == 2
+    for absent in ({"review_message_ids": None, "rejected_post_ids": None}, {}):
+        answer = {k: v for k, v in answer.items() if k not in ("review_message_ids", "rejected_post_ids")}
+        answer.update(absent)
+        res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+        assert res.review_message_ids == () and res.rejected_post_ids == ()
+
+
+@pytest.mark.parametrize("canned, expected", [
+    ({"outcome": "not_found"}, {}),
+    ({"outcome": "too_late"}, {}),
+    ({"outcome": "already_replaced", "run_id": "22222222-2222-4222-8222-222222222222", "replacement": 1,
+      "status": "media_ready"}, {"run_id": "22222222-2222-4222-8222-222222222222", "replacement": 1,
+                                 "status": "media_ready"}),
+    ({"outcome": "already_replaced", "run_id": "junk", "replacement": 9, "status": "weird"},
+     {"run_id": None, "replacement": None, "status": None}),
+    ({"outcome": "not_ready", "status": "in_progress"}, {"status": "in_progress"}),
+    ({"outcome": "not_money_map"}, {}),
+    ({"outcome": "member_decided", "statuses": "approved,queued"}, {"detail": "approved,queued"}),
+    ({"outcome": "nothing_pending"}, {}),
+    ({"outcome": "cap_reached", "today": 2}, {"replacements_today": 2}),
+    ({"outcome": "cap_reached", "today": "2"}, {"replacements_today": None}),
+])
+@pytest.mark.asyncio
+async def test_every_outcome_of_the_function_maps_through(svc, monkeypatch, canned, expected):
+    assert canned["outcome"] in schemas.REPLACEMENT_OUTCOMES
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    monkeypatch.setattr(svc.fake.replacement_rpc, "marketing_request_replacement", lambda **_k: dict(canned))
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    assert res.outcome == canned["outcome"] and res.run["id"] == gen0["id"]
+    for key, value in expected.items():
+        assert getattr(res, key) == value, key
+
+
+@pytest.mark.parametrize("knob, match", [
+    ("missing:PGRST202", "apply migration 215"), ("missing:42883", "apply migration 215"),
+    ("legacy_unique", "UNIQUE \\(run_date, lane\\) is back"), ("fail", "may have committed"),
+])
+@pytest.mark.asyncio
+async def test_a_function_failure_is_a_ledger_error_naming_what_to_do(svc, monkeypatch, caplog, knob, match):
+    _replace(monkeypatch)
+    gen0, posts = await _money_map_day(svc, monkeypatch)
+    fake = svc.fake.replacement_rpc
+    if knob.startswith("missing"):
+        fake.missing, fake.missing_code = True, knob.split(":")[1]
+    elif knob == "legacy_unique":
+        fake.legacy_unique = True                 # migration 210 re-run after 215: the INSERT raises 23505
+    else:
+        fake.fail.add(rpcfake.REQUEST)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingRunError):
+            await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    assert any(re.search(match, r.getMessage()) and r.levelno == logging.ERROR for r in caplog.records), \
+        [r.getMessage() for r in caplog.records]
+    assert sum(1 for r in svc.fake.tables[mrs.RUNS].rows if mrs.run_replacement(r) >= 1) == 0
+    assert all(_live_post(svc, p["id"])["status"] == "pending_review" for p in posts)
+
+
+@pytest.mark.asyncio
+async def test_a_request_names_who_asked_and_when(svc, monkeypatch):
+    _replace(monkeypatch)
+    gen0, _ = await _money_map_day(svc, monkeypatch)
+    for by in ("", "   ", None, 7):
+        with pytest.raises(MarketingRequestInvalid, match="`by`"):
+            await svc.request_replacement(gen0["id"], by=by, now=_et(_R_DAY, 18, 0))
+        with pytest.raises(MarketingRequestInvalid, match="`by`"):
+            await svc.restore_replaced(gen0["id"], by=by, now=_et(_R_DAY, 18, 0))
+    for now in (_R_DAY, "soon", None):
+        with pytest.raises(ValueError):
+            await svc.request_replacement(gen0["id"], by=_BY, now=now)
+    svc.fake.rpc_clock = _et(_R_DAY, 18, 0)
+    long_by = "telegram:" + "9" * 100
+    res = await svc.request_replacement(gen0["id"], by=long_by, now=_et(_R_DAY, 18, 0))
+    assert res.outcome == "requested" and svc.fake.replacement_rpc.calls[-1][1]["p_by"] == long_by[:64]
+    recorded = _stored(svc, gen0["id"])["metadata"]["replaced_by"]
+    assert recorded["by"] == long_by[:64] and recorded["not_after"] == _et(_R_DAY, 22, 10).isoformat()
+
+
+# ── restore_replaced: "↩ Post {SYM} after all" ──────────────────────────────────────────────────────────────────────
+
+
+async def _dead_replacement(svc, monkeypatch, *, status="skipped", attempts=1):
+    _replace(monkeypatch)
+    gen0, posts = await _money_map_day(svc, monkeypatch)
+    res = await _request(svc, gen0["id"], at=_et(_R_DAY, 18, 0))
+    _stored(svc, res.run_id).update(status=status, attempts=attempts)
+    return gen0, posts, res
+
+
+@pytest.mark.asyncio
+async def test_a_restore_puts_back_exactly_the_posts_the_request_rejected_and_reads_no_switch(svc, monkeypatch,
+                                                                                               caplog):
+    gen0, posts, res = await _dead_replacement(svc, monkeypatch)
+    _replace(monkeypatch, on=False)                    # restore works after replacing was switched off (A1)
+    monkeypatch.setattr(mrs.selection, "replacement_on", _never_read)
+    svc.fake.rpc_clock = _et(_R_DAY, 19, 0)
+    with caplog.at_level(logging.INFO, logger=mrs.logger.name):
+        out = await svc.restore_replaced(gen0["id"], by=_BY, now=_et(_R_DAY, 19, 0))
+    assert out.outcome == "restored" and out.replayed is False
+    # the restore closes at the END of the run's ET day (never the 22:10 tap cutoff): midnight ET
+    assert sorted(out.post_ids) == sorted(p["id"] for p in posts) and out.cutoff == datetime(2026, 9, 18, tzinfo=mrs.ET)
+    assert svc.fake.replacement_rpc.calls[-1] == (rpcfake.RESTORE, {"p_run_id": gen0["id"], "p_by": _BY,
+                                                                    "p_now": _et(_R_DAY, 19, 0).isoformat()})
+    for p in posts:
+        live = _live_post(svc, p["id"])
+        assert live["status"] == "pending_review" and "review" not in live["metadata"]
+        assert live["metadata"]["restored"]["by_run_id"] == res.run_id
+    assert any("outcome=restored" in r.getMessage() for r in caplog.records)
+    again = await svc.restore_replaced(gen0["id"], by=_BY, now=_et(_R_DAY, 19, 1))
+    assert again.outcome == "restored" and again.replayed is True and sorted(again.post_ids) == sorted(out.post_ids)
+    # a request after a restore never replays the old one: the lane is already replaced
+    _replace(monkeypatch)
+    monkeypatch.setattr(mrs.selection, "replacement_on", lambda: True)
+    assert (await _request(svc, gen0["id"], at=_et(_R_DAY, 19, 2))).outcome == "already_replaced"
+
+
+@pytest.mark.parametrize("status, attempts, expected", [
+    ("planned", 0, "replacement_running"), ("in_progress", 1, "replacement_running"),
+    ("failed", 1, "replacement_running"), ("failed", 2, "restored"), ("media_ready", 1, "restored"),
+])
+@pytest.mark.asyncio
+async def test_a_restore_waits_for_a_replacement_that_may_still_post(svc, monkeypatch, status, attempts, expected):
+    gen0, _, res = await _dead_replacement(svc, monkeypatch, status=status, attempts=attempts)
+    svc.fake.rpc_clock = _et(_R_DAY, 19, 0)
+    out = await svc.restore_replaced(gen0["id"], by=_BY, now=_et(_R_DAY, 19, 0))
+    assert out.outcome == expected
+    if expected == "replacement_running":
+        assert (out.status, out.attempts) == (status, attempts) and out.post_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_a_restore_refuses_a_replacement_that_made_posts_and_a_late_or_unknown_run(svc, monkeypatch):
+    gen0, _, res = await _dead_replacement(svc, monkeypatch, status="media_ready")
+    _p5_post(svc, status="rejected", run_id=res.run_id, key="2026-09-17:r1:x:text")
+    svc.fake.rpc_clock = _et(_R_DAY, 19, 0)
+    assert (await svc.restore_replaced(gen0["id"], by=_BY, now=_et(_R_DAY, 19, 0))).outcome == "replacement_has_posts"
+    svc.fake.tables[mrs.POSTS].rows[:] = [p for p in svc.fake.tables[mrs.POSTS].rows if p["run_id"] != res.run_id]
+    svc.fake.rpc_clock = _et(_R_DAY + timedelta(days=1), 0, 0)
+    late = await svc.restore_replaced(gen0["id"], by=_BY, now=_et(_R_DAY + timedelta(days=1), 0, 0))
+    assert late.outcome == "too_late" and late.cutoff == datetime(2026, 9, 18, tzinfo=mrs.ET)
+    calls = len(svc.fake.replacement_rpc.calls)
+    for junk in ("x", gen0["id"].upper(), None):
+        assert (await svc.restore_replaced(junk, by=_BY, now=_et(_R_DAY, 19, 0))).outcome == "not_found"
+    assert (await svc.restore_replaced(str(uuid.uuid4()), by=_BY, now=_et(_R_DAY, 19, 0))).outcome == "not_found"
+    assert len(svc.fake.replacement_rpc.calls) == calls                       # none of those called the function
+
+
+@pytest.mark.parametrize("answer", [None, {"outcome": "undone"}, {"outcome": "restored", "post_ids": []},
+                                    {"outcome": "restored", "replayed": "no", "post_ids": []},
+                                    {"outcome": "restored", "replayed": False, "post_ids": "x"}])
+@pytest.mark.asyncio
+async def test_a_restore_answer_that_does_not_read_back_is_a_ledger_error(svc, monkeypatch, caplog, answer):
+    gen0, _, _ = await _dead_replacement(svc, monkeypatch)
+    monkeypatch.setattr(svc.fake.replacement_rpc, "marketing_restore_replaced", lambda **_k: answer)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingRunError, match="unreadable answer"):
+            await svc.restore_replaced(gen0["id"], by=_BY, now=_et(_R_DAY, 19, 0))
+    assert any("does not read back" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("knob", ["missing", "fail"])
+@pytest.mark.asyncio
+async def test_a_restore_failure_is_a_ledger_error(svc, monkeypatch, caplog, knob):
+    gen0, posts, _ = await _dead_replacement(svc, monkeypatch)
+    if knob == "missing":
+        svc.fake.replacement_rpc.missing = True
+    else:
+        svc.fake.replacement_rpc.fail.add(rpcfake.RESTORE)
+    with caplog.at_level(logging.ERROR, logger=mrs.logger.name):
+        with pytest.raises(mrs.MarketingRunError):
+            await svc.restore_replaced(gen0["id"], by=_BY, now=_et(_R_DAY, 19, 0))
+    assert any(r.levelno == logging.ERROR and "marketing_restore_replaced" in r.getMessage() for r in caplog.records)
+    assert all(_live_post(svc, p["id"])["status"] == "rejected" for p in posts)
+
+
+# ── the readers: replaced_scripts, count_replacements, replacement_runs_between ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_replaced_scripts_returns_every_earlier_record_of_the_lane_or_raises(svc, monkeypatch):
+    for lane, n, ref in (("main", 0, "news:money_map:COST:2025"), ("main", 1, "news:money_map:NVDA:2026"),
+                         ("spotlight", 0, "news:money_map:AAPL:2025"), ("main", 2, "news:money_map:MSFT:2026")):
+        _script_at(svc, "2026-09-17", lane=lane, replacement=n, source_ref=ref, output={"n": n})
+    got = await svc.replaced_scripts(_R_DAY, "main", below=2)
+    assert [(r["replacement"], r["source_ref"], r["output"]) for r in got] == [
+        (0, "news:money_map:COST:2025", {"n": 0}), (1, "news:money_map:NVDA:2026", {"n": 1})]
+    assert set(got[0]) == {"run_id", "replacement", "source_ref", "output"}
+    assert [r["source_ref"] for r in await svc.replaced_scripts("2026-09-17", "main", below=1)] == [
+        "news:money_map:COST:2025"]
+    assert [r["source_ref"] for r in await svc.replaced_scripts(_R_DAY, "spotlight", below=1)] == [
+        "news:money_map:AAPL:2025"]
+    # never built on a guess: a missing generation, an extra row, an empty ref, a number that does not read back
+    with pytest.raises(mrs.MarketingRunError, match=r"holds scripts of \[0\]"):
+        await svc.replaced_scripts(_R_DAY, "spotlight", below=2)
+    with pytest.raises(mrs.MarketingRunError, match="replaced_scripts"):
+        await svc.replaced_scripts(date(2026, 9, 18), "main", below=1)
+    dup = _script_at(svc, "2026-09-17", lane="main", replacement=1, source_ref="news:money_map:AMD:2026")
+    with pytest.raises(mrs.MarketingRunError, match=r"holds scripts of \[0, 1, 1\]"):
+        await svc.replaced_scripts(_R_DAY, "main", below=2)
+    svc.fake.tables[mrs.SCRIPTS].rows.remove(dup)
+    svc.fake.tables[mrs.SCRIPTS].rows[1]["source_ref"] = " "
+    with pytest.raises(mrs.MarketingRunError, match="records no source_ref"):
+        await svc.replaced_scripts(_R_DAY, "main", below=2)
+    svc.fake.tables[mrs.SCRIPTS].rows[1]["source_ref"] = None
+    with pytest.raises(mrs.MarketingRunError, match="records no source_ref"):
+        await svc.replaced_scripts(_R_DAY, "main", below=2)
+    # (1.5: past the SMALLINT a real row could never hold — the fake still lets it through the `< below` filter)
+    svc.fake.tables[mrs.SCRIPTS].rows[1].update(source_ref="news:money_map:NVDA:2026", replacement=1.5)
+    with pytest.raises(mrs.MarketingRunError, match="does not read back"):
+        await svc.replaced_scripts(_R_DAY, "main", below=2)
+    reads = _counting_reads(monkeypatch)
+    for below in (0, 3, True, "1", None):
+        with pytest.raises(ValueError, match="below"):
+            await svc.replaced_scripts(_R_DAY, "main", below=below)
+    with pytest.raises(MarketingRequestInvalid):
+        await svc.replaced_scripts(_R_DAY, "noon", below=1)
+    assert reads == []
+
+    async def down(query):
+        raise RuntimeError("503 from PostgREST")
+
+    monkeypatch.setattr(mrs, "sb_exec", down)
+    with pytest.raises(mrs.MarketingRunError, match="replaced_scripts"):
+        await svc.replaced_scripts(_R_DAY, "main", below=1)
+
+
+def _rep_run(svc, day: str, n: int, *, lane: str = "main", status: str = "planned", **meta) -> Dict[str, Any]:
+    row = {"id": str(uuid.uuid4()), "run_date": day, "replacement": n, "status": status, "stage": "planned",
+           "attempts": 0, "metadata": dict(meta), "updated_at": _et(_R_DAY, 18, 0).isoformat()}
+    if lane != "main":
+        row["lane"] = lane
+    svc.fake.tables[mrs.RUNS].rows.append(row)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_count_replacements_counts_both_lanes_of_one_day(svc, monkeypatch):
+    assert await svc.count_replacements(_R_DAY) == 0
+    _seed_run(svc, _R_DAY, "media_ready", touched=NOW)                          # a day's own run never counts
+    _rep_run(svc, "2026-09-17", 1)
+    _rep_run(svc, "2026-09-17", 1, lane="spotlight")
+    _rep_run(svc, "2026-09-16", 1)
+    assert await svc.count_replacements("2026-09-17") == 2
+    with pytest.raises(ValueError):
+        await svc.count_replacements(datetime(2026, 9, 17, 12))
+
+    async def down(query):
+        raise RuntimeError("503")
+
+    monkeypatch.setattr(mrs, "sb_exec", down)
+    with pytest.raises(mrs.MarketingRunError, match="count_replacements"):
+        await svc.count_replacements(_R_DAY)
+
+
+@pytest.mark.asyncio
+async def test_replacement_runs_between_reads_by_state_bounded(svc, monkeypatch):
+    _seed_run(svc, _R_DAY, "skipped", touched=NOW)                              # a day's own run: never read
+    a = _rep_run(svc, "2026-09-17", 1, lane="spotlight", status="skipped")
+    b = _rep_run(svc, "2026-09-17", 1, status="failed")
+    c = _rep_run(svc, "2026-09-16", 2, status="skipped", replacement_reported={"at": "x", "notice": "N1"})
+    d = _rep_run(svc, "2026-09-16", 1, status="media_ready")
+    got = await svc.replacement_runs_between(date(2026, 9, 16), _R_DAY)
+    assert [r["id"] for r in got] == [d["id"], c["id"], b["id"], a["id"]]          # day, main first, by number
+    got = await svc.replacement_runs_between(date(2026, 9, 16), _R_DAY, statuses=("skipped", "failed"),
+                                             unreported=True)
+    assert [r["id"] for r in got] == [b["id"], a["id"]]
+    assert await svc.replacement_runs_between(_R_DAY, date(2026, 9, 16)) == []
+    reads = _counting_reads(monkeypatch)
+    assert await svc.replacement_runs_between(date(2026, 9, 16), _R_DAY, statuses=()) == []
+    for bad in ("skipped", ("skipped", "gone"), (None,)):
+        with pytest.raises(ValueError, match="statuses"):
+            await svc.replacement_runs_between(date(2026, 9, 16), _R_DAY, statuses=bad)
+    assert reads == []
+    # past the per-day cap over the window: a hand edit — refused, never a partial list
+    _rep_run(svc, "2026-09-17", 2, status="planned")
+    with pytest.raises(mrs.MarketingRunError, match="replacement_runs_between: more than 2"):
+        await svc.replacement_runs_between(_R_DAY, _R_DAY)
+
+
+# ── the web's expiry step (amendment A10): closes what no claim will ever run, never what may still post ─────────────
+
+
+@pytest.mark.asyncio
+async def test_the_web_expiry_step_closes_what_no_claim_will_run(svc, monkeypatch, caplog):
+    _spot(monkeypatch, days="mon,tue,wed,thu,fri,sat,sun", real_start_window=True)
+    _replace(monkeypatch)
+    now = _et(_R_DAY, 23, 40)                                     # past the main lane's start window too
+    unstarted_main = _rep_run(svc, "2026-09-17", 1)
+    unstarted_spot = _rep_run(svc, "2026-09-17", 1, lane="spotlight")
+    yesterday_failed = _rep_run(svc, "2026-09-16", 1, status="failed", lane="spotlight")
+    yesterday_failed.update(attempts=1, stage="voiced")
+    at_cap = _rep_run(svc, "2026-09-16", 2, status="failed")
+    at_cap.update(attempts=2, stage="voiced")
+    with_posts = _rep_run(svc, "2026-09-15", 1, status="in_progress")
+    with_posts.update(attempts=1, stage="assets_ready")
+    live = _rep_run(svc, "2026-09-15", 2, status="in_progress")
+    live.update(attempts=1, stage="voiced", updated_at=(now - timedelta(minutes=10)).isoformat())
+    ready = _rep_run(svc, "2026-09-14", 1, status="media_ready")
+    too_old = _rep_run(svc, "2026-09-13", 1)                       # past the lookback: the claim's sweep's
+    with caplog.at_level(logging.INFO, logger=mrs.logger.name):
+        closed = await svc.expire_unclaimable_replacements(now=now)
+    assert sorted(r["id"] for r in closed) == sorted([unstarted_main["id"], unstarted_spot["id"],
+                                                      yesterday_failed["id"]])
+    whys = {r["id"]: r["metadata"]["replacement_expired"]["why"] for r in closed}
+    assert whys == {unstarted_main["id"]: "start_window_closed", unstarted_spot["id"]: "start_window_closed",
+                    yesterday_failed["id"]: "day_over"}
+    for row in (at_cap, with_posts, live, ready, too_old):
+        assert "replacement_expired" not in _stored(svc, row["id"])["metadata"], row["id"]
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert await svc.expire_unclaimable_replacements(now=now) == []                 # nothing left: idempotent
+
+
+@pytest.mark.asyncio
+async def test_the_web_expiry_step_closes_an_unstarted_replacement_when_the_switch_or_the_lane_closed(
+        svc, monkeypatch):
+    _spot(monkeypatch, days="mon,tue,wed,thu,fri,sat,sun")
+    _replace(monkeypatch)
+    now = _et(_R_DAY, 12, 0)
+    spot = _rep_run(svc, "2026-09-17", 1, lane="spotlight")
+    main = _rep_run(svc, "2026-09-17", 1)
+    assert await svc.expire_unclaimable_replacements(now=now) == []                 # both may still start
+    _spot(monkeypatch, days="mon,tue,wed,fri,sat,sun")                              # Thursday leaves the spotlight days
+    _replace(monkeypatch)
+    closed = await svc.expire_unclaimable_replacements(now=now)
+    assert [(r["id"], r["metadata"]["replacement_expired"]["why"]) for r in closed] == [(spot["id"], "lane_closed")]
+    _replace(monkeypatch, on=False)
+    closed = await svc.expire_unclaimable_replacements(now=now)
+    assert [(r["id"], r["metadata"]["replacement_expired"]["why"]) for r in closed] == [(main["id"], "switched_off")]
+
+
+@pytest.mark.asyncio
+async def test_the_web_expiry_step_reads_the_switch_and_the_lane_only_when_a_row_needs_them(svc, monkeypatch):
+    monkeypatch.setattr(mrs.settings, "MARKETING_RUN_HOUR_ET", 16)
+    asked: List[str] = []
+    monkeypatch.setattr(mrs.selection, "replacement_on", lambda: asked.append("switch") or True)
+    monkeypatch.setattr(mrs.selection, "spotlight_day_problem", lambda d: asked.append(f"lane {d}") or None)
+    assert await svc.expire_unclaimable_replacements(now=_et(_R_DAY, 12, 0)) == []
+    assert asked == []                                                              # no row: nothing read
+    for n in (1, 2):
+        _rep_run(svc, "2026-09-17", n, lane="spotlight")
+    _rep_run(svc, "2026-09-16", 1, status="failed").update(attempts=1, stage="voiced")      # day_over: needs neither
+    _rep_run(svc, "2026-09-17", 1)
+    assert await svc.expire_unclaimable_replacements(now=_et(_R_DAY, 12, 0)) != []
+    assert sorted(asked) == ["lane 2026-09-17", "switch"]                           # once each per call
+
+
+@pytest.mark.asyncio
+async def test_the_web_expiry_step_leaves_an_unreadable_row_and_a_lost_close_alone(svc, monkeypatch, caplog):
+    _replace(monkeypatch, on=False)
+    odd = _rep_run(svc, "2026-09-17", 1, lane="morning")
+    raced = _rep_run(svc, "2026-09-17", 2)
+    real_exec = mrs._exec
+
+    async def racing(query, *, op, **ids):
+        if op == "expire_unclaimable_replacements.close":
+            _stored(svc, raced["id"]).update(status="in_progress", attempts=1)     # a claim got there first
+        return await real_exec(query, op=op, **ids)
+
+    monkeypatch.setattr(mrs, "_exec", racing)
+    with caplog.at_level(logging.INFO, logger=mrs.logger.name):
+        assert await svc.expire_unclaimable_replacements(now=_et(_R_DAY, 18, 0)) == []
+    assert _stored(svc, raced["id"])["status"] == "in_progress"
+    assert any(r.levelno == logging.ERROR and odd["id"] in r.getMessage() for r in caplog.records)
+    assert any("lost to a concurrent write" in r.getMessage() and raced["id"] in r.getMessage()
+               for r in caplog.records)
+
+    async def down(query, *, op, **ids):
+        if op == "expire_unclaimable_replacements.close":
+            raise mrs.MarketingRunError("520")
+        return await real_exec(query, op=op, **ids)
+
+    _stored(svc, raced["id"]).update(status="planned", attempts=0)
+    monkeypatch.setattr(mrs, "_exec", down)
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        assert await svc.expire_unclaimable_replacements(now=_et(_R_DAY, 18, 0)) == []
+    assert any("next review cycle retries" in r.getMessage() for r in caplog.records)
+
+    async def unreadable(query, *, op, **ids):
+        raise mrs.MarketingRunError(f"{op} failed: 503")
+
+    monkeypatch.setattr(mrs, "_exec", unreadable)
+    with pytest.raises(mrs.MarketingRunError, match="replacement_runs_between"):
+        await svc.expire_unclaimable_replacements(now=_et(_R_DAY, 18, 0))
+
+
+def test_the_expiry_reasons_have_words_and_nothing_else():
+    assert set(mrs._REPLACEMENT_EXPIRED_WORDS) == set(schemas.REPLACEMENT_EXPIRED_WHY)
+    assert "swept" not in schemas.REPLACEMENT_EXPIRED_WHY                         # amendment A10: unreachable, dropped

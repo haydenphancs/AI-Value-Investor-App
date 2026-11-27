@@ -23,13 +23,22 @@ Idempotency shapes, all enforced by the database, not by check-then-act:
   after a Railway-skipped slot) gets 23505 and reads the row. A day holds at most one MAIN run
   (claimed through `/runs/claim`, whose INSERT never sends `lane`) and one SPOTLIGHT run (the
   second, morning post on MARKETING_SPOTLIGHT_WEEKDAYS, claimed through `/lanes/spotlight/claim`).
+  Since migration 215 the key is `(run_date, lane, replacement)`: a day's own run of a lane is replacement
+  0 (every INSERT here omits the column, so the 23505 above still fires on (run_date, lane, 0)), and the
+  owner's "🔄 Next company" (Money Map only, at most 2 a day over both lanes) adds replacement 1 or 2 of
+  the same (day, lane) through ONE Postgres function (`request_replacement`), which the worker's next tick
+  claims through this same claim — `get_run_by_date` hands it the (day, lane)'s NEWEST run. At most ONE
+  run per (day, lane) ever PUBLISHES: the function refuses once any post of the run is decided, and the
+  restore (`restore_replaced`) only while the replacement made no post.
 * `marketing_assets.storage_path` UNIQUE — content-addressed, so re-registering the same
   bytes on a resumed run returns the existing row instead of a second object. A spotlight run's
-  objects live under `<run_date>/spotlight/`, so the two runs of one day never meet on a path,
-  and an existing row of ANOTHER run is refused, never adopted.
+  objects live under `<run_date>/spotlight/`, a replacement's under `<run_date>[/spotlight]/r<n>/`
+  (migration 215), so the runs of one day never meet on a path, and an existing row of ANOTHER run is
+  refused, never adopted.
 * `marketing_posts (run_id, platform, format)` UNIQUE and `idempotency_key` UNIQUE — one
   ledger row per outlet, and the key the outlets themselves see
-  (`<run_date>:<platform>:<format>`; a spotlight post's is `<run_date>:spotlight:<platform>:<format>`).
+  (`<run_date>:<platform>:<format>`; a spotlight post's is `<run_date>:spotlight:<platform>:<format>`;
+  a replacement's `<run_date>[:spotlight]:r<n>:<platform>:<format>`).
 * `claim_post`: `UPDATE … WHERE status = 'approved'` returning the row — atomic, so two
   publisher ticks cannot both take the same post.
 * Per-post art (workstream C, 2026-11-16): `art/<sha256[:32]>.jpg` objects (`store_art`) are content-addressed
@@ -83,11 +92,26 @@ from app.schemas.marketing import (
     POST_METADATA_WRITTEN_BY,
     POST_PLATFORMS,
     POST_STATUSES,
+    REPLACEABLE_SERIES,
+    REPLACEMENT_EXPIRED_WHY,
+    REPLACEMENT_MAX_ATTEMPTS,
+    REPLACEMENT_OUTCOMES,
+    REPLACEMENT_REQUEST_RPC,
+    REPLACEMENT_RESTORE_RPC,
+    REPLACEMENT_SKIP_REASON,
+    REPLACEMENTS_PER_DAY,
+    RESTORE_OUTCOMES,
     RUN_LANE_MAIN,
     RUN_LANE_SPOTLIGHT,
     RUN_LANES,
+    RUN_META_REPLACED_BY,
+    RUN_META_REPLACEMENT_EXPIRED,
+    RUN_META_REPLACEMENT_REPORTED,
+    RUN_META_RESTORED_FROM,
+    RUN_REPLACEMENT_MAX,
     RUN_STAGES,
     RUN_STATUSES,
+    RUNS_PER_DAY_MAX,
     RUN_WORKER_CAPABILITIES_KEY,
     SERVER_OWNED_RUN_METADATA,
     TEMPLATE_AUTHORSHIP,
@@ -183,9 +207,10 @@ _REVIEW_OFFER_STAMPS: Tuple[str, ...] = ("review_bundle", "review_notified_at", 
 #: exactly these codes — pinned equal by tests/test_marketing_review_bot.py.
 REJECT_REASON_CODES = ("tone", "accuracy", "compliance", "weak", "other")
 
-#: Why `close_finished_runs` closed a run (`metadata.closed.reason`, from `close_summary`).
+#: Why `close_finished_runs` closed a run (`metadata.closed.reason`, from `close_summary`). Migration 215 appends
+#: `replaced` LAST: the owner's "🔄 Next company" rejected the run's waiting posts (nothing reached a platform).
 CLOSE_REASONS = ("posted", "all_rejected", "expired_unreviewed", "approved_unsent", "failed", "no_posts",
-                 "mixed")
+                 "mixed", "replaced")
 
 #: `link_hits_between` reads at most this many (campaign, day) rows — ~15 campaigns × a month is ~465.
 _LINK_HITS_LIMIT = 2000
@@ -290,8 +315,9 @@ def spotlight_start_closed(run_date: date, now: datetime) -> bool:
 
 def claim_window_ok(run_date: date, today: date) -> bool:
     """A worker may claim only TODAY (ET) or YESTERDAY (the out-of-window resume). A future
-    date would claim the real day before it arrives (the claim is UNIQUE (run_date, lane), so
-    that day's run in that lane would later be skipped as already done); an older one is
+    date would claim the real day before it arrives (the claim is UNIQUE (run_date, lane, replacement) — migration
+    215, a day's own run is replacement 0 — so that day's run in that lane would later be skipped as already done);
+    an older one is
     unbounded writer spend on demand. The same window bounds which runs a kick may start writer
     spend for (`held_problem`), in either lane."""
     return today - timedelta(days=1) <= run_date <= today
@@ -405,18 +431,22 @@ def next_stage(stage: str) -> Optional[str]:
     return RUN_STAGES[i + 1] if i + 1 < len(RUN_STAGES) else None
 
 
-def storage_path_for(run_date: date, kind: str, sha256: str, ext: str, *, lane: str = RUN_LANE_MAIN) -> str:
+def storage_path_for(run_date: date, kind: str, sha256: str, ext: str, *, lane: str = RUN_LANE_MAIN,
+                     replacement: int = 0) -> str:
     """Content-addressed object key: `<run_date>/<kind>-<sha256[:16]>.<ext>` for the MAIN lane (unchanged since
-    migration 170), `<run_date>/spotlight/<kind>-<sha256[:16]>.<ext>` for the SPOTLIGHT lane (migration 210).
+    migration 170), `<run_date>/spotlight/<kind>-<sha256[:16]>.<ext>` for the SPOTLIGHT lane (migration 210), and —
+    a replacement run (migration 215, `replacement` 1 or 2) — the lane's folder plus `/r<n>`:
+    `<run_date>/r1/…`, `<run_date>/spotlight/r2/…`. Replacement 0 is byte for byte the string it always was.
 
     Immutable by construction — the same bytes always land on the same key, different bytes
     never collide with it, and nothing is ever overwritten in place (podcast directories
-    and Meta both cache by URL). The lane is part of the key because the worker's deterministic
-    objects (the preflight manifest) can be byte-identical in the two runs of one day: on one key
+    and Meta both cache by URL). The lane and the replacement are part of the key because the worker's deterministic
+    objects (the preflight manifest) can be byte-identical in the runs of one day: on one key
     they would meet the UNIQUE `storage_path` and one run would be handed the other's row.
-    ValueError for an unknown lane, kind or extension."""
+    ValueError for an unknown lane, replacement, kind or extension."""
     if lane not in RUN_LANES:
         raise ValueError(f"unknown lane {str(lane)[:40]!r}")
+    replacement = _check_replacement(replacement)
     if kind not in ASSET_KINDS:
         raise ValueError(f"unknown asset kind {kind!r}")
     ext = ext.lower().lstrip(".")
@@ -427,6 +457,8 @@ def storage_path_for(run_date: date, kind: str, sha256: str, ext: str, *, lane: 
     if len(sha256) != 64:
         raise ValueError("sha256 must be 64 hex chars")
     folder = run_date.isoformat() if lane == RUN_LANE_MAIN else f"{run_date.isoformat()}/{lane}"
+    if replacement >= 1:
+        folder = f"{folder}/{_replacement_segment(replacement)}"
     return f"{folder}/{kind}-{sha256[:16].lower()}.{ext}"
 
 
@@ -465,40 +497,81 @@ def _check_lane(lane: Any, *, op: str) -> str:
     return lane
 
 
-def lane_label(day: str, lane: Optional[str]) -> str:
+def lane_label(day: str, lane: Optional[str], replacement: Any = 0) -> str:
     """How a run is named to the owner: the day alone for the MAIN lane (byte for byte what every message said
-    before the spotlight lane), `<day> · spotlight` for the SPOTLIGHT lane. Pure."""
-    return f"{day} · {RUN_LANE_SPOTLIGHT}" if lane == RUN_LANE_SPOTLIGHT else day
+    before the spotlight lane), `<day> · spotlight` for the SPOTLIGHT lane — and, for a replacement run (migration
+    215), ` · replacement <n>` after either (`2026-11-27 · replacement 1`, `2026-11-27 · spotlight · replacement 2`).
+    Replacement 0 (the default: every caller before 215) adds nothing; a value that is not a replacement number
+    (`run_replacement` could not read it) is written ` · replacement ?`, never guessed. Pure, never raises."""
+    text = f"{day} · {RUN_LANE_SPOTLIGHT}" if lane == RUN_LANE_SPOTLIGHT else day
+    if type(replacement) is int and replacement == 0:
+        return text
+    if type(replacement) is int and 1 <= replacement <= RUN_REPLACEMENT_MAX:
+        return f"{text} · replacement {replacement}"
+    return f"{text} · replacement ?"
 
 
 def run_label(run: Any) -> str:
-    """`lane_label` of a run row: its `run_date` (first 10 characters; '?' when it has none) and its lane. A lane
-    that does not read back is named '?', never guessed as main. Pure, never raises."""
+    """`lane_label` of a run row: its `run_date` (first 10 characters; '?' when it has none), its lane and its
+    replacement number (migration 215; none for a day's own run). A lane that does not read back is named '?',
+    never guessed as main; a replacement that does not read back is ` · replacement ?`. Pure, never raises."""
     day = str(run.get("run_date"))[:10] if isinstance(run, dict) and run.get("run_date") else "?"
     try:
         lane: Optional[str] = run_lane(run)
     except ValueError:
         return f"{day} · ?"
-    return lane_label(day, lane)
+    try:
+        replacement: Any = run_replacement(run)
+    except ValueError:
+        replacement = None
+    return lane_label(day, lane, replacement)
 
 
-def post_lane(post: Any) -> Optional[str]:
-    """The lane of a post, from its idempotency key: `<run_date>:<platform>:<format>` → main,
-    `<run_date>:spotlight:<platform>:<format>` → spotlight (`idempotency_key_for`), anything else → None (a
-    malformed key, an unknown platform or format). Pure."""
+def _post_key_shape(post: Any) -> Optional[Tuple[str, int]]:
+    """(lane, replacement) of a post, from its idempotency key — the four shapes `idempotency_key_for` writes:
+    `<run_date>:<platform>:<format>` → (main, 0), `<run_date>:spotlight:<platform>:<format>` → (spotlight, 0),
+    `<run_date>:r<n>:<platform>:<format>` → (main, n), `<run_date>:spotlight:r<n>:<platform>:<format>` →
+    (spotlight, n) — or None for anything else (a malformed key, an unknown platform or format, `r0`, `r01`, `R1`, a
+    number past RUN_REPLACEMENT_MAX, a `main` segment). No platform and no lane is `r<digit>`, so the shapes never
+    collide. Pure."""
     key = str(post.get("idempotency_key") or "") if isinstance(post, dict) else ""
     parts = key.split(":")
     try:
         date.fromisoformat(parts[0])
     except ValueError:
         return None
+    replacement = 0
     if len(parts) == 3:
         lane, platform, fmt = RUN_LANE_MAIN, parts[1], parts[2]
     elif len(parts) == 4 and parts[1] == RUN_LANE_SPOTLIGHT:
         lane, platform, fmt = RUN_LANE_SPOTLIGHT, parts[2], parts[3]
+    elif len(parts) == 4 and _replacement_from_segment(parts[1]) is not None:
+        lane, platform, fmt = RUN_LANE_MAIN, parts[2], parts[3]
+        replacement = _replacement_from_segment(parts[1]) or 0
+    elif len(parts) == 5 and parts[1] == RUN_LANE_SPOTLIGHT and _replacement_from_segment(parts[2]) is not None:
+        lane, platform, fmt = RUN_LANE_SPOTLIGHT, parts[3], parts[4]
+        replacement = _replacement_from_segment(parts[2]) or 0
     else:
         return None
-    return lane if platform in POST_PLATFORMS and fmt in POST_FORMATS else None
+    if platform not in POST_PLATFORMS or fmt not in POST_FORMATS:
+        return None
+    return lane, replacement
+
+
+def post_lane(post: Any) -> Optional[str]:
+    """The lane of a post, from its idempotency key: `<run_date>:<platform>:<format>` → main,
+    `<run_date>:spotlight:<platform>:<format>` → spotlight (`idempotency_key_for`) — and, migration 215, the same
+    two with an `r<n>` segment after the lane (a replacement run's) — anything else → None (a malformed key, an
+    unknown platform or format). Pure."""
+    shape = _post_key_shape(post)
+    return shape[0] if shape is not None else None
+
+
+def post_replacement(post: Any) -> Optional[int]:
+    """The replacement number of a post's run, from its idempotency key (migration 215): 0 for the two shapes before
+    it, n for `…:r<n>:…`, None for a key `post_lane` does not read either. Pure."""
+    shape = _post_key_shape(post)
+    return shape[1] if shape is not None else None
 
 
 def _lane_rank(row: Any) -> int:
@@ -513,9 +586,342 @@ def _lane_rank(row: Any) -> int:
 def post_run_label(post: Any) -> str:
     """`lane_label` of a post's run, from its idempotency key: the key's first 10 characters (the run date — the
     rendering every alert used before the spotlight lane, kept byte for byte for a main or malformed key), plus
-    ` · spotlight` for a spotlight key. Pure, never raises."""
+    ` · spotlight` for a spotlight key and ` · replacement <n>` for a replacement run's (migration 215). Pure, never
+    raises."""
     key = str(post.get("idempotency_key") or "") if isinstance(post, dict) else ""
-    return lane_label(key[:10], post_lane(post))
+    return lane_label(key[:10], post_lane(post), post_replacement(post) or 0)
+
+
+# ── replacement runs (migration 215, owner decision 2026-11-27: "Full replacement … Max 2 replacements a day. Money Map
+#    posts only … off until you switch it on") ─────────────────────────────────────────────────────────────────────
+# A replacement is a NEW run of the same (ET day, lane), `replacement` 1 or 2, inserted `planned` by ONE Postgres
+# function (`MarketingRunService.request_replacement`) and claimed by the worker's next hourly tick through the
+# EXISTING claim. Every key, path and label below is byte for byte today's for replacement 0.
+
+#: The `r<n>` key / path segment of a replacement run: one digit 1-9 (bounded by RUN_REPLACEMENT_MAX at the read),
+#: never `r0`, `r01` or `R1`. No platform, format or lane matches it, so the key shapes never collide.
+_REPLACEMENT_SEGMENT_RE = re.compile(r"r([1-9])", re.ASCII)
+
+#: The worker's cron minute (`marketing/railway.toml` "15 * * * *", pinned equal by a test): every tick starts at :15.
+WORKER_TICK_MINUTE = 15
+#: The main lane's last tick that can START a replacement the owner asked for before its cutoff, with one same-day
+#: retry left (22:15, then 23:15): taps close REPLACEMENT_TAP_MARGIN_MINUTES before it.
+MAIN_REPLACEMENT_LAST_TICK_HOUR_ET = 22
+#: Taps close this many minutes before a lane's last start tick (22:10 main; (run hour − 1):10 spotlight).
+REPLACEMENT_TAP_MARGIN_MINUTES = 5
+#: The last tick of an ET day (23:15): past it, only the next day's resume can claim the run — and that expires it.
+LAST_TICK_HOUR_ET = 23
+#: How long after a lane's LAST start tick the web's expiry step waits before it calls an unstarted replacement
+#: "not started in its window" (`replacement_start_closes`): the tick claims within seconds of :15.
+REPLACEMENT_START_GRACE_MINUTES = 20
+#: How many ET days back the web's expiry step reads replacement runs (`expire_unclaimable_replacements`): the claim's
+#: sweep (`_sweep_abandoned`, runs dated before yesterday) is the backstop for anything older.
+REPLACEMENT_WEB_LOOKBACK_DAYS = 3
+#: Run statuses a replacement may still leave unrun (`replacement_expiry_problem`): never media_ready (its posts are
+#: the owner's to decide), never a terminal one.
+_EXPIRABLE_REPLACEMENT_STATUSES = ("planned", "in_progress", "failed")
+#: Why a replacement was closed unrun (`metadata.replacement_expired.why`, REPLACEMENT_EXPIRED_WHY) in log / last_error
+#: words — operator words, never public copy.
+_REPLACEMENT_EXPIRED_WORDS: Dict[str, str] = {
+    "start_window_closed": "the worker did not start it before its lane's last start tick",
+    "day_over": "its day ended before the worker finished it",
+    "switched_off": "replacing was switched off (MARKETING_REPLACE_ENABLED) before the worker started it",
+    "lane_closed": "its lane is closed for its date (the spotlight lane is off for that day now)",
+}
+
+
+def _replacement_from_segment(segment: Any) -> Optional[int]:
+    """n of an `r<n>` key segment, 1..RUN_REPLACEMENT_MAX, else None. Pure."""
+    m = _REPLACEMENT_SEGMENT_RE.fullmatch(segment) if isinstance(segment, str) else None
+    if m is None:
+        return None
+    n = int(m.group(1))
+    return n if 1 <= n <= RUN_REPLACEMENT_MAX else None
+
+
+def _replacement_segment(n: int) -> str:
+    """The `r<n>` segment of replacement n (≥ 1) — the one spelling keys and paths use."""
+    return f"r{n}"
+
+
+def _check_replacement(n: Any, *, op: str = "replacement") -> int:
+    """A replacement-number ARGUMENT: a plain int (never a bool) in 0..RUN_REPLACEMENT_MAX, else ValueError — a key,
+    a path and the claim depend on it, so it is never coerced or guessed."""
+    if type(n) is not int or not 0 <= n <= RUN_REPLACEMENT_MAX:
+        raise ValueError(f"{op}: replacement must be an int 0..{RUN_REPLACEMENT_MAX}, not {str(n)[:40]!r}")
+    return n
+
+
+def run_replacement(run: Any) -> int:
+    """The replacement number of a run row (migration 215): 0 for a day's own run of its lane — and for a row that
+    carries no `replacement` at all (one read before 215 was applied, or a hand-built dict: the column's own default)
+    — 1 or 2 for a replacement the owner asked for. Pure. ValueError for anything else (not a dict, a bool, a string,
+    a number outside 0..RUN_REPLACEMENT_MAX): never guessed, since keys, paths and the claim depend on it."""
+    if not isinstance(run, dict):
+        raise ValueError(f"a run row is a dict, not {type(run).__name__}")
+    raw = run.get("replacement")
+    if raw is None:
+        return 0
+    if type(raw) is not int or not 0 <= raw <= RUN_REPLACEMENT_MAX:
+        raise ValueError(f"unknown replacement {str(raw)[:40]!r}")
+    return raw
+
+
+def _replacement_of(run: Dict[str, Any], *, op: str) -> int:
+    """`run_replacement` for a service method: an unreadable value is a 422 (MarketingRequestInvalid — deterministic
+    for the run, never retried as a 5xx), logged at ERROR with the run id (the mirror of `_lane_of`)."""
+    try:
+        return run_replacement(run)
+    except ValueError as e:
+        logger.error("marketing %s REFUSED run_id=%s: %s — nothing written", op, run.get("id"), e)
+        raise MarketingRequestInvalid(f"{op}: run {run.get('id')}: {e}") from e
+
+
+def _replacement_rank(row: Any) -> int:
+    """A row's replacement number for a stable within-(day, lane) order; one that does not read back sorts after every
+    known number. For ordering only — never a guess at the number."""
+    try:
+        return run_replacement(row)
+    except ValueError:
+        return RUN_REPLACEMENT_MAX + 1
+
+
+def _closed_cutoff(run_date: date) -> datetime:
+    """A cutoff that has always passed for any tap on `run_date`: the start of the day (ET)."""
+    return datetime(run_date.year, run_date.month, run_date.day, tzinfo=ET)
+
+
+def _spotlight_last_tick_hour(run_date: date, *, what: str) -> Optional[int]:
+    """The spotlight lane's last START tick hour: MARKETING_RUN_HOUR_ET − 1 (the :15 tick before the hour at which
+    `spotlight_start_closed` shuts the lane's new starts). None for an unreadable run hour (fail closed, ERROR)."""
+    hour = settings.MARKETING_RUN_HOUR_ET
+    if type(hour) is not int or not 1 <= hour <= 23:
+        logger.error("marketing replacement %s run_date=%s: MARKETING_RUN_HOUR_ET=%r is not a whole ET hour 1-23 — the "
+                     "spotlight lane's replacements are closed", what, run_date, str(hour)[:40])
+        return None
+    return hour - 1
+
+
+def replacement_cutoff(run_date: date, lane: str) -> datetime:
+    """The last moment (ET-aware) a replacement of a run of (`run_date`, `lane`) may be asked for — the `p_not_after`
+    the request function also checks. MAIN: 22:10 ET (the 22:15 tick starts it, 23:15 leaves one retry). SPOTLIGHT:
+    (MARKETING_RUN_HOUR_ET − 1):10 ET — 15:10 with the default 16 — the last tick before `spotlight_start_closed`
+    shuts new spotlight starts. An unreadable run hour closes the spotlight's taps (the start of the day: always
+    passed). ValueError for an unknown lane. Pure but for that setting."""
+    if lane == RUN_LANE_MAIN:
+        hour: Optional[int] = MAIN_REPLACEMENT_LAST_TICK_HOUR_ET
+    elif lane == RUN_LANE_SPOTLIGHT:
+        hour = _spotlight_last_tick_hour(run_date, what="cutoff")
+    else:
+        raise ValueError(f"unknown lane {str(lane)[:40]!r}")
+    if hour is None:
+        return _closed_cutoff(run_date)
+    tick = datetime(run_date.year, run_date.month, run_date.day, hour, WORKER_TICK_MINUTE, tzinfo=ET)
+    return tick - timedelta(minutes=REPLACEMENT_TAP_MARGIN_MINUTES)
+
+
+def replacement_start_closes(run_date: date, lane: str) -> datetime:
+    """When (ET-aware) an UNSTARTED replacement of (`run_date`, `lane`) can no longer be started: the lane's last start
+    tick plus REPLACEMENT_START_GRACE_MINUTES — 23:15 + grace for MAIN (the day's last tick; the next one is the
+    following day's resume, which expires it), (MARKETING_RUN_HOUR_ET − 1):15 + grace for SPOTLIGHT (at the run hour
+    `spotlight_start_closed` turns every spotlight claim into a resume). An unreadable run hour: the start of the day
+    (closed). ValueError for an unknown lane. Pure but for that setting."""
+    if lane == RUN_LANE_MAIN:
+        hour: Optional[int] = LAST_TICK_HOUR_ET
+    elif lane == RUN_LANE_SPOTLIGHT:
+        hour = _spotlight_last_tick_hour(run_date, what="start window")
+    else:
+        raise ValueError(f"unknown lane {str(lane)[:40]!r}")
+    if hour is None:
+        return _closed_cutoff(run_date)
+    tick = datetime(run_date.year, run_date.month, run_date.day, hour, WORKER_TICK_MINUTE, tzinfo=ET)
+    return tick + timedelta(minutes=REPLACEMENT_START_GRACE_MINUTES)
+
+
+def restore_closes(run_date: date) -> datetime:
+    """When (ET-aware) "↩ Post {SYM} after all" stops working for a run of `run_date`: the END of its own ET day
+    (00:00 ET of the next day) — the day `marketing_restore_replaced` judges. Never the lane's tap cutoff
+    (`replacement_cutoff`): a tap in the last hour before it starts its replacement only at the next :15 tick, past the
+    cutoff, and an unstarted replacement is closed after it too (23:35 / 15:35 ET), so a cutoff-bound restore could
+    never bring those originals back (review 2026-11-27). The original's posts stay fresh through the next ET day
+    (`is_fresh`). Pure."""
+    nxt = run_date + timedelta(days=1)
+    return datetime(nxt.year, nxt.month, nxt.day, tzinfo=ET)
+
+
+def replacement_request_landed(run: Any) -> bool:
+    """Has a replacement request already landed on `run` — the request function stamped `metadata.replaced_by` with a
+    canonical run id — and was the run never restored? Then a tap on it can only be answered from the ledger (the
+    function's replay, or `already_replaced`), never by a new replacement, so the web's own gates (the switches, the
+    tap cutoff, the lane) must not hide what already happened (review 2026-11-27: a lost response retried past the
+    cutoff was told "too late" for a request that had rejected his posts). Pure."""
+    meta = run.get("metadata") if isinstance(run, dict) and isinstance(run.get("metadata"), dict) else {}
+    stamp = meta.get(RUN_META_REPLACED_BY)
+    new_id = stamp.get("run_id") if isinstance(stamp, dict) else None
+    return isinstance(new_id, str) and _canonical_uuid(new_id) == new_id and RUN_META_RESTORED_FROM not in meta
+
+
+def next_worker_tick(now: datetime) -> datetime:
+    """The worker's next tick strictly after `now` (ET-aware): the next :WORKER_TICK_MINUTE. Computed in UTC (every ET
+    offset is a whole number of hours, so :15 ET is :15 UTC), so a DST change never shifts it. For the owner's text
+    only ("the worker's next start is 22:15 ET"). A naive `now` is UTC."""
+    utc = (now if now.tzinfo else now.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+    tick = utc.replace(minute=WORKER_TICK_MINUTE, second=0, microsecond=0)
+    if tick <= utc:
+        tick += timedelta(hours=1)
+    return tick.astimezone(ET)
+
+
+def run_attempts_cap(run: Any) -> int:
+    """The attempts cap `decide_claim` holds a run to: MARKETING_MAX_RUN_ATTEMPTS for a day's own run (unchanged); for
+    a replacement, REPLACEMENT_MAX_ATTEMPTS — or the setting when it is lower and at least 1 (a setting of 0 means "no
+    cap" for a day's run, never for a replacement). ValueError for an unreadable replacement (`run_replacement`)."""
+    setting = settings.MARKETING_MAX_RUN_ATTEMPTS
+    if run_replacement(run) == 0:
+        return setting
+    if type(setting) is int and setting >= 1:
+        return min(REPLACEMENT_MAX_ATTEMPTS, setting)
+    return REPLACEMENT_MAX_ATTEMPTS
+
+
+def _attempts(run: Dict[str, Any]) -> Optional[int]:
+    """A run's `attempts` when it reads back as a non-negative int (NULL is 0, the column default), else None."""
+    raw = run.get("attempts")
+    if raw is None:
+        return 0
+    return raw if type(raw) is int and raw >= 0 else None
+
+
+def replacement_unstarted(run: Any) -> bool:
+    """A replacement no worker ever claimed: replacement ≥ 1, still `planned`, attempts 0 (what the request function
+    inserts). ValueError for an unreadable replacement. Pure."""
+    return run_replacement(run) >= 1 and run.get("status") == "planned" and _attempts(run) == 0
+
+
+def replacement_claim_problem(existing: Dict[str, Any], *, run_date: date, today: date, resume_only: bool,
+                              switch_on: Callable[[], bool]) -> Optional[str]:
+    """Why a claim that `decide_claim` would hand a REPLACEMENT run must close it unrun instead (a REPLACEMENT_EXPIRED_WHY
+    value), or None. Pure but for `switch_on` (a zero-argument read of the switch, asked only when it decides).
+
+    The pre-inserted `planned` row slips past `resume_only` / `spotlight_start_closed`, which gate only a claim's
+    INSERT, so the claim gates it here:
+    * a replacement whose run is at `assets_ready` (its posts exist) → None, on any day inside the claim window: the
+      resume only PATCHes media_ready, with no render and no new post (review L1);
+    * `run_date` before today (ET) → `day_over`: a replacement never runs on a later day, started or not (the worker's
+      yesterday-resume);
+    * unstarted and `resume_only` (which includes the spotlight's start window, `spotlight_start_closed`) →
+      `start_window_closed`;
+    * unstarted and the switch off now → `switched_off`;
+    * otherwise None — a STARTED replacement on its own day may finish, within its own attempts cap."""
+    if existing.get("stage") == "assets_ready":
+        return None
+    if run_date < today:
+        return "day_over"
+    if replacement_unstarted(existing):
+        if resume_only:
+            return "start_window_closed"
+        if not switch_on():
+            return "switched_off"
+    return None
+
+
+def replacement_expiry_problem(run: Dict[str, Any], *, now: datetime, switch_on: Callable[[], bool],
+                               lane_problem: Callable[[date], Optional[str]], stale_seconds: int) -> Optional[str]:
+    """Why the WEB's expiry step (review L2 / amendment A10, every review cycle) must close a replacement unrun NOW — a
+    REPLACEMENT_EXPIRED_WHY value — or None. The claim-side gate (`replacement_claim_problem`) stays the second line:
+    this one also runs when no claim ever comes (a spotlight lane closed for the date answers `not_scheduled` before
+    reading anything; a worker that is down). Pure but for the two zero-argument reads it is given (`switch_on`, and
+    `lane_problem(run_date)` = `selection.spotlight_day_problem` for a spotlight run, asked only when it decides).
+
+    Never for a day's own run (replacement 0), for a status other than planned / in_progress / failed, for a run at
+    `assets_ready` (its posts exist: the next resume completes it — review L1), or for one `failed` at its attempts cap
+    (`run_attempts_cap`: it is over, and its notice is the owner's N4). Then:
+    * STARTED (claimed at least once): a fresh `in_progress` (touched less than `stale_seconds` ago) is its holder's →
+      None; otherwise `day_over` when its date is before today (ET) and `lane_closed` when its spotlight lane is closed
+      for its date (no claim will ever re-claim it); else None (the next tick may still retry it today);
+    * UNSTARTED (`replacement_unstarted`): `day_over`, `lane_closed`, then `switched_off` (MARKETING_REPLACE_ENABLED
+      off now), then `start_window_closed` once its lane's last start tick and the grace have passed
+      (`replacement_start_closes`).
+    ValueError for an unreadable replacement, lane or run date (the caller logs it and leaves the row)."""
+    if run_replacement(run) < 1:
+        return None
+    status = run.get("status")
+    if status not in _EXPIRABLE_REPLACEMENT_STATUSES or run.get("stage") == "assets_ready":
+        return None
+    attempts = _attempts(run)
+    if attempts is None:
+        raise ValueError(f"attempts {str(run.get('attempts'))[:40]!r} is not a count")
+    if status == "failed" and attempts >= run_attempts_cap(run):
+        return None
+    lane = run_lane(run)
+    run_date = date.fromisoformat(str(run.get("run_date"))[:10])
+    today = run_date_et(now)
+    if not replacement_unstarted(run):
+        if status == "in_progress":
+            touched = _touched(run)
+            if touched is not None and now - touched < timedelta(seconds=max(int(stale_seconds), 0)):
+                return None
+        if run_date < today:
+            return "day_over"
+        if lane == RUN_LANE_SPOTLIGHT and lane_problem(run_date) is not None:
+            return "lane_closed"
+        return None
+    if run_date < today:
+        return "day_over"
+    if lane == RUN_LANE_SPOTLIGHT and lane_problem(run_date) is not None:
+        return "lane_closed"
+    if not switch_on():
+        return "switched_off"
+    if now >= replacement_start_closes(run_date, lane):
+        return "start_window_closed"
+    return None
+
+
+def replaced_by_run_id(post: Any) -> Optional[str]:
+    """The replacement run that rejected `post` (`metadata.review.replaced_by_run_id`, written only by the request
+    function), when it reads back as a canonical uuid — else None (no replacement rejected it). Pure."""
+    meta = post.get("metadata") if isinstance(post, dict) and isinstance(post.get("metadata"), dict) else {}
+    review = meta.get("review")
+    raw = review.get("replaced_by_run_id") if isinstance(review, dict) else None
+    return raw if isinstance(raw, str) and _canonical_uuid(raw) == raw else None
+
+
+@dataclass(frozen=True)
+class ReplacementResult:
+    """What `request_replacement` answers (one of REPLACEMENT_OUTCOMES, or a local refusal of
+    REPLACEMENT_REFUSALS_LOCAL). `run_id` / `replacement` name the NEW run for `requested` (and the newest run for
+    `already_replaced`, when the function said); `replayed` is True when the request had already landed (a lost
+    response, a re-tap) and the payload was read back, never written twice. `status` is the run status the function
+    read (`not_ready`: the tapped run's; `already_replaced`, and a replayed `requested`: the newest run's — the
+    replacement — as it is NOW). `run` is the tapped run as read before
+    the call (None when not read) and `cutoff` its lane's tap cutoff (ET)."""
+    outcome: str
+    run_id: Optional[str] = None
+    replacement: Optional[int] = None
+    replacements_today: Optional[int] = None
+    rejected_post_ids: Tuple[str, ...] = ()
+    review_message_ids: Tuple[int, ...] = ()
+    from_source_ref: Optional[str] = None
+    replayed: bool = False
+    status: Optional[str] = None
+    detail: Optional[str] = None
+    run: Optional[Dict[str, Any]] = None
+    cutoff: Optional[datetime] = None
+
+
+@dataclass(frozen=True)
+class RestoreResult:
+    """What `restore_replaced` answers (one of RESTORE_OUTCOMES). `post_ids` are the posts put back to pending_review
+    (read back on a replay: `replayed` True, nothing written twice). `status` / `attempts` are the replacement's when
+    the function said it is still running. `run` is the replaced run as read before the call, `cutoff` when its
+    restore closes (`restore_closes`: the end of its own ET day; None when its date does not read back)."""
+    outcome: str
+    post_ids: Tuple[str, ...] = ()
+    replayed: bool = False
+    status: Optional[str] = None
+    attempts: Optional[int] = None
+    run: Optional[Dict[str, Any]] = None
+    cutoff: Optional[datetime] = None
 
 
 def frozen_post_formats(output: Any) -> Optional[Dict[str, str]]:
@@ -1058,21 +1464,27 @@ def run_worker_capabilities(run: Any) -> frozenset:
     return frozenset(c for c in raw if isinstance(c, str) and c in WORKER_CAPABILITIES)
 
 
-def idempotency_key_for(run_date: date, platform: str, fmt: str, *, lane: str = RUN_LANE_MAIN) -> str:
+def idempotency_key_for(run_date: date, platform: str, fmt: str, *, lane: str = RUN_LANE_MAIN,
+                        replacement: int = 0) -> str:
     """The post's ledger key, which the outlets see too (Upload-Post's request id, Bluesky's record key):
     `<run_date>:<platform>:<format>` for the MAIN lane (unchanged since migration 170) and
     `<run_date>:spotlight:<platform>:<format>` for the SPOTLIGHT lane (migration 210) — so the two runs of one day
     never share a key, and `key[:10]` is still the run date everywhere it is read (`post_run_date`, `is_fresh`,
-    the publish feed, the review bot, Bluesky's record key). ValueError for an unknown lane, platform or format."""
+    the publish feed, the review bot, Bluesky's record key). A replacement run (migration 215, `replacement` 1 or 2)
+    adds an `r<n>` segment after the lane: `<run_date>:r1:<platform>:<format>`,
+    `<run_date>:spotlight:r2:<platform>:<format>` (still `key[:10]` = the run date); replacement 0 is byte for byte
+    the key it always was. ValueError for an unknown lane, replacement, platform or format."""
     if lane not in RUN_LANES:
         raise ValueError(f"unknown lane {str(lane)[:40]!r}")
+    replacement = _check_replacement(replacement)
     if platform not in POST_PLATFORMS:
         raise ValueError(f"unknown platform {platform!r}")
     if fmt not in POST_FORMATS:
         raise ValueError(f"unknown format {fmt!r}")
-    if lane == RUN_LANE_MAIN:
-        return f"{run_date.isoformat()}:{platform}:{fmt}"
-    return f"{run_date.isoformat()}:{lane}:{platform}:{fmt}"
+    head = run_date.isoformat() if lane == RUN_LANE_MAIN else f"{run_date.isoformat()}:{lane}"
+    if replacement >= 1:
+        head = f"{head}:{_replacement_segment(replacement)}"
+    return f"{head}:{platform}:{fmt}"
 
 
 #: Post statuses that are not yet final — a run is never closed while one remains.
@@ -1343,7 +1755,10 @@ def close_summary(posts: List[Dict[str, Any]], *, now: Optional[str] = None) -> 
       `all_rejected` (every one rejected), `failed` (every one failed), `expired_unreviewed` (every
       one expired without a decision — `expired_unreviewed()`), `approved_unsent` (every one was
       approved and expired unsent: the X cap, a dry run, an unwired platform, or an unknown outcome
-      the platform did not hold — `expired_approved_unsent()`), else `mixed`."""
+      the platform did not hold — `expired_approved_unsent()`), else `mixed`.
+    * `replaced` (migration 215) — checked before `all_rejected`: every post of that basis is rejected and at least
+      one was rejected by the owner's "🔄 Next company" (`replaced_by_run_id`). A run with no such post gives exactly
+      the reasons it always did."""
     rows = [p for p in (posts or []) if isinstance(p, dict)]
     statuses = Counter(_summary_key(p.get("status")) for p in rows)
     skip_reasons: Counter = Counter()
@@ -1358,7 +1773,7 @@ def close_summary(posts: List[Dict[str, Any]], *, now: Optional[str] = None) -> 
     else:
         basis = [p for p in rows if _offered_for_review(p)] or rows
         if all(p.get("status") == "rejected" for p in basis):
-            reason = "all_rejected"
+            reason = "replaced" if any(replaced_by_run_id(p) is not None for p in basis) else "all_rejected"
         elif all(p.get("status") == "failed" for p in basis):
             reason = "failed"
         elif all(expired_unreviewed(p) for p in basis):
@@ -1595,14 +2010,33 @@ class MarketingRunService:
             )
         )
 
-    async def get_run_by_date(self, run_date: date, lane: str = RUN_LANE_MAIN) -> Optional[Dict[str, Any]]:
-        """The run of one (ET day, lane) — UNIQUE (run_date, lane), migration 210 — or None. Filtered on the lane
-        IN the query: without the filter a day holding both runs would answer whichever PostgREST returned first.
-        Needs 210 applied (42703 without the column — the documented deploy order)."""
+    async def get_run_by_date(self, run_date: date, lane: str = RUN_LANE_MAIN, *,
+                              replacement: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """The NEWEST run of one (ET day, lane) — or None. Filtered on the lane IN the query: without the filter a day
+        holding both lanes' runs would answer whichever PostgREST returned first. Needs 210 applied (42703 without
+        the column — the documented deploy order).
+
+        Since migration 215 a (day, lane) holds its own run (replacement 0) and up to two replacements the owner
+        asked for (UNIQUE (run_date, lane, replacement)); every caller (the claim's 23505 path, every resume, the
+        nightly check and the final word) wants the newest — the one a claim must take or judge. Ordered by
+        `created_at` DESC, then `id` DESC (review L7a): the request function stamps a replacement's created_at with
+        the clock read AFTER its per-day lock, so replacement numbers and created_at rise together, and this read
+        works before AND after 215 (it names no new column). On a day with no replacement it is the same row as
+        before. `replacement=n` reads exactly that run of the (day, lane) instead (needs 215;
+        MarketingRequestInvalid for a number outside 0..RUN_REPLACEMENT_MAX, before any read)."""
         lane = _check_lane(lane, op="get_run_by_date")
+        query = self.sb.table(RUNS).select("*").eq("run_date", run_date.isoformat()).eq("lane", lane)
+        if replacement is None:
+            query = query.order("created_at", desc=True).order("id", desc=True)
+        else:
+            try:
+                replacement = _check_replacement(replacement, op="get_run_by_date")
+            except ValueError as e:
+                raise MarketingRequestInvalid(str(e)) from e
+            query = query.eq("replacement", replacement)
         return _one(
             await _exec(
-                self.sb.table(RUNS).select("*").eq("run_date", run_date.isoformat()).eq("lane", lane).limit(1),
+                query.limit(1),
                 op="get_run_by_date", run_date=run_date, lane=lane,
             )
         )
@@ -1657,6 +2091,16 @@ class MarketingRunService:
         spotlight claim of a closed lane sweeps nothing (it reads and writes nothing at all); a late spotlight START
         (`spotlight_start_closed`) answers NOT_SCHEDULED after the sweep and its row read. MARKETING_FORCE on the
         worker bypasses only the WORKER's hour gate: no new spotlight run starts at or after MARKETING_RUN_HOUR_ET ET.
+
+        Replacement runs (migration 215): the INSERT body is unchanged (no `replacement` key — a day's own run is 0),
+        so a day holding an owner-requested replacement still meets 23505 on (run_date, lane, 0), and the read hands the
+        matrix the (day, lane)'s NEWEST run (`get_run_by_date`) — the `planned` replacement, which `decide_claim` claims
+        with the existing re-claim CAS. A replacement is held to its own attempts cap (`run_attempts_cap`), and one the
+        matrix would hand over is first checked by `replacement_claim_problem` (read only for a replacement): one that
+        may not run now (its day is over; unstarted outside its start window; unstarted with MARKETING_REPLACE_ENABLED
+        off) is closed unrun (`skipped`, replacement_expired) and answered ALREADY_DONE — or, when that close loses to
+        a concurrent write, the re-read row is judged instead (`_claim_expired_replacement`). An unreadable replacement
+        number is a 422 for that lane's claim (MarketingRequestInvalid).
         """
         lane = _check_lane(lane, op="claim_run")
         problem = selection.spotlight_day_problem(run_date) if lane == RUN_LANE_SPOTLIGHT else None
@@ -1722,14 +2166,27 @@ class MarketingRunService:
             # the row vanished between the 23505 and the read — treat as busy
             raise MarketingRunError(f"claim_run: run for {run_date} (lane {lane}) raced away")
         self._own_lane(existing, lane, op="claim_run.read")
-
+        # Migration 215: `existing` is the (day, lane)'s NEWEST run — a replacement the owner asked for, when there is
+        # one. An unreadable replacement number is a 422 for THIS lane's claim, every tick, on purpose (review L9): a
+        # key, a path and the gate below depend on it, and the CHECK makes such a row a hand edit.
+        n = _replacement_of(existing, op="claim_run.read")
+        cap = run_attempts_cap(existing)
         reason = decide_claim(
             existing,
             now=now,
             stale_seconds=settings.MARKETING_RUN_STALE_SECONDS,
-            max_attempts=settings.MARKETING_MAX_RUN_ATTEMPTS,
+            max_attempts=cap,
             claim_nonce=claim_nonce,
         )
+        if n >= 1 and reason == CLAIMED:
+            # The pre-inserted `planned` replacement slips past `resume_only` / `spotlight_start_closed`, which gate only
+            # the INSERT above: close it unrun instead when it may not run now (`replacement_claim_problem`). The switch
+            # is read only on this branch — a day's own run reads and logs nothing new.
+            why = replacement_claim_problem(existing, run_date=run_date, today=run_date_et(now),
+                                            resume_only=resume_only, switch_on=selection.replacement_on)
+            if why is not None:
+                return await self._claim_expired_replacement(existing, why=why, now=now, cap=cap,
+                                                             claim_nonce=claim_nonce, lane=lane)
         if reason == ATTEMPTS_EXHAUSTED and existing.get("status") != "failed":
             # A stale in_progress (or planned) row at the cap: its last worker was killed, so no
             # `failed` was ever written and the day would read "in_progress" forever.
@@ -1806,6 +2263,79 @@ class MarketingRunService:
                          op, row.get("id"), str(row.get("lane"))[:40], lane)
             raise MarketingRunError(f"{op}: run {row.get('id')} is lane {str(row.get('lane'))[:40]!r}, not {lane!r}")
 
+    async def _claim_expired_replacement(self, existing: Dict[str, Any], *, why: str, now: datetime, cap: int,
+                                         claim_nonce: Optional[str], lane: str) -> Tuple[Dict[str, Any], str]:
+        """The claim's answer for a replacement it closes unrun (`replacement_claim_problem` said `why`): ALREADY_DONE
+        with the closed row. A lost close CAS (another writer moved the row first — a manual run beside the cron, the
+        web's expiry step) re-reads the row and judges THAT (review L3): ALREADY_DONE only for a terminal row,
+        IN_PROGRESS for a held one, MEDIA_READY / ATTEMPTS_EXHAUSTED as they are — and a row the matrix would still
+        hand over is answered IN_PROGRESS (busy) without a write, exactly like a lost re-claim; the next tick judges
+        it again."""
+        closed = await self._expire_replacement(existing, now=now, why=why, op="claim_run.expire_replacement")
+        if closed is not None:
+            logger.info("marketing run NOT claimed run_date=%s lane=%s run_id=%s replacement=%s reason=%s (closed "
+                        "unrun: %s)", existing.get("run_date"), lane, existing.get("id"), existing.get("replacement"),
+                        ALREADY_DONE, why)
+            return closed, ALREADY_DONE
+        current = await self.get_run(existing["id"])
+        if current is None:
+            raise MarketingRunError(f"claim_run: replacement run {existing.get('id')} raced away")
+        reason = decide_claim(current, now=now, stale_seconds=settings.MARKETING_RUN_STALE_SECONDS,
+                              max_attempts=cap, claim_nonce=claim_nonce)
+        if reason == CLAIMED:
+            reason = IN_PROGRESS
+        logger.info("marketing run NOT claimed run_date=%s lane=%s run_id=%s replacement=%s: its close (%s) lost to a "
+                    "concurrent write — now status=%s attempts=%s reason=%s", existing.get("run_date"), lane,
+                    existing.get("id"), existing.get("replacement"), why, current.get("status"),
+                    current.get("attempts"), reason)
+        return current, reason
+
+    async def _expire_replacement(self, row: Dict[str, Any], *, now: datetime, why: str,
+                                  op: str = "expire_replacement") -> Optional[Dict[str, Any]]:
+        """Close a REPLACEMENT run that will never run (or finish) as `skipped` — one compare-and-swap on the observed
+        (status, attempts, updated_at), the same fence as `_close_failed_cas`: a claim, a checkpoint or another closer
+        landing in between makes it miss (None; the caller re-reads). It writes `finished_at` (kept when set),
+        `updated_at`, `last_error` ("replacement not run: <why>" for one no worker started, "replacement not finished:
+        <why>" for one that was; an earlier `last_error` kept after " — last error: "), and merges into the observed
+        metadata `skip_reason` = REPLACEMENT_SKIP_REASON and `replacement_expired` = {why, at, was, stage, attempts}
+        (`was`/`stage`/`attempts` = the row as judged, so a notice can tell an unstarted run from a failed one). Logged
+        at INFO — never "needs a human": the owner hears it once, from the review bot's notice. ValueError for a `why`
+        outside REPLACEMENT_EXPIRED_WHY (a caller's bug, before any write); a ledger error raises MarketingRunError."""
+        if why not in REPLACEMENT_EXPIRED_WHY:
+            raise ValueError(f"unknown replacement expiry reason {str(why)[:40]!r}")
+        run_id = row.get("id")
+        stamp = now.isoformat()
+        unstarted = replacement_unstarted(row)
+        words = f"replacement {'not run' if unstarted else 'not finished'}: {_REPLACEMENT_EXPIRED_WORDS[why]}"
+        previous = row.get("last_error")
+        if isinstance(previous, str) and previous:
+            words = f"{words} — last error: {previous}"
+        meta = dict(row["metadata"]) if isinstance(row.get("metadata"), dict) else {}
+        meta["skip_reason"] = REPLACEMENT_SKIP_REASON
+        meta[RUN_META_REPLACEMENT_EXPIRED] = {"why": why, "at": stamp, "was": str(row.get("status"))[:40],
+                                             "stage": str(row.get("stage"))[:40], "attempts": _attempts(row)}
+        patch: Dict[str, Any] = {"status": "skipped", "updated_at": stamp, "last_error": words[:2000], "metadata": meta}
+        if not row.get("finished_at"):
+            patch["finished_at"] = stamp
+        query = (
+            self.sb.table(RUNS).update(patch)
+            .eq("id", run_id)
+            .eq("status", row.get("status"))
+            .eq("attempts", int(row.get("attempts") or 0))
+        )
+        observed_touch = row.get("updated_at")
+        query = (query.is_("updated_at", "null") if observed_touch is None
+                 else query.eq("updated_at", _ts_filter(observed_touch)))
+        closed = _one(await _exec(query, op=op, run_id=run_id))
+        if closed is None:
+            logger.info("marketing replacement run_id=%s run_date=%s lane=%s: its close (%s) lost to a concurrent write "
+                        "— left as it is now", run_id, row.get("run_date"), row.get("lane") or RUN_LANE_MAIN, why)
+            return None
+        logger.info("marketing replacement CLOSED UNRUN run_id=%s run_date=%s lane=%s replacement=%s was=%s stage=%s "
+                    "attempts=%s why=%s", run_id, row.get("run_date"), row.get("lane") or RUN_LANE_MAIN,
+                    row.get("replacement"), row.get("status"), row.get("stage"), row.get("attempts"), why)
+        return closed
+
     async def _close_failed_cas(
         self, existing: Dict[str, Any], *, now: datetime, last_error: str, op: str
     ) -> Optional[Dict[str, Any]]:
@@ -1840,7 +2370,11 @@ class MarketingRunService:
         yesterday, which is still resumable until the run hour — whose liveness is older than
         MARKETING_RUN_STALE_SECONDS, in EITHER lane (the window and the liveness are the same for both).
         Each close is the same fenced CAS as the attempts-cap close; only the transition logs WARNING. Bounded (`_SWEEP_LIMIT`, on the (status, run_date)
-        index) and best effort: a failure here never fails the claim. Returns how many closed."""
+        index) and best effort: a failure here never fails the claim. Returns how many closed.
+
+        A REPLACEMENT run (migration 215) is closed unrun instead — `skipped`, replacement_expired, why `day_over`
+        (`_expire_replacement`, INFO) — unless it stands at `assets_ready` (its posts exist: today's close, review L1);
+        its number is read inside the row's own try, so an unreadable one leaves only that row alone (review L9)."""
         today = run_date_et(now)
         cutoff = today - timedelta(days=1)
         stale = timedelta(seconds=max(int(settings.MARKETING_RUN_STALE_SECONDS), 0))
@@ -1868,6 +2402,31 @@ class MarketingRunService:
             touched = _touched(row)
             if touched is not None and now - touched < stale:
                 continue  # something touched it recently: not provably abandoned yet
+            # Migration 215: a REPLACEMENT dated before yesterday never runs again (its day is over) — closed unrun
+            # (`skipped`, replacement_expired, why day_over), the owner told once by the review bot's notice, never
+            # "failed, needs a human". One at `assets_ready` (its posts exist) keeps today's close (review L1). The
+            # number is read INSIDE this row's try (review L9): an unreadable one leaves THIS row alone, logged, and
+            # never stops the sweep — the claim of every lane runs it first.
+            try:
+                replacement = run_replacement(row)
+            except ValueError as e:
+                logger.error("marketing run: sweep left run_id=%s run_date=%s lane=%s alone — its replacement number "
+                             "does not read back (%s)", run_id, run_date, lane, e)
+                continue
+            if replacement >= 1 and row.get("stage") != "assets_ready":
+                try:
+                    expired = await self._expire_replacement(row, now=now, why="day_over",
+                                                             op="sweep_abandoned.expire_replacement")
+                except Exception as e:
+                    (logger.warning if isinstance(e, MarketingRunError) else logger.error)(
+                        "marketing run: sweep could not close replacement run_id=%s run_date=%s lane=%s (%s: %s) — the "
+                        "next claim retries", run_id, run_date, lane, type(e).__name__, e,
+                        exc_info=not isinstance(e, MarketingRunError),
+                    )
+                    continue
+                if expired is not None:
+                    closed += 1
+                continue
             # The lane is named only off the main lane: a main run's `last_error` stays what it was.
             lane_note = "" if lane == RUN_LANE_MAIN else f" lane {lane}"
             try:
@@ -2095,10 +2654,11 @@ class MarketingRunService:
         `ready` — a resumed run re-registering identical bytes must NOT re-upload (the
         object is immutable and Spotify/Meta cache it by URL).
 
-        The path carries the run's lane (`storage_path_for`: a spotlight run's objects live under
-        `<run_date>/spotlight/`), and an existing row on the path is adopted ONLY when it belongs to
-        THIS run: another run's row is refused (MarketingRequestInvalid, logged at ERROR) — never handed
-        over, so one run can never verify, point at or post another run's media.
+        The path carries the run's lane and replacement number (`storage_path_for`: a spotlight run's objects live
+        under `<run_date>/spotlight/`, a replacement's under `<run_date>[/spotlight]/r<n>/`, migration 215), and an
+        existing row on the path is adopted ONLY when it belongs to THIS run: another run's row is refused
+        (MarketingRequestInvalid, logged at ERROR) — never handed over, so one run can never verify, point at or
+        post another run's media.
         """
         run = await self.get_run(run_id)
         if run is None:
@@ -2115,6 +2675,7 @@ class MarketingRunService:
             raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
         run_date = date.fromisoformat(str(run["run_date"]))
         lane = _lane_of(run, op="register_asset")
+        replacement = _replacement_of(run, op="register_asset")
         if kind == "audio" and isinstance(metadata, dict) and metadata.get("words"):
             await self._check_timed_words(run_id, metadata["words"])
         if kind == "video":
@@ -2123,7 +2684,7 @@ class MarketingRunService:
                 "image_role" in metadata or "onscreen_text" in metadata):
             await self._check_post_image_text(run, metadata, ext=ext, size_bytes=size_bytes)
         try:
-            path = storage_path_for(run_date, kind, sha256, ext, lane=lane)
+            path = storage_path_for(run_date, kind, sha256, ext, lane=lane, replacement=replacement)
         except ValueError as e:
             # The request schema checks the same things first; a ValueError here must still be a
             # 422, not the classifier's generic 502 (which the worker would retry).
@@ -2157,8 +2718,9 @@ class MarketingRunService:
         if asset is None:
             raise MarketingRunError(f"register_asset: no row for {path}")
         if str(asset.get("run_id")) != str(run_id):
-            # No cross-run adoption: the path is content-addressed per (day, lane), so another run's row here
-            # is a hand edit or a bug — handing it over would let this run verify and post the other's media.
+            # No cross-run adoption: the path is content-addressed per (day, lane, replacement), so another run's row
+            # here — the other lane's, or another replacement of this lane's — is a hand edit or a bug: handing it over
+            # would let this run verify and post the other's media.
             logger.error("marketing register_asset REFUSED run_id=%s kind=%s path=%s: the existing row %s "
                          "belongs to run %s — not adopted", run_id, kind, path, asset.get("id"), asset.get("run_id"))
             raise MarketingRequestInvalid(
@@ -2967,6 +3529,12 @@ class MarketingRunService:
         kill switch MARKETING_NEWS_SERIES ∩ the shipped series, the authorship and `news_templates.revalidate`.
         A main run is unchanged.
 
+        A REPLACEMENT run (migration 215, replacement 1 or 2): its keys carry `r<n>`
+        (`<run_date>[:spotlight]:r<n>:<platform>:<format>`, `idempotency_key_for`), it posts only the replaceable series
+        (Money Map: any other template is a 422 — the build never writes one) and only while MARKETING_REPLACE_ENABLED is
+        on, read now (off → 409 MarketingTemplateRefused, the worker skips the run `template_refused`), then through every
+        gate a template shares. Replacement 0 is unchanged.
+
         Per-post art (workstream C, owner decisions 2026-11-15) — never a gate: when a TEMPLATE output carries an
         `art` record, every post of the run gets the art note (`art_note`, `metadata[POST_METADATA_ART]`), and an
         image post's `made_with_ai` is True when the run's VERIFIED post image declared drawing the accepted art
@@ -2986,6 +3554,7 @@ class MarketingRunService:
             raise MarketingRunNotHeld(f"run {run_id} is not held by this caller: {problem}")
         run_date = date.fromisoformat(str(run["run_date"]))
         lane = _lane_of(run, op="create_posts")
+        replacement = _replacement_of(run, op="create_posts")
         script = await self.get_script(run_id)
         output = (script or {}).get("output")
         if not script or script.get("status") != "accepted" or not isinstance(output, dict):
@@ -3031,6 +3600,23 @@ class MarketingRunService:
                              str(template_id)[:40])
                 raise MarketingTemplateRefused(
                     f"run {run_id}: the spotlight lane is switched off (MARKETING_SPOTLIGHT_ENABLED); nothing recorded")
+        if replacement >= 1:
+            # A REPLACEMENT run (migration 215): it only ever posts the replaceable series (Money Map) — anything else
+            # is a contract breach, never a post — and only while MARKETING_REPLACE_ENABLED is on, read NOW: one
+            # switched off after it started rendering records nothing (409, the worker skips the run
+            # `template_refused`, and the owner gets one notice). Then the gates every template shares (below).
+            if template_id not in REPLACEABLE_SERIES:
+                logger.error("marketing create_posts REFUSED run_id=%s lane=%s replacement=%s: a %r script on a "
+                             "replacement run, which posts %s only — nothing recorded", run_id, lane, replacement,
+                             str(template_id)[:40], ",".join(REPLACEABLE_SERIES))
+                raise MarketingRequestInvalid(
+                    f"run {run_id}: a {str(template_id)[:40]!r} script on replacement {replacement} "
+                    f"({', '.join(REPLACEABLE_SERIES)} only); nothing recorded")
+            if not selection.replacement_on():
+                logger.error("marketing create_posts TEMPLATE REFUSED run_id=%s lane=%s replacement=%s: "
+                             "MARKETING_REPLACE_ENABLED is off — nothing recorded", run_id, lane, replacement)
+                raise MarketingTemplateRefused(
+                    f"run {run_id}: replacing is switched off (MARKETING_REPLACE_ENABLED); nothing recorded")
         authorship = post_copy.AUTHORSHIP_AI
         series = selection.LESSON
         if klass == "A":
@@ -3343,7 +3929,7 @@ class MarketingRunService:
             initial = ("approved" if (auto and fmt == "text" and not asset_ids and klass == "A"
                                       and (platform, fmt) not in extra_pairs)
                        else "pending_review")
-            key = idempotency_key_for(run_date, platform, fmt, lane=lane)
+            key = idempotency_key_for(run_date, platform, fmt, lane=lane, replacement=replacement)
             metadata: Dict[str, Any] = {
                 "dry_run": run_dry,
                 "generation_id": script.get("generation_id"),
@@ -3395,8 +3981,8 @@ class MarketingRunService:
             if created is None:
                 raise MarketingRunError(f"create_posts: no row for {key}")
             if str(created.get("run_id")) != str(run_id):
-                # No cross-run adoption: keys are per (day, lane), so another run's post on this key is a hand
-                # edit or a bug — handing it back would record (and let the review bot offer) the other's post.
+                # No cross-run adoption: keys are per (day, lane, replacement), so another run's post on this key is
+                # a hand edit or a bug — handing it back would record (and let the review bot offer) the other's post.
                 logger.error("marketing create_posts REFUSED run_id=%s lane=%s: key %s already holds post %s of run "
                              "%s — not adopted", run_id, lane, key, created.get("id"), created.get("run_id"))
                 raise MarketingRequestInvalid(
@@ -4231,9 +4817,10 @@ class MarketingRunService:
         before C0) is passed over for the next older one. A recorded window that does not read back as a window of
         that run (start ≤ end < its run date, at most `SPOTLIGHT_MAX_WINDOW_DAYS` long) is passed over with a WARNING —
         an older one, or none (the caller's window then starts a week back: an overlap, harmless under the issuer
-        cooldown), never a guessed later start that could skip filings. One bounded read (one script per run, one run
-        per (day, lane): at most `within_days` rows); a failed read, a row past that bound or a run date that does not
-        read back RAISES (MarketingRunError, with the lane and the day). A lane outside RUN_LANES is
+        cooldown), never a guessed later start that could skip filings. One bounded read of the lane's OWN runs —
+        replacement 0 only (migration 215: a replacement builds Money Map alone and never records a Form 4 window), so
+        one script per run and one such run per (day, lane) still bound it to `within_days` rows; a failed read, a row
+        past that bound or a run date that does not read back RAISES (MarketingRunError, with the lane and the day). A lane outside RUN_LANES is
         MarketingRequestInvalid, a bad `series` / `within_days` a ValueError — both before any read."""
         lane = _check_lane(lane, op="last_checked_window")
         if not isinstance(series, str) or series not in selection.SERIES_BY_ID:
@@ -4244,7 +4831,7 @@ class MarketingRunService:
         start = day - timedelta(days=within_days)
         res = await _exec(
             self.sb.table(SCRIPTS).select("run_id,run_date,fact_sheet")
-            .eq("lane", lane).gte("run_date", start.isoformat()).lt("run_date", day.isoformat())
+            .eq("lane", lane).eq("replacement", 0).gte("run_date", start.isoformat()).lt("run_date", day.isoformat())
             .order("run_date", desc=True).limit(within_days + 1),
             op="last_checked_window", lane=lane, before=day,
         )
@@ -4276,28 +4863,36 @@ class MarketingRunService:
                 return window
         return None
 
-    async def get_run_for_date(self, run_date: Any, *, lane: str = RUN_LANE_MAIN) -> Optional[Dict[str, Any]]:
-        """The run of one (ET day, lane) — UNIQUE (run_date, lane), migration 210 — or None:
+    async def get_run_for_date(self, run_date: Any, *, lane: str = RUN_LANE_MAIN,
+                               replacement: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """The NEWEST run of one (ET day, lane) — or, with `replacement=n`, exactly that run (migration 215) — or None:
         `get_run_by_date` with its argument checked (a `date` or an ISO date string; never a datetime).
         The MAIN lane unless told otherwise."""
-        return await self.get_run_by_date(_as_date(run_date, "run_date"), lane)
+        day = _as_date(run_date, "run_date")
+        if replacement is None:
+            return await self.get_run_by_date(day, lane)
+        return await self.get_run_by_date(day, lane, replacement=replacement)
 
     async def list_runs_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
         """Runs of EVERY lane dated `start_date`..`end_date` INCLUSIVE (ET days), oldest day first and, within a
-        day, in RUN_LANES order (main, then spotlight). (run_date, lane) is UNIQUE (migration 210), so the
-        window's day count × the lanes bounds the read exactly; an inverted window reads nothing."""
+        day, in RUN_LANES order (main, then spotlight), each lane's own run before its replacements (migration 215).
+        The read is bounded by the window's day count × RUNS_PER_DAY_MAX (a day's own run of each lane plus the
+        owner's REPLACEMENTS_PER_DAY replacements over both lanes). Review L7(c), accepted: that bound is looser than
+        the old days × lanes for a window with no replacement, so a hand-edited extra row no longer meets it as soon;
+        past it the read TRUNCATES (the newest days drop), as it always did. An inverted window reads nothing."""
         start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
         if start > end:
             return []
         res = await _exec(
             self.sb.table(RUNS).select("*")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
-            .order("run_date").limit(((end - start).days + 1) * len(RUN_LANES)),
+            .order("run_date").limit(((end - start).days + 1) * RUNS_PER_DAY_MAX),
             op="list_runs_between", start=start, end=end,
         )
         rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
-        # Within a day, main before spotlight (a lane that does not read back sorts last, never dropped).
-        rows.sort(key=lambda r: (str(r.get("run_date") or ""), _lane_rank(r)))
+        # Within a day, main before spotlight, each lane's own run before its replacements (a lane or a number that does
+        # not read back sorts last, never dropped).
+        rows.sort(key=lambda r: (str(r.get("run_date") or ""), _lane_rank(r), _replacement_rank(r)))
         return rows
 
     async def spend_by_op_since(self, platform: str, since: Any) -> Dict[str, int]:
@@ -4460,7 +5055,12 @@ class MarketingRunService:
         that keeps them equal. A row that already names a lane must name the run's (MarketingRunError
         otherwise). A MAIN script's INSERT never sends the column (it defaults to 'main'), so its body is byte
         for byte what it was before the lanes; a SPOTLIGHT script's carries `lane: spotlight`. A run that cannot
-        be found raises MarketingRunNotFound (the FK would refuse the INSERT anyway)."""
+        be found raises MarketingRunNotFound (the FK would refuse the INSERT anyway).
+
+        The script's `replacement` (migration 215) is copied the same way, from the run, and SENT only for a
+        replacement (1 or 2): a day's own run's script INSERT is byte for byte what it was. A row that already names a
+        replacement must name the run's (a plain int equal to it — MarketingRunError otherwise); an unreadable number on
+        the run is a 422 (MarketingRequestInvalid)."""
         run_id = row["run_id"]
         if run is None:
             run = await self.get_run(str(run_id))
@@ -4476,9 +5076,18 @@ class MarketingRunService:
                          run_id, str(row["lane"])[:40], lane)
             raise MarketingRunError(f"insert_script: run {run_id} is lane {lane!r}, the row says "
                                     f"{str(row['lane'])[:40]!r}")
-        row = {k: v for k, v in row.items() if k != "lane"}
+        replacement = _replacement_of(run, op="insert_script")
+        if "replacement" in row and not (type(row["replacement"]) is int and row["replacement"] == replacement):
+            logger.error("marketing insert_script REFUSED run_id=%s: the row names replacement %r, its run is %r",
+                         run_id, str(row["replacement"])[:40], replacement)
+            raise MarketingRunError(f"insert_script: run {run_id} is replacement {replacement}, the row says "
+                                    f"{str(row['replacement'])[:40]!r}")
+        row = {k: v for k, v in row.items() if k not in ("lane", "replacement")}
         if lane != RUN_LANE_MAIN:
             row["lane"] = lane
+        if replacement >= 1:
+            # Only a replacement's script names it: every other INSERT stays byte for byte (the column defaults to 0).
+            row["replacement"] = replacement
         try:
             created = _one(await _exec(self.sb.table(SCRIPTS).insert(row), op="insert_script",
                                        run_id=run_id))
@@ -4515,8 +5124,10 @@ class MarketingRunService:
 
         `lane` (the CALLER's lane, migration 210): when given, the SAME day's picks of the OTHER lane come
         first — the spotlight's 10:00 pick must not be the main lane's 16:00 pick, nor the other way round —
-        read by a second, bounded query (one row per lane at most); the caller's own lane on that day is never
-        read (its pick is the one being made). A same-day row whose lane does not read back counts as the other
+        read by a second, bounded query (at most RUNS_PER_DAY_MAX rows: a day's own run of each lane and the owner's
+        replacements, migration 215 — the other lane's replacements included); the caller's own lane on that day is
+        never read (its pick is the one being made; a replacement reads its own lane's earlier picks through
+        `replaced_scripts`). A same-day row whose lane does not read back counts as the other
         lane's (excluding more is the safe side). None (the digest's runway, and every caller before the lanes)
         reads exactly what it always did: strictly before `before`."""
         if limit <= 0:
@@ -4539,7 +5150,7 @@ class MarketingRunService:
                 self.sb.table(SCRIPTS).select("run_date,source_ref,lane,created_at")
                 .eq("run_date", before.isoformat())
                 .not_.is_("source_ref", "null")
-                .limit(len(RUN_LANES)),
+                .limit(RUNS_PER_DAY_MAX),
                 op="recent_source_refs.same_day", before=before, lane=lane,
             )
             others = [r for r in (getattr(same, "data", None) or [])
@@ -4549,64 +5160,93 @@ class MarketingRunService:
         return refs[:limit]
 
     async def script_tokens_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
-        """`{run_date, lane, tokens_used, claude_usage}` of the scripts dated `start_date`..`end_date`
+        """`{run_date, lane, tokens_used, claude_usage}` (plus `replacement` for a replacement run's script, migration
+        215 — a day's own run's row is byte for byte what it was) of the scripts dated `start_date`..`end_date`
         INCLUSIVE (ET days), oldest first (main before spotlight within a day) — the weekly cost line's Gemini
         and Claude read (Claude's tokens are inside `tokens_used`; `claude_usage` is NULL unless Claude billed —
         migration 206, which must be applied before this read is deployed; `lane` is migration 210's, the same
-        for 210). Raw values: the caller validates them. One script per run (PK run_id) and one run per (day,
-        lane) (UNIQUE (run_date, lane)) bound the read by the day count × the lanes; more rows than that, or
-        two rows on one (day, lane) (a hand edit — possible in a sparse window too), cannot be told apart from a
-        double count, so it RAISES instead of returning a sum that might count one twice. A row with no lane is
-        the main lane's (the column default). An inverted window reads nothing."""
+        for 210, and `replacement` 215's). Raw values: the caller validates them. One script per run (PK run_id) and
+        one run per (day, lane, replacement) (UNIQUE (run_date, lane, replacement), migration 215) bound the read by
+        the day count × RUNS_PER_DAY_MAX (review L7(c), accepted: looser than the old days × lanes for a window with no
+        replacement); more rows than that, or two rows on one (day, lane, replacement) (a hand edit — possible in a
+        sparse window too), cannot be told apart from a double count, so it RAISES instead of returning a sum that
+        might count one twice. A row with no lane is the main lane's, one with no replacement a day's own run's (the
+        column defaults); one whose replacement does not read back RAISES too. An inverted window reads nothing."""
         start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
         if start > end:
             return []
         days = (end - start).days + 1
-        bound = days * len(RUN_LANES)
+        bound = days * RUNS_PER_DAY_MAX
         res = await _exec(
-            self.sb.table(SCRIPTS).select("run_date,lane,tokens_used,claude_usage")
+            self.sb.table(SCRIPTS).select("run_date,lane,replacement,tokens_used,claude_usage")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
             .order("run_date").limit(bound + 1),
             op="script_tokens_between", start=start, end=end,
         )
-        rows = [{"run_date": r.get("run_date"), "lane": r.get("lane") or RUN_LANE_MAIN,
-                 "tokens_used": r.get("tokens_used"), "claude_usage": r.get("claude_usage")}
-                for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
-        slots = [(str(r["run_date"]), str(r["lane"])) for r in rows]
+        rows: List[Dict[str, Any]] = []
+        slots = []
+        for r in getattr(res, "data", None) or []:
+            if not isinstance(r, dict):
+                continue
+            try:
+                replacement = run_replacement(r)
+            except ValueError as e:
+                raise MarketingRunError(f"script_tokens_between: a script dated {str(r.get('run_date'))[:10]} has a "
+                                        f"replacement number that does not read back ({e}) — the cost line refuses to "
+                                        "sum it") from e
+            row = {"run_date": r.get("run_date"), "lane": r.get("lane") or RUN_LANE_MAIN,
+                   "tokens_used": r.get("tokens_used"), "claude_usage": r.get("claude_usage")}
+            if replacement >= 1:
+                row["replacement"] = replacement
+            rows.append(row)
+            slots.append((str(row["run_date"]), str(row["lane"]), replacement))
         if len(rows) > bound or len(set(slots)) != len(slots):
             raise MarketingRunError(
                 f"script_tokens_between: {len(rows)} scripts for the {days} days {start}..{end} and a (day, lane) "
-                "holds two — the cost line refuses to sum them")
-        rows.sort(key=lambda r: (str(r["run_date"]), _lane_rank(r)))
+                "holds two of one replacement number — the cost line refuses to sum them")
+        rows.sort(key=lambda r: (str(r["run_date"]), _lane_rank(r), _replacement_rank(r)))
         return rows
 
     async def lane_scripts_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
         """The ACCEPTED scripts of EVERY lane dated `start_date`..`end_date` INCLUSIVE (ET days) — `{run_id,
-        run_date, lane, source_ref, template_id, output}`, oldest day first and main before spotlight within a
-        day — what the cross-lane exclusion reads (migration 210): the series another lane posted that day, and
-        the lead company it drew in the last days. A row with no lane is the main lane's. Bounded by the day
-        count × the lanes (one script per run, one run per (day, lane)): one row past that bound (a hand edit or
-        a double count) RAISES (MarketingRunError) rather than return a list a caller could mistake for the
-        whole window; so does a failed read — never a silent empty. An inverted window reads nothing."""
+        run_date, lane, replacement, source_ref, template_id, output}`, oldest day first, main before spotlight
+        within a day and each lane's own run before its replacements — what the cross-lane exclusion reads
+        (migration 210): the series another lane posted that day, and the lead company it drew in the last days.
+        A row with no lane is the main lane's, one with no replacement a day's own run's (0); a replacement number
+        that does not read back RAISES. Bounded by the day count × RUNS_PER_DAY_MAX (one script per run; a day's own
+        run per lane plus the owner's replacements, migration 215 — review L7(c), accepted: looser than the old
+        days × lanes for a window with no replacement): one row past that bound (a hand edit or a double count)
+        RAISES (MarketingRunError) rather than return a list a caller could mistake for the whole window; so does a
+        failed read — never a silent empty. An inverted window reads nothing."""
         start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
         if start > end:
             return []
-        bound = ((end - start).days + 1) * len(RUN_LANES)
+        bound = ((end - start).days + 1) * RUNS_PER_DAY_MAX
         res = await _exec(
-            self.sb.table(SCRIPTS).select("run_id,run_date,lane,source_ref,template_id,output")
+            self.sb.table(SCRIPTS).select("run_id,run_date,lane,replacement,source_ref,template_id,output")
             .eq("status", "accepted")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
             .order("run_date").limit(bound + 1),
             op="lane_scripts_between", start=start, end=end,
         )
-        rows = [{"run_id": r.get("run_id"), "run_date": r.get("run_date"), "lane": r.get("lane") or RUN_LANE_MAIN,
-                 "source_ref": r.get("source_ref"), "template_id": r.get("template_id"), "output": r.get("output")}
-                for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        rows: List[Dict[str, Any]] = []
+        for r in getattr(res, "data", None) or []:
+            if not isinstance(r, dict):
+                continue
+            try:
+                replacement = run_replacement(r)
+            except ValueError as e:
+                raise MarketingRunError(f"lane_scripts_between: run {str(r.get('run_id'))[:40]} has a replacement "
+                                        f"number that does not read back ({e})") from e
+            rows.append({"run_id": r.get("run_id"), "run_date": r.get("run_date"),
+                         "lane": r.get("lane") or RUN_LANE_MAIN, "replacement": replacement,
+                         "source_ref": r.get("source_ref"), "template_id": r.get("template_id"),
+                         "output": r.get("output")})
         if len(rows) > bound:
             raise MarketingRunError(
-                f"lane_scripts_between: more than {bound} accepted scripts for {start}..{end} — one run per (day, "
-                "lane) cannot hold that many; refusing a list that may not be the whole window")
-        rows.sort(key=lambda r: (str(r["run_date"]), _lane_rank(r)))
+                f"lane_scripts_between: more than {bound} accepted scripts for {start}..{end} — a day's own run per "
+                "lane and its replacements cannot hold that many; refusing a list that may not be the whole window")
+        rows.sort(key=lambda r: (str(r["run_date"]), _lane_rank(r), _replacement_rank(r)))
         return rows
 
     async def theme_scripts_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
@@ -4617,8 +5257,9 @@ class MarketingRunService:
         day and lane, the quiet-week backups the week already made (owner decision 2026-11-27: one a week,
         `selection.THEME_FALLBACKS_PER_WEEK`). A row with no lane is the main lane's (the column default). Its own
         bounded read, so the rotation sees its whole window whatever the other series post and however the posting days
-        changed: at most one script per (day, lane) — the bound; one row past it (a hand edit) RAISES
-        (MarketingRunError), as does a failed read — never a silent empty. An inverted window reads nothing."""
+        changed: at most one THEME script per (day, lane) — the bound (unchanged by migration 215: a replacement builds
+        Money Map alone and never writes a theme script); one row past it (a hand edit) RAISES (MarketingRunError), as
+        does a failed read — never a silent empty. An inverted window reads nothing."""
         start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
         if start > end:
             return []
@@ -4648,14 +5289,15 @@ class MarketingRunService:
         when the output is NULL or carries no art; an output that is not an object is passed through as `art`, so
         `art_spend_of` reads it as unreadable). The record and its usage ride in `marketing_scripts.output.art` (no
         migration), so this selects `run_date,lane,output` and extracts in Python — no PostgREST JSON-path alias
-        (which the in-memory fakes could not model). NO one-row-per-day assumption: two lanes post on one day.
-        Bounded by the day count × the lanes (one script per run, one run per (day, lane)): one row past that bound
-        RAISES (MarketingRunError) rather than return a sum that may miss rows — as does a failed read; never a
+        (which the in-memory fakes could not model). NO one-row-per-day assumption: two lanes post on one day, and the
+        owner's replacements add runs (migration 215). Bounded by the day count × RUNS_PER_DAY_MAX (one script per run;
+        review L7(c), accepted: looser than the old days × lanes for a window with no replacement): one row past that
+        bound RAISES (MarketingRunError) rather than return a sum that may miss rows — as does a failed read; never a
         silent empty. An inverted window reads nothing."""
         start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
         if start > end:
             return []
-        bound = ((end - start).days + 1) * len(RUN_LANES)
+        bound = ((end - start).days + 1) * RUNS_PER_DAY_MAX
         res = await _exec(
             self.sb.table(SCRIPTS).select("run_date,lane,output")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
@@ -4672,8 +5314,8 @@ class MarketingRunService:
             rows.append({"run_date": r.get("run_date"), "lane": r.get("lane") or RUN_LANE_MAIN, "art": art})
         if len(rows) > bound:
             raise MarketingRunError(
-                f"art_usage_between: more than {bound} scripts for {start}..{end} — one run per (day, lane) cannot "
-                "hold that many; refusing a sum that may not be the whole window")
+                f"art_usage_between: more than {bound} scripts for {start}..{end} — a day's own run per lane and its "
+                "replacements cannot hold that many; refusing a sum that may not be the whole window")
         rows.sort(key=lambda r: (str(r["run_date"] or ""), _lane_rank(r)))
         return rows
 
@@ -4689,6 +5331,452 @@ class MarketingRunService:
                 f"art_spend_between: an art record dated {start_date}..{end_date} has a spend that cannot be read — "
                 "the month's art spend is unknown")
         return spent
+
+    # replacement runs (migration 215, owner decision 2026-11-27: "🔄 Next company") ---------------------------------
+    # The ONE writer of a replacement row is `public.marketing_request_replacement` (`request_replacement`); the ONE way
+    # a rejected post returns to pending_review is `public.marketing_restore_replaced` (`restore_replaced`). Everything
+    # else here is a bounded read, or the web's expiry step (amendment A10).
+
+    async def replaced_scripts(self, run_date: Any, lane: str, *, below: int) -> List[Dict[str, Any]]:
+        """`{run_id, replacement, source_ref, output}` of the scripts of the (`run_date`, `lane`) runs a replacement
+        `below` replaces — replacements 0..below−1, oldest first — so its build excludes every record the day's lane
+        already drew (`recent_source_refs` never reads the caller's own lane on its run date). One bounded read; it
+        RAISES (MarketingRunError, naming the day, the lane and what is wrong) unless it holds EXACTLY `below` rows
+        numbered 0..below−1, each with a non-empty `source_ref` — a replacement is never built on a guess about what it
+        replaces (each replaced run was media_ready with an accepted script, which the request function requires). A
+        failed read raises too. `below` must be an int 1..RUN_REPLACEMENT_MAX and `lane` one of RUN_LANES (ValueError /
+        MarketingRequestInvalid, before any read)."""
+        lane = _check_lane(lane, op="replaced_scripts")
+        day = _as_date(run_date, "run_date")
+        if type(below) is not int or not 1 <= below <= RUN_REPLACEMENT_MAX:
+            raise ValueError(f"below must be an int 1..{RUN_REPLACEMENT_MAX}, not {str(below)[:40]!r}")
+        res = await _exec(
+            self.sb.table(SCRIPTS).select("run_id,replacement,source_ref,output")
+            .eq("run_date", day.isoformat()).eq("lane", lane).lt("replacement", below)
+            .order("replacement").limit(below + 1),
+            op="replaced_scripts", run_date=day, lane=lane, below=below,
+        )
+        rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                number = run_replacement(r)
+            except ValueError as e:
+                raise MarketingRunError(f"replaced_scripts {day} lane {lane}: run {str(r.get('run_id'))[:40]} has a "
+                                        f"replacement number that does not read back ({e})") from e
+            ref = r.get("source_ref")
+            if not isinstance(ref, str) or not ref.strip():
+                raise MarketingRunError(f"replaced_scripts {day} lane {lane}: the script of replacement {number} (run "
+                                        f"{str(r.get('run_id'))[:40]}) records no source_ref — what it drew is unknown")
+            out.append({"run_id": r.get("run_id"), "replacement": number, "source_ref": ref, "output": r.get("output")})
+        out.sort(key=lambda r: r["replacement"])
+        numbers = [r["replacement"] for r in out]
+        if numbers != list(range(below)):
+            raise MarketingRunError(f"replaced_scripts {day} lane {lane}: replacement {below} replaces 0..{below - 1}, "
+                                    f"the ledger holds scripts of {numbers} — refusing to build on a guess")
+        return out
+
+    async def count_replacements(self, run_date: Any) -> int:
+        """How many replacement runs (replacement ≥ 1, both lanes) `run_date` holds — the review bot's best-effort read
+        to hide "🔄 Next company" once the day's cap (REPLACEMENTS_PER_DAY) is spent. One indexed read bounded at
+        RUNS_PER_DAY_MAX + 1 rows; the request function counts again under its lock and is the authority. A failed read
+        raises MarketingRunError (the bot then shows the button and lets the tap decide)."""
+        day = _as_date(run_date, "run_date")
+        res = await _exec(
+            self.sb.table(RUNS).select("id").eq("run_date", day.isoformat()).gte("replacement", 1)
+            .limit(RUNS_PER_DAY_MAX + 1),
+            op="count_replacements", run_date=day,
+        )
+        return len([r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)])
+
+    async def replacement_runs_between(self, start_date: Any, end_date: Any, *,
+                                       statuses: Optional[Collection[str]] = None,
+                                       unreported: bool = False) -> List[Dict[str, Any]]:
+        """Every REPLACEMENT run (replacement ≥ 1, both lanes) dated `start_date`..`end_date` INCLUSIVE (ET days) —
+        optionally only those in `statuses` (RUN_STATUSES values) and, with `unreported`, only those whose owner notice
+        is not stamped yet (no `metadata.replacement_reported`): the web's expiry step and the review bot's notices read
+        by STATE through it (amendment A10), never by date alone. Oldest day first, main before spotlight, by number.
+        Bounded by the day count × REPLACEMENTS_PER_DAY (the request function's per-day cap over both lanes): one row
+        past it (a hand edit) RAISES (MarketingRunError), as does a failed read — never a partial list. ValueError for
+        an unknown status; an inverted window reads nothing."""
+        start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
+        wanted: Optional[List[str]] = None
+        if statuses is not None:
+            if isinstance(statuses, str) or not all(isinstance(x, str) and x in RUN_STATUSES for x in statuses):
+                raise ValueError(f"statuses must be RUN_STATUSES values, not {str(statuses)[:80]!r}")
+            wanted = sorted(set(statuses))
+        if start > end or wanted == []:
+            return []
+        bound = ((end - start).days + 1) * REPLACEMENTS_PER_DAY
+        query = (self.sb.table(RUNS).select("*")
+                 .gte("run_date", start.isoformat()).lte("run_date", end.isoformat()).gte("replacement", 1))
+        if wanted is not None:
+            query = query.in_("status", wanted)
+        if unreported:
+            query = query.is_(f"metadata->>{RUN_META_REPLACEMENT_REPORTED}", "null")
+        res = await _exec(query.order("run_date").limit(bound + 1), op="replacement_runs_between",
+                          start=start, end=end)
+        rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
+        if len(rows) > bound:
+            raise MarketingRunError(
+                f"replacement_runs_between: more than {bound} replacement runs for {start}..{end} — "
+                f"{REPLACEMENTS_PER_DAY} a day cannot hold that many; refusing a list that may not be the whole window")
+        rows.sort(key=lambda r: (str(r.get("run_date") or ""), _lane_rank(r), _replacement_rank(r)))
+        return rows
+
+    async def expire_unclaimable_replacements(self, *, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """The web's expiry step (review L2 / amendment A10), run by the review cycle before its notices: close unrun
+        (`skipped`, replacement_expired) every replacement of the last REPLACEMENT_WEB_LOOKBACK_DAYS ET days that no
+        claim will ever run or finish — `replacement_expiry_problem`: an unstarted one whose spotlight lane is closed
+        for its date, whose switch is off, or whose start window has passed (with a grace); any non-fresh one whose day
+        is over or whose lane is closed — each by the same fenced CAS as the claim's gate (`_expire_replacement`), so a
+        claim landing in between wins. The claim-side gate stays the second line, the claim's sweep the third. Never a
+        run at `assets_ready` (its posts exist) and never one failed at its attempts cap. Returns the rows it closed.
+        Best effort per row: a row whose number, lane, date or attempts do not read back is left alone (ERROR), a close
+        that fails is retried next cycle (WARNING); a failed READ raises MarketingRunError (the caller logs it). The
+        switch and each spotlight date's predicate are read at most once per call, and only when a row needs them."""
+        now = now or datetime.now(timezone.utc)
+        today = run_date_et(now)
+        rows = await self.replacement_runs_between(today - timedelta(days=REPLACEMENT_WEB_LOOKBACK_DAYS), today,
+                                                   statuses=_EXPIRABLE_REPLACEMENT_STATUSES)
+        switch: List[bool] = []
+        lane_problems: Dict[date, Optional[str]] = {}
+
+        def switch_on() -> bool:
+            if not switch:
+                switch.append(selection.replacement_on())
+            return switch[0]
+
+        def lane_problem(day: date) -> Optional[str]:
+            if day not in lane_problems:
+                lane_problems[day] = selection.spotlight_day_problem(day)
+            return lane_problems[day]
+
+        closed: List[Dict[str, Any]] = []
+        for row in rows:
+            run_id = row.get("id")
+            try:
+                why = replacement_expiry_problem(row, now=now, switch_on=switch_on, lane_problem=lane_problem,
+                                                 stale_seconds=int(settings.MARKETING_RUN_STALE_SECONDS))
+            except ValueError as e:
+                logger.error("marketing replacement expiry left run_id=%s run_date=%s alone — it does not read back "
+                             "(%s)", run_id, str(row.get("run_date"))[:10], e)
+                continue
+            if why is None:
+                continue
+            try:
+                done = await self._expire_replacement(row, now=now, why=why,
+                                                      op="expire_unclaimable_replacements.close")
+            except MarketingRunError as e:
+                logger.warning("marketing replacement expiry could not close run_id=%s (%s: %s) — the next review "
+                               "cycle retries", run_id, type(e).__name__, e)
+                continue
+            if done is not None:
+                closed.append(done)
+        return closed
+
+    async def _replacement_rpc(self, name: str, params: Dict[str, Any], *, run_id: str) -> Any:
+        """Call one of migration 215's functions and return its JSON answer. Every failure is a MarketingRunError
+        (the review bot answers "Could not record that — tap again"), logged at ERROR with what to do: a 23505 means
+        UNIQUE (run_date, lane) is back (migration 210 re-run after 215 — review L5; `_exec` re-raises a unique
+        violation raw so a claim can adopt its winner, so it is caught HERE); PGRST202 / 42883 means the function is
+        missing (215 not applied). Any other failure — a transport error after the COMMIT included — may have
+        committed: the request function then answers the retry `requested` again with `replayed` (amendment A5)."""
+        try:
+            res = await _exec(self.sb.rpc(name, params), op=name, run_id=run_id)
+        except Exception as e:
+            if is_unique_violation(e):
+                logger.error("marketing %s run_id=%s FAILED: UNIQUE (run_date, lane) is back — was 210 re-run after "
+                             "215? (%s) — nothing was recorded", name, run_id, type(e).__name__)
+                raise MarketingRunError(f"{name} run {run_id}: a unique violation on the replacement's claim key "
+                                        "(UNIQUE (run_date, lane) is back — was 210 re-run after 215?)") from e
+            if _missing_function(e):
+                logger.error("marketing %s run_id=%s FAILED: the function is missing — apply migration 215 (%s: %s)",
+                             name, run_id, type(e).__name__, e)
+                raise MarketingRunError(f"{name} run {run_id}: the function is missing (apply migration 215)") from e
+            logger.error("marketing %s run_id=%s FAILED (%s: %s) — it may have committed; a retry is answered from the "
+                         "ledger", name, run_id, type(e).__name__, e, exc_info=not isinstance(e, MarketingRunError))
+            if isinstance(e, MarketingRunError):
+                raise
+            raise MarketingRunError(f"{name} run {run_id}: {type(e).__name__}: {e}") from e
+        return getattr(res, "data", None)
+
+    async def request_replacement(self, run_id: str, *, by: str, now: datetime) -> ReplacementResult:
+        """The owner's confirmed "🔄 Next company" on a Money Map run's review bundle (owner decision 2026-11-27).
+
+        The web's own refusals come first, each before the function is called and none written:
+        `switched_off` (MARKETING_REPLACE_ENABLED off), `money_map_off` (amendment A2: Money Map is switched off —
+        MARKETING_NEWS_SERIES / MARKETING_CONTENT_CLASSES — so a replacement could never post), `not_found` (no such
+        run, or not a run id — nothing read), `too_late` (now is past the lane's tap cutoff, `replacement_cutoff`, or
+        not the run's own ET day), `lane_closed` (a spotlight run whose lane is closed for its date now: no claim would
+        ever read the replacement). Then ONE call of `marketing_request_replacement(run, by, cutoff)`: in one
+        transaction it rejects every pending post of the run and inserts the planned replacement row that the worker's
+        next tick claims — or answers why not (REPLACEMENT_OUTCOMES).
+
+        EXCEPT for a request that already LANDED (`replacement_request_landed`: the response was lost, or a second
+        phone taps): it is answered from the ledger past every local refusal (review 2026-11-27) — the function is
+        called with `p_not_after` = the start of the run's ET day whenever a local gate refused, so it can only read
+        the replay back (or answer `too_late` / `already_replaced`), never plan a replacement the web refused. A
+        replayed `requested` is returned as such; any other answer to that call returns the local refusal. The run is
+        therefore read even when a switch is off; a failed read then answers the switch refusal (WARNING), never an
+        error.
+
+        Its answer is parsed strictly: an unknown outcome, or a `requested` answer without a canonical new run id,
+        replacement n+1 and a day count in 1..REPLACEMENTS_PER_DAY, is a MarketingRunError (ERROR); a decision message
+        id that is not a whole number, or a post id that is not a uuid, is dropped (WARNING) — the request stands.
+        Every outcome is logged at INFO. MarketingRequestInvalid for an empty `by` or an unreadable lane / replacement
+        on the run; MarketingRunError for a ledger or function failure (`_replacement_rpc`)."""
+        if not isinstance(by, str) or not by.strip():
+            raise MarketingRequestInvalid("request_replacement: `by` must name who asked")
+        now = _as_instant(now, "now")
+        switch_refusal: Optional[Tuple[str, str]] = None
+        if not selection.replacement_on():
+            switch_refusal = ("switched_off", "MARKETING_REPLACE_ENABLED is off")
+        elif selection.replacement_chain_now() == (selection.SKIP,):
+            switch_refusal = ("money_map_off", "Money Map is switched off: MARKETING_NEWS_SERIES / "
+                                               "MARKETING_CONTENT_CLASSES")
+        if not isinstance(run_id, str) or _canonical_uuid(run_id) != run_id:
+            if switch_refusal is not None:
+                logger.info("marketing replacement REFUSED run_id=%r outcome=%s by=%s (%s) — nothing read or written",
+                            str(run_id)[:40], switch_refusal[0], by[:64], switch_refusal[1])
+                return ReplacementResult(switch_refusal[0])
+            logger.warning("marketing replacement REFUSED run_id=%r outcome=not_found by=%s: not a run id — nothing "
+                           "read", str(run_id)[:40], by[:64])
+            return ReplacementResult("not_found")
+        try:
+            run = await self.get_run(run_id)
+        except MarketingRunError as e:
+            if switch_refusal is None:
+                raise
+            logger.warning("marketing replacement REFUSED run_id=%s outcome=%s by=%s (%s) — the run could not be read "
+                           "to tell a request that already landed (%s: %s); answered with the switch", run_id,
+                           switch_refusal[0], by[:64], switch_refusal[1], type(e).__name__, e)
+            return ReplacementResult(switch_refusal[0])
+        if run is None:
+            outcome = switch_refusal[0] if switch_refusal is not None else "not_found"
+            logger.info("marketing replacement REFUSED run_id=%s outcome=%s by=%s", run_id, outcome, by[:64])
+            return ReplacementResult(outcome)
+        landed = replacement_request_landed(run)
+        if switch_refusal is not None and not landed:
+            logger.info("marketing replacement REFUSED run_id=%s outcome=%s by=%s (%s) — nothing written", run_id,
+                        switch_refusal[0], by[:64], switch_refusal[1])
+            return ReplacementResult(switch_refusal[0])
+        lane = _lane_of(run, op="request_replacement")
+        n = _replacement_of(run, op="request_replacement")
+        run_date = self._run_day(run, op="request_replacement")
+        cutoff = replacement_cutoff(run_date, lane)
+        local: Optional[ReplacementResult] = None
+        if switch_refusal is not None:
+            local = ReplacementResult(switch_refusal[0])
+        elif now >= cutoff or run_date_et(now) != run_date:
+            local = ReplacementResult("too_late", run=run, cutoff=cutoff)
+        elif lane == RUN_LANE_SPOTLIGHT:
+            problem = selection.spotlight_day_problem(run_date)
+            if problem is not None:
+                local = ReplacementResult("lane_closed", detail=problem, run=run, cutoff=cutoff)
+        if local is not None and not landed:
+            logger.info("marketing replacement REFUSED run_id=%s run_date=%s lane=%s outcome=%s by=%s (taps closed %s; "
+                        "%s)", run_id, run_date, lane, local.outcome, by[:64], cutoff.isoformat(), local.detail)
+            return local
+        # A local refusal of a request that already landed: the function may only read the replay back — a cutoff at
+        # the start of the run's own ET day makes any other path `too_late` (or `already_replaced`), never a write.
+        not_after = cutoff if local is None else _closed_cutoff(run_date)
+        data = await self._replacement_rpc(
+            REPLACEMENT_REQUEST_RPC,
+            {"p_run_id": run_id, "p_by": by[:64], "p_not_after": not_after.isoformat()},
+            run_id=run_id,
+        )
+        try:
+            result = _parse_replacement_answer(data, n=n, run=run, cutoff=cutoff)
+        except ValueError as e:
+            logger.error("marketing replacement run_id=%s run_date=%s lane=%s: the request function's answer does not "
+                         "read back (%s) — treated as not recorded", run_id, run_date, lane, e)
+            raise MarketingRunError(f"request_replacement run {run_id}: unreadable answer ({e})") from e
+        if local is not None and not (result.outcome == "requested" and result.replayed):
+            logger.info("marketing replacement REFUSED run_id=%s run_date=%s lane=%s outcome=%s by=%s (taps closed %s; "
+                        "%s) — the ledger answered %s, nothing written", run_id, run_date, lane, local.outcome, by[:64],
+                        cutoff.isoformat(), local.detail, result.outcome)
+            return local
+        if result.outcome == "requested":
+            logger.info("marketing replacement REQUESTED run_id=%s run_date=%s lane=%s new_run_id=%s replacement=%s "
+                        "today=%s rejected=%d replayed=%s status=%s by=%s%s", run_id, run_date, lane, result.run_id,
+                        result.replacement, result.replacements_today, len(result.rejected_post_ids), result.replayed,
+                        result.status, by[:64],
+                        f" (answered from the ledger past the local refusal {local.outcome})" if local else "")
+        else:
+            logger.info("marketing replacement REFUSED run_id=%s run_date=%s lane=%s outcome=%s status=%s detail=%s "
+                        "by=%s", run_id, run_date, lane, result.outcome, result.status, result.detail, by[:64])
+        return result
+
+    async def restore_replaced(self, run_id: str, *, by: str, now: datetime) -> RestoreResult:
+        """"↩ Post {SYM} after all" (amendment A1): put back to pending_review exactly the posts a replacement request
+        rejected on run `run_id`, through ONE call of `marketing_restore_replaced(run, by, now)` — only while the run is
+        still media_ready, its replacement is over with NO post, and it is still the run's own ET day (until its end,
+        `restore_closes` — never the tap cutoff; the function's own checks; RESTORE_OUTCOMES). Reads NO switch: the
+        original may be posted after replacing was switched off. A replay answers `restored` with `replayed`, never a
+        second write.
+        `not_found` (no such run, or not a run id) never calls the function. Its answer is parsed strictly (an unknown
+        outcome or a non-bool `replayed` is a MarketingRunError, ERROR); a post id that is not a uuid is dropped
+        (WARNING). Every outcome logged at INFO. MarketingRequestInvalid for an empty `by`; MarketingRunError for a
+        ledger or function failure (`_replacement_rpc`)."""
+        if not isinstance(by, str) or not by.strip():
+            raise MarketingRequestInvalid("restore_replaced: `by` must name who asked")
+        now = _as_instant(now, "now")
+        if not isinstance(run_id, str) or _canonical_uuid(run_id) != run_id:
+            logger.warning("marketing restore REFUSED run_id=%r outcome=not_found by=%s: not a run id — nothing read",
+                           str(run_id)[:40], by[:64])
+            return RestoreResult("not_found")
+        run = await self.get_run(run_id)
+        if run is None:
+            logger.info("marketing restore REFUSED run_id=%s outcome=not_found by=%s", run_id, by[:64])
+            return RestoreResult("not_found")
+        try:
+            cutoff: Optional[datetime] = restore_closes(date.fromisoformat(str(run.get("run_date"))[:10]))
+        except ValueError:
+            cutoff = None    # only the toast's time; the function judges the day itself
+        data = await self._replacement_rpc(
+            REPLACEMENT_RESTORE_RPC, {"p_run_id": run_id, "p_by": by[:64], "p_now": now.isoformat()}, run_id=run_id)
+        try:
+            result = _parse_restore_answer(data, run=run, cutoff=cutoff)
+        except ValueError as e:
+            logger.error("marketing restore run_id=%s: the restore function's answer does not read back (%s) — treated "
+                         "as not recorded", run_id, e)
+            raise MarketingRunError(f"restore_replaced run {run_id}: unreadable answer ({e})") from e
+        logger.info("marketing restore run_id=%s run_date=%s lane=%s outcome=%s posts=%d replayed=%s status=%s by=%s",
+                    run_id, str(run.get("run_date"))[:10], run.get("lane") or RUN_LANE_MAIN, result.outcome,
+                    len(result.post_ids), result.replayed, result.status, by[:64])
+        return result
+
+    @staticmethod
+    def _run_day(run: Dict[str, Any], *, op: str) -> date:
+        """A run row's `run_date` as a date — a ledger row whose date does not read back is a MarketingRunError
+        (logged at ERROR with the run id), never a guessed day."""
+        try:
+            return date.fromisoformat(str(run.get("run_date"))[:10])
+        except ValueError as e:
+            logger.error("marketing %s run_id=%s: run_date %r does not read back", op, run.get("id"),
+                         str(run.get("run_date"))[:40])
+            raise MarketingRunError(f"{op}: run {run.get('id')} has an unreadable run_date") from e
+
+
+#: SQLSTATE / PostgREST codes meaning a function does not exist (migration 215 not applied).
+_MISSING_FUNCTION_CODES = frozenset({"PGRST202", "42883"})
+
+
+def _missing_function(exc: BaseException) -> bool:
+    """Does the exception (or one it was raised from) carry a STRUCTURED code saying the called function does not exist
+    — never its text (a Cloudflare Ray ID can hold "42883": `smart_link._looks_missing`)."""
+    seen = 0
+    cur: Optional[BaseException] = exc
+    while cur is not None and seen < 8:
+        code = getattr(cur, "code", None)
+        if isinstance(code, str) and code.strip().upper() in _MISSING_FUNCTION_CODES:
+            return True
+        cur = cur.__cause__ or cur.__context__
+        seen += 1
+    return False
+
+
+def _uuid_list(raw: Any, *, what: str) -> Tuple[str, ...]:
+    """A JSON list of canonical uuids from a 215 function's answer; anything else in it is dropped with a WARNING (the
+    decision it describes was already recorded). None / absent is the empty list; a non-list is a ValueError."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"{what} is {type(raw).__name__}, not a list")
+    kept = tuple(x for x in raw if isinstance(x, str) and _canonical_uuid(x) == x)
+    if len(kept) != len(raw):
+        logger.warning("marketing replacement answer: dropped %d %s entr(ies) that are not uuids", len(raw) - len(kept),
+                       what)
+    return kept
+
+
+def _message_ids(raw: Any) -> Tuple[int, ...]:
+    """Decision message ids from the request's answer (amendment A6): whole numbers only (never a bool, a string or a
+    float) — anything else is dropped with a WARNING; a non-list is a ValueError."""
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ValueError(f"review_message_ids is {type(raw).__name__}, not a list")
+    kept = tuple(x for x in raw if type(x) is int)
+    if len(kept) != len(raw):
+        logger.warning("marketing replacement answer: dropped %d decision message id(s) that are not whole numbers",
+                       len(raw) - len(kept))
+    return kept
+
+
+def _known_status(raw: Any) -> Optional[str]:
+    return raw if isinstance(raw, str) and raw in RUN_STATUSES else None
+
+
+def _parse_replacement_answer(data: Any, *, n: int, run: Dict[str, Any], cutoff: datetime) -> ReplacementResult:
+    """`marketing_request_replacement`'s JSON answer as a ReplacementResult. ValueError when it does not read back: not
+    an object, an outcome outside REPLACEMENT_OUTCOMES, or a `requested` answer without a canonical new run id,
+    replacement n + 1, a day count in 1..REPLACEMENTS_PER_DAY and a bool `replayed`. A replay's `status` (the
+    replacement's now) outside RUN_STATUSES reads as None (unknown — the bot then words it as still coming)."""
+    if not isinstance(data, dict):
+        raise ValueError(f"the answer is {type(data).__name__}, not an object")
+    outcome = data.get("outcome")
+    if outcome not in REPLACEMENT_OUTCOMES:
+        raise ValueError(f"unknown outcome {str(outcome)[:40]!r}")
+    if outcome == "requested":
+        new_id = data.get("run_id")
+        if not isinstance(new_id, str) or _canonical_uuid(new_id) != new_id:
+            raise ValueError(f"run_id {str(new_id)[:40]!r} is not a canonical uuid")
+        replacement = data.get("replacement")
+        if type(replacement) is not int or replacement != n + 1:
+            raise ValueError(f"replacement {str(replacement)[:40]!r} is not {n + 1}")
+        today = data.get("replacements_today")
+        if type(today) is not int or not 1 <= today <= REPLACEMENTS_PER_DAY:
+            raise ValueError(f"replacements_today {str(today)[:40]!r} is not 1..{REPLACEMENTS_PER_DAY}")
+        replayed = data.get("replayed")
+        if type(replayed) is not bool:
+            raise ValueError(f"replayed {str(replayed)[:40]!r} is not a bool")
+        ref = data.get("from_source_ref")
+        return ReplacementResult(
+            "requested", run_id=new_id, replacement=replacement, replacements_today=today,
+            rejected_post_ids=_uuid_list(data.get("rejected_post_ids"), what="rejected_post_ids"),
+            review_message_ids=_message_ids(data.get("review_message_ids")),
+            from_source_ref=ref if isinstance(ref, str) else None, replayed=replayed,
+            # a replay says what became of the replacement (its status NOW); a fresh request planned it
+            status=_known_status(data.get("status")) if replayed else None, run=run, cutoff=cutoff)
+    if outcome == "already_replaced":
+        newest = data.get("run_id")
+        number = data.get("replacement")
+        return ReplacementResult(
+            outcome, run_id=newest if isinstance(newest, str) and _canonical_uuid(newest) == newest else None,
+            replacement=number if type(number) is int and 1 <= number <= RUN_REPLACEMENT_MAX else None,
+            status=_known_status(data.get("status")), run=run, cutoff=cutoff)
+    if outcome == "not_ready":
+        return ReplacementResult(outcome, status=_known_status(data.get("status")), run=run, cutoff=cutoff)
+    if outcome == "member_decided":
+        statuses = data.get("statuses")
+        return ReplacementResult(outcome, detail=statuses[:120] if isinstance(statuses, str) else None, run=run,
+                                 cutoff=cutoff)
+    if outcome == "cap_reached":
+        today = data.get("today")
+        return ReplacementResult(outcome, replacements_today=today if type(today) is int and today >= 0 else None,
+                                 run=run, cutoff=cutoff)
+    return ReplacementResult(outcome, run=run, cutoff=cutoff)
+
+
+def _parse_restore_answer(data: Any, *, run: Dict[str, Any], cutoff: Optional[datetime]) -> RestoreResult:
+    """`marketing_restore_replaced`'s JSON answer as a RestoreResult. ValueError when it does not read back: not an
+    object, an outcome outside RESTORE_OUTCOMES, or a `restored` answer without a bool `replayed`."""
+    if not isinstance(data, dict):
+        raise ValueError(f"the answer is {type(data).__name__}, not an object")
+    outcome = data.get("outcome")
+    if outcome not in RESTORE_OUTCOMES:
+        raise ValueError(f"unknown outcome {str(outcome)[:40]!r}")
+    if outcome == "restored":
+        replayed = data.get("replayed")
+        if type(replayed) is not bool:
+            raise ValueError(f"replayed {str(replayed)[:40]!r} is not a bool")
+        return RestoreResult(outcome, post_ids=_uuid_list(data.get("post_ids"), what="post_ids"), replayed=replayed,
+                             run=run, cutoff=cutoff)
+    attempts = data.get("attempts")
+    return RestoreResult(outcome, status=_known_status(data.get("status")),
+                         attempts=attempts if type(attempts) is int and attempts >= 0 else None, run=run, cutoff=cutoff)
 
 
 def _is_storage_conflict(exc: BaseException) -> bool:

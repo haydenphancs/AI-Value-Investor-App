@@ -1606,6 +1606,9 @@ def test_reason_sets_are_pinned():
                                           # non-U.S. kind), not actively trading, or whose listing cannot be
                                           # verified — dropped, never named
                                           "stake_not_public", "stake_not_trading", "stake_listing_unverified",
+                                          # owner decision 2026-11-27: a Money Map loss year whose costs bar
+                                          # cannot be split, its other items a cost or unknown
+                                          "money_map_costs_undivided",
                                           # news-v23 phase 3 (the weekly theme post): an angle not built yet, one
                                           # the run's worker cannot draw, too few market values; a member's
                                           # market value left out

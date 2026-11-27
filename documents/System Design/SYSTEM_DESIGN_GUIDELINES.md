@@ -8265,7 +8265,9 @@ web that carries it deploys (that web filters every run read on `lane`). Plan
   posts are keyed `<run_date>:spotlight:<platform>:<format>` (the first ten characters stay the date for every reader)
   and its assets live under `<run_date>/spotlight/`; `register_asset` and `create_posts` refuse to adopt another
   run's row on the same path or key. `marketing_scripts.lane` copies the run's lane in one place
-  (`run_service.insert_script`).
+  (`run_service.insert_script`). Since migration 215 (§12.25, built, not deployed) the key is UNIQUE (`run_date`,
+  `lane`, `replacement`): a (day, lane) holds its own run (replacement 0, everything above unchanged) and at most two
+  owner-requested replacements a day over both lanes, of which at most one run per (day, lane) ever publishes.
 - **Its own claim route**, `POST /api/v1/internal/marketing/lanes/spotlight/claim`, with the same body and answer as
   `POST /api/v1/internal/marketing/runs/claim`. Not a field on that route: its request model ignores unknown fields,
   so an older web would have claimed MAIN. It answers `not_scheduled` before any read or write unless
@@ -8857,6 +8859,16 @@ stay (none has shipped). A PROFIT year is untouched, key for key and byte for by
   items were INCOME, of any size (parts or none — a sliver too small for the note can still move the 10-K's total
   across a rounding step), the bar reads "Costs, after other items" and the alt text "costs after other items"; a cost,
   zero or no operating line keeps "Costs and expenses". The worker draws it from the spec (no worker change; `READBACK_LOOK` stays news-v23).
+- **An undivided bar that hides other costs is never posted** (owner decision 2026-11-27, on the open call "a loss year
+  whose other items were a COST with no gross line": "i don't think we need to post for these companies. so, post the
+  other one"). When the bar cannot be split (no gross or no operating line, or a part ≤ 0) and interest, tax and other
+  items were a COST — or no operating line can tell — the one bar labelled "Costs and expenses" would hold interest and
+  tax the 10-K does not count there. ONE predicate, `company_news_rules.money_map_costs_undivided` (the template's own
+  Decimal arithmetic), refuses it at the read (`company_news_adapter._money_map_record` →
+  `money_map_costs_undivided`, a content refusal remembered for the fiscal year, so the walk posts the next company the
+  same day) and in the template (`news_templates._money_map_parts` → ``costs_undivided``, so `revalidate` refuses a day
+  built before the rule). Other INCOME keeps the undivided bar under the news-v24 label; exactly ZERO keeps "Costs and
+  expenses" (the bar is then the statement's own total). No `TEMPLATE_VERSION` bump: no accepted output changes.
 - **Rounding.** One decimal (`money_image`'s form) unless the reader's arithmetic misses at that precision (parts ±
   other vs costs, costs − revenue vs the net loss, within half the coarsest figure's last digit: `_lands`), then two
   decimals for that post (`MONEY_MAP_COSTS_PLACES`) — the revenue card above it included (`flow[0]` takes the costs
@@ -8888,8 +8900,120 @@ stay (none has shipped). A PROFIT year is untouched, key for key and byte for by
   carries art since the final review of 2026-11-26, §12.21 — the gate stands for the day the Money Map is put back).
 
 Not done: a costs view for a profit year (the owner approved the step card for those; a thin-margin year would draw two
-almost equal bars). The label "Costs, after other items" on an other-income year was decided by the owner on 2026-11-27
-(the bullet above).
+almost equal bars). The label "Costs, after other items" on an other-income year, and the refusal of an undivided bar
+that hides other costs, were decided by the owner on 2026-11-27 (the bullets above).
+
+### 12.25 Replace a Money Map post with the next company (owner decision 2026-11-27, migration 215)
+
+The owner, reviewing a Money Map post in Telegram: "when i review the post for this type of post, i can have an option
+to replace to the other companies (like the next one)", and his choice: "Full replacement: the next company's post
+(video + picture) comes to Telegram for review about 20-75 min after the tap. Max 2 replacements a day. Money Map posts
+only. Needs migration 215, off until you switch it on." Built 2026-11-27 and not deployed: `MARKETING_REPLACE_ENABLED`
+defaults False and is read at call time; migration 215 (`database/migrations/215_marketing_replacement_runs.sql`) must
+be applied before the web that carries it; the media worker does not change. Design and its binding amendments (from
+two adversarial reviews): `~/.claude/plans/marketing-v2-design/replace/`.
+
+- **A replacement is a new run of the same (ET day, lane).** `marketing_runs.replacement` is 1 or 2 and
+  `replaces_run_id` names the run it replaces; both are 0 / NULL on every day's own run (CHECKed together). The claim
+  key becomes UNIQUE (`run_date`, `lane`, `replacement`): 215 adds it first, then drops `UNIQUE (run_date, lane)` by its
+  definition, as 210 did. It is called `replacement`, never "generation": `generation_id` and `generations` already
+  mean the writer's lease and its call count. Replacement 0 is byte for byte the run of before — its INSERT never names
+  the column, and its keys, paths, labels and Telegram texts carry no new segment.
+- **One Postgres function writes it** (`public.marketing_request_replacement`, SECURITY INVOKER, service_role only;
+  called by `run_service.request_replacement`). In one transaction, under a per-ET-day advisory lock over both lanes,
+  it checks that the tapped run is the newest of its (day, lane), media_ready, with an accepted money_map script, no
+  post approved / queued / published / failed / retracted and at least one pending_review, and that the day holds
+  fewer than two replacements; then it inserts the `planned` replacement (attempts 0, and no owner id: the row is
+  echoed to the worker), rejects every pending post of the run (each review record names the new run) and stamps the
+  run `metadata.replaced_by`. One function, because PostgREST can neither reject on condition that no sibling was
+  approved, count both lanes' replacements nor insert in one write: a check-then-act lets an Approve all, a second tap
+  or the other lane's tap slip between the steps. The cap counts REQUESTS, so a replacement that found nothing has
+  still spent its slot and the cap cannot loop. A replayed tap (a lost response) is answered `requested` again from the
+  ledger, never written twice, with the replacement's status now (so a stale tap after it ended is never told it is
+  coming) — and BEFORE the cutoff check: a request that committed seconds before the cutoff is still answered on a
+  retry after it. The web refuses first, before the call: the switch off, Money Map switched off now, past the lane's
+  cutoff or another ET day, a spotlight lane closed for the date — except for a run whose request already landed
+  (`metadata.replaced_by`, never restored), which goes to the function with the start of its day as the cutoff, so it
+  can only read the replay back, never plan a replacement the web refused. A 23505 from the function means migration
+  210 was re-run after 215 (ERROR; the owner reads "Could not record that — tap again").
+- **The existing claim runs it; the worker is unchanged.** The worker's next tick INSERTs the day's run as always, meets
+  23505 on (day, lane, 0), and the claim reads the (day, lane)'s NEWEST run — `get_run_by_date` orders by `created_at`,
+  then `id` (the function stamps `created_at` after its lock, so numbers and stamps rise together, and the read names
+  no 215 column) — and re-claims the planned row with the usual CAS. The pre-inserted row slips past `resume_only` and
+  `spotlight_start_closed`, which gate only an INSERT, so `run_service.replacement_claim_problem` closes it unrun
+  instead (`skipped`, skip reason `replacement_expired`) when its day is over, or when it is unstarted outside its
+  lane's start window or with the switch off — never a run at `assets_ready`, whose posts exist (the next resume
+  completes it, as for any day). A replacement runs only on its own ET day, with at most 2 attempts. Its objects live
+  under `<run_date>[/spotlight]/r<n>/` and its posts are keyed `<run_date>[:spotlight]:r<n>:<platform>:<format>`: the
+  worker's manifest is deterministic, so without the server's `r<n>` folder a replacement's would land on the replaced
+  run's path and be refused every attempt. The worker reads only the run's id, date, lane, attempts and stage, uploads
+  to the path the server mints, and turns the build's skip into `nothing_qualified` as it always did.
+- **Taps close per lane:** 22:10 ET on the main lane (the 22:15 tick starts it and 23:15 leaves one retry), and
+  (`MARKETING_RUN_HOUR_ET` − 1):10 ET on the spotlight lane, the morning lane's last start tick (15:10 with the
+  defaults). The function re-checks the cutoff the web passes, on its own clock read after the lock.
+- **The build makes ONLY a Money Map** (`script_service._select_replacement`, chain `selection.replacement_chain` =
+  money_map then SKIP, from the switches read now): never the day's calendar, never C0's drop, never the lesson — a
+  main-lane replacement must not become a second weekly lesson. It keeps away from everything its (day, lane) already
+  drew: the replaced scripts' ledger keys join the adapter's exclude set (`run_service.replaced_scripts`, which raises
+  rather than answer on a guess), and a candidate whose LEAD company one of them drew, a share-class twin included, is
+  excluded `replaced_company` (an exclusion, never a template refusal or a refusal memo). Without that, a replacement
+  re-picks the very same company: `recent_source_refs` and the cross-lane read never see the caller's own lane on its
+  run date. Nothing left: one `rejected` / `nothing_qualified` script, the run closes `skipped`. Money Map switched off,
+  or a worker that cannot draw it, writes its own trail outcome (`switched_off`, `worker_capability`), an
+  infrastructure outcome that alerts. `create_posts` of a replacement re-checks it: a template outside
+  `REPLACEABLE_SERIES` is a 422, the switch off now a 409 `MARKETING_TEMPLATE_REFUSED` (the day skips
+  `template_refused`). `scripts/marketing_news_preview.py --exclude-ref` previews what a replacement would post.
+- **The review bot.** "🔄 Next company" is the LAST row of BOTH decision messages of a Money Map run's review bundles,
+  only while the switch is exactly True, the run is media_ready, has never been replaced, is below its cap and its
+  cutoff, its spotlight lane is open, Money Map is switched on now, and none of its posts is approved or sent; per-post
+  review mode never shows it (one WARNING per process when the switch is on without bundles). Its callbacks are their
+  own two-letter family, `nx:` (ask / yes / keep / restore, then the run uuid: no single letter was left), dispatched
+  after the owner allow-list, after the Learn and stake-finder families. A tap asks first: the 🔄 row is swapped for
+  "✅ Yes, get the next company" / "↩ No, keep this one" by an edit of the keyboard alone (every `nx:` change is
+  edit-only, never a fallback message that could carry a second live button). Yes calls the function, appends "🔄
+  Replaced HH:MM ET (k of 2 today) …" to the tapped message and removes the other decision's keyboard through the
+  shared pacer (flood control stops those edits, never the decision). An Approve all on one decision removes the
+  other's 🔄 row; a decision sent after the tap is closed when it is stamped. The replacement's bundles name their run
+  "… · replacement n" and carry "Replaces: {SYM} (replaced HH:MM ET)."
+- **The original can come back** (`public.marketing_restore_replaced`): every notice that says nothing replaces it
+  carries "↩ Post {SYM} after all" while the restore can work. Under the same lock it puts back to pending_review
+  EXACTLY the posts that request rejected — only while the original is media_ready, its replacement is the newest run
+  of the (day, lane) and is over with NO post at all, and it is still that ET day — to its END
+  (`run_service.restore_closes`), never the tap cutoff: a tap in the last hour before the cutoff starts its replacement
+  only at the next :15 tick, after it, and an unstarted one is closed after it, so a cutoff-bound restore could never
+  bring those originals back (the posts stay fresh for the publisher through the next ET day). A retried restore is
+  answered from the ledger before that day check — removes their review record and offer stamps (the next sweep offers a fresh bundle, without 🔄) and keeps
+  an audit record on each post and on the run. With the "no post" rule, at most one run per (day, lane) ever PUBLISHES,
+  whatever a later change does. It reads no switch: the owner may want the original back precisely because replacing
+  was switched off. It is the only way a rejected post returns to pending_review.
+- **One ending, one message.** A replacement that made posts is answered by its bundles. Otherwise the review cycle's
+  notice step (in the publisher loop, every ≤ 10 minutes: no new loop) sends exactly one ringing notice — no other
+  company qualified; no company because a data source failed; never started; failed at its cap or skipped for another
+  reason; finished with no post to review — and stamps `metadata.replacement_reported` only after it went out (at
+  least once, the bundles' rule). Before it, the step closes on the WEB clock every replacement no claim will ever run
+  or finish (its spotlight lane closed for the date, its start window passed, its day over, the switch off: a closed
+  lane's claim answers `not_scheduled` before reading anything), and it reads due rows by STATE, never by date alone.
+  The nightly check and the final word judge a replacement first: quiet once reported, the same notice text and stamp
+  when they meet an unreported ending, quiet for 75 minutes after a request the worker has not started, then one alert
+  naming the real cause (the day over, the lane closed, the switch off, the last start passed, or the cron). The weekly
+  digest lists each replacement as its own row under its day and lane, and counts the rejected posts under "replaced by
+  the next company"; two days later `close_finished_runs` closes the replaced run `skipped` with reason `replaced`.
+- **Per-day bounds.** The ledger reads that bounded a window by days × lanes now bound it by days × `RUNS_PER_DAY_MAX`
+  (4: two lanes and two replacements). Accepted: the looser bound also loosens their guard against a double-counted day
+  (review L7c).
+- **Rollback.** `MARKETING_REPLACE_ENABLED=false` first: no button, every tap refused, an unstarted replacement closed
+  unrun (the owner is told once), one already rendering cannot post. Never roll the WEB back below this release while a
+  replacement row is dated within the last 15 ET days (the 14-day spotlight cooldown read plus the run day; it also
+  covers the digest's two-week window): the old web reads a (day, lane) unordered and could hand a replacement to a
+  claim, and its per-day bounds raise or drop rows. Never drop 215's columns, key or functions while a
+  replacement-aware web runs, and never re-run 210 after 215. The worker needs no rollback. The steps are in 215's
+  header.
+
+Rejected: inserting the replacement at the CLAIM from a recorded request (the tap would promise a run the claim could
+still refuse; an unserved request leaves no row any check can see; the cap would be counted twice with no lock between);
+PostgREST writes for the tap (check-then-act); counting only successful replacements against the cap (a skip could
+loop); resuming a replacement the next day (it would post overnight and compete with that day's runs); the button in
+per-post review mode; a restore that needs the switch on.
 
 ## Appendix A: Where things live
 
@@ -9061,6 +9185,8 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-11-20 | Live earnings after the first report day (owner, that day: "Fix both now", "Fix inbox text", "LIVE all day until midnight", "Yes, read it once"): EPS lands on its own (`eps_seen_pending`); FMP's figures are logged at a watched report's landing (`EARNINGS_LIVE_LANDING`) and when FMP changes them after (`EARNINGS_LIVE_CHANGED`); a push FMP contradicts later has its inbox rows corrected, "Updated: …", with no second buzz (`revise_sent_text`); the LIVE label stays on a report's own day to midnight ET beside its results (`live_label`, a flag, not a status); a release FMP beat is still read once, late, for its outlook and link. After a review of that change the same day: corrections speak in the card's words, count "reported" turning into a verdict as news, wait while a stated metric is held, rewrite a row read before its wake, and stop at the first failed write; a late read keeps its outlook and link and drops its figures, makes one model call a round, cut at 20 s, and skips EDGAR's holidays; FMP's leftover row never wears the label; the logs name a restatement apart from a first fill; two switches, `EARNINGS_LIVE_INBOX_CORRECTIONS_ENABLED` and `EARNINGS_LIVE_LATE_READS_ENABLED`, both on. A second review of those fixes: a correction keeps the push's words for a figure now held (it no longer waits for it), and its retry writes only rows still holding what they held, never over a wake's words; a failed write waits 5 min; a late read's link-only row is restored (the deadline doubling written here was replaced by the third review's 20 s cut while busy); the strip is judged when the figure arrives; the label and the late list follow the push about a stale earlier row; the logs carry FMP's later revenue. A third review: a correction now rewrites only rows holding words the sender knows a row can hold, each in its own merged words (never a figure a woken row's phone was spared), and follows the report's result rows; a late read is cut at 20 s only while a waiting ticker is in its window and a cut waits for a calm round without spending an attempt; the strip is judged from the record when the figure arrives; a late read keeps its link even when every figure failed. A fourth review: a look keeps the texts it may have written before its write, and reads the held rows first; result rows a wake wrote in the live words are followed; a late call is judged busy over its whole span; every release found keeps its link; a release with no figure closes no landing. A fifth review: the live-words track reads and writes nothing until a wake writes such a row, and looks a record change owes go before held re-looks, longest due first; a late call is judged busy as it starts, after its own SEC reads, and a cut one is served from the memo once a twin has read its release; a release with no figure clears neither landing flag. Then, the owner's calls on the research ("Add the check", "Follow FMP", "Backend only"): a revenue 25%+ off consensus whose EPS does not move the same way by half as much goes in the live push with no verdict; corrections keep following FMP's newest answer; the web redeploys only for `/backend/**` changes (`watchPatterns`), so an iOS- or docs-only push no longer restarts it (a backend push, a variable change or a crash still does, and a restart forgets what was pushed). A sixth review, after the owner's "fix what you need to fix first": the revenue check gains its $100M floor (unfloored it withheld 7.1% of all US reports against the "about 1%" quoted) and lets a release's GAAP EPS neither raise nor settle it (4 of the 9 real surprises lost their verdict when the release came first); a passing EPS hold corrects nothing; a correction's own "Updated: " rows follow FMP; a correction never pairs a revenue verdict with an EPS that no longer bears it out; the WITHHELD line is written once, after the send; `EARNINGS_LIVE_REVENUE_CHECK_ENABLED`; a deleted held row marks nothing; a cut filing settled another way leaves nothing waiting. A seventh review, of the whole branch (2026-11-26): the result track spells a result past 5% as `result_copy` does (a woken, re-kinded or 16:00-pass row printed "7%" where the track read "8%", or a percent from 1,000% where it read none); a correction keeping the release's figure keeps its sentence; a revenue verdict FMP moves before any EPS is out is corrected; a correction judges a row's own revenue at every two-decimal surprise the row's text was written at, as the push judged it (never the whole percent it printed), withholding where the push would at any; every report this process told is followed, its ticker watched or not; FMP's leftover row filling the day after a report reads `reported`, not `live`; a waiting ticker whose watch ended earlier in the round makes no late call busy; a cut is kept per filing, so a late twin waits instead of paying its own cut call; a restored row with no figure is never memoised for a twin; the figure logs say `eps_no_landing`, "(no landing)" and `via=daily_pass` where they apply; while the feed build fails in price hours the iOS round asks the LIVE cards through their own routes, one still labelled or `live` from an earlier day included, never handing a refusal back to the feed that just failed (a card older than the route's window waits for the feed). An eighth and a ninth review of those fixes: a leftover with no figures reads as its own, LIVE, until its own fold notes the report before (a read noting it froze a true report's sheet on a stale row); the `reported` change needs figures of its own; FMP's change lines are written after the landing is noted; a failed read keeps a cut, a waiting twin logs `late_wait`; a text keeps every revenue surprise it was written at, the record's own round by round, and a correction withholds where a push would at any; the failed-feed round asks report-day cards still drawn `upcoming` too. A tenth review: a report that has shown figures of its own never reads through a stale row that does not stand (a guard holding its figures had let that row's figures into its inbox corrections and wakes); a row of today reading as an earlier report keeps a 30 s poll while its day is read; once a held read finds no live row held, a moved surprise is no longer kept for the live words; a moved surprise is kept through a failed write's wait; the sheet's retry counts are pinned write by write | 2026-11-20 (BJ, BKE, FRO, IESC watched): BKE pre-announces quarterly sales, so its record was born holding a revenue and its EPS never landed (no push, no log line); FRO's first FMP answer set IFRS revenue against a TCE consensus and an off-basis EPS ("revenue +31%, EPS +10%"), restated within two hours to "EPS missed 12%", with no figure logged to check either; LIVE ended at the results, so a 06:54 MT look saw none; FMP beat every 8-K (BJ by 13 min, IESC by 39 s), so no sheet showed Guidance | A blanket "no % when revenue is 25%+ off consensus" rule (research: 9 of 16 such US reports were real surprises, so it would hide real news; the owner chose the EPS cross-check instead); a 2nd-FMP-answer confirmation delay (FRO's wrong answer stood 10+ min, so it would not have caught it); a server-only LIVE flip of the status (the app would say "is reporting" and poll every 30 s beside finished results); reading late releases every minute (no figure left to win, so a slot's minute is not spent) |
 | 2026-11-26 | Marketing v2 final review, not deployed: AI art used NOWHERE (`post_art.ART_SERIES` empty, the Money Map in `NEVER_ART_SERIES`; §12.21, §12.23); a Form 4 record holds 3-5 companies, the five largest (`INSIDER_MAX_ROWS` 5; §12.23); an older worker re-claiming a built run keeps a stake's basis label and the earnings table, so it fails loudly (`template_onscreen.PRE_V23_ROW_DROPS`; §12.23); a theme row's disc of a missing logo draws its ticker chip (§12.22) | The owner's 2026-11-20 answers were "Drop it from insider posts (Recommended) :: Keep the code but use it nowhere for now; the switch stays off" (not "Put it on Money Map covers") and "At least 3 companies, at most 5 (the 5 largest purchases when more qualify)"; the build had kept the Money Map cover's art and a cap of 8. A rollback re-claim sent a stake amount without its basis and earnings names without figures, which the server accepted | Refusing the read-back with 409 (an older worker retries a 409 six times, and it would also refuse a resume past `rendered`); stripping more keys; a theme reserved for Wednesday (an open owner call); drawing the name at 9 px or skipping the disc on a theme row |
 | 2026-11-27 | Marketing v2 deployed (2026-11-27 00:20 UTC, every switch off; the owner switched the spotlight, the theme, the 13F spotlight and the first-line prefixes on that evening; the 13F prefix became "🐋 13F filing:"). The first spotlight post found three faults, fixed the same night: a NEW spotlight run starts only before `MARKETING_RUN_HOUR_ET` of its date (the lane switched on at 20:00 ET of a spotlight Thursday had posted that evening; §12.19); a Storage LIST or upload that dies on a dropped connection is tried once more (its four logo calls had failed together, §12.13 storage); a Form 4 company whose lines span two share classes is refused `share_class_overlap` (Biglari's Class A and B had been summed into one range). |
+| 2026-11-27 | A Money Map loss year whose costs bar cannot be split and whose interest, tax and other items were a cost (or cannot be told) is never posted; the next company posts instead (`money_map_costs_undivided` at the read, ``costs_undivided`` in the template, one predicate). A quiet spotlight day stays quiet (owner: "no need to. just send me what i need to approve") | The owner's two remaining open calls of the release: the one undivided bar labelled "Costs and expenses" would include interest and tax the 10-K does not count there ("i don't think we need to post for these companies. so, post the other one") | Draw the bar with a third label; keep posting it with "Costs and expenses"; alert on every quiet day |
+| 2026-11-27 | "🔄 Next company" on a Money Map run's review bundles, built and not deployed, switch off (`MARKETING_REPLACE_ENABLED`, migration 215, §12.25): a confirmed tap rejects the run's waiting posts and inserts a planned replacement run of the same (ET day, lane) — replacement 1 or 2, at most 2 a day over both lanes — in ONE Postgres function under a per-day lock; the worker's next tick claims it through the existing claim (newest run by `created_at`, a gate for a never-started row), with no worker change; its build makes only a Money Map, keeping out every record its (day, lane) drew; keys and paths gain `r<n>` for n ≥ 1 only; one notice when it makes no post, with "↩ Post {SYM} after all" (a second function, the only way back to pending_review). Rollback: switch off first; never roll the web back while a replacement row is dated within 15 ET days | The owner: "when i review the post for this type of post, i can have an option to replace to the other companies (like the next one)"; his choice "Full replacement … Max 2 replacements a day. Money Map posts only. Needs migration 215, off until you switch it on." Two adversarial reviews (the ledger, the posts) added the restore, an idempotent request, reporting by state with expiry on the web's clock, and edit-only keyboards | Inserting the replacement at the claim from a recorded request; PostgREST check-then-act writes for the tap; calling it "generation" (the writer's word); counting only successful replacements; resuming a replacement the next day; the button in per-post review mode; a restore that needs the switch on |
 
 ---
 

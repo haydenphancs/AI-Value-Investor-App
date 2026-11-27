@@ -673,16 +673,10 @@ def test_every_public_table_is_curated():
 # 2026-11-13: 209's live earnings filing cache (earnings_filing_cache) was applied and re-dumped,
 # so it left the list. Each entry below leaves once the owner has applied its migration and
 # dump_schema.sh has run — the test below fails until then.
-_PENDING_MIGRATION_TABLES: set[str] = {
-    # 211 (audit CC-01, 2026-11-26): keyed fingerprints of deleted accounts.
-    "public.deleted_account_fingerprints",
-    # 213 (2026-11-26): Sign in with Apple refresh tokens for the account-deletion revoke (SOC-04).
-    "public.apple_sign_in_grants",
-    # 214 (2026-11-26): server-side sessions. Leave the list once 214 is applied and re-dumped —
-    # and then add `sessions_revoked_at` to public.users' key in schema_curation.py.
-    "public.auth_refresh_families",
-    "public.auth_refresh_tokens",
-}
+_PENDING_MIGRATION_TABLES: set[str] = set()
+# 2026-11-27: 211's deleted_account_fingerprints, 213's apple_sign_in_grants and 214's
+# auth_refresh_families / auth_refresh_tokens were applied (with 212) and re-dumped, so they
+# left the list; `sessions_revoked_at` (214) joined public.users' key in schema_curation.py.
 # 2026-10-29: 205's Trillion Club stake-finder ledger (trillion_club_stake_findings) was applied
 # and re-dumped, so it left the list.
 # 2026-10-23: 204's two Wiser weekly tables (learn_weekly_pieces, learn_narration_jobs) were

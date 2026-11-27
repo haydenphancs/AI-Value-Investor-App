@@ -7948,7 +7948,7 @@ Built and shipped in code, OFF in production until the owner lists each series i
   Form 4 day's fallback (Monday, and the spotlight days — §12.23), so Wednesday is no longer the only theme day; Thursday's earnings post covers
   8 report days so Wednesday's report day is never lost. The active themes rotate oldest-posted first, never one
   posted in the last 28 days, under the key `news:theme_explainer:<slug>:<angle>:<run_date>` (an older key counts as
-  the first angle on its date), from the build's own 84-day ledger read (`runs.theme_refs_between`). Angles rotate per
+  the first angle on its date), from the build's own 84-day ledger read (`runs.theme_scripts_between`). Angles rotate per
   theme — "how they make money" (the grid: "<segment> · 88% of revenue", an older fiscal year tagged on its tile;
   since phase 4 every member's breakdown is read, largest first, the tiles are the members with a fact by market value
   from the same memoised batch "who's biggest" reads, only those 12 carry their fact, and a member whose newest segment
@@ -8801,12 +8801,14 @@ the build to both answers (the cap had been 8, and the Money Map's cover had kep
 - **The theme fallback.** `selection` puts `theme_explainer` right after the insider series in both lanes: Monday CEO
   buys → insider buys → theme → Money Map → lesson; spotlight insider list → theme → [13F spotlight] → Money Map →
   SKIP (the 13F-lead Saturday keeps the 13F spotlight first; Wednesday's lead is unchanged; C0 drops the theme from a
-  spotlight chain on a day whose main chain holds it). The 28-day rule reads `runs.theme_refs_between`, which holds
-  both lanes' theme scripts, so a week may carry up to five theme posts (Mon, Tue, Wed, Thu, Sat) but never one theme
-  twice inside four weeks. Nothing reserves a theme for Wednesday: with 8 active themes and Wednesday needing 4 every
-  28 days, more than about one fallback a week uses them up and the next Wednesdays fall through to earnings / Money
-  Map until one comes free (a Wednesday pick returns on a Wednesday, so Wednesday loses slots, not its cycle) — an
-  OPEN owner call (final review of 2026-11-26; a one-fallback-a-week cap simulated clean), nothing built.
+  spotlight chain on a day whose main chain holds it). The 28-day rule reads `runs.theme_scripts_between`, which holds
+  both lanes' theme scripts, so no theme posts twice inside four weeks. With 8 active themes and Wednesday needing 4
+  every 28 days, more than about one fallback a week used them up (final review of 2026-11-26), so since 2026-11-27
+  (owner: "1 backup theme a week (Recommended)" — "At most one quiet-week theme per week across both daily posts, so
+  Wednesday almost always keeps a theme.") every theme step but the main lane's Wednesday lead is a backup, and a
+  backup step in an ET week (Monday..Sunday) that already holds one in either lane — read from the same ledger rows,
+  through the next day for a main run — falls back `week_cap` unasked (`script_service.theme_week_fallbacks`), so a
+  week carries at most two theme posts.
   On the worst path (the theme spending its whole 120 s) two series no longer get their whole cap — the in-season 13F
   spotlight (56 s) and, on the 13F-lead Saturday, the theme itself (56 s) — and Monday's Money Map starts with 24 s;
   pinned in `tests/test_marketing_news_series_switch.py` (`_SPOTLIGHT_WORST_STARTS`).
@@ -8850,6 +8852,11 @@ stay (none has shipped). A PROFIT year is untouched, key for key and byte for by
   the bar's last stretch (the costs it covered) is hatched and one grey line says "+$X from interest, tax and other
   items made the loss smaller"; the solid red, and the net-loss box, end where costs end. Zero, or under half the costs
   figure's last shown digit: omitted, operating expenses' BAR (never its value) absorbing it.
+- **The bar's label** (owner decision 2026-11-27, '"Costs, after other items" (Recommended)' — "The label matches the
+  figure exactly, so a reader checking the 10-K finds no mismatch"; news-v24, `mm.cost.total.after`): whenever other
+  items were INCOME, of any size (parts or none — a sliver too small for the note can still move the 10-K's total
+  across a rounding step), the bar reads "Costs, after other items" and the alt text "costs after other items"; a cost,
+  zero or no operating line keeps "Costs and expenses". The worker draws it from the spec (no worker change; `READBACK_LOOK` stays news-v23).
 - **Rounding.** One decimal (`money_image`'s form) unless the reader's arithmetic misses at that precision (parts ±
   other vs costs, costs − revenue vs the net loss, within half the coarsest figure's last digit: `_lands`), then two
   decimals for that post (`MONEY_MAP_COSTS_PLACES`) — the revenue card above it included (`flow[0]` takes the costs
@@ -8881,8 +8888,8 @@ stay (none has shipped). A PROFIT year is untouched, key for key and byte for by
   carries art since the final review of 2026-11-26, §12.21 — the gate stands for the day the Money Map is put back).
 
 Not done: a costs view for a profit year (the owner approved the step card for those; a thin-margin year would draw two
-almost equal bars); the label "Costs, after other items" (the designers' open alternative to "Costs and expenses" on an
-other-income year, whose GAAP total is higher by the hatched amount) — an owner call.
+almost equal bars). The label "Costs, after other items" on an other-income year was decided by the owner on 2026-11-27
+(the bullet above).
 
 ## Appendix A: Where things live
 

@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict xLonKklE55R32MdKuMO7RFyTxQVOEhzWhM8hyqoIJwWyZZS6bNXnIcme1zdToy7
+\restrict hqSS8sqVY2710UyJI1d2Khf3rUhc7GZLCIPVNUv0ygzuoMNq8awQU6a9fwSrgxf
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -959,6 +959,96 @@ CREATE FUNCTION pgbouncer.get_auth(p_usename text) RETURNS TABLE(username text, 
 
 
 --
+-- Name: _account_fingerprint(text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public._account_fingerprint(p_kind text, p_value text) RETURNS text
+    LANGUAGE plpgsql STABLE
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_key bytea;
+BEGIN
+    IF p_kind IS NULL OR p_value IS NULL OR p_value = '' THEN
+        RETURN NULL;
+    END IF;
+    SELECT decode(s.decrypted_secret, 'hex') INTO v_key
+      FROM vault.decrypted_secrets s
+     WHERE s.name = 'deleted_account_fingerprint_key';
+    IF v_key IS NULL OR length(v_key) < 32 THEN
+        RAISE EXCEPTION 'deleted_account_fingerprint_key is missing from Vault (migration 211)';
+    END IF;
+    RETURN encode(
+        extensions.hmac(convert_to(p_kind || ':' || p_value, 'UTF8'), v_key, 'sha256'),
+        'hex'
+    );
+END;
+$$;
+
+
+--
+-- Name: _account_fingerprints(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public._account_fingerprints(p_user_id uuid) RETURNS TABLE(kind text, fingerprint text)
+    LANGUAGE sql STABLE
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+    WITH keys AS (
+        SELECT 'email'::text AS kind, public.canonical_account_email(u.email) AS value
+          FROM auth.users u
+         WHERE u.id = p_user_id
+        UNION
+        SELECT 'email', public.canonical_account_email(i.identity_data ->> 'email')
+          FROM auth.identities i
+         WHERE i.user_id = p_user_id
+        UNION
+        SELECT lower(i.provider), i.provider_id
+          FROM auth.identities i
+         WHERE i.user_id = p_user_id
+           AND lower(i.provider) NOT IN ('email', 'phone')
+           AND lower(i.provider) ~ '^[a-z0-9_]{1,32}$'
+           AND COALESCE(i.provider_id, '') <> ''
+    )
+    SELECT DISTINCT k.kind, public._account_fingerprint(k.kind, k.value)
+      FROM keys k
+     WHERE k.value IS NOT NULL AND k.value <> '';
+$_$;
+
+
+--
+-- Name: _lock_refresh_sessions(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public._lock_refresh_sessions(p_user_id uuid) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT pg_advisory_xact_lock(hashtextextended('auth_refresh_sessions:' || p_user_id::text, 0));
+$$;
+
+
+--
+-- Name: _prune_refresh_sessions(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public._prune_refresh_sessions(p_user_id uuid) RETURNS void
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    DELETE FROM public.auth_refresh_tokens t
+     WHERE t.user_id = p_user_id
+       AND t.expires_at < now() - interval '1 day';
+    DELETE FROM public.auth_refresh_families f
+     WHERE f.user_id = p_user_id
+       AND f.created_at < now() - interval '1 day'
+       AND NOT EXISTS (
+           SELECT 1 FROM public.auth_refresh_tokens t WHERE t.family_id = f.family_id
+       );
+$$;
+
+
+--
 -- Name: account_auth_methods(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -989,6 +1079,24 @@ $$;
 --
 
 COMMENT ON FUNCTION public.account_auth_methods(p_user_id uuid) IS 'Returns {has_password, providers} for an account, or NULL if no auth.users row matches. has_password reads auth.users.encrypted_password (authoritative: an admin password write does not necessarily create an email identity). service_role only — see the REVOKE below.';
+
+
+--
+-- Name: account_has_identity(uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.account_has_identity(p_user_id uuid, p_provider text, p_subject text) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT EXISTS (
+        SELECT 1
+          FROM auth.identities i
+         WHERE i.user_id = p_user_id
+           AND i.provider = p_provider
+           AND (i.provider_id = p_subject OR i.identity_data->>'sub' = p_subject)
+    );
+$$;
 
 
 --
@@ -1129,6 +1237,57 @@ BEGIN
     );
 END;
 $$;
+
+
+--
+-- Name: canonical_account_email(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.canonical_account_email(p_email text) RETURNS text
+    LANGUAGE plpgsql IMMUTABLE
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_email  text;
+    v_at     integer;
+    v_local  text;
+    v_domain text;
+    v_plus   integer;
+BEGIN
+    IF p_email IS NULL THEN
+        RETURN NULL;
+    END IF;
+    v_email := lower(btrim(p_email, E' \t\r\n'));
+    IF strpos(v_email, '@') = 0 THEN
+        RETURN NULL;
+    END IF;
+    -- Split at the LAST '@' (a quoted local part may hold another one).
+    v_at := length(v_email) - strpos(reverse(v_email), '@') + 1;
+    v_local := left(v_email, v_at - 1);
+    v_domain := substr(v_email, v_at + 1);
+    IF v_local = '' OR v_domain = '' THEN
+        RETURN NULL;
+    END IF;
+    v_plus := strpos(v_local, '+');
+    IF v_plus > 1 THEN
+        v_local := left(v_local, v_plus - 1);
+    END IF;
+    IF v_domain IN ('gmail.com', 'googlemail.com') THEN
+        IF replace(v_local, '.', '') <> '' THEN
+            v_local := replace(v_local, '.', '');
+        END IF;
+        v_domain := 'gmail.com';
+    END IF;
+    RETURN v_local || '@' || v_domain;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION canonical_account_email(p_email text); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.canonical_account_email(p_email text) IS 'One address per inbox: lower(trim), local part cut at its first +, Gmail dots removed, googlemail.com -> gmail.com. NULL without a local part and a domain. IMMUTABLE (an index uses it). Migration 211.';
 
 
 --
@@ -3033,6 +3192,47 @@ COMMENT ON FUNCTION public.purge_ownerless_subscription_transactions() IS 'BEFOR
 
 
 --
+-- Name: record_deleted_account(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.record_deleted_account(p_user_id uuid) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    v_n integer := 0;
+BEGIN
+    IF p_user_id IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    -- Retention: nothing older than 90 days survives a write.
+    DELETE FROM public.deleted_account_fingerprints WHERE expires_at <= now();
+
+    INSERT INTO public.deleted_account_fingerprints AS f (fingerprint, kind, expires_at)
+    SELECT DISTINCT ON (fp.fingerprint) fp.fingerprint, fp.kind, now() + INTERVAL '90 days'
+      FROM public._account_fingerprints(p_user_id) fp
+     WHERE fp.fingerprint IS NOT NULL
+     ORDER BY fp.fingerprint, fp.kind
+    ON CONFLICT (fingerprint) DO UPDATE
+       SET last_recorded_at = now(),
+           expires_at       = now() + INTERVAL '90 days',
+           times_recorded   = f.times_recorded + 1;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+    RETURN v_n;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION record_deleted_account(p_user_id uuid); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.record_deleted_account(p_user_id uuid) IS 'Records the fingerprints of an account about to be deleted (DELETE /users/me, before admin.delete_user) for 90 days, and prunes expired rows. Returns the rows written. Raises on failure. service_role only. Migration 211, audit CC-01.';
+
+
+--
 -- Name: record_subscription_transaction(text, text, text, uuid, text, timestamp with time zone, timestamp with time zone, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3591,6 +3791,55 @@ COMMENT ON FUNCTION public.renew_sentiment_backfill(p_scope text, p_token uuid, 
 
 
 --
+-- Name: revoke_all_refresh_sessions(uuid); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.revoke_all_refresh_sessions(p_user_id uuid) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_stamp    timestamptz;
+    v_families integer;
+BEGIN
+    IF p_user_id IS NULL THEN
+        RAISE EXCEPTION 'revoke_all_refresh_sessions: p_user_id is NULL';
+    END IF;
+
+    PERFORM public._lock_refresh_sessions(p_user_id);
+
+    -- The NEXT whole second, read AFTER the lock (review 2026-11-26). Every eviction check floors
+    -- the stamp to whole seconds because `iat` has none, so a stamp inside second S spared every
+    -- token minted earlier in S — e.g. a thief refreshing once a second kept an access token for
+    -- up to 60 minutes. Rounding UP evicts all of S. Nothing legitimate is minted in S: this call
+    -- hands the caller no tokens. `clock_timestamp()`, not `now()`: `now()` is the transaction
+    -- start, which can precede a rotation that committed while this call waited for the lock.
+    v_stamp := date_trunc('second', clock_timestamp()) + interval '1 second';
+
+    -- The stamp is what evicts: every token minted before it is refused on refresh and on
+    -- every route that reads the users row — legacy tokens with no session row included.
+    UPDATE public.users SET sessions_revoked_at = v_stamp WHERE id = p_user_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('status', 'account_missing');
+    END IF;
+
+    -- The session rows are revoked too, so they read as ended rather than merely stale.
+    UPDATE public.auth_refresh_families
+       SET revoked_at = v_stamp, revoke_reason = 'signout_all'
+     WHERE user_id = p_user_id AND revoked_at IS NULL;
+    GET DIAGNOSTICS v_families = ROW_COUNT;
+
+    PERFORM public._prune_refresh_sessions(p_user_id);
+
+    RETURN jsonb_build_object(
+        'status', 'revoked', 'families', v_families,
+        'sessions_revoked_at', to_char(v_stamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+    );
+END;
+$$;
+
+
+--
 -- Name: revoke_paid_period(uuid, text, text, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3819,6 +4068,44 @@ $$;
 
 
 --
+-- Name: revoke_refresh_family(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.revoke_refresh_family(p_user_id uuid, p_family_id uuid, p_reason text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_fam public.auth_refresh_families%ROWTYPE;
+BEGIN
+    IF p_user_id IS NULL OR p_family_id IS NULL OR p_reason IS NULL THEN
+        RAISE EXCEPTION 'revoke_refresh_family: a required argument is NULL';
+    END IF;
+    IF p_reason NOT IN ('logout', 'reuse') THEN
+        RAISE EXCEPTION 'revoke_refresh_family: unknown reason %', p_reason;
+    END IF;
+
+    PERFORM public._lock_refresh_sessions(p_user_id);
+
+    -- Scoped to the caller: another account's session id reads as unknown, never as revoked.
+    SELECT * INTO v_fam FROM public.auth_refresh_families f
+     WHERE f.family_id = p_family_id AND f.user_id = p_user_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('status', 'unknown');
+    END IF;
+    IF v_fam.revoked_at IS NOT NULL THEN
+        RETURN jsonb_build_object('status', 'already_revoked', 'reason', v_fam.revoke_reason);
+    END IF;
+
+    UPDATE public.auth_refresh_families
+       SET revoked_at = now(), revoke_reason = p_reason
+     WHERE family_id = p_family_id;
+    RETURN jsonb_build_object('status', 'revoked');
+END;
+$$;
+
+
+--
 -- Name: revoke_tier_credits(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3937,6 +4224,123 @@ $$;
 --
 
 COMMENT ON FUNCTION public.revoke_tier_credits(p_user_id uuid) IS 'Apple REFUND/REVOKE of a subscription (legacy backstop; iap_service calls revoke_paid_period once 198 is applied): claws back the unspent granted pool to GREATEST(free allocation, used) and writes off the spend (139), then leaves paid mode (196). In paid mode it acts only when the in-force period''s own lineage row (198) is revoked under that period''s key; otherwise it logs a WARNING and changes nothing. Never touches the purchased pool. service_role only.';
+
+
+--
+-- Name: rotate_refresh_token(uuid, uuid, bigint, bigint, boolean, uuid, uuid, timestamp with time zone, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.rotate_refresh_token(p_user_id uuid, p_jti uuid, p_token_iat bigint, p_token_exp bigint, p_legacy boolean, p_new_jti uuid, p_new_family_id uuid, p_new_expires_at timestamp with time zone, p_grace_seconds integer, p_max_children integer) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_now        timestamptz := now();
+    v_pw         timestamptz;
+    v_sr         timestamptz;
+    v_stamp      timestamptz;
+    v_tok        public.auth_refresh_tokens%ROWTYPE;
+    v_fam        public.auth_refresh_families%ROWTYPE;
+    v_age        double precision;
+    v_auth_epoch bigint;
+BEGIN
+    IF p_user_id IS NULL OR p_jti IS NULL OR p_new_jti IS NULL OR p_token_iat IS NULL
+       OR p_new_expires_at IS NULL THEN
+        RAISE EXCEPTION 'rotate_refresh_token: a required argument is NULL';
+    END IF;
+
+    PERFORM public._lock_refresh_sessions(p_user_id);
+
+    -- Re-checked HERE, under the lock, although the backend checks both before calling: a
+    -- sign-out-all that commits between that check and this rotation must still win.
+    SELECT u.password_changed_at, u.sessions_revoked_at INTO v_pw, v_sr
+      FROM public.users u WHERE u.id = p_user_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('status', 'account_missing');
+    END IF;
+    v_stamp := GREATEST(v_pw, v_sr);   -- GREATEST ignores NULLs
+    -- Whole seconds, as everywhere else: `iat` has no fraction, the stamp has microseconds.
+    IF v_stamp IS NOT NULL AND to_timestamp(p_token_iat) < date_trunc('second', v_stamp) THEN
+        RETURN jsonb_build_object('status', 'evicted');
+    END IF;
+
+    SELECT * INTO v_tok FROM public.auth_refresh_tokens t WHERE t.jti = p_jti;
+
+    IF NOT FOUND THEN
+        IF NOT COALESCE(p_legacy, false) THEN
+            RETURN jsonb_build_object('status', 'unknown');
+        END IF;
+        -- First use of a pre-214 token: record it as already used, under a new session, and
+        -- mint its successor there. A second use of the same legacy token then finds this row.
+        IF p_new_family_id IS NULL OR p_token_exp IS NULL THEN
+            RAISE EXCEPTION 'rotate_refresh_token: a legacy token needs p_new_family_id and p_token_exp';
+        END IF;
+        INSERT INTO public.auth_refresh_families (family_id, user_id, created_at, auth_time)
+        VALUES (p_new_family_id, p_user_id, v_now, NULL);
+        INSERT INTO public.auth_refresh_tokens
+            (jti, family_id, user_id, parent_jti, issued_at, expires_at,
+             revoked_at, replaced_by, child_count, legacy)
+        VALUES
+            (p_jti, p_new_family_id, p_user_id, NULL, to_timestamp(p_token_iat),
+             to_timestamp(p_token_exp), v_now, p_new_jti, 1, true);
+        INSERT INTO public.auth_refresh_tokens (jti, family_id, user_id, parent_jti, issued_at, expires_at)
+        VALUES (p_new_jti, p_new_family_id, p_user_id, p_jti, v_now, p_new_expires_at);
+        PERFORM public._prune_refresh_sessions(p_user_id);
+        RETURN jsonb_build_object(
+            'status', 'rotated', 'family_id', p_new_family_id, 'auth_time', NULL, 'legacy', true
+        );
+    END IF;
+
+    IF v_tok.user_id <> p_user_id THEN
+        RETURN jsonb_build_object('status', 'mismatch');
+    END IF;
+
+    SELECT * INTO v_fam FROM public.auth_refresh_families f WHERE f.family_id = v_tok.family_id;
+    IF v_fam.revoked_at IS NOT NULL THEN
+        RETURN jsonb_build_object(
+            'status', 'revoked', 'reason', v_fam.revoke_reason, 'family_id', v_fam.family_id
+        );
+    END IF;
+
+    IF v_tok.expires_at <= v_now THEN
+        RETURN jsonb_build_object('status', 'expired', 'family_id', v_fam.family_id);
+    END IF;
+
+    v_auth_epoch := floor(EXTRACT(EPOCH FROM v_fam.auth_time))::bigint;
+
+    IF v_tok.revoked_at IS NULL THEN
+        UPDATE public.auth_refresh_tokens
+           SET revoked_at = v_now, replaced_by = p_new_jti, child_count = child_count + 1
+         WHERE jti = p_jti;
+        INSERT INTO public.auth_refresh_tokens (jti, family_id, user_id, parent_jti, issued_at, expires_at)
+        VALUES (p_new_jti, v_fam.family_id, p_user_id, p_jti, v_now, p_new_expires_at);
+        PERFORM public._prune_refresh_sessions(p_user_id);
+        RETURN jsonb_build_object(
+            'status', 'rotated', 'family_id', v_fam.family_id, 'auth_time', v_auth_epoch
+        );
+    END IF;
+
+    v_age := EXTRACT(EPOCH FROM (v_now - v_tok.revoked_at));
+    IF v_age <= GREATEST(COALESCE(p_grace_seconds, 0), 0)
+       AND v_tok.child_count < GREATEST(COALESCE(p_max_children, 1), 1) THEN
+        UPDATE public.auth_refresh_tokens SET child_count = child_count + 1 WHERE jti = p_jti;
+        INSERT INTO public.auth_refresh_tokens (jti, family_id, user_id, parent_jti, issued_at, expires_at)
+        VALUES (p_new_jti, v_fam.family_id, p_user_id, p_jti, v_now, p_new_expires_at);
+        RETURN jsonb_build_object(
+            'status', 'grace', 'family_id', v_fam.family_id, 'auth_time', v_auth_epoch,
+            'age_seconds', v_age, 'child_count', v_tok.child_count + 1
+        );
+    END IF;
+
+    UPDATE public.auth_refresh_families
+       SET revoked_at = v_now, revoke_reason = 'reuse'
+     WHERE family_id = v_fam.family_id;
+    RETURN jsonb_build_object(
+        'status', 'reuse', 'family_id', v_fam.family_id, 'age_seconds', v_age,
+        'child_count', v_tok.child_count
+    );
+END;
+$$;
 
 
 --
@@ -4245,6 +4649,38 @@ $$;
 
 
 --
+-- Name: start_refresh_family(uuid, uuid, uuid, timestamp with time zone, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.start_refresh_family(p_user_id uuid, p_family_id uuid, p_jti uuid, p_expires_at timestamp with time zone, p_auth_time timestamp with time zone) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    IF p_user_id IS NULL OR p_family_id IS NULL OR p_jti IS NULL OR p_expires_at IS NULL THEN
+        RAISE EXCEPTION 'start_refresh_family: a required argument is NULL';
+    END IF;
+
+    PERFORM public._lock_refresh_sessions(p_user_id);
+
+    IF NOT EXISTS (SELECT 1 FROM public.users u WHERE u.id = p_user_id) THEN
+        RETURN jsonb_build_object('status', 'account_missing');
+    END IF;
+
+    INSERT INTO public.auth_refresh_families (family_id, user_id, created_at, auth_time)
+    VALUES (p_family_id, p_user_id, now(), p_auth_time);
+
+    INSERT INTO public.auth_refresh_tokens (jti, family_id, user_id, parent_jti, issued_at, expires_at)
+    VALUES (p_jti, p_family_id, p_user_id, NULL, now(), p_expires_at);
+
+    PERFORM public._prune_refresh_sessions(p_user_id);
+
+    RETURN jsonb_build_object('status', 'started', 'family_id', p_family_id);
+END;
+$$;
+
+
+--
 -- Name: subscriptions_keep_max_period_end(); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4270,6 +4706,40 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+
+--
+-- Name: sync_public_user_email(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.sync_public_user_email() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+BEGIN
+    IF NEW.email IS NULL OR btrim(NEW.email) = '' THEN
+        RETURN NEW;
+    END IF;
+    UPDATE public.users
+       SET email = NEW.email,
+           updated_at = now()
+     WHERE id = NEW.id
+       AND email IS DISTINCT FROM NEW.email;
+    RETURN NEW;
+EXCEPTION WHEN OTHERS THEN
+    RAISE WARNING 'sync_public_user_email failed for user %: % (SQLSTATE %)',
+        NEW.id, SQLERRM, SQLSTATE;
+    RETURN NEW;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION sync_public_user_email(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.sync_public_user_email() IS 'AFTER UPDATE OF email on auth.users: copies a changed, non-empty address into public.users.email (read by change-password, set-password and Profile). Fails open. Migration 212, audit CC-09.';
 
 
 --
@@ -4323,6 +4793,126 @@ BEGIN
     RETURN NULL;
 END;
 $$;
+
+
+--
+-- Name: withhold_returning_welcome_credits(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.withhold_returning_welcome_credits() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    SET row_security TO 'off'
+    AS $$
+DECLARE
+    _GUEST   CONSTANT UUID := '00000000-0000-4000-8000-00000000dead';
+    v_hits   integer := 0;
+    v_alias  boolean := FALSE;
+    v_canon  text;
+    v_row    public.user_credits%ROWTYPE;
+    v_others integer;
+BEGIN
+    IF NEW.id = _GUEST THEN
+        RETURN NULL;
+    END IF;
+
+    -- Retention: an expired row is removed here too, and never matched below.
+    DELETE FROM public.deleted_account_fingerprints WHERE expires_at <= now();
+
+    UPDATE public.deleted_account_fingerprints f
+       SET times_matched = f.times_matched + 1,
+           last_matched_at = now()
+     WHERE f.expires_at > now()
+       AND f.fingerprint IN (
+           SELECT fp.fingerprint FROM public._account_fingerprints(NEW.id) fp
+            WHERE fp.fingerprint IS NOT NULL
+       );
+    GET DIAGNOSTICS v_hits = ROW_COUNT;
+
+    -- An alias of a LIVE account (foo+2@gmail.com beside foo@gmail.com) is the same inbox: it
+    -- has had its welcome grant already.
+    IF v_hits = 0 THEN
+        v_canon := public.canonical_account_email(NEW.email);
+        IF v_canon IS NOT NULL THEN
+            -- Two alias sign-ups committing at the same moment would each miss the other's
+            -- uncommitted row. This lock (held to commit) serialises them on the canonical
+            -- address, so the second one's EXISTS, a new statement under READ COMMITTED, sees
+            -- the first one's committed row. A hash collision only serialises two sign-ups.
+            PERFORM pg_advisory_xact_lock(hashtext('welcome:' || v_canon));
+            SELECT EXISTS (
+                SELECT 1 FROM public.users u
+                 WHERE public.canonical_account_email(u.email) = v_canon
+                   AND u.id <> NEW.id
+                   AND u.id <> _GUEST
+            ) INTO v_alias;
+        END IF;
+    END IF;
+
+    IF v_hits = 0 AND NOT v_alias THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT * INTO v_row FROM public.user_credits WHERE user_id = NEW.id FOR UPDATE;
+    IF NOT FOUND THEN
+        -- create_user_credits failed (it fails soft). ensure_credit_period will seed this account
+        -- on first read; say so rather than guess.
+        RAISE WARNING 'withhold_returning_welcome_credits: no user_credits row for returning user %', NEW.id;
+        RETURN NULL;
+    END IF;
+
+    -- Only the untouched opening grant, in the GRANTED pool. Anything else means this is not
+    -- the brand-new account the trigger was written for: leave it alone and say so.
+    IF v_row.used <> 0 OR v_row.purchased_total <> 0 OR v_row.purchased_used <> 0
+       OR v_row.paid_period_id IS NOT NULL OR v_row.total <= 0
+       OR v_row.total <> v_row.tier_alloc THEN
+        RAISE WARNING 'withhold_returning_welcome_credits: user % is not an untouched opening grant (total %, used %, tier_alloc %); left alone',
+            NEW.id, v_row.total, v_row.used, v_row.tier_alloc;
+        RETURN NULL;
+    END IF;
+    SELECT count(*) INTO v_others
+      FROM public.credit_transactions
+     WHERE user_id = NEW.id AND reason <> 'grant';
+    IF v_others > 0 THEN
+        RAISE WARNING 'withhold_returning_welcome_credits: user % already has % ledger row(s) besides the opening grant; left alone',
+            NEW.id, v_others;
+        RETURN NULL;
+    END IF;
+
+    -- Append, never rewrite: the opening grant row stays, and this row takes it back, so the
+    -- Credit History reads "+50 Welcome credits, -50 Welcome credits already claimed" and
+    -- SUM(delta) still equals `spendable`. ref_id NULL so no refund can ever pair with it.
+    INSERT INTO public.credit_transactions
+        (user_id, delta, granted_delta, purchased_delta, reason, ref_id, balance_after)
+    VALUES (NEW.id, -v_row.total, -v_row.total, 0, 'welcome_withheld', NULL, 0);
+
+    -- `total` ONLY. `tier_alloc` stays at the period's allowance on purpose: ensure_credit_period
+    -- tops a calendar account up whenever `tier_alloc` is below its plan's allocation (the
+    -- mid-month raise branch, 139/196), so zeroing it re-granted the 50 as `tier_upgrade` on the
+    -- very next balance read (found by the local end-to-end run, 2026-11-26). Left at 50 it says
+    -- "this period's allowance is accounted for", and a real mid-month raise (a comp tier) still
+    -- tops up to the full new allocation, because that branch adds `alloc - total`.
+    UPDATE public.user_credits
+       SET total = 0, updated_at = now()
+     WHERE user_id = NEW.id;
+
+    RAISE LOG 'withhold_returning_welcome_credits: welcome grant withheld for user % (fingerprint hits %, live alias %)',
+        NEW.id, v_hits, v_alias;
+    RETURN NULL;
+EXCEPTION WHEN OTHERS THEN
+    -- Never block a sign-up over a credit control (the 044 pattern). The block's own writes are
+    -- rolled back with it, so a half-withheld grant cannot be left behind.
+    RAISE WARNING 'withhold_returning_welcome_credits failed for user %: % (SQLSTATE %)',
+        NEW.id, SQLERRM, SQLSTATE;
+    RETURN NULL;
+END;
+$$;
+
+
+--
+-- Name: FUNCTION withhold_returning_welcome_credits(); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.withhold_returning_welcome_credits() IS 'DEFERRED AFTER INSERT on auth.users (runs at commit, when the identity rows exist): withholds the untouched free welcome grant (granted pool only) from an account whose email/Apple/Google fingerprint matches an unexpired deleted_account_fingerprints row, or whose canonical email belongs to another live account. Fails open. Migration 211, CC-01.';
 
 
 --
@@ -8378,6 +8968,44 @@ ALTER SEQUENCE public.analytics_events_id_seq OWNED BY public.analytics_events.i
 
 
 --
+-- Name: apple_sign_in_grants; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.apple_sign_in_grants (
+    user_id uuid NOT NULL,
+    apple_sub text NOT NULL,
+    client_id text NOT NULL,
+    refresh_token text NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT apple_sign_in_grants_apple_sub_check CHECK (((char_length(apple_sub) >= 1) AND (char_length(apple_sub) <= 255))),
+    CONSTRAINT apple_sign_in_grants_client_id_check CHECK (((char_length(client_id) >= 1) AND (char_length(client_id) <= 255))),
+    CONSTRAINT apple_sign_in_grants_refresh_token_check CHECK (((char_length(refresh_token) >= 1) AND (char_length(refresh_token) <= 4096)))
+);
+
+
+--
+-- Name: TABLE apple_sign_in_grants; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.apple_sign_in_grants IS 'Sign in with Apple refresh token per user, kept ONLY so DELETE /users/me can revoke the Apple grant (Apple account-deletion guidance; SOC-04). Written by /auth/oauth from the sign-in''s authorization code (app >= 1.04), read once at deletion, cascades with the account. Service-role-only; the token is unusable without the .p8-signed client secret.';
+
+
+--
+-- Name: COLUMN apple_sign_in_grants.apple_sub; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.apple_sign_in_grants.apple_sub IS 'Apple user id (identity token sub = the app''s credential.user). The exchange stores a token only when the code''s subject equals the verified identity token''s.';
+
+
+--
+-- Name: COLUMN apple_sign_in_grants.refresh_token; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.apple_sign_in_grants.refresh_token IS 'Apple refresh token. A credential: never logged, never returned by any route.';
+
+
+--
 -- Name: article_chunks; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -8391,6 +9019,55 @@ CREATE TABLE public.article_chunks (
     token_count integer,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
+
+
+--
+-- Name: auth_refresh_families; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.auth_refresh_families (
+    family_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    auth_time timestamp with time zone,
+    revoked_at timestamp with time zone,
+    revoke_reason text,
+    CONSTRAINT auth_refresh_families_revoke_reason_check CHECK (((revoke_reason IS NULL) OR (revoke_reason = ANY (ARRAY['logout'::text, 'reuse'::text, 'signout_all'::text])))),
+    CONSTRAINT auth_refresh_families_revoked_pair_check CHECK (((revoked_at IS NULL) = (revoke_reason IS NULL)))
+);
+
+
+--
+-- Name: TABLE auth_refresh_families; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.auth_refresh_families IS 'One row per app session (a sign-in on one device): the family of refresh tokens it rotates through, carried in every token as `sid`. revoked_at ends the session: logout, reuse of a retired token, or sign-out-all. Written only by the 214 functions. Migration 214.';
+
+
+--
+-- Name: auth_refresh_tokens; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.auth_refresh_tokens (
+    jti uuid NOT NULL,
+    family_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    parent_jti uuid,
+    issued_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    revoked_at timestamp with time zone,
+    replaced_by uuid,
+    child_count integer DEFAULT 0 NOT NULL,
+    legacy boolean DEFAULT false NOT NULL,
+    CONSTRAINT auth_refresh_tokens_child_count_check CHECK ((child_count >= 0))
+);
+
+
+--
+-- Name: TABLE auth_refresh_tokens; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.auth_refresh_tokens IS 'One row per app refresh token (jti claim). Single-use: /auth/refresh sets revoked_at + replaced_by and mints the successor; a retired token presented again outside the grace window revokes its whole family (auth_refresh_families). Rows past expires_at are pruned per user by the 214 functions. Written only by those functions. Migration 214.';
 
 
 --
@@ -9104,6 +9781,33 @@ CREATE SEQUENCE public.dcf_fair_value_history_id_seq
 --
 
 ALTER SEQUENCE public.dcf_fair_value_history_id_seq OWNED BY public.dcf_fair_value_history.id;
+
+
+--
+-- Name: deleted_account_fingerprints; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.deleted_account_fingerprints (
+    fingerprint text NOT NULL,
+    kind text NOT NULL,
+    first_recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    last_recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    times_recorded integer DEFAULT 1 NOT NULL,
+    times_matched integer DEFAULT 0 NOT NULL,
+    last_matched_at timestamp with time zone,
+    CONSTRAINT deleted_account_fingerprints_fingerprint_check CHECK ((fingerprint ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT deleted_account_fingerprints_kind_check CHECK ((kind ~ '^[a-z0-9_]{1,32}$'::text)),
+    CONSTRAINT deleted_account_fingerprints_times_matched_check CHECK ((times_matched >= 0)),
+    CONSTRAINT deleted_account_fingerprints_times_recorded_check CHECK ((times_recorded >= 1))
+);
+
+
+--
+-- Name: TABLE deleted_account_fingerprints; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.deleted_account_fingerprints IS 'HMAC-SHA256 fingerprints (Vault key deleted_account_fingerprint_key) of DELETED accounts: canonical email and Apple/Google subject. No user id, no email. Read only by the sign-up trigger that withholds the free welcome grant from a returning account; written by record_deleted_account() from DELETE /users/me. Kept 90 days from the last deletion (expires_at), never matched after that. Migration 211, audit CC-01. SERVICE-ROLE ONLY.';
 
 
 --
@@ -12182,7 +12886,8 @@ CREATE TABLE public.users (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     password_changed_at timestamp with time zone,
     is_admin boolean DEFAULT false NOT NULL,
-    comp_tier public.user_tier
+    comp_tier public.user_tier,
+    sessions_revoked_at timestamp with time zone
 );
 
 
@@ -12219,6 +12924,13 @@ COMMENT ON COLUMN public.users.is_admin IS 'Grants access to /api/v1/admin/*. Se
 --
 
 COMMENT ON COLUMN public.users.comp_tier IS 'Complimentary tier FLOOR (App Review demo account, TestFlight testers). NULL = none. iap_service.reconcile_user_tier writes users.tier = max(winning subscription tier, comp_tier), so a sandbox purchase or its expiry can never demote the account below it. Migration 177.';
+
+
+--
+-- Name: COLUMN users.sessions_revoked_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.users.sessions_revoked_at IS 'Set by "Sign out of all devices" (POST /auth/sign-out-all). Every app token whose iat is before it (whole seconds) is refused, on refresh and on every route that reads this row — the same rule as password_changed_at (migration 105). Migration 214.';
 
 
 --
@@ -13416,6 +14128,14 @@ ALTER TABLE ONLY public.analytics_events
 
 
 --
+-- Name: apple_sign_in_grants apple_sign_in_grants_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.apple_sign_in_grants
+    ADD CONSTRAINT apple_sign_in_grants_pkey PRIMARY KEY (user_id);
+
+
+--
 -- Name: article_chunks article_chunks_article_id_chunk_index_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -13429,6 +14149,22 @@ ALTER TABLE ONLY public.article_chunks
 
 ALTER TABLE ONLY public.article_chunks
     ADD CONSTRAINT article_chunks_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: auth_refresh_families auth_refresh_families_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.auth_refresh_families
+    ADD CONSTRAINT auth_refresh_families_pkey PRIMARY KEY (family_id);
+
+
+--
+-- Name: auth_refresh_tokens auth_refresh_tokens_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.auth_refresh_tokens
+    ADD CONSTRAINT auth_refresh_tokens_pkey PRIMARY KEY (jti);
 
 
 --
@@ -13676,6 +14412,14 @@ ALTER TABLE ONLY public.dcf_fair_value_history
 
 ALTER TABLE ONLY public.dcf_fair_value_history
     ADD CONSTRAINT dcf_fair_value_history_ticker_as_of_date_model_version_key UNIQUE (ticker, as_of_date, model_version);
+
+
+--
+-- Name: deleted_account_fingerprints deleted_account_fingerprints_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.deleted_account_fingerprints
+    ADD CONSTRAINT deleted_account_fingerprints_pkey PRIMARY KEY (fingerprint);
 
 
 --
@@ -15440,6 +16184,27 @@ CREATE INDEX idx_article_chunks_embedding_hnsw ON public.article_chunks USING hn
 
 
 --
+-- Name: idx_auth_refresh_families_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_auth_refresh_families_user ON public.auth_refresh_families USING btree (user_id);
+
+
+--
+-- Name: idx_auth_refresh_tokens_family; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_auth_refresh_tokens_family ON public.auth_refresh_tokens USING btree (family_id);
+
+
+--
+-- Name: idx_auth_refresh_tokens_user_expiry; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_auth_refresh_tokens_user_expiry ON public.auth_refresh_tokens USING btree (user_id, expires_at);
+
+
+--
 -- Name: idx_book_chapters_book; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -15661,6 +16426,13 @@ CREATE INDEX idx_crypto_snapshots_symbol ON public.crypto_snapshots USING btree 
 --
 
 CREATE INDEX idx_dcf_fair_value_history_ticker_date ON public.dcf_fair_value_history USING btree (ticker, as_of_date DESC);
+
+
+--
+-- Name: idx_deleted_account_fingerprints_expires; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_deleted_account_fingerprints_expires ON public.deleted_account_fingerprints USING btree (expires_at);
 
 
 --
@@ -16490,6 +17262,13 @@ CREATE INDEX idx_user_memory_facts_recent ON public.user_memory_facts USING btre
 
 
 --
+-- Name: idx_users_canonical_email; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_users_canonical_email ON public.users USING btree (public.canonical_account_email(email));
+
+
+--
 -- Name: idx_users_email; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -16875,6 +17654,20 @@ CREATE TRIGGER on_auth_user_created AFTER INSERT ON auth.users FOR EACH ROW EXEC
 
 
 --
+-- Name: users on_auth_user_email_changed; Type: TRIGGER; Schema: auth; Owner: -
+--
+
+CREATE TRIGGER on_auth_user_email_changed AFTER UPDATE OF email ON auth.users FOR EACH ROW WHEN (((old.email)::text IS DISTINCT FROM (new.email)::text)) EXECUTE FUNCTION public.sync_public_user_email();
+
+
+--
+-- Name: users trg_withhold_returning_welcome; Type: TRIGGER; Schema: auth; Owner: -
+--
+
+CREATE CONSTRAINT TRIGGER trg_withhold_returning_welcome AFTER INSERT ON auth.users DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION public.withhold_returning_welcome_credits();
+
+
+--
 -- Name: subscriptions subscriptions_max_period_end; Type: TRIGGER; Schema: public; Owner: -
 --
 
@@ -17225,6 +18018,38 @@ ALTER TABLE ONLY auth.webauthn_challenges
 
 ALTER TABLE ONLY auth.webauthn_credentials
     ADD CONSTRAINT webauthn_credentials_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: apple_sign_in_grants apple_sign_in_grants_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.apple_sign_in_grants
+    ADD CONSTRAINT apple_sign_in_grants_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: auth_refresh_families auth_refresh_families_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.auth_refresh_families
+    ADD CONSTRAINT auth_refresh_families_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+--
+-- Name: auth_refresh_tokens auth_refresh_tokens_family_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.auth_refresh_tokens
+    ADD CONSTRAINT auth_refresh_tokens_family_id_fkey FOREIGN KEY (family_id) REFERENCES public.auth_refresh_families(family_id) ON DELETE CASCADE;
+
+
+--
+-- Name: auth_refresh_tokens auth_refresh_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.auth_refresh_tokens
+    ADD CONSTRAINT auth_refresh_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -17733,6 +18558,19 @@ CREATE POLICY analytics_events_service_all ON public.analytics_events TO service
 
 
 --
+-- Name: apple_sign_in_grants; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.apple_sign_in_grants ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: apple_sign_in_grants apple_sign_in_grants_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY apple_sign_in_grants_service_all ON public.apple_sign_in_grants TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: article_chunks; Type: ROW SECURITY; Schema: public; Owner: -
 --
 
@@ -17743,6 +18581,32 @@ ALTER TABLE public.article_chunks ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY article_chunks_service_all ON public.article_chunks USING ((auth.role() = 'service_role'::text));
+
+
+--
+-- Name: auth_refresh_families; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.auth_refresh_families ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: auth_refresh_families auth_refresh_families_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY auth_refresh_families_service_all ON public.auth_refresh_families TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: auth_refresh_tokens; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.auth_refresh_tokens ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: auth_refresh_tokens auth_refresh_tokens_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY auth_refresh_tokens_service_all ON public.auth_refresh_tokens TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -18043,6 +18907,19 @@ ALTER TABLE public.dcf_fair_value_history ENABLE ROW LEVEL SECURITY;
 --
 
 CREATE POLICY dcf_fair_value_history_service_all ON public.dcf_fair_value_history TO service_role USING (true) WITH CHECK (true);
+
+
+--
+-- Name: deleted_account_fingerprints; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.deleted_account_fingerprints ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: deleted_account_fingerprints deleted_account_fingerprints_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY deleted_account_fingerprints_service_all ON public.deleted_account_fingerprints TO service_role USING (true) WITH CHECK (true);
 
 
 --
@@ -19971,11 +20848,49 @@ GRANT ALL ON FUNCTION pgbouncer.get_auth(p_usename text) TO pgbouncer;
 
 
 --
+-- Name: FUNCTION _account_fingerprint(p_kind text, p_value text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public._account_fingerprint(p_kind text, p_value text) FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION _account_fingerprints(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public._account_fingerprints(p_user_id uuid) FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION _lock_refresh_sessions(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public._lock_refresh_sessions(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public._lock_refresh_sessions(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION _prune_refresh_sessions(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public._prune_refresh_sessions(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public._prune_refresh_sessions(p_user_id uuid) TO service_role;
+
+
+--
 -- Name: FUNCTION account_auth_methods(p_user_id uuid); Type: ACL; Schema: public; Owner: -
 --
 
 REVOKE ALL ON FUNCTION public.account_auth_methods(p_user_id uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.account_auth_methods(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION account_has_identity(p_user_id uuid, p_provider text, p_subject text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.account_has_identity(p_user_id uuid, p_provider text, p_subject text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.account_has_identity(p_user_id uuid, p_provider text, p_subject text) TO service_role;
 
 
 --
@@ -19992,6 +20907,14 @@ GRANT ALL ON FUNCTION public.add_chat_tokens(p_user_id uuid, p_day date, p_token
 
 REVOKE ALL ON FUNCTION public.add_purchased_credits(p_transaction_id text, p_user_id uuid, p_product_id text, p_credits integer, p_environment text, p_original_transaction_id text, p_price_cents integer, p_app_account_token uuid, p_purchased_at timestamp with time zone) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.add_purchased_credits(p_transaction_id text, p_user_id uuid, p_product_id text, p_credits integer, p_environment text, p_original_transaction_id text, p_price_cents integer, p_app_account_token uuid, p_purchased_at timestamp with time zone) TO service_role;
+
+
+--
+-- Name: FUNCTION canonical_account_email(p_email text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.canonical_account_email(p_email text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.canonical_account_email(p_email text) TO service_role;
 
 
 --
@@ -20285,6 +21208,14 @@ REVOKE ALL ON FUNCTION public.purge_ownerless_subscription_transactions() FROM P
 
 
 --
+-- Name: FUNCTION record_deleted_account(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.record_deleted_account(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.record_deleted_account(p_user_id uuid) TO service_role;
+
+
+--
 -- Name: FUNCTION record_subscription_transaction(p_environment text, p_transaction_id text, p_original_transaction_id text, p_user_id uuid, p_tier text, p_period_end timestamp with time zone, p_revocation_date timestamp with time zone, p_kind text, p_signed_at timestamp with time zone); Type: ACL; Schema: public; Owner: -
 --
 
@@ -20341,6 +21272,14 @@ GRANT ALL ON FUNCTION public.renew_sentiment_backfill(p_scope text, p_token uuid
 
 
 --
+-- Name: FUNCTION revoke_all_refresh_sessions(p_user_id uuid); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.revoke_all_refresh_sessions(p_user_id uuid) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.revoke_all_refresh_sessions(p_user_id uuid) TO service_role;
+
+
+--
 -- Name: FUNCTION revoke_paid_period(p_user_id uuid, p_environment text, p_transaction_id text, p_original_transaction_id text, p_period_end timestamp with time zone); Type: ACL; Schema: public; Owner: -
 --
 
@@ -20357,11 +21296,27 @@ GRANT ALL ON FUNCTION public.revoke_purchased_credits(p_transaction_id text, p_e
 
 
 --
+-- Name: FUNCTION revoke_refresh_family(p_user_id uuid, p_family_id uuid, p_reason text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.revoke_refresh_family(p_user_id uuid, p_family_id uuid, p_reason text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.revoke_refresh_family(p_user_id uuid, p_family_id uuid, p_reason text) TO service_role;
+
+
+--
 -- Name: FUNCTION revoke_tier_credits(p_user_id uuid); Type: ACL; Schema: public; Owner: -
 --
 
 REVOKE ALL ON FUNCTION public.revoke_tier_credits(p_user_id uuid) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.revoke_tier_credits(p_user_id uuid) TO service_role;
+
+
+--
+-- Name: FUNCTION rotate_refresh_token(p_user_id uuid, p_jti uuid, p_token_iat bigint, p_token_exp bigint, p_legacy boolean, p_new_jti uuid, p_new_family_id uuid, p_new_expires_at timestamp with time zone, p_grace_seconds integer, p_max_children integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.rotate_refresh_token(p_user_id uuid, p_jti uuid, p_token_iat bigint, p_token_exp bigint, p_legacy boolean, p_new_jti uuid, p_new_family_id uuid, p_new_expires_at timestamp with time zone, p_grace_seconds integer, p_max_children integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.rotate_refresh_token(p_user_id uuid, p_jti uuid, p_token_iat bigint, p_token_exp bigint, p_legacy boolean, p_new_jti uuid, p_new_family_id uuid, p_new_expires_at timestamp with time zone, p_grace_seconds integer, p_max_children integer) TO service_role;
 
 
 --
@@ -20413,10 +21368,25 @@ GRANT ALL ON FUNCTION public.spend_credits(p_user_id uuid, p_amount integer, p_r
 
 
 --
+-- Name: FUNCTION start_refresh_family(p_user_id uuid, p_family_id uuid, p_jti uuid, p_expires_at timestamp with time zone, p_auth_time timestamp with time zone); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.start_refresh_family(p_user_id uuid, p_family_id uuid, p_jti uuid, p_expires_at timestamp with time zone, p_auth_time timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.start_refresh_family(p_user_id uuid, p_family_id uuid, p_jti uuid, p_expires_at timestamp with time zone, p_auth_time timestamp with time zone) TO service_role;
+
+
+--
 -- Name: FUNCTION subscriptions_keep_max_period_end(); Type: ACL; Schema: public; Owner: -
 --
 
 REVOKE ALL ON FUNCTION public.subscriptions_keep_max_period_end() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION sync_public_user_email(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.sync_public_user_email() FROM PUBLIC;
 
 
 --
@@ -20438,6 +21408,13 @@ REVOKE ALL ON FUNCTION public.update_updated_at_column() FROM PUBLIC;
 --
 
 REVOKE ALL ON FUNCTION public.update_whale_followers_count() FROM PUBLIC;
+
+
+--
+-- Name: FUNCTION withhold_returning_welcome_credits(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.withhold_returning_welcome_credits() FROM PUBLIC;
 
 
 --
@@ -20975,10 +21952,31 @@ GRANT SELECT,USAGE ON SEQUENCE public.analytics_events_id_seq TO service_role;
 
 
 --
+-- Name: TABLE apple_sign_in_grants; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.apple_sign_in_grants TO service_role;
+
+
+--
 -- Name: TABLE article_chunks; Type: ACL; Schema: public; Owner: -
 --
 
 GRANT ALL ON TABLE public.article_chunks TO service_role;
+
+
+--
+-- Name: TABLE auth_refresh_families; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.auth_refresh_families TO service_role;
+
+
+--
+-- Name: TABLE auth_refresh_tokens; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.auth_refresh_tokens TO service_role;
 
 
 --
@@ -21164,6 +22162,13 @@ GRANT ALL ON TABLE public.dcf_fair_value_history TO service_role;
 --
 
 GRANT SELECT,USAGE ON SEQUENCE public.dcf_fair_value_history_id_seq TO service_role;
+
+
+--
+-- Name: TABLE deleted_account_fingerprints; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.deleted_account_fingerprints TO service_role;
 
 
 --
@@ -22250,5 +23255,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict xLonKklE55R32MdKuMO7RFyTxQVOEhzWhM8hyqoIJwWyZZS6bNXnIcme1zdToy7
+\unrestrict hqSS8sqVY2710UyJI1d2Khf3rUhc7GZLCIPVNUv0ygzuoMNq8awQU6a9fwSrgxf
 

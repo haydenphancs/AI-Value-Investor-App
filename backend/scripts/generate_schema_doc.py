@@ -177,12 +177,29 @@ EXPECTED: dict[str, int] = {
     #                          service_role policy (no fk, function, enum or view).
     #   The Supabase platform changed realtime.* (filters_hash, two realtime indexes) and the
     #   storage lifecycle grants in the same window: not counted here.
-    "tables": 157,
-    "public": 116,
-    "fk": 36,
-    "policies": 123,
-    "rls": 116,
-    "functions": 58,
+    # Refreshed 2026-11-27 after the owner applied 211-214 and re-dumping. The snapshot diff held
+    # ONLY their objects (pg_dump also moved analytics_events' sequence; no drift). Every delta
+    # accounted for:
+    #   +4 tables / +4 public / +4 rls / +4 policies -> deleted_account_fingerprints (211),
+    #                          apple_sign_in_grants (213), auth_refresh_families and
+    #                          auth_refresh_tokens (214), each with one service_role policy
+    #   +4 fk                  -> apple_sign_in_grants.user_id, auth_refresh_families.user_id,
+    #                          auth_refresh_tokens.user_id (each → users) and
+    #                          auth_refresh_tokens.family_id → auth_refresh_families (214)
+    #   +13 functions          -> canonical_account_email, _account_fingerprint,
+    #                          _account_fingerprints, record_deleted_account,
+    #                          withhold_returning_welcome_credits (211); sync_public_user_email
+    #                          (212); _lock_refresh_sessions, _prune_refresh_sessions,
+    #                          start_refresh_family, rotate_refresh_token, revoke_refresh_family,
+    #                          revoke_all_refresh_sessions, account_has_identity (214)
+    #   211's and 212's triggers sit on auth.users; 214's users.sessions_revoked_at is a column:
+    #   no counted delta.
+    "tables": 161,
+    "public": 120,
+    "fk": 40,
+    "policies": 127,
+    "rls": 120,
+    "functions": 71,
     "enums": 14,
     "views": 1,
 }

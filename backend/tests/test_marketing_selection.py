@@ -1942,3 +1942,26 @@ def test_phase3_the_post_season_thursday_needs_a_wednesday_in_the_calendar(monke
     assert sel.plan_for(thu) == sel.DayPlan(False, ("money_map", sel.LESSON), "thursday_off")
     _cadence(monkeypatch, "mon,tue,wed,thu,sat")
     assert sel.plan_for(thu) == sel.DayPlan(False, ("earnings", "money_map", sel.LESSON), "thursday_earnings")
+
+
+# ── owner decision 2026-11-27: ONE quiet-week backup theme a week ("1 backup theme a week (Recommended)") ────────────────
+
+
+def test_week_cap_the_lead_is_exactly_the_main_chain_that_opens_on_the_theme(monkeypatch):
+    """`theme_is_fallback` says "not a backup" for exactly the main-lane days whose chain OPENS on the theme (Wednesday's
+    lead, every posting calendar holding Wednesday) — every other theme step of either lane is a backup; and
+    `theme_week` is the Monday..Sunday week holding the day, both ends inclusive, for ten years of days."""
+    _cadence(monkeypatch, _ALL_DAYS)
+    assert sel.THEME_FALLBACKS_PER_WEEK == 1
+    leads = 0
+    for d, plan in _plans(date(2026, 1, 1), date(2036, 1, 1)):
+        lead = plan.chain[:1] == ("theme_explainer",)
+        leads += lead
+        assert sel.theme_is_fallback(d, main_lane=True) is (not lead), d
+        assert sel.theme_is_fallback(d, main_lane=False) is True, d             # the spotlight lane never leads
+        start, end = sel.theme_week(d)
+        assert start.weekday() == 0 and end - start == timedelta(days=6) and start <= d <= end, d
+    assert leads > 500
+    # the ET week's edges: a Sunday closes the week its Monday opened; the next Monday opens a new one
+    sun, mon = date(2026, 11, 22), date(2026, 11, 23)
+    assert sel.theme_week(sun) == (date(2026, 11, 16), sun) and sel.theme_week(mon) == (mon, date(2026, 11, 29))

@@ -2644,7 +2644,7 @@ async def test_news_v22_each_spotlight_series_builds_draws_and_records_end_to_en
     row = _script(sb, rid)
     out = row["output"]
     assert row["lane"] == "spotlight" and row["fact_sheet"]["selection"]["chain"][0] == series
-    assert out["template_version"] == news_templates.TEMPLATE_VERSION == "news-v23"
+    assert out["template_version"] == news_templates.TEMPLATE_VERSION == "news-v24"
     # owner decisions 2026-11-20 ("3 - 5 companies at once"): the insider LIST — a `rows` picture of three companies
     assert out["series"] == series and out["content_class"] == "C" and out["image_spec"]["layout"] == "rows"
     assert len(out["image_spec"]["sections"][0]["rows"]) == len(rec.companies) >= 3
@@ -3792,7 +3792,7 @@ async def test_news_v23_the_build_drops_a_company_its_template_refuses_and_keys_
 
 def _theme_ledger(sb: FakeSB, day: date) -> List[str]:
     """Twelve weekly theme scripts 7..84 days before `day` (old keys and new), one 85 days back, other series and a
-    key-less row — what `runs.theme_refs_between` must hand the adapter: the twelve, oldest first."""
+    key-less row — what `runs.theme_scripts_between` must hand the adapter: the twelve, oldest first."""
     from app.services.marketing import company_news_rules as R
 
     want = []
@@ -3851,13 +3851,13 @@ async def test_phase3_another_days_build_never_reads_the_theme_window(tworld, mo
     monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", EVERY_SERIES)
     _today(monkeypatch, TUE)
     reads = []
-    real = runs.theme_refs_between
+    real = runs.theme_scripts_between
 
     async def spy(*a, **kw):
         reads.append(a)
         return await real(*a, **kw)
 
-    monkeypatch.setattr(runs, "theme_refs_between", spy)
+    monkeypatch.setattr(runs, "theme_scripts_between", spy)
     news = FakeNews({})
     svc = _svc(runs, news)
     rid = _run(sb, TUE)
@@ -3875,16 +3875,16 @@ async def test_phase3_a_failed_theme_window_read_stops_the_build_never_a_guess(t
     rec, day, _klass, _layout = _2b_case("theme_explainer")
     monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", EVERY_SERIES)
     _today(monkeypatch, day)
-    real = runs.theme_refs_between
+    real = runs.theme_scripts_between
     fail = {"n": 1}
 
     async def flaky(*a, **kw):
         if fail["n"]:
             fail["n"] -= 1
-            raise mrs.MarketingRunError("theme_refs_between failed: 520")
+            raise mrs.MarketingRunError("theme_scripts_between failed: 520")
         return await real(*a, **kw)
 
-    monkeypatch.setattr(runs, "theme_refs_between", flaky)
+    monkeypatch.setattr(runs, "theme_scripts_between", flaky)
     news = FakeNews({"theme_explainer": cands("theme_explainer", rec)})
     svc = _svc(runs, news)
     rid = _run(sb, day, caps=_v23_caps("theme_explainer"))
@@ -4121,6 +4121,11 @@ def test_review_1126_the_alt_text_describes_the_picture_the_worker_drew(factory,
             on_picture = _figures(" ".join(drawn).replace("−", "-"))
             assert _figures(said.replace("−", "-")) <= on_picture, (said, sorted(on_picture))
             assert ("costs and expenses" in said) is ("Costs and expenses" in drawn), (said, drawn)
+            # news-v24 (owner 2026-11-27): Rivian's other income nets into the bar — the alt text names the bar as its
+            # label does ("Costs, after other items"); Coherent's other items were a cost — the approved label
+            assert ("costs after other items" in said) is ("Costs, after other items" in drawn), (said, drawn)
+            if drawn is full:
+                assert ("Costs, after other items" in drawn) is (factory == "rivian"), drawn       # anti-vacuity
     # unreadable declarations never guess: the stored alt text
     for junk in (None, "x", [1, 2], {}):
         assert news_templates.picture_alt(out, junk) == out["image_post"]

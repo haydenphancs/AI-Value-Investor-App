@@ -187,7 +187,8 @@ T = TableDoc
 CURATION: dict[str, TableDoc] = {
 
     # ---------------------------------------------------------------- identity
-    "public.users": T("identity", key=("id", "email", "tier", "is_admin", "password_changed_at"),
+    "public.users": T("identity", key=("id", "email", "tier", "is_admin", "password_changed_at",
+                                       "sessions_revoked_at"),
         note="1:1 mirror of auth.users, created by the on_auth_user_created trigger. "
              "The `id` IS the auth uuid — that shared key is what lets RLS compare auth.uid()."),
     "public.user_settings": T("identity",

@@ -95,6 +95,10 @@ def _gotrue_transport_error() -> Exception:
 _SIGNUP_ERRORS = {
     "signup_email_rate": lambda: _gotrue_error(
         429, {"code": "over_email_send_rate_limit", "msg": "email rate limit exceeded"}),
+    # GoTrue's PER-ADDRESS send interval: same code, its own message.
+    "signup_email_interval": lambda: _gotrue_error(429, {
+        "code": "over_email_send_rate_limit",
+        "msg": "For security purposes, you can only request this after 42 seconds."}),
     "signup_ip_rate": lambda: _gotrue_error(
         429, {"code": "over_request_rate_limit", "msg": "Request rate limit reached"}),
     "signup_smtp": lambda: _gotrue_error(
@@ -1082,13 +1086,15 @@ async def test_register_writes_nothing_to_public_users():
 
 
 @pytest.mark.asyncio
-async def test_register_copy_is_neutral_and_names_the_way_out():
+async def test_register_pending_copy_is_the_neutral_sentence():
     out = await auth_ep.sign_up(
         SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
         _FakeRequest(), FakeSupabase(confirmed=False),
     )
     assert "link" not in out.message.lower()
-    assert "sign in" in out.message.lower() and "reset" in out.message.lower()
+    # Since 2026-11-26 an address that already has an account is refused plainly
+    # (AUTH_EMAIL_ALREADY_REGISTERED), so the pending answer no longer has to cover that case.
+    assert out.message == auth_ep.SIGN_UP_PENDING_MESSAGE == "Check your email to confirm your address."
 
 
 _SEND_FAILED = "couldn't send your confirmation email"
@@ -1148,8 +1154,9 @@ async def test_register_keeps_the_generic_fallback_for_what_needs_a_person(flag,
 
 
 @pytest.mark.asyncio
-async def test_register_per_email_denial_says_3600():
-    """IOS-AUTH-04: Retry-After is the window of the bucket that denied (it said "60")."""
+async def test_register_per_email_denial_says_900():
+    """IOS-AUTH-04: Retry-After is the window of the bucket that denied (it said "60"). Since
+    2026-11-26 that window is 15 minutes (owner: "15-minute window"; it was an hour)."""
     for i in range(5):
         await auth_ep.sign_up(
             SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
@@ -1160,7 +1167,307 @@ async def test_register_per_email_denial_says_3600():
             SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
             _FakeRequest("198.51.100.199"), FakeSupabase(confirmed=False),
         )
+    assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "900"
+
+
+# ── 2026-11-26: 15-minute mail windows + the existing-account sentence ────────────────────
+
+@pytest.mark.asyncio
+async def test_register_six_tries_from_one_device_are_refused_by_the_address_window():
+    """The owner's own case: one phone, one address, a sixth try. The refusal must come from
+    the 15-minute ADDRESS bucket, not from anything longer."""
+    for _ in range(5):
+        await auth_ep.sign_up(
+            SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+            _FakeRequest("198.51.100.7"), FakeSupabase(confirmed=False),
+        )
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.sign_up(
+            SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+            _FakeRequest("198.51.100.7"), FakeSupabase(confirmed=False),
+        )
+    assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "900"
+
+
+@pytest.mark.asyncio
+async def test_resend_per_email_denial_says_900():
+    for i in range(3):
+        await auth_ep.resend_confirmation(
+            ResendConfirmationRequest(email=_EMAIL), _FakeRequest(f"198.51.100.{i}"),
+            FakeSupabase(),
+        )
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.resend_confirmation(
+            ResendConfirmationRequest(email=_EMAIL), _FakeRequest("198.51.100.90"),
+            FakeSupabase(),
+        )
+    assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "900"
+
+
+@pytest.mark.asyncio
+async def test_resend_one_person_is_refused_by_the_address_window_not_the_ip_one():
+    """The IP bucket must stay looser than the address bucket: a person tapping "Send a new
+    code" from one phone hits the address limit (3) first, and is told 15 minutes."""
+    for _ in range(3):
+        await auth_ep.resend_confirmation(
+            ResendConfirmationRequest(email=_EMAIL), _FakeRequest("198.51.100.8"), FakeSupabase(),
+        )
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.resend_confirmation(
+            ResendConfirmationRequest(email=_EMAIL), _FakeRequest("198.51.100.8"), FakeSupabase(),
+        )
+    assert ei.value.headers["Retry-After"] == "900"
+    # Only an ALLOWED call adds an entry, so the order is visible: the IP bucket saw all four
+    # (it is checked first and allowed the fourth), the address bucket only the three it allowed.
+    assert len(rate_limiter._protected["resend:ip:198.51.100.8"]) == 4
+    assert len(rate_limiter._protected[f"resend:email:{_EMAIL}"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_resend_per_ip_allows_ten_addresses_then_refuses_for_15_minutes():
+    for i in range(10):
+        await auth_ep.resend_confirmation(
+            ResendConfirmationRequest(email=f"user{i}@example.com"), _FakeRequest("198.51.100.9"),
+            FakeSupabase(),
+        )
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.resend_confirmation(
+            ResendConfirmationRequest(email="user99@example.com"), _FakeRequest("198.51.100.9"),
+            FakeSupabase(),
+        )
+    assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "900"
+
+
+def test_mail_windows_are_fifteen_minutes_and_ip_buckets_stay_looser():
+    """Source pin on the three routes that make Supabase SEND mail, so a later edit cannot
+    quietly put an hour back, or make an IP bucket tighter than its address bucket."""
+    import inspect
+
+    assert auth_ep.REGISTER_EMAIL_WINDOW_SECONDS == 900
+    assert auth_ep.MAIL_SEND_WINDOW_SECONDS == 900
+    register = inspect.getsource(auth_ep.sign_up)
+    assert '(f"register:ip:{client_ip}", 10, REGISTER_EMAIL_WINDOW_SECONDS)' in register
+    assert '(f"register:email:{email_key}", 5, REGISTER_EMAIL_WINDOW_SECONDS)' in register
+    resend = inspect.getsource(auth_ep.resend_confirmation)
+    assert '(f"resend:ip:{client_ip}", 10, MAIL_SEND_WINDOW_SECONDS)' in resend
+    assert '(f"resend:email:{email_key}", 3, MAIL_SEND_WINDOW_SECONDS)' in resend
+    forgot = inspect.getsource(auth_ep.forgot_password)
+    assert '(f"forgot:ip:{client_ip}", 10, MAIL_SEND_WINDOW_SECONDS)' in forgot
+    assert '_per_email_check("forgot", email_key, 3, MAIL_SEND_WINDOW_SECONDS, req)' in forgot
+    for src in (register, resend, forgot):
+        assert ", 3600)" not in src and ", 3600, req)" not in src
+        assert '(f"mail:ip:h:{client_ip}", MAIL_PER_IP_PER_HOUR, MAIL_HOUR_SECONDS)' in src
+    # IP buckets (keys the caller cannot choose) before address buckets, on every route.
+    assert register.index("register:ip:") < register.index("mail:ip:h:") < register.index("register:email:") \
+        < register.index("confirm_mail:email:")
+    assert resend.index("resend:ip:") < resend.index("mail:ip:h:") < resend.index("resend:email:") \
+        < resend.index("confirm_mail:email:")
+    assert forgot.index("forgot:ip:") < forgot.index("mail:ip:h:") < forgot.index('"forgot", email_key') \
+        < forgot.index('"forgot_hour", email_key')
+    assert (auth_ep.CONFIRM_MAIL_PER_ADDRESS_PER_HOUR, auth_ep.RESET_MAIL_PER_ADDRESS_PER_HOUR,
+            auth_ep.MAIL_PER_IP_PER_HOUR, auth_ep.MAIL_HOUR_SECONDS) == (16, 6, 30, 3600)
+
+
+class _ObfuscatedUser:
+    """GoTrue's answer to a sign-up for an address that already has a CONFIRMED account: a
+    made-up id, no confirmation time, and an EMPTY identities list. No email goes out."""
+    id = "00000000-0000-0000-0000-00000000dead"
+    email = _EMAIL
+    email_confirmed_at = None
+    identities: list = []
+
+
+class _PendingUser:
+    """An address whose earlier sign-up was never confirmed: GoTrue returns that EXISTING user
+    (its identities are there) and re-sends the confirmation email."""
+    id = _USER_ID
+    email = _EMAIL
+    email_confirmed_at = None
+    identities = [object()]
+
+
+@pytest.mark.asyncio
+async def test_signup_for_a_confirmed_address_says_plainly_that_the_email_is_in_use(caplog):
+    """Owner decision 2026-11-26: "if users use the same email, we should let them know right
+    away". 409 AUTH_EMAIL_ALREADY_REGISTERED with the way out, no tokens, no code screen."""
+    caplog.set_level(logging.INFO, logger="app.api.v1.endpoints.auth")
+    sb = FakeSupabase(confirmed=False)
+    sb.auth._user = _ObfuscatedUser()
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.sign_up(
+            SignUpRequest(email="taken@example.com", password=_PASSWORD, display_name="N"),
+            _FakeRequest("198.51.100.12"), sb,
+        )
+    assert ei.value.status_code == 409
+    body = ei.value.detail
+    assert body["error_code"] == "AUTH_EMAIL_ALREADY_REGISTERED"
+    assert body["action"] == "sign_in"
+    copy = body["user_message"].lower()
+    assert "already in use" in copy and "sign in" in copy and "forgot password" in copy
+    assert "apple or google" in copy, "a Google/Apple account holder must be pointed at that button"
+    assert not (ei.value.headers or {}).get("WWW-Authenticate"), "not an auth failure"
+    texts = [r.getMessage() for r in caplog.records]
+    assert any("already has a confirmed account" in t for t in texts)
+    assert not any(_ObfuscatedUser.id in t for t in texts), "the made-up id is logged as a user"
+    assert not any("taken@example.com" in t for t in texts), "the address must not reach the log"
+
+
+@pytest.mark.asyncio
+async def test_signup_for_a_pending_address_still_opens_the_code_screen():
+    """A sign-up that was never confirmed is the same person trying again: GoTrue re-sends the
+    email, and the answer is the ordinary pending one — never "already in use"."""
+    sb = FakeSupabase(confirmed=False)
+    sb.auth._user = _PendingUser()
+    out = await auth_ep.sign_up(
+        SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+        _FakeRequest("198.51.100.14"), sb,
+    )
+    assert out.confirmation_required and out.access_token is None
+    assert out.message == auth_ep.SIGN_UP_PENDING_MESSAGE
+
+
+class _InvitedUser:
+    """An address invited from the dashboard and never accepted: GoTrue emails it a code and
+    EMPTIES `identities` in its answer too — but it has `invited_at`, and no password yet."""
+    id = _USER_ID
+    email = _EMAIL
+    email_confirmed_at = None
+    invited_at = "2026-11-20T00:00:00Z"
+    identities: list = []
+
+
+@pytest.mark.asyncio
+async def test_an_invited_address_is_not_called_in_use():
+    """Review finding 2026-11-26: an invitee's answer also has an empty identities list. It must
+    get the code screen (its password is set there), never "already in use"."""
+    sb = FakeSupabase(confirmed=False)
+    sb.auth._user = _InvitedUser()
+    out = await auth_ep.sign_up(
+        SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+        _FakeRequest("198.51.100.15"), sb,
+    )
+    assert out.confirmation_required and out.message == auth_ep.SIGN_UP_PENDING_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_a_second_tap_within_a_minute_answers_check_your_email_not_send_failed(caplog):
+    """Seen in production 2026-11-26: Create Account tapped again within a minute got 503
+    "couldn't send your confirmation email", though the first email HAD gone out. GoTrue's
+    per-address interval means exactly that, so the answer is the ordinary pending one."""
+    caplog.set_level(logging.INFO, logger="app.api.v1.endpoints.auth")
+    out = await auth_ep.sign_up(
+        SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+        _FakeRequest("198.51.100.16"), FakeSupabase(confirmed=False, fail=("signup_email_interval",)),
+    )
+    assert out.confirmation_required and out.access_token is None
+    assert out.message == auth_ep.SIGN_UP_PENDING_MESSAGE
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING], "an ordinary double tap is not a warning"
+
+
+@pytest.mark.asyncio
+async def test_the_projects_spent_mail_budget_is_still_a_503():
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.sign_up(
+            SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+            _FakeRequest("198.51.100.17"), FakeSupabase(confirmed=False, fail=("signup_email_rate",)),
+        )
+    assert ei.value.status_code == 503 and ei.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_register_per_ip_lets_ten_addresses_through_then_refuses_for_15_minutes():
+    """The bound on how fast one IP can test addresses now that a sign-up says "in use": the
+    tenth 409 still passes the limiter, the eleventh request from that IP is a 429."""
+    for i in range(10):
+        sb = FakeSupabase(confirmed=False)
+        sb.auth._user = _ObfuscatedUser()
+        with pytest.raises(HTTPException) as ei:
+            await auth_ep.sign_up(
+                SignUpRequest(email=f"probe{i}@example.com", password=_PASSWORD, display_name="N"),
+                _FakeRequest("198.51.100.77"), sb,
+            )
+        assert ei.value.status_code == 409
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.sign_up(
+            SignUpRequest(email="probe99@example.com", password=_PASSWORD, display_name="N"),
+            _FakeRequest("198.51.100.77"), FakeSupabase(confirmed=False),
+        )
+    assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "900"
+
+
+@pytest.mark.asyncio
+async def test_one_ip_is_held_to_thirty_mail_requests_an_hour_across_all_three_routes():
+    """The shared hourly IP ceiling: whatever mix of sign-up, resend and reset, one IP gets 30
+    an hour (the project's mail budget is 100). Each route's own 15-minute IP bucket (10) is
+    cleared between rounds here to stand for four quarter-hours."""
+    ip = "198.51.100.88"
+    sent = 0
+    for round_ in range(4):
+        for i in range(8):
+            await auth_ep.resend_confirmation(
+                ResendConfirmationRequest(email=f"r{round_}-{i}@example.com"), _FakeRequest(ip), FakeSupabase(),
+            )
+            sent += 1
+            if sent == 30:
+                break
+        if sent == 30:
+            break
+        rate_limiter._protected.pop(f"resend:ip:{ip}", None)
+    assert sent == 30
+    rate_limiter._protected.pop(f"resend:ip:{ip}", None)
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.resend_confirmation(
+            ResendConfirmationRequest(email="one-more@example.com"), _FakeRequest(ip), FakeSupabase(),
+        )
     assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "3600"
+
+
+@pytest.mark.asyncio
+async def test_one_address_gets_at_most_sixteen_confirmation_emails_an_hour():
+    """The hourly per-address ceiling for confirmation mail (sign-up + resend share it), so the
+    15-minute windows cannot quadruple an inbox flood. Each 15-minute address bucket is cleared
+    between rounds here to stand for the next quarter-hour."""
+    target = "victim@example.com"
+    allowed = 0
+    for q in range(4):
+        for i in range(3):
+            try:
+                await auth_ep.resend_confirmation(
+                    ResendConfirmationRequest(email=target), _FakeRequest(f"203.0.113.{q * 10 + i}"),
+                    FakeSupabase(),
+                )
+                allowed += 1
+            except HTTPException as e:
+                assert e.status_code == 429
+        for i in range(5):
+            try:
+                await auth_ep.sign_up(
+                    SignUpRequest(email=target, password=_PASSWORD, display_name="N"),
+                    _FakeRequest(f"203.0.113.{100 + q * 10 + i}"), FakeSupabase(confirmed=False),
+                )
+                allowed += 1
+            except HTTPException as e:
+                assert e.status_code == 429
+        rate_limiter._protected.pop(f"resend:email:{target}", None)
+        rate_limiter._protected.pop(f"register:email:{target}", None)
+    assert allowed == 16, allowed
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.resend_confirmation(
+            ResendConfirmationRequest(email=target), _FakeRequest("203.0.113.250"), FakeSupabase(),
+        )
+    assert ei.value.headers["Retry-After"] == "3600"
+
+
+@pytest.mark.asyncio
+async def test_a_user_without_an_identities_list_is_never_read_as_an_existing_account(caplog):
+    """`identities` missing (None) is unknown, not "already registered": only an EMPTY list is."""
+    caplog.set_level(logging.INFO, logger="app.api.v1.endpoints.auth")
+    await auth_ep.sign_up(
+        SignUpRequest(email=_EMAIL, password=_PASSWORD, display_name="N"),
+        _FakeRequest("198.51.100.13"), FakeSupabase(confirmed=False),
+    )
+    assert not any("already has a confirmed account" in r.getMessage() for r in caplog.records)
+    # (and it answered the ordinary pending sentence rather than raising)
 
 
 @pytest.mark.parametrize("password, named", [

@@ -5,7 +5,7 @@ stuck. Supabase's "Confirm signup" email carried an 8-digit code and no link; th
 user to click a link, had no screen and no route that could take a sign-up code, and
 `AuthService.signIn` silently re-sent the email on EVERY attempt — appending "We've just sent you
 a fresh confirmation link" to the backend's own sentence (the doubled red text), rotating the
-code in the inbox each time, and spending the 3-an-hour resend budget before the user tapped
+code in the inbox each time, and spending the resend budget (3 per 15 minutes) before the user tapped
 anything. The whole auth suite was green throughout (TG-1, TG-4): nothing pinned the iOS path.
 
 What this file pins, each against the regression that would reopen it:
@@ -36,7 +36,7 @@ Second round (same day, review findings IOS-CONF-1/2, COMPAT-2, PW-6):
     the primary action — never on AUTH_UNAVAILABLE, which also comes back BEFORE the code is
     checked, while it is still good; AppError gives both post-verify codes a typed,
     non-retryable branch on the arm their 503 / 400 reaches (IOS-CONF-1, C2);
-  * the sign-up response's sentence ("Already have an account? Sign in…") reaches the code
+  * the sign-up response's sentence (`SIGN_UP_PENDING_MESSAGE`) reaches the code
     screen, unbranched on, and the sign-in link reads "Already confirmed, or have an account?
     Sign in" (IOS-CONF-2, C5);
   * an unstructured 404 (an app newer than its server) gets honest copy and a contract-drift
@@ -204,7 +204,7 @@ def test_resend_is_explicit_guarded_cooled_down_and_never_claims_a_send():
     assert "appState.resendConfirmation(email: email)" in resend, "resend no longer sends — re-derive"
     assert re.search(r"guard activity == nil,[^\n]*secondsUntilResend\(at: Date\(\)\) == 0 else", resend) \
         and "activity = .resending" in resend, (
-        "resend lost its in-flight / cooldown guard — a double tap spends two of the 3-an-hour sends")
+        "resend lost its in-flight / cooldown guard — a double tap spends two of the 3-per-15-minute sends")
     assert "resendAvailableAt = Date().addingTimeInterval(Self.resendCooldown)" in resend \
         and "static let resendCooldown: TimeInterval = 60" in cv, (
         "resend no longer starts its 60 s cooldown")
@@ -286,10 +286,10 @@ def test_a_code_refused_after_an_unanswered_try_says_it_may_have_gone_through():
 
 
 def test_the_sign_up_message_reaches_the_code_screen_and_the_link_is_neutral():
-    """IOS-CONF-2: an existing user who taps Create Account gets no email. The backend's sentence
-    ("…Already have an account? Sign in or reset your password.") is the only way out it names,
-    and the screen used to drop it. It is worded the same for every address, so it may be shown;
-    the screen must never branch on it (that would reveal which addresses have accounts)."""
+    """IOS-CONF-2, as of 2026-11-26: the sign-up response's sentence (`SIGN_UP_PENDING_MESSAGE`)
+    is still carried to the code screen, and the screen must never branch on it. It is no longer
+    SHOWN: it only says what the title says, because an address that already has an account is
+    refused on the form (409 AUTH_EMAIL_ALREADY_REGISTERED) and never gets here."""
     view = _code(_SIGN_IN)
     assert "let signUpMessage: String?" in _block(view, "private struct PendingConfirmation"), (
         "PendingConfirmation has nowhere to carry the sign-up message")
@@ -306,9 +306,6 @@ def test_the_sign_up_message_reaches_the_code_screen_and_the_link_is_neutral():
     for name in ("signUpMessage", "signUpNote"):
         hit = re.search(rf"\b{name}\s*(?:==|!=|\?*\.(?:contains|hasPrefix|hasSuffix|range|lowercased|starts))", cv)
         assert not hit, f"ConfirmEmailView inspects the sign-up message ({hit.group(0)!r}) — enumeration"
-    header = _block(cv, "private var header: some View")
-    assert re.search(r"if let signUpNote = Self\.displayable\(signUpMessage\) \{\s*Text\(signUpNote\)", header), (
-        "the sign-up message is not shown on the code screen")
     shown = _block(cv, "static func displayable(_ message: String?) -> String?")
     for step in ("trimmingCharacters(in: .whitespacesAndNewlines)", "!trimmed.isEmpty", "prefix(signUpMessageLimit)"):
         assert step in shown, f"displayable() lost `{step}`"
@@ -316,6 +313,54 @@ def test_the_sign_up_message_reaches_the_code_screen_and_the_link_is_neutral():
         "the sign-in link's label drifted from the C5 copy")
     assert "linkButton(Self.signInLinkTitle" in _block(cv, "private var otherWays: some View")
     assert "Confirmed with the link? Sign in" not in cv, "the old link-only label is back"
+
+
+def test_an_email_already_in_use_is_a_typed_form_error_in_the_app():
+    """Owner decision 2026-11-26: a sign-up with an address that already has an account is told
+    so right away (409 AUTH_EMAIL_ALREADY_REGISTERED). The app must map it to `.validationFailed`
+    (the server's wording, red under the form, never retryable, outside `isAuthError`) — never
+    to the generic `.apiError` arm, whose Try Again would repeat a refusal forever."""
+    src = _code(_APP_ERROR)
+    mapper = _block(src, "private static func mapAPIError(_ error: APIError) -> AppError")
+    biz = mapper[mapper.index("case .businessError(let code, let message):"):]
+    m = re.search(
+        r'if code == "AUTH_EMAIL_ALREADY_REGISTERED" \{\s*return \.validationFailed\(', biz)
+    assert m, "AUTH_EMAIL_ALREADY_REGISTERED is not mapped to .validationFailed on the businessError arm"
+    from app.api.error_response import ErrorCode
+    assert ErrorCode.AUTH_EMAIL_ALREADY_REGISTERED.value == "AUTH_EMAIL_ALREADY_REGISTERED"
+
+
+def test_a_refused_resend_holds_the_button_for_the_servers_window():
+    """Review finding 2026-11-26: after a 429 on "Send a new code" the button stayed tappable,
+    so each tap repeated the same refusal. The catch must set `resendAvailableAt` from the
+    server's Retry-After (capped), and a long wait reads in minutes, not "899s"."""
+    cv = _code(_CONFIRM)
+    resend = _block(cv, "private func resend()")
+    catch = resend[resend.index("} catch {"):]
+    assert re.search(
+        r"if case \.rateLimited\(let seconds\) = appError \{[\s\S]*?"
+        r"min\(max\(seconds, Int\(Self\.resendCooldown\)\), Self\.rateLimitWaitCapSeconds\)[\s\S]*?"
+        r"resendAvailableAt = Date\(\)\.addingTimeInterval", catch,
+    ), "a refused resend no longer holds the button for the server's window"
+    assert "static let rateLimitWaitCapSeconds = 3600" in cv
+    label = _block(cv, "private func resendLabel(wait: Int) -> String")
+    assert "if wait > 90" in label and " min)\"" in label and "up to" in label, (
+        "a 15-minute wait would read as seconds, or as an exact countdown")
+
+
+def test_email_already_in_use_flips_the_form_to_sign_in():
+    """Review finding 2026-11-26: the 409 says "use Forgot password on the sign-in screen", but
+    the sign-up form shows no such link. The catch must switch to Sign In (keeping the address)
+    BEFORE it sets the message — `toggleMode()` would clear the message."""
+    view = _code(_SIGN_IN)
+    submit = _block(view, "private func submit()")
+    catch = submit[submit.index("} catch {"):]
+    assert re.search(
+        r"if submittedMode == \.signUp, Self\.isEmailAlreadyRegistered\(error\) \{\s*"
+        r"mode = \.signIn\s*showPassword = false\s*\}[\s\S]*?errorMessage = friendlyError\(error\)", catch,
+    ), "an email already in use no longer switches the form to Sign In"
+    check = _block(view, "static func isEmailAlreadyRegistered(_ error: Error) -> Bool")
+    assert 'code == "AUTH_EMAIL_ALREADY_REGISTERED"' in check
 
 
 def test_an_unstructured_404_gets_honest_copy_and_a_drift_warning():
@@ -770,13 +815,22 @@ _MUTATIONS = [
      ((f"{_I20}signUpMessage: pending.signUpMessage,\n", ""),),
      _T_SIGNUP_MSG, "the code screen is not handed the sign-up message"),
     ("signup-message-branched-on", _CONFIRM,
-     (("if let signUpNote = Self.displayable(signUpMessage) {",
-       'if let signUpNote = Self.displayable(signUpMessage), signUpMessage?.contains("Already") == true {'),),
+     ((f'{_I12}Text("Check your email")\n',
+       f'{_I12}if signUpMessage?.contains("Already") == true {{ Text("x") }}\n{_I12}Text("Check your email")\n'),),
      _T_SIGNUP_MSG, "ConfirmEmailView inspects the sign-up message"),
-    ("signup-message-not-shown", _CONFIRM,
-     ((f"{_I12}if let signUpNote = Self.displayable(signUpMessage) {{\n{_I16}Text(signUpNote)\n",
-       f"{_I12}if let signUpNote = Self.displayable(nil) {{\n{_I16}Text(signUpNote)\n"),),
-     _T_SIGNUP_MSG, "the sign-up message is not shown on the code screen"),
+    # 2026-11-26: the email-in-use 409 and the resend hold.
+    ("email-in-use-unmapped", _APP_ERROR,
+     (('if code == "AUTH_EMAIL_ALREADY_REGISTERED" {', 'if code == "AUTH_EMAIL_ALREADY_REGISTERED_X" {'),),
+     test_an_email_already_in_use_is_a_typed_form_error_in_the_app,
+     "AUTH_EMAIL_ALREADY_REGISTERED is not mapped to .validationFailed on the businessError arm"),
+    ("email-in-use-no-flip", _SIGN_IN,
+     ((f"{_I20}mode = .signIn\n{_I20}showPassword = false\n", f"{_I20}showPassword = false\n"),),
+     test_email_already_in_use_flips_the_form_to_sign_in,
+     "an email already in use no longer switches the form to Sign In"),
+    ("resend-429-not-held", _CONFIRM,
+     (("resendAvailableAt = Date().addingTimeInterval(TimeInterval(wait))", "_ = wait"),),
+     test_a_refused_resend_holds_the_button_for_the_servers_window,
+     "a refused resend no longer holds the button for the server's window"),
     ("old-link-label", _CONFIRM,
      (('static let signInLinkTitle = "Already confirmed, or have an account? Sign in"',
        'static let signInLinkTitle = "Confirmed with the link? Sign in"'),),

@@ -273,6 +273,15 @@ class ErrorCode(str, Enum):
     # A REFUSED password stays AUTH_PASSWORD_REJECTED. `fix_input`: the cure is a new code in the
     # field; NOT retry_later, which would resubmit the dead one.
     AUTH_CODE_USED = "AUTH_CODE_USED"
+    # `/auth/register` only: the address already has a CONFIRMED account (GoTrue answers that
+    # sign-up with a made-up user and sends no email). Said plainly — owner decision 2026-11-26
+    # ("if users use the same email, we should let them know right away"), accepting that a
+    # sign-up now tells anyone whether an address has a Caydex account; the per-IP and
+    # per-address sign-up limits bound how fast anyone can test addresses. 409 Conflict, action
+    # `sign_in`: the person is on the sign-up form and signing in is the cure. Never a 401/403
+    # (no credential is involved) and never retryable. An address whose account is still
+    # UNCONFIRMED is not this: that person gets a new code (the code screen).
+    AUTH_EMAIL_ALREADY_REGISTERED = "AUTH_EMAIL_ALREADY_REGISTERED"
 
     # The five below are deliberately DISTINCT rather than one AUTH_FAILED, because iOS must
     # react differently to each and only two of them may destroy a stored credential. Collapsing
@@ -456,6 +465,10 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
     ErrorCode.AUTH_CODE_USED: (
         "We couldn't set your new password, and that code has now been used. "
         "Send a new code and try again."
+    ),
+    ErrorCode.AUTH_EMAIL_ALREADY_REGISTERED: (
+        "This email is already in use. Please sign in instead, or use Forgot password on the "
+        "sign-in screen. If you signed up with Apple or Google, use that button."
     ),
     ErrorCode.TICKER_NOT_FOUND: (
         "We couldn't find that ticker symbol. Check the spelling and try again."
@@ -646,6 +659,8 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     # NOT sign_in (they are mid-flow, often signed out by design) and NOT retry_later (the same
     # code is refused forever — the outage case is AUTH_UNAVAILABLE, not this).
     ErrorCode.AUTH_CODE_INVALID: "fix_input",
+    # sign_in: the sign-up form's address already has a confirmed account; signing in is the cure.
+    ErrorCode.AUTH_EMAIL_ALREADY_REGISTERED: "sign_in",
     # sign_in: the address is confirmed and the code is spent; signing in (with the password the
     # app still holds) is what finishes. The user is on the code screen, so it is not a circle.
     ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED: "sign_in",
@@ -728,6 +743,8 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     ErrorCode.EMAIL_NOT_CONFIRMED: 403,
     # 400, not GoTrue's own 403: a 401/403 here would reach iOS's auth handling for a typo.
     ErrorCode.AUTH_CODE_INVALID: 400,
+    # 409 Conflict: the address is taken. Not 400 (nothing in the form is malformed), not 401/403.
+    ErrorCode.AUTH_EMAIL_ALREADY_REGISTERED: 409,
     # 503 by default (ours: the sign-in / write after a good code failed); the route passes 400
     # when the password itself was refused. Never 401: no stored credential is involved.
     ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED: 503,

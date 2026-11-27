@@ -671,6 +671,13 @@ _CLASS_RATIO_TEXT: Dict[str, str] = {
 _CLASS_LABEL = {"class-a": "Class A", "class-b": "Class B"}
 
 
+def symbol_share_class(symbol: object) -> Optional[str]:
+    """The class token a listed two-class symbol trades as ("class-b" for BH, "class-a" for BRK-A), or None for every
+    other symbol (`_SYMBOL_CLASS`)."""
+    entry = _SYMBOL_CLASS.get(str(symbol or "").strip().upper())
+    return entry[1] if entry else None
+
+
 def share_class_note(symbol: object) -> Optional[str]:
     """How to read share totals for an issuer whose classes differ, None for every other."""
     entry = _SYMBOL_CLASS.get(str(symbol or "").strip().upper())

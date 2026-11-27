@@ -867,8 +867,15 @@ def _retries(lane: str = RUN_LANE_MAIN) -> str:
 
 
 def _no_run_hint(lane: str = RUN_LANE_MAIN) -> str:
-    return (f"Check the marketing-worker cron on Railway (hourly from {lane_hour_et(lane):02d}:15 ET) and its last "
+    hint = (f"Check the marketing-worker cron on Railway (hourly from {lane_hour_et(lane):02d}:15 ET) and its last "
             f"logs")
+    if lane == RUN_LANE_SPOTLIGHT:
+        # 2026-11-27: no NEW spotlight run starts at or after the main run hour of its day
+        # (`run_service.spotlight_start_closed`), so a lane switched on that late leaves the day with no run and a
+        # healthy cron — say so instead of sending the owner to debug the cron
+        hint += (f", unless the spotlight was switched on at or after {run_hour_et():02d}:00 ET that day (no new "
+                 f"spotlight run starts that late; then nothing is wrong)")
+    return hint
 
 
 #: C0 (2026-11-16, the second review): what a SPOTLIGHT run's texts say instead of a retry outlook or a cron hint once

@@ -121,6 +121,9 @@ async def test_the_read_back_carries_the_runs_lane(svc, monkeypatch):
                         ("MARKETING_RUN_HOUR_ET", 16),
                         ("MARKETING_NEWS_SERIES", "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight")):
         monkeypatch.setattr(mrs.settings, name, value)
+    # NOW is 17:30 ET: the lane's start window (`spotlight_start_closed`, 2026-11-26) is held open here and pinned by
+    # tests/test_marketing_run_service.py::test_the_spotlight_start_window_*
+    monkeypatch.setattr(mrs, "spotlight_start_closed", lambda run_date, now: False)
     spot, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW,
                                        claim_nonce="0" * 31 + "1", lane="spotlight")
     assert reason == mrs.CLAIMED

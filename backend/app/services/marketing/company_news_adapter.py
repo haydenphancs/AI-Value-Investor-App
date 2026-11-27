@@ -37,8 +37,9 @@ API (contract D6):
   sitting officer's — an allow-list of title words, never a list of bad ones, applied to an
   ``other:`` text naming the role too; a director's ``other:`` text naming the seat must be a
   sitting director's (``role_uncertain``).
-* 13F moves (review round 8) are chosen by dollar size with each kind's largest reserved; an
-  exit carries its previous-quarter value (``prev_value_usd``, never drawn) so it ranks too.
+* 13F moves are chosen by dollar size alone (review round 8; review 2026-11-20 removed each kind's
+  reserved slots — the one ranked list shows the largest changes); an exit carries its
+  previous-quarter value (``prev_value_usd``, never drawn) so it ranks too.
 * Review round 9 (2026-10-10), each fail-closed:
   - Form 4: a member of Congress is matched by the surname rule too (a legal first name, a
     nickname twin, an initial — `company_news_rules.is_congress_name`), and the whole PERSON is
@@ -122,6 +123,36 @@ API (contract D6):
   fiscal year (``template_refused``), so the walk tries that company after every candidate that can publish —
   and (the round-3 review, RR3-STAKES-TEMPLATE-WALL) a company stake's by its stake id, so that stake is offered
   after every other one until its row changes. Synchronous, no I/O; any other record is ignored (False).
+* The spotlight lane (owner decisions 2026-11-15, "Add a second daily post"; B decisions 5-8), two single-company
+  series, shipped with their templates (news-v22) and run only by the spotlight lane's chains:
+  - ``insider_spotlight`` (`_collect_insider_spotlight`): since the owner decisions of 2026-11-20 ("each post or each
+    image/video will have more than 2,3, ideally are 3 - 5 companies at once") a LIST of `R.INSIDER_MIN_ROWS` to
+    `R.INSIDER_MAX_ROWS` issuers (`R.InsiderSpotlight` of `R.InsiderSpotlightCompany` rows: each issuer's largest
+    qualifying CEO / CFO / director and up to `R.SPOTLIGHT_MAX_OTHERS` more of it), the largest total first — fewer is
+    no post (``insider_spotlight_too_few_companies``; the chain falls through to the theme). The window runs from the
+    day after the last window an earlier insider spotlight CHECKED (``spotlight_checked_through``, passed by the script
+    flow — C0, 2026-11-16) to the day before the newest filing the market-wide walk holds; the window it checked rides
+    back on ``Candidates.checked_window`` for the script flow to record. No new day to check is a quiet skip
+    (``insider_spotlight_no_new_window``) while the feed is current, ``insider_feed_behind`` (unavailable, never a skip)
+    when it is not. Every Form 4 gate of the roundups runs (the walk-level gates, the profile-stage gates and the
+    per-reporter gates are SHARED helpers — `_insider_gated_lines`, `_issuer_lines`, `_reporter_rows` — so the
+    roundups' answers are byte for byte what they were), with two windows (`_amendment_verdict`: the 4/A / role /
+    co-officer LOOK-BACK, never shorter than the roundups' week, and the PURCHASE window a person's row must hold whole)
+    and the per-issuer Form 4/A check run per PERSON (`_spotlight_checked`); one person once across the list. Every
+    company of a posted list is keyed once (``news:insider_spotlight:<SYM>+<SYM>…:<window start>``, already_posted for
+    that window); a 14-day issuer cooldown by root symbol and display name (``spotlight_cooldown``,
+    ``spotlight_recent`` passed by the script flow). The one-issuer post's revenue line is retired with it.
+  - The weekly roundups (owner decisions 2026-11-20): fewer than `R.INSIDER_MIN_ROWS` rows is no post
+    (``ceo_too_few_companies`` / ``insider_too_few_companies``; Monday's chain falls through to the theme).
+  - ``thirteen_f_spotlight`` (`_collect_thirteen_f_spotlight`): ONE filer's largest eligible holdings (up to
+    `R.THIRTEEN_F_SPOTLIGHT_MAX_MOVES`, owner feedback 2026-11-19) through the roundup's own walkers; never a lead filer (``lead_filer_reserved``); more / fewer shares only when vouched, never split-restated
+    (``split_restated``: the re-check's restated rows travel out of band on the call context, never on a record) and
+    only at a 25% change; one 13F post per filer per quarter across both lanes (`_widened_13f_exclude`, which the
+    roundup reads too).
+  - The Form 4 roundup rows now carry the filing's own cost per share (`R.InsiderPurchase.cost_per_share_min_usd` /
+    ``_max_usd``: the lines' own prices, as filed — never the profile price).
+* `company_facts(symbol)` → ``{sector, industry}`` or None (workstream C's art brief): name-free, from the profile memo
+  (else one read), never raises.
 * company_stakes, the round-3 review of 2026-10-20 (RR3-STAKES-TEMPLATE-WALL): the read applies every gate of the
   template's that a stake ROW decides (`_stake_candidate`: the drawn caps on the source title, the investee name
   and the local listing — `R.STAKE_SOURCE_DRAW_MAX_CHARS`, `R.STAKE_TEXT_WORD_MAX_CHARS`,
@@ -151,7 +182,14 @@ API (contract D6):
     and then KEPT by the owner (auto + ``owner_kept_at``) — filtered in the read, re-checked strictly
     on every row after the row-cap check and before the catalogue's known words are built (a left-out
     row's investee name never vouches for another row's source title); counted in a log line, never
-    a rejection code.
+    a rejection code. news-v23 (the restyle, owner 2026-11-19: "filter for companies that public only. no
+    private" + "add 1-3 more companies for the NVIDIA (or the other trillion companies)"): ONE post holds ONE
+    investor's stakes in PUBLIC companies (`R.CompanyStakes`, 1-4 — RESTYLE_SPEC §2.5; the picture draws every
+    one) — a stake is public only with a kind that can be (`R.PUBLIC_STAKE_KINDS`), a listed U.S. symbol, a
+    profile `R.company_from_profile` accepts for the stake's company and ``isActivelyTrading`` exactly True
+    (fail closed: ``stake_not_public`` / ``stake_listing_unverified`` / ``stake_not_trading``, each dropped and
+    its investee never named); the investor with the most not-yet-posted public stakes leads (`_stakes_records`),
+    and the post's ledger key names every stake it holds (`R.stake_ref_ids`), so each is posted once.
   - ``earnings``: the previous seven ET days' calendar, one day per call (a day at the 4,000-row
     cap is unavailable, never ranked), EPS digit-shift and implausible gaps refused — and (owner-delegated,
     2026-10-19) an |EPS actual| or |estimate| above `R.EPS_MAX_ABS`, $1,000,000 a share (``eps_implausible``) —,
@@ -224,7 +262,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import (
     AbstractSet, Any, Awaitable, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set,
-    Tuple,
+    Tuple, Union,
 )
 
 import httpx
@@ -233,12 +271,13 @@ from app.config import settings
 from app.database import get_supabase
 from app.integrations.fmp import FMPUnavailableException, get_fmp_client
 from app.services._insider_buys_common import (
-    BAD_SYMBOLS as _BAD_FORM4_SYMBOLS, SYMBOL_RE as _FORM4_SYMBOL_RE, canonical_symbol as form4_symbol,
-    extract_insider_buys, insider_role, normalize_cik, price_plausible, rank_buy_symbols,
+    BAD_SYMBOLS as _BAD_FORM4_SYMBOLS, MAX_ROW_DOLLARS as _FORM4_MAX_ROW_DOLLARS, SYMBOL_RE as _FORM4_SYMBOL_RE,
+    canonical_symbol as form4_symbol, extract_insider_buys, insider_role, normalize_cik, price_plausible,
+    rank_buy_symbols,
 )
 from app.services._earnings_common import eps_digit_shift_suspect
 from app.services._insider_common import (
-    classify_insider_transaction, insider_reporter_key, is_common_stock, officer_title,
+    classify_insider_transaction, distinct_trades, insider_reporter_key, is_common_stock, officer_title,
 )
 from app.services._whale_common import (
     MAX_SPLIT_LOOKUPS, is_13f_non_share_row, select_13f_comparison, thirteen_f_share_positions,
@@ -294,16 +333,36 @@ INSIDER_AMENDMENT_MAX_SYMBOLS = R.INSIDER_MAX_ROWS + 3
 INSIDER_AMENDMENT_PAGE_SIZE = INSIDER_PAGE_SIZE
 INSIDER_AMENDMENT_MAX_PAGES = 2
 
+# ── the spotlight lane (owner decisions 2026-11-15, "Add a second daily post") ─────────────────────────────
+#: The insider list reads each issuer's CEO, CFO and directors (`_collect_insider_spotlight`).
+SPOTLIGHT_ROLES: Tuple[str, ...] = ("ceo", "cfo", "director")
+#: How many qualifying people of one issuer reach the per-person Form 4/A check: the lead and up to
+#: `R.SPOTLIGHT_MAX_OTHERS` more, largest first. The cluster is a lower bound ("at least N other insiders"), so a
+#: sixth buyer is never needed to say it; a person the check drops leaves fewer, never another.
+SPOTLIGHT_PEOPLE_PER_ISSUER = 1 + R.SPOTLIGHT_MAX_OTHERS
+#: The insider spotlight's per-PERSON Form 4/A check (`_spotlight_checked`, the cluster variant of
+#: `_amendment_checked`: keyed (symbol, reporter), every person of an issuer checked, one memoized per-issuer read
+#: per issuer): at most this many issuers (the main lane's cap: `INSIDER_AMENDMENT_MAX_SYMBOLS` per-issuer reads)
+#: and this many people in all — at least `R.INSIDER_MAX_ROWS` × (1 + `R.SPOTLIGHT_MAX_OTHERS`), pinned.
+SPOTLIGHT_AMENDMENT_MAX_ISSUERS = INSIDER_AMENDMENT_MAX_SYMBOLS
+SPOTLIGHT_AMENDMENT_MAX_PEOPLE = SPOTLIGHT_AMENDMENT_MAX_ISSUERS * SPOTLIGHT_PEOPLE_PER_ISSUER
+#: The 13F spotlight reads at most this many filings beyond its record limit (each filer yields at most ONE
+#: holding, and a filing may yield none: every more / fewer move under 25%, split-restated or withheld).
+THIRTEEN_F_SPOTLIGHT_SPARE_FILINGS = 2
+#: `company_facts` (workstream C's art brief): one profile read's timeout when the memo does not hold it.
+COMPANY_FACTS_TIMEOUT_SECONDS = 8.0
+
 #: Registry 13F builds per call that actually hit FMP (a memo hit is free; a refused book —
 #: `FilingRefused` — does not count).
 MAX_LIVE_13F_BUILDS = 2
 #: This many `FilingUnavailable` (or failed date lists) in one call → the series is unavailable.
 THIRTEEN_F_MAX_UNAVAILABLE = 2
-#: Moves presented (and profiled) per filing before the final cut to `THIRTEEN_F_MAX_MOVES`.
+#: Moves presented (and profiled) per filing before the final cut to `THIRTEEN_F_MAX_MOVES`. Both cuts are by dollar
+#: size alone (`_cut`), in both 13F series — review 2026-11-20: the roundup used to reserve each kind's three largest
+#: (`_select_moves`, review round 8, removed), so a filing with all four kinds always kept the top two of EACH — a $70M
+#: new holding drawn where $3B, $2B and $1B decreases were in no picture and no caption — while the one list design
+#: (news-v23) ranks the largest dollar change first.
 THIRTEEN_F_MAX_PROFILED = 10
-#: Both cuts are by dollar size (`_select_moves`, review round 8), with each kind's largest this
-#: many moves reserved first, so a large increase or exit is never cut by kind order.
-THIRTEEN_F_KIND_RESERVE = 3
 #: An increase / decrease smaller than this share of the previous count is not shown.
 THIRTEEN_F_MIN_CHANGE = 0.10
 #: A newly reported or no-longer-reported move is shown only when its value reaches
@@ -331,6 +390,21 @@ THIRTEEN_F_MAX_SPLIT_CHECKS = 40
 #: quarter's end (`_split_window_problem`): a split paid on the last session is ex-dated the next business day, and
 #: a filer that books on the payable date reports the post-split count. A week covers a long holiday weekend.
 THIRTEEN_F_SPLIT_RECHECK_SLACK_DAYS = 7
+#: The BUY-OUT CHECK of a closed-out 13F holding (news-v23, owner 2026-11-19 — "Closed out + buy-out check": a holding
+#: whose company stopped trading during or after the quarter — acquired, delisted, merged — is DROPPED, never called
+#: "closed out"; `_closed_out_checked`). Two licensed FMP sources ("3 Company Information"), both fail closed: the
+#: profile's `isActivelyTrading` (read anyway, in the same batch) must be exactly True, and FMP's delisted-companies
+#: list (newest `delistedDate` first, `get_delisted_companies`) must hold no row of the symbol dated on or after the
+#: quarter's first day — read page by page until a page's oldest row is older than that day, at most
+#: `CLOSED_OUT_DELISTED_MAX_PAGES` pages (the app's own window, `listing_status_service._WINDOW_PAGES`: ~8 months at
+#: ~3 pages a month, enough for a quarter and its filing season), memoized `CLOSED_OUT_DELISTED_TTL_SECONDS` and shared
+#: by both 13F series. A list that cannot be read that far back (a failed page, an empty or malformed one, the cap
+#: reached, too little budget) drops every closed-out row of the filing with a WARNING — never a guess. Read only when a
+#: filing still holds a closed-out row after its profiles.
+CLOSED_OUT_DELISTED_PAGE_SIZE = 100
+CLOSED_OUT_DELISTED_MAX_PAGES = 24
+CLOSED_OUT_DELISTED_TTL_SECONDS = 6 * 3600.0
+CLOSED_OUT_DELISTED_TIMEOUT_SECONDS = 30.0
 
 #: Money Map, per call: candidates past the ledger check that ended in a record or in an
 #: UPSTREAM gap (`_MONEY_MAP_UPSTREAM_GAPS`), the deterministic content refusals (a gross
@@ -434,14 +508,19 @@ _SEGMENT_NAME_RE = re.compile(r"[A-Za-z0-9 &.,'+/-]{2,40}")
 #   at most 2×8 + 2×30 + 2×30 = 136 page requests + ≤ 10 profile calls = 146 (review round 9:
 #   the old "107" left out the confirming reads at 7500 — pinned by a page-counting test).
 # company_stakes: 0 FMP calls for data (the club group, its rows and one stakes read), + 1
-#   profile batch for at most `STAKES_PROFILE_CANDIDATES` stakes' investor and investee.
+#   profile batch for at most `STAKES_PROFILE_CANDIDATES` stakes' investor and investee (news-v23: the
+#   stakes with a listed U.S. symbol and a kind that can be public — the rest are dropped before it).
 # earnings: 7 one-day calendar calls (4 at a time, all-or-nothing) + ONE profile pass over the first
 #   `EARNINGS_MAX_PROFILES` reports by revenue estimate (60 symbols: the client's batches of 50, so 2
 #   calls) + one quarterly income-statement read (`EARNINGS_STATEMENT_ROWS` quarters: the reporting
 #   currency and the reported quarter) per report that reaches the read stage, in market-cap order
 #   (≤ `EARNINGS_MAX_STATEMENT_READS`; Batch 1, 2026-10-15).
-# theme_explainer: 1 themes read; per theme evaluated (≤ `THEME_MAX_EVALUATED`) 1 profile batch
-#   and ≤ `THEME_SEGMENT_LOOKUPS` revenue breakdowns (the service's own two-tier cache first).
+# theme_explainer: 1 themes read; per theme evaluated (≤ `THEME_MAX_EVALUATED`) 1 profile batch; then at most
+#   `THEME_MAX_ANGLE_ATTEMPTS` angle evaluations in all — "how they make money" EVERY member's revenue breakdown
+#   (≤ `THEME_SEGMENT_LOOKUPS`; the service's own two-tier cache first, memoised per symbol), an older-years read
+#   (`get_segment_years`: the card's own two licensed feeds) for each member whose newest stack is gross, and the ONE
+#   market-capitalization batch "biggest" reads too (memoised per member set: the tile order); "biggest" that batch.
+#   Worst case: 2 profile batches + 2 × 24 breakdowns (two waves of 12 each) + their older-years reads + 1 batch.
 
 #: The two walk sizes of the Congress feeds (rows per chamber; the client fetches 250-row pages
 #: in parallel, at most 30). The 2026-10-09 probe: Senate 500 rows ≈ 2.5 months, House 500 rows ≈
@@ -488,17 +567,16 @@ _GENERIC_NAME_WORDS = frozenset({
     "holding", "group", "ltd", "limited", "plc", "class", "common", "stock", "shares",
 })
 
-#: Earnings: report days ``[run_date - 7, run_date - 1]``, one ET day per calendar call.
-EARNINGS_WINDOW_DAYS = 7
+#: Earnings: report days ``[run_date - 7, run_date - 1]``, one ET day per calendar call — eight on a Thursday since
+#: news-v23 phase 3 (`R.earnings_window_days`: Wednesday posts the weekly theme first, and Thursday's window takes every
+#: report day Wednesday's used to cover).
+EARNINGS_WINDOW_DAYS = R.EARNINGS_WINDOW_DAYS
 #: The re-review of 2026-10-19 (EME-1): a posted earnings key of a listing counts as THIS report also when its day is
 #: up to this many days BEFORE the window (two windows): FMP re-dating a reported row across a window boundary
 #: must not post one report twice. Far below the shortest gap between two quarterly reports of one issuer (a
 #: quarter is 77+ days, `R.EARNINGS_QUARTER_SPAN_DAYS`; the counted keys span at most 14 + 6 = 20 days), so the
 #: next quarter's report is never taken for this one.
 EARNINGS_POSTED_LOOKBACK_DAYS = 14
-#: A ledger key's day, exactly as `R.ledger_key` writes it (``date.fromisoformat`` alone would also read an ISO
-#: week date such as "2027-W02-1").
-_LEDGER_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 #: FMP's silent row cap: a one-day answer this long is probably TRUNCATED → the series is
 #: unavailable (`earnings_window_service` only logs it; a post must not rank a cut list).
 EARNINGS_TRUNCATION_ROWS = 4000
@@ -545,8 +623,11 @@ EARNINGS_CLASS_LINES: FrozenSet[str] = frozenset({"GOOGL"})
 #: Company stakes: the stakes read's row cap (the club service's `_MAX_STAKE_ROWS`); a full page
 #: may be cut, so it is unavailable, never a partial catalogue.
 STAKES_READ_LIMIT = 2000
-#: Unposted stakes (rank order) whose investor and investee reach the profile stage per call.
-STAKES_PROFILE_CANDIDATES = 8
+#: Unposted stakes (rank order) whose investor and investee reach the profile stage per call — news-v23: only the stakes
+#: with a listed U.S. symbol and a kind that can be public (the rest are dropped before it), and enough of them to pick
+#: the investor with the most public stakes and fill its post (`R.STAKES_POST_STAKES`, 4). One batch: at most twice
+#: this many symbols (fewer: the investors repeat), each memoized `PROFILE_TTL_SECONDS`.
+STAKES_PROFILE_CANDIDATES = 12
 #: The round-3 review of 2026-10-20 (RR3-STAKES-TEMPLATE-WALL): how long the memo keeps a stake its TEMPLATE refused
 #: (`remember_template_refusal` → ``("stake_template_refused", stake_id) → (fingerprint, refused_on)``), process-local
 #: like every memo entry. While it holds — and the row still says what was refused (`_stake_fingerprint`) — the stake
@@ -576,16 +657,93 @@ _STAKE_ORIGIN_AUTO = "auto"
 #: every row it returns, strictly, before anything else reads them.
 _STAKE_POSTABLE_FILTER = "origin.in.(seed,proposal),owner_kept_at.not.is.null"
 
-#: Theme explainer: themes evaluated past the ledger and the cheap gates per call (each costs a
-#: profile batch and segment lookups), the members whose largest segment is looked up (theme
-#: order; a later member is still listed, without a segment fact), and the lookups in flight.
+#: Theme explainer — news-v23 phase 3, the WEEKLY theme post (owner 2026-11-19, RESTYLE_SPEC §2 item 7): the active
+#: themes rotate oldest-posted first (`_theme_order`), each theme's next ANGLE after its last posted one
+#: (`R.next_theme_angle`). Bounded per call: at most THEME_MAX_EVALUATED themes past the ledger and the cheap gates
+#: (each costs one profile batch), and at most THEME_MAX_ANGLE_ATTEMPTS angle evaluations that READ (an angle not built,
+#: or one the run's worker cannot draw, is skipped without a read and never counts). Each angle's reads are memoised
+#: (`_shared`): the breakdowns per symbol, the market values per member set, the annual statements per symbol, the Form 4
+#: reads per issuer, the Congress month's walk (shared with congress_count).
+#: 2026-11-20 (every angle built): FIVE attempts — one whole rotation of the first theme, so a theme whose next angles
+#: are thin (a Congress month of fewer than four companies is common) still reaches the angle after them in the same
+#: call ("≥ 4 companies with data, else the next angle"); at three, a theme past "biggest" whose growth, insider and
+#: Congress angles were all thin never reached "how they make money" and the whole series skipped. Worst reads of one
+#: call: 16 statements + 16 issuers × THEME_INSIDER_MAX_PAGES + one memoised Congress walk + 24 breakdowns (and the
+#: older-years reads of the gross ones) + one market value batch — so each angle runs under its OWN share of the time
+#: (THEME_ANGLE_BUDGET_SECONDS, below).
 THEME_MAX_EVALUATED = 2
-THEME_SEGMENT_LOOKUPS = 12
-THEME_LOOKUP_CONCURRENCY = 6
-#: A segment fact's fiscal year must be this recent (years before the run's year).
+THEME_MAX_ANGLE_ATTEMPTS = 5
+#: Fix round 2026-11-20 — each angle's own time, inside the series' (`script_service.SERIES_BUDGET_SECONDS`, 120 s): an
+#: angle whose reads outlast it loses ITS turn only (an outage: the next angle is tried, and with no record at all the
+#: series reports "unavailable", never "nothing qualified"), so one slow source can no longer spend the whole series'
+#: time before the angle after it runs (before: one `ctx.step` per angle with ALL the time left — a slow insider walk
+#: followed by a slow Congress walk ended the series `budget_exhausted` with nothing posted, and next Wednesday repeated
+#: it). Sized from the measured worst ROUND (`THEME_WORST_ROUND_SECONDS`, the FMP client's own 5xx retries included —
+#: script_service's notes: ~47 s for seven rounds): make_money three rounds (phase 4, 2026-11-20: two waves of 12
+#: breakdowns — every member of the largest theme — then one wave of older-years reads for the members whose newest
+#: stack is gross, the market-value batch beside the first wave), biggest one batch,
+#: growth_profit two waves of 8 statements, insiders four waves of 4 issuers at one page each (an issuer list past one
+#: page is cut: the 12-round three-page worst would take ~80 s), Congress the shared walk's ~30 s worst. Their sum plus
+#: THEME_MAX_EVALUATED profile batches is the call's worst (`theme_worst_seconds`), pinned below the series' cap by
+#: tests/test_marketing_news_series_switch.py.
+THEME_WORST_ROUND_SECONDS = 6.7
+THEME_ANGLE_BUDGET_SECONDS: Dict[str, float] = {
+    "make_money": 21.0, "biggest": 8.0, "growth_profit": 16.0, "insiders": 28.0, "congress": 32.0,
+}
+
+
+def theme_worst_seconds() -> float:
+    """One `candidates("theme_explainer")` call at its worst BEFORE it holds a record: THEME_MAX_EVALUATED profile
+    batches (one round each) and the five angles' own shares once each. A theme's rotation tries each angle at most
+    once, and the THEME_MAX_ANGLE_ATTEMPTS (5) attempts are the call's: a second theme only tries what the first left,
+    and only when fewer angles are on offer (class C off: three; an older worker: one), so its repeats are of those
+    cheaper angles (phase 4: ≤ 82 s and ≤ 42 s). After a record, the series' own deadline ends the call with what it holds."""
+    return THEME_MAX_EVALUATED * THEME_WORST_ROUND_SECONDS + sum(THEME_ANGLE_BUDGET_SECONDS.values())
+#: "How they make money" (phase 4, 2026-11-20 — the owner's 2026-11-19 "for AI CHIPS, i don't see ARM, Intel and SNPS?
+#: add for me"): EVERY member's largest segment is looked up — as many as a theme record holds (`R.THEME_MEMBERS`' 24;
+#: the largest production theme, Silicon Rush, has 21: with the old first-16-in-list-order Intel, its 20th, was never
+#: read) — THEME_SEGMENT_CONCURRENCY in flight, so two waves; the reads start in MARKET-VALUE order (`_theme_read_
+#: priority`), so a share cut short leaves only the smallest members unread. A member whose newest stack is gross
+#: (intersegment sales) gets one older-years read (THEME_SEGMENT_YEARS_CONCURRENCY in flight, apart from the
+#: breakdowns): `_walked_back_fact`. The tiles are the members with a fact, the largest market value first.
+THEME_SEGMENT_LOOKUPS = R.THEME_MEMBERS[1]
+#: The members whose segment fact the record CARRIES: the picture's tiles (`template_onscreen.MAX_TILES`, pinned equal by
+#: tests/test_marketing_company_news_adapter.py) — the largest by market value among those with one. The others are
+#: listed without it ("{co} is also in {theme}." in the captions, as an unread member always was): every member's fact
+#: in the long captions overflowed Instagram, YouTube and Threads on Silicon Rush (18 facts; 12 keep every outlet).
+THEME_FACT_TILES = 12
+THEME_SEGMENT_CONCURRENCY = 12
+THEME_SEGMENT_YEARS_CONCURRENCY = 4
+#: Angle 3's annual statements (and its in-flight bound): THEME_LOOKUP_CONCURRENCY at a time.
+THEME_LOOKUP_CONCURRENCY = 8
+#: The insider spotlight's segment fact: its fiscal year this recent (years before the run's). A THEME member's fact may
+#: be older — up to `R.THEME_TAGGED_FACT_MAX_AGE_YEARS`, drawn with its own "FY…" tag (`news_templates`).
 THEME_FACT_MAX_AGE_YEARS = 2
 #: Segments may add up to at most this much more than revenue for a share to be stated.
 THEME_SEGMENT_SUM_TOLERANCE = 0.005
+#: The memo of one member's revenue breakdown (an angle's reads re-asked in a later build of the day are answered
+#: here; the service keeps its own two-tier cache behind it) and of one member set's market values.
+THEME_BREAKDOWN_TTL_SECONDS = 30 * 60.0
+THEME_MARKET_VALUE_TTL_SECONDS = 10 * 60.0
+#: Angle 3 "growth + profit" (news-v23 phase 3, 2026-11-20): the members whose ANNUAL income statements are read (theme
+#: order) — the picture's 10 rows and spares, THEME_LOOKUP_CONCURRENCY in flight, ONE licensed `income-statement` call
+#: each (the two latest years and a spare), memoised THEME_STATEMENT_TTL_SECONDS per symbol.
+THEME_STATEMENT_LOOKUPS = 16
+THEME_STATEMENT_ROWS = 3
+THEME_STATEMENT_TTL_SECONDS = 30 * 60.0
+#: Angle 4 "insider scorecard": the members whose Form 4 rows are read (theme order) — each one per-ISSUER read of the
+#: licensed `insider-trading/search` (every code, every class, by the profile's issuer CIK), at most
+#: THEME_INSIDER_MAX_PAGES pages of THEME_INSIDER_PAGE_SIZE rows (an issuer whose 90 days run past them is LEFT OUT —
+#: `FMPPartialPageException`, never a partial total), THEME_INSIDER_CONCURRENCY in flight, memoised like the Form 4
+#: series' reads (INSIDER_RAW_TTL_SECONDS). FMP calls per angle attempt: ≤ THEME_INSIDER_LOOKUPS ×
+#: THEME_INSIDER_MAX_PAGES.
+THEME_INSIDER_LOOKUPS = 16
+THEME_INSIDER_PAGE_SIZE = 1000
+THEME_INSIDER_MAX_PAGES = 3
+THEME_INSIDER_CONCURRENCY = 4
+#: The theme columns read. Never `updated_at` (owner decision 2026-11-20, "Trust the app's lists"): a list with no
+#: `tickers_as_of` of its own is the app's live list and counts as current (`_theme_as_of`); the row's last write
+#: neither gates nor dates it.
 _THEME_COLUMNS = "slug,title,tickers,blocked_tickers,tickers_as_of,sort_order,is_active"
 _THEME_SLUG_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
 
@@ -628,14 +786,24 @@ class MarketingNewsUnavailable(Exception):
 @dataclass(frozen=True)
 class Candidates:
     """One series' answer. ``records`` is at most ``limit`` long, in rank order; empty only
-    with a `SKIP_REASONS` ``skip_reason``. ``rejections`` counts per-candidate refusals."""
+    with a `SKIP_REASONS` ``skip_reason``. ``rejections`` counts per-candidate refusals.
+
+    ``checked_window`` (C0, 2026-11-16; the insider spotlight only, None for every other series): the Form 4 window
+    ``(start, end)`` the collector CHECKED — whether a record qualified or not. The script flow records it on the
+    day's selection trail, and the next insider spotlight's window starts the day after its end."""
 
     series: str
     records: Tuple[Any, ...]
     skip_reason: Optional[str]
     rejections: Mapping[str, int]
+    checked_window: Optional[Tuple[date, date]] = None
 
     def __post_init__(self) -> None:
+        if self.checked_window is not None:
+            w = self.checked_window
+            if not (isinstance(w, tuple) and len(w) == 2
+                    and all(isinstance(d, date) and not isinstance(d, datetime) for d in w) and w[0] <= w[1]):
+                raise ValueError(f"Candidates.checked_window must be a (start, end) pair of dates, got {w!r:.80}")
         if not isinstance(self.records, tuple) or any(not isinstance(r, R.RECORD_TYPES) for r in self.records):
             raise ValueError("Candidates.records must be a tuple of news records")
         if self.records and self.skip_reason is not None:
@@ -799,21 +967,61 @@ async def _lead(key: Tuple[Any, ...], ttl: float, fetch: Callable[[], Awaitable[
 
 
 class _Ctx:
-    """One `candidates()` call: its inputs, resolved dependencies, budget and counters."""
+    """One `candidates()` call: its inputs, resolved dependencies, budget and counters.
+
+    The spotlight lane's inputs (2026-11-15) are keyword-only with safe defaults, so every other series — the main
+    lane's included — builds exactly the context it always did: ``spotlight_checked_through`` (the end of the last
+    Form 4 window an earlier insider spotlight checked — C0, 2026-11-16 — the insider spotlight's window starts the day
+    after) and ``spotlight_recent`` (``(symbol, display name)`` of every insider spotlight accepted within the issuer
+    cooldown). ``checked_window`` is the window the insider spotlight checked this call (None until it has one); `done`
+    hands it back on the answer. ``split_checked`` /
+    ``split_restated_any`` are filled by the 13F split re-check as it runs (`_split_window_problem`), out of band:
+    the 13F spotlight reads them (``split_restated``) and no record ever carries them; ``counts_partial`` is filled by
+    the 13F walkers the same way (`_mark_counts_partial`), read by the 13F spotlight's ``filing_moves``."""
 
     def __init__(self, series: str, run_date: date, exclude: FrozenSet[str], limit: int,
-                 deadline: float, deps: NewsDeps) -> None:
+                 deadline: float, deps: NewsDeps, *, spotlight_checked_through: Optional[date] = None,
+                 spotlight_recent: Tuple[Tuple[str, str], ...] = (),
+                 theme_history: FrozenSet[str] = frozenset(),
+                 theme_angles: FrozenSet[str] = frozenset(R.THEME_ANGLES),
+                 theme_classes: Optional[FrozenSet[str]] = None) -> None:
         self.series = series
+        #: news-v23 phase 3 (the theme explainer only): the build's own theme ledger refs (THEME_HISTORY_DAYS back,
+        #: beside `exclude`), the angles the run's worker can draw and the content classes switched on (None: every
+        #: class — an angle of filings, `R.THEME_ANGLE_CLASSES`, runs only while its class is on).
+        self.theme_history = theme_history
+        self.theme_angles = theme_angles
+        self.theme_classes = theme_classes
         self.run_date = run_date
         self.exclude = exclude
         self.limit = limit
         self.deadline = deadline
         self.deps = deps
+        self.spotlight_checked_through = spotlight_checked_through
+        self.spotlight_recent = spotlight_recent
+        self.checked_window: Optional[Tuple[date, date]] = None
         self.rejections: Counter = Counter()
         self.considered = 0
         self.profiles_requested = 0
         self.profiles_returned = 0
         self._resolved: Dict[str, Any] = {}
+        #: (filer CIK, period) → the canonical symbols of the more / fewer rows the 13F split re-check found a
+        #: split for and passed as RESTATED by the build — written only when every such row of the filing was
+        #: verified (a filing absent here never had its more / fewer rows verified).
+        self.split_checked: Dict[Tuple[str, str], FrozenSet[str]] = {}
+        #: The (filer CIK, period) whose restated rows cannot be tied to the record's moves by symbol (a club
+        #: filer: its detail rows carry routable spellings, the stored rows the filed ones) — every more / fewer
+        #: move of such a filing counts as restated (fail closed).
+        self.split_restated_any: Set[Tuple[str, str]] = set()
+        #: The (filer CIK, period) whose four change counts may NOT be every holding change the filing reports
+        #: (review of the 13F list, 2026-11-19): a ``corporate_action`` row (a share count the diff could not
+        #: separate from a split — "say so, never guess") or an unreadable count of them, an option / note row on
+        #: either book (the builder diffs share rows only, so an option position that changed is counted nowhere;
+        #: `_option_moves_dropped` also LOWERS a count), or — a club filer, whose stored builds keep no option row —
+        #: any excluded row on either stored build, or an unreadable count of them. Written by the walkers, read by
+        #: the 13F spotlight only (`_spotlight_holding`: its ``filing_moves`` is then None, so the list never states
+        #: its counts as the filing's). No record carries it.
+        self.counts_partial: Set[Tuple[str, str]] = set()
 
     # Production singletons are resolved lazily, so a series only touches what it reads.
     def _dep(self, name: str, factory: Callable[[], Any]) -> Any:
@@ -894,6 +1102,7 @@ class _Ctx:
             skip_reason=None if records else skip_reason,
             # A fresh plain dict per call (JSON-serialisable as is), sorted by reason.
             rejections=dict(sorted(self.rejections.items())),
+            checked_window=self.checked_window,
         )
 
 
@@ -1213,12 +1422,20 @@ async def _issuer_feed(ctx: "_Ctx", cik: str, window_start: date) -> List[Dict[s
 
 
 async def _amendment_verdict(ctx: "_Ctx", symbol: str, lines: Sequence[Any], *, issuer: Optional[str],
-                             walk_rows: Sequence[Any], window_start: date) -> Optional[str]:
+                             walk_rows: Sequence[Any], amend_since: date,
+                             purchase_window: Tuple[date, date]) -> Optional[str]:
     """None when the row stands; else its rejection reason. The market-wide walk asks FMP for P
     rows only, so an amendment under another code (a re-code, a derivative-only 4/A) never
     reaches it: the row's ISSUER — ``issuer``, its profile's CIK — is re-read with no transaction
     filter (review round 9: by CIK, so a 4/A under the issuer's other share class, a blank or a
     variant symbol comes back too, whether or not the P walk showed that class).
+
+    Two windows, two jobs (the spotlight lane's review, 2026-11-15): ``amend_since`` is the LOOK-BACK — the issuer
+    read's start and the filing day from which a 4/A, a role text and a co-officer count — and ``purchase_window``
+    (both ends inclusive) is the window whose purchases the row must hold whole (``partial_person``). The weekly
+    roundups pass their own window for both (``(window_start, (window_start, window_end))``: byte for byte what one
+    window did); the insider spotlight looks back at least as far as the roundups do, while its purchases are only
+    its own few days — an earlier purchase of the person is another window's, never a missing line of this one.
 
     * No profile CIK to read by, the read failing, a read holding another issuer's rows (the
       filter was not applied), or a read that does not hold what the walk saw
@@ -1241,7 +1458,7 @@ async def _amendment_verdict(ctx: "_Ctx", symbol: str, lines: Sequence[Any], *, 
                        "read; row dropped", ctx.series, symbol)
         return "amendment_check_failed"
     try:
-        feed = await _issuer_feed(ctx, cik, window_start)
+        feed = await _issuer_feed(ctx, cik, amend_since)
     except (MarketingNewsUnavailable, asyncio.CancelledError):
         raise
     except Exception as e:  # noqa: BLE001 — any read failure fails THIS row closed, logged
@@ -1254,7 +1471,7 @@ async def _amendment_verdict(ctx: "_Ctx", symbol: str, lines: Sequence[Any], *, 
         logger.warning("company news %s: %s Form 4/A check read rows of %d other issuer(s) under CIK %s — not "
                        "one issuer's read; row dropped", ctx.series, symbol, len(foreign), cik)
         return "amendment_check_failed"
-    if any(_is_amendment_row(r) and _filed_since(r, window_start) for r in rows):
+    if any(_is_amendment_row(r) and _filed_since(r, amend_since) for r in rows):
         logger.info("company news %s: %s an amendment of the issuer was filed since the window opened — "
                     "row dropped", ctx.series, symbol)
         return "amended_filing"
@@ -1268,7 +1485,7 @@ async def _amendment_verdict(ctx: "_Ctx", symbol: str, lines: Sequence[Any], *, 
     role = _person_role(lines)
     person = set().union(*(_line_keys(b) for b in lines)) if lines else set()
     for r in rows:
-        if (_filed_since(r, window_start) and _row_keys(r) & person
+        if (_filed_since(r, amend_since) and _row_keys(r) & person
                 and not _role_text_ok(r.get("typeOfOwner"), role)):
             logger.info("company news %s: %s the row's %s has a role text that is not the sitting %s's — "
                         "row dropped", ctx.series, symbol, role, role)
@@ -1284,7 +1501,7 @@ async def _amendment_verdict(ctx: "_Ctx", symbol: str, lines: Sequence[Any], *, 
     # false for one of two …
     if role in ("ceo", "cfo"):
         for r in rows:
-            if not _filed_since(r, window_start):
+            if not _filed_since(r, amend_since):
                 continue
             text = r.get("typeOfOwner")
             if role in _co_title_roles(text) or (
@@ -1294,10 +1511,11 @@ async def _amendment_verdict(ctx: "_Ctx", symbol: str, lines: Sequence[Any], *, 
                             ctx.series, symbol, role, role)
                 return "ambiguous_ceo"
     # … and a purchase of the person the row does not hold (the walk's pages, another class, a
-    # line the extractor skipped): the row would understate what the filings report.
-    _ws, window_end = R.insider_window(ctx.run_date)
+    # line the extractor skipped): the row would understate what the filings report — inside the
+    # row's own PURCHASE window (an earlier purchase belongs to another window's post).
+    purchase_start, purchase_end = purchase_window
     unaccounted = _unaccounted_purchases(_purchase_index(rows), lines, symbol=symbol, issuer=issuer,
-                                         window_start=window_start, window_end=window_end)
+                                         window_start=purchase_start, window_end=purchase_end)
     if unaccounted:
         logger.info("company news %s: %s the issuer read holds %d purchase(s) of the row's person the row "
                     "does not — row dropped", ctx.series, symbol, unaccounted)
@@ -1306,12 +1524,13 @@ async def _amendment_verdict(ctx: "_Ctx", symbol: str, lines: Sequence[Any], *, 
 
 
 async def _amendment_checked(ctx: "_Ctx", purchases: Sequence[Any], chosen: Mapping[str, Sequence[Any]],
-                             issuers: Mapping[str, Optional[str]], walk_rows: Sequence[Any],
-                             window_start: date) -> List[Any]:
+                             issuers: Mapping[str, Optional[str]], walk_rows: Sequence[Any], *,
+                             amend_since: date, purchase_window: Tuple[date, date]) -> List[Any]:
     """The rows (rank order) whose per-issuer Form 4/A check passes, at most `R.INSIDER_MAX_ROWS`,
     checking at most `INSIDER_AMENDMENT_MAX_SYMBOLS` rows: the rows a week can publish first (in
     parallel), then spares for the rows a check dropped. ``issuers`` maps a row's symbol to its
-    PROFILE's issuer CIK (the read's key).
+    PROFILE's issuer CIK (the read's key). ``amend_since`` / ``purchase_window``: `_amendment_verdict`'s two
+    windows (the weekly roundups pass their one window for both).
 
     Review round 10: ONE row per PERSON across issuers. The week counts people ("At least 2 CEOs
     disclosed buying"), and one CEO of two affiliated funds (PennantPark's PNNT and PFLT) buying at
@@ -1338,7 +1557,7 @@ async def _amendment_checked(ctx: "_Ctx", purchases: Sequence[Any], chosen: Mapp
         verdicts = await asyncio.gather(
             *(_amendment_verdict(ctx, row.company.symbol, chosen[row.company.symbol],
                                  issuer=issuers.get(row.company.symbol), walk_rows=walk_rows,
-                                 window_start=window_start)
+                                 amend_since=amend_since, purchase_window=purchase_window)
               for row in wave),
             return_exceptions=True,
         )
@@ -1355,6 +1574,76 @@ async def _amendment_checked(ctx: "_Ctx", purchases: Sequence[Any], chosen: Mapp
                 continue
             seen |= keys
             out.append(row)
+    return out
+
+
+@dataclass
+class _SpotlightGroup:
+    """One issuer's qualifying people before the per-person Form 4/A check (`_spotlight_checked`): ``people`` =
+    ``(InsiderPurchase, its lines)`` in `R.spotlight_person_order`, one per person; ``issuer`` = the PROFILE's
+    issuer CIK (the per-issuer read's key); ``issuer_of`` = the CIK the lines name, else None (the share-class
+    check, as the roundups key it)."""
+
+    symbol: str
+    company: Any
+    issuer: Optional[str]
+    issuer_of: Optional[str]
+    people: List[Tuple[Any, List[Any]]]
+
+
+async def _spotlight_checked(ctx: "_Ctx", groups: Sequence[_SpotlightGroup], walk_rows: Sequence[Any], *,
+                             amend_since: date, purchase_window: Tuple[date, date], keep: int
+                             ) -> List[Tuple[_SpotlightGroup, List[Any]]]:
+    """The cluster variant of `_amendment_checked` (the spotlight lane's review, 2026-11-15): every PERSON of an
+    issuer — its first `SPOTLIGHT_PEOPLE_PER_ISSUER` people, keyed (symbol, reporter) — through the same per-issuer
+    Form 4/A check (`_amendment_verdict`: one memoized issuer read serves them all), groups in rank order, at most
+    ``keep`` of them kept (the insider list's `R.INSIDER_MAX_ROWS`, owner decisions 2026-11-20), checking at most `SPOTLIGHT_AMENDMENT_MAX_ISSUERS` issuers and
+    `SPOTLIGHT_AMENDMENT_MAX_PEOPLE` people: the groups a call can return first (in parallel), then spares for the
+    groups a check emptied. A person the check drops is counted with its reason (one count per person: an
+    issuer-level ``amended_filing`` counts once for each of its people, as the roundups count one per row) and the
+    group keeps the rest; a group with nobody left is dropped. Returns ``(group, the InsiderPurchase rows that
+    passed, in `R.spotlight_person_order`)``."""
+    out: List[Tuple[_SpotlightGroup, List[Any]]] = []
+    queue = list(groups)
+    issuers = people = 0
+    while queue and len(out) < keep and issuers < SPOTLIGHT_AMENDMENT_MAX_ISSUERS:
+        wave: List[_SpotlightGroup] = []
+        for g in list(queue):
+            if len(out) + len(wave) >= keep or issuers + len(wave) >= SPOTLIGHT_AMENDMENT_MAX_ISSUERS:
+                break
+            need = min(len(g.people), SPOTLIGHT_PEOPLE_PER_ISSUER)
+            if people + sum(min(len(w.people), SPOTLIGHT_PEOPLE_PER_ISSUER) for w in wave) + need \
+                    > SPOTLIGHT_AMENDMENT_MAX_PEOPLE:
+                break
+            wave.append(g)
+        if not wave:
+            break
+        queue = queue[len(wave):]
+        jobs = [(g, row, lines) for g in wave for row, lines in g.people[:SPOTLIGHT_PEOPLE_PER_ISSUER]]
+        issuers += len(wave)
+        people += len(jobs)
+        verdicts = await asyncio.gather(
+            *(_amendment_verdict(ctx, g.symbol, lines, issuer=g.issuer, walk_rows=walk_rows,
+                                 amend_since=amend_since, purchase_window=purchase_window)
+              for g, _row, lines in jobs),
+            return_exceptions=True,
+        )
+        for v in verdicts:
+            if isinstance(v, BaseException):
+                raise v
+        passed: Dict[int, List[Any]] = {id(g): [] for g in wave}
+        for (g, row, _lines), v in zip(jobs, verdicts):
+            if v is not None:
+                ctx.reject(v)
+                continue
+            passed[id(g)].append(row)
+        for g in wave:
+            rows = passed[id(g)]
+            if rows:
+                out.append((g, sorted(rows, key=R.spotlight_person_order)))
+            else:
+                logger.info("company news %s: %s every person's Form 4/A check refused — issuer dropped",
+                            ctx.series, g.symbol)
     return out
 
 
@@ -1565,13 +1854,14 @@ def _person_role(lines: Sequence[Any]) -> str:
 
 
 def _role_uncertain_people(rows: Sequence[Any], lines: Sequence[Any],
-                           window_start: date) -> Set[Tuple[str, str]]:
+                           amend_since: date) -> Set[Tuple[str, str]]:
     """``(symbol, reporter)`` of every person any of whose role texts is not the sitting role's
     (`_role_text_ok`: a CEO / CFO's officer title and an ``other:`` text naming the role; a
     director's ``other:`` text naming the seat): their own lines, and EVERY walk row of the same
     person (identity keys) on the same issuer — the symbol, or the issuer CIK the lines name —
-    filed since the window opened. The per-issuer read applies the same check to the codes the P
-    walk never returns (`_amendment_verdict`)."""
+    filed since ``amend_since``, the LOOK-BACK (the roundups' window start; the insider spotlight's
+    `_amendment_verdict` look-back, never shorter than the roundups'). The per-issuer read applies the
+    same check to the codes the P walk never returns (`_amendment_verdict`)."""
     people: Dict[Tuple[str, str], List[Any]] = {}
     for b in lines:
         people.setdefault((b.symbol, b.reporter), []).append(b)
@@ -1592,7 +1882,7 @@ def _role_uncertain_people(rows: Sequence[Any], lines: Sequence[Any],
     if not officers:
         return out
     for r in rows:
-        if not isinstance(r, dict) or not _filed_since(r, window_start):
+        if not isinstance(r, dict) or not _filed_since(r, amend_since):
             continue
         candidates = set(by_symbol.get(_row_symbol(r), ()))
         cik = normalize_cik(r.get("companyCik"))
@@ -1753,6 +2043,12 @@ def _insider_row(ctx: _Ctx, company: "R.CompanyRef", profile: Mapping[str, Any],
             filing_dates=tuple(filings),
             holding=holding,
             amended=False,
+            # Owner decision 2026-11-15 ("Captions + picture"): the filing's OWN cost per share — each Form 4
+            # line's own price, as filed (`InsiderBuy.price`; its `dollars` is shares × that price), over exactly
+            # the lines summed above. NEVER the profile's price: that is only `price_plausible`'s reference and
+            # must not travel (tests/test_marketing_company_news_leaks.py plants it as a canary).
+            cost_per_share_min_usd=min(b.price for b in lines),
+            cost_per_share_max_usd=max(b.price for b in lines),
         )
     except ValueError as e:
         logger.info("company news %s: %s row refused as record_invalid (%s)",
@@ -1783,12 +2079,9 @@ def _one_row_per_issuer(ctx: _Ctx, purchases: Sequence[Any],
     return out
 
 
-async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str) -> Candidates:
-    window_start, window_end = R.insider_window(ctx.run_date)
-    key = f"{R.LEDGER_PREFIX}{ctx.series}:{window_start.isoformat()}"
-    if key in ctx.exclude:                 # the week is posted: no feed, no profile call
-        ctx.reject("already_posted")
-        return ctx.done((), none_reason)
+def _insider_series_open(ctx: _Ctx) -> None:
+    """The gates EVERY Form 4 series passes before any read — the weekly roundups and the insider spotlight alike:
+    a whole Congress block-list, a roster fresh for the run date, and (logged) the members-elect window."""
     if not R.person_names_allowed():
         # The Congress block-list could not be built (roster / registry unreadable, logged at
         # ERROR by the rules module). A member's row must be DROPPED, and role-only would still
@@ -1814,18 +2107,33 @@ async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str) 
                     "role-only, no person (owner decision 4)", ctx.series, ctx.run_date,
                     R.MEMBERS_ELECT_PUBLISH_DAYS)
 
+
+async def _insider_walk(ctx: _Ctx, since: date) -> List[Dict[str, Any]]:
+    """The market-wide P walk of the rows filed since ``since`` — memoized per start day, so every Form 4 series of
+    the process reading from that day shares one walk."""
     rows = await ctx.step(
         "insider_walk",
-        lambda: _shared(("insider", window_start.isoformat()), INSIDER_RAW_TTL_SECONDS,
-                        lambda: _walk_insider(ctx.fmp, window_start), keep=bool),
+        lambda: _shared(("insider", since.isoformat()), INSIDER_RAW_TTL_SECONDS,
+                        lambda: _walk_insider(ctx.fmp, since), keep=bool),
         reason="insider_feed_unavailable",
     )
     if not rows:
         # A market-wide week of open-market purchases is never empty: an empty answer is the
         # client's page-0 403/404 degrade (or an outage), not "nobody bought".
         raise MarketingNewsUnavailable(ctx.series, "insider_feed_empty",
-                                       f"stage=insider_walk; 0 rows filed since {window_start}")
+                                       f"stage=insider_walk; 0 rows filed since {since}")
+    return rows
 
+
+def _insider_gated_lines(ctx: _Ctx, rows: Sequence[Any], *, window_start: date, window_end: date,
+                         roles: Tuple[str, ...], amend_since: date) -> Tuple[List[Any], Set[str]]:
+    """The walk-level Form 4 gates, shared by the weekly roundups and the insider spotlight (2026-11-15) →
+    ``(the lines that may still be published, the issuer CIKs an amendment refused)``. Purchases are the lines
+    FILED in ``[window_start, window_end]``; ``amend_since`` is the LOOK-BACK of THE amendment rule and the role
+    check (the roundups pass their window start: one window, as before; the spotlight looks back at least as far
+    as the roundups do). In order, each counted: the symbol grammar, THE amendment rule, the co-officer refusal,
+    the officer groups (built before the role refusal), the sitting-role allow-list, two holders of one officer
+    role, and the whole-person Congress drop."""
     buys = extract_insider_buys(rows, window_start=window_start, window_end=window_end, roles=roles)
     ctx.considered = len({b.symbol for b in buys})
 
@@ -1842,12 +2150,12 @@ async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str) 
         ctx.reject(problem)
 
     # THE amendment rule (review rounds 7-8): ANY amendment row of an issuer filed since the
-    # window opened (the walk's rows, run day included) — on its symbol or its issuer CIK, every
+    # look-back opened (the walk's rows, run day included) — on its symbol or its issuer CIK, every
     # share class — refuses every person of that issuer for the week (`amended_filing`, one count
     # per person), before anything else reads them. The profile stage refuses a row whose
-    # PROFILE CIK is amended; the per-issuer read below applies the same rule to the codes the
+    # PROFILE CIK is amended; the per-issuer read applies the same rule to the codes the
     # P-only walk never returns.
-    amended_syms, amended_ciks = _amended_issuers(rows, window_start)
+    amended_syms, amended_ciks = _amended_issuers(rows, amend_since)
     if amended_syms or amended_ciks:
         refused = {(b.symbol, b.reporter) for b in usable if _issuer_amended(b, amended_syms, amended_ciks)}
         if refused:
@@ -1900,7 +2208,7 @@ async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str) 
     # "Incoming CEO", "CEO (Resigned)", "CEO until 12/31/2026", a filing as a non-officer) is not
     # shown as the company's CEO / CFO: that person is refused (`role_uncertain`, one count per
     # person).
-    uncertain = _role_uncertain_people(rows, usable, window_start)
+    uncertain = _role_uncertain_people(rows, usable, amend_since)
     if uncertain:
         ctx.reject("role_uncertain", len(uncertain))
         usable = [b for b in usable if (b.symbol, b.reporter) not in uncertain]
@@ -1938,6 +2246,99 @@ async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str) 
         if congress_reporters:
             ctx.reject("congress_name", len(congress_reporters))
             kept = [b for b in usable if b.reporter not in congress_reporters]
+    return kept, amended_ciks
+
+
+def _issuer_lines(ctx: _Ctx, sym: str, profile: Any, kept: Sequence[Any], amended_ciks: Set[str]
+                  ) -> Optional[Tuple[Any, Optional[str], List[Any]]]:
+    """One profiled symbol's lines after the profile-stage gates → ``(CompanyRef, the PROFILE's issuer CIK, the
+    lines that may be summed)``, or None (counted). Shared by the roundups and the insider spotlight: the listing
+    gate, THE amendment rule on the profile's issuer CIK, a line naming another issuer, the price PLAUSIBILITY
+    check (the profile's price is only the reference — never a travelling figure) and a line with no trade date."""
+    company = R.company_from_profile(profile, sym, purpose="insider")
+    if isinstance(company, str):
+        ctx.reject(company)
+        return None
+    issuer = normalize_cik(profile.get("cik"))
+    # The amendment rule on the PROFILE's issuer CIK: the row's own lines may name no CIK
+    # while the walk's amendment row (another share class, a blank symbol) names the issuer.
+    if issuer is not None and issuer in amended_ciks:
+        ctx.reject("amended_filing")
+        return None
+    # FMP keys the symbol on the filing's EDGAR folder: a public company filing as the
+    # reporting owner of ANOTHER issuer carries its own ticker with that issuer's CIK. Such
+    # a line is never this company's purchase; with no profile CIK to check against, no
+    # line that names an issuer is trusted (fail closed).
+    sym_lines = [b for b in kept if b.symbol == sym]
+    if issuer is None and any(b.company_cik for b in sym_lines):
+        ctx.reject("issuer_unverified")
+        return None
+    ref_price = profile.get("price")
+    good = []
+    for b in sym_lines:
+        if b.company_cik is not None and b.company_cik != issuer:
+            ctx.reject("issuer_mismatch")
+            continue
+        if not price_plausible(b.price, ref_price, require_reference=True):
+            ref = _num(ref_price)
+            ctx.reject("price_reference_missing" if ref is None or ref <= 0 else "price_implausible")
+            continue
+        if not b.transaction_date:
+            ctx.reject("record_invalid")      # a buy with no trade date is not dated news
+            continue
+        good.append(b)
+    return company, issuer, good
+
+
+def _reporter_rows(ctx: _Ctx, company: Any, profile: Mapping[str, Any], issuer: Optional[str],
+                   good: Sequence[Any], *, purchase_index: Mapping[str, Sequence[Dict[str, Any]]],
+                   window_start: date, window_end: date) -> Iterable[Tuple[List[Any], Any]]:
+    """Each reporter of one symbol's ``good`` lines, LARGEST first (then the reporter key) → ``(their lines, an
+    InsiderPurchase or the reason they are refused)``. Lazy: the roundups stop at the first person who passes (one
+    person per company row, the largest that passes every gate); the insider spotlight takes every one. The gates,
+    in order: the whole person (`_unaccounted_purchases` over the PURCHASE window: a purchase the row would not hold
+    → ``partial_person``), the dollar floor, the market-cap share, the per-row maximum, then `_insider_row`."""
+    cap = _num(profile.get("marketCap"))
+    sym = company.symbol
+    by_reporter: Dict[str, List[Any]] = {}
+    for b in good:
+        by_reporter.setdefault(b.reporter, []).append(b)
+    for reporter in sorted(by_reporter, key=lambda r: (-math.fsum(x.dollars for x in by_reporter[r]), r)):
+        lines = by_reporter[reporter]
+        amount = math.fsum(x.dollars for x in lines)
+        if _unaccounted_purchases(purchase_index, lines, symbol=sym, issuer=issuer,
+                                  window_start=window_start, window_end=window_end):
+            # Review round 9: a purchase of this person on this issuer in the window that the
+            # row does not hold (a line dropped above, or one the extractor skipped) — the row
+            # would understate the filings. The person is refused, never re-summed.
+            got: Any = "partial_person"
+        elif amount < R.INSIDER_MIN_AMOUNT_USD:
+            got = "below_dollar_floor"
+        elif cap is None or amount > INSIDER_MAX_CAP_SHARE * cap:
+            got = "over_cap_share"
+        elif amount > R.INSIDER_MAX_AMOUNT_USD:
+            got = "record_invalid"
+        else:
+            got = _insider_row(ctx, company, profile, lines)
+        yield lines, got
+
+
+async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str, few_reason: str) -> Candidates:
+    """One weekly Form 4 roundup (ceo_buys / insider_buys): every issuer's largest qualifying person of ``roles`` over
+    the week, through every Form 4 gate, at most `R.INSIDER_MAX_ROWS` rows, the largest first. Owner decisions
+    2026-11-20 ("3 - 5 companies at once"): fewer than `R.INSIDER_MIN_ROWS` rows is NO post — ``few_reason`` (one or
+    two qualified; the chain falls through to the theme), ``none_reason`` (none)."""
+    window_start, window_end = R.insider_window(ctx.run_date)
+    key = f"{R.LEDGER_PREFIX}{ctx.series}:{window_start.isoformat()}"
+    if key in ctx.exclude:                 # the week is posted: no feed, no profile call
+        ctx.reject("already_posted")
+        return ctx.done((), none_reason)
+    _insider_series_open(ctx)
+
+    rows = await _insider_walk(ctx, window_start)
+    # The roundups' one window is both the purchase window and the look-back.
+    kept, amended_ciks = _insider_gated_lines(ctx, rows, window_start=window_start, window_end=window_end,
+                                              roles=roles, amend_since=window_start)
 
     ranked = rank_buy_symbols(kept, min_dollars=R.INSIDER_MIN_AMOUNT_USD)
     ranked_syms = [s for s, _total, _latest in ranked]
@@ -1954,71 +2355,24 @@ async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str) 
     chosen: Dict[str, List[Any]] = {}                  # symbol → its row's person's lines
     for sym in top:
         profile = profiles.get(sym)
-        company = R.company_from_profile(profile, sym, purpose="insider")
-        if isinstance(company, str):
-            ctx.reject(company)
+        got = _issuer_lines(ctx, sym, profile, kept, amended_ciks)
+        if got is None:
             continue
-        issuer = normalize_cik(profile.get("cik"))
-        # The amendment rule on the PROFILE's issuer CIK: the row's own lines may name no CIK
-        # while the walk's amendment row (another share class, a blank symbol) names the issuer.
-        if issuer is not None and issuer in amended_ciks:
-            ctx.reject("amended_filing")
-            continue
+        company, issuer, good = got
         profile_cik[sym] = issuer
-        # FMP keys the symbol on the filing's EDGAR folder: a public company filing as the
-        # reporting owner of ANOTHER issuer carries its own ticker with that issuer's CIK. Such
-        # a line is never this company's purchase; with no profile CIK to check against, no
-        # line that names an issuer is trusted (fail closed).
-        sym_lines = [b for b in kept if b.symbol == sym]
-        if issuer is None and any(b.company_cik for b in sym_lines):
-            ctx.reject("issuer_unverified")
-            continue
-        ref_price, cap = profile.get("price"), _num(profile.get("marketCap"))
-        good = []
-        for b in sym_lines:
-            if b.company_cik is not None and b.company_cik != issuer:
-                ctx.reject("issuer_mismatch")
-                continue
-            if not price_plausible(b.price, ref_price, require_reference=True):
-                ref = _num(ref_price)
-                ctx.reject("price_reference_missing" if ref is None or ref <= 0 else "price_implausible")
-                continue
-            if not b.transaction_date:
-                ctx.reject("record_invalid")      # a buy with no trade date is not dated news
-                continue
-            good.append(b)
         # The row's issuer identity for the share-class check: the CIK its own Form 4 lines
         # name (equal to the profile's after the check above), else none — the name decides.
         issuer_of[sym] = issuer if any(b.company_cik for b in good) else None
-        by_reporter: Dict[str, List[Any]] = {}
-        for b in good:
-            by_reporter.setdefault(b.reporter, []).append(b)
         # One person per company row: the largest reporter that passes every gate. When none
         # does, the LARGEST reporter's reason is counted (one count per symbol).
         best, first_reason = None, None
-        for reporter in sorted(by_reporter, key=lambda r: (-math.fsum(x.dollars for x in by_reporter[r]), r)):
-            lines = by_reporter[reporter]
-            amount = math.fsum(x.dollars for x in lines)
-            if _unaccounted_purchases(purchase_index, lines, symbol=sym, issuer=issuer,
-                                      window_start=window_start, window_end=window_end):
-                # Review round 9: a purchase of this person on this issuer in the window that the
-                # row does not hold (a line dropped above, or one the extractor skipped) — the row
-                # would understate the filings. The person is refused, never re-summed.
-                why = "partial_person"
-            elif amount < R.INSIDER_MIN_AMOUNT_USD:
-                why = "below_dollar_floor"
-            elif cap is None or amount > INSIDER_MAX_CAP_SHARE * cap:
-                why = "over_cap_share"
-            elif amount > R.INSIDER_MAX_AMOUNT_USD:
-                why = "record_invalid"
-            else:
-                row = _insider_row(ctx, company, profile, lines)
-                if not isinstance(row, str):
-                    best = row
-                    chosen[sym] = lines
-                    break
-                why = row
-            first_reason = first_reason or why
+        for lines, row in _reporter_rows(ctx, company, profile, issuer, good, purchase_index=purchase_index,
+                                         window_start=window_start, window_end=window_end):
+            if not isinstance(row, str):
+                best = row
+                chosen[sym] = lines
+                break
+            first_reason = first_reason or row
         if best is None:
             ctx.reject(first_reason or "below_dollar_floor")
             continue
@@ -2031,10 +2385,17 @@ async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str) 
     # every share class, symbol spelling and blank symbol at once), every code — for an amendment
     # the P-only walk never returned, a stale read, or a role text that is not the sitting role's.
     # The same pass keeps one row per PERSON across issuers (`same_person`, review round 10).
-    purchases = await _amendment_checked(ctx, purchases, chosen, profile_cik, rows, window_start)
+    purchases = await _amendment_checked(ctx, purchases, chosen, profile_cik, rows, amend_since=window_start,
+                                         purchase_window=(window_start, window_end))
     rows_out = tuple(purchases[: R.INSIDER_MAX_ROWS])
     if not rows_out:
         return ctx.done((), none_reason)
+    if len(rows_out) < R.INSIDER_MIN_ROWS:
+        # owner decisions 2026-11-20: never a one- or two-company Form 4 post — a quiet week posts the theme instead
+        logger.info("company news %s: only %d compan%s qualified for the week of %s (fewer than %d) — no post: %s",
+                    ctx.series, len(rows_out), "y" if len(rows_out) == 1 else "ies", window_start, R.INSIDER_MIN_ROWS,
+                    few_reason)
+        return ctx.done((), few_reason)
     try:
         record = R.InsiderBuysWeek(series=ctx.series, window_start=window_start,
                                    window_end=window_end, rows=rows_out)
@@ -2048,12 +2409,276 @@ async def _collect_insider(ctx: _Ctx, roles: Tuple[str, ...], none_reason: str) 
 
 
 async def _collect_ceo_buys(ctx: _Ctx) -> Candidates:
-    return await _collect_insider(ctx, ("ceo",), "ceo_none_qualified")
+    return await _collect_insider(ctx, ("ceo",), "ceo_none_qualified", "ceo_too_few_companies")
 
 
 async def _collect_insider_buys(ctx: _Ctx) -> Candidates:
     # Reuses the memoized raw rows of ceo_buys (same window, same walk).
-    return await _collect_insider(ctx, ("cfo", "director"), "insider_none_qualified")
+    return await _collect_insider(ctx, ("cfo", "director"), "insider_none_qualified", "insider_too_few_companies")
+
+
+# ── insider_spotlight (the spotlight lane, owner decisions 2026-11-15) ────────────────────────────────────
+
+
+def _newest_filed(rows: Sequence[Any], run_date: date) -> Optional[date]:
+    """The newest filing day of the walk's rows ON OR BEFORE the run date (a later one is junk, never proof), or
+    None: what proves how far the market-wide feed has come (`R.spotlight_window`)."""
+    days = [d for d in (_day(r.get("filingDate")) for r in rows if isinstance(r, dict))
+            if d is not None and d <= run_date]
+    return max(days, default=None)
+
+
+def _issuer_root(symbol: str) -> str:
+    """A listing's ROOT symbol — share-class twins are one issuer for the spotlight's cooldown: the part before a
+    class suffix ("BF-B" → "BF", "BRK-A" → "BRK"), and a five-letter Nasdaq line's first four ("GOOGL" → "GOOG",
+    "LBRDA" → "LBRD", "WAFDP" → "WAFD") — except an OTC foreign line (`EARNINGS_FOREIGN_LETTERS`: often another
+    company, CMPRF beside CMPR). An over-match refuses one candidate; a twin it misses is caught by the issuer's
+    display name (`_spotlight_cooldown`). The rule itself is `R.issuer_root` (2026-11-16: the cross-lane rule (b) folds
+    leads through the same rule, and script_service may not import this module)."""
+    return R.issuer_root(symbol) or symbol
+
+
+def _spotlight_cooldown(ctx: _Ctx) -> Tuple[Set[str], Set[str]]:
+    """``(issuer roots, casefolded display names)`` the insider spotlight must not take again
+    (``spotlight_cooldown``, `R.SPOTLIGHT_ISSUER_COOLDOWN_DAYS`):
+
+    * every company of every insider spotlight ledger key among the recent refs (`R.insider_spotlight_key_parts`: a
+      list's key names each of its companies once) whose window started within the cooldown of the run date — the key
+      carries its window's start, never its run date;
+    * every ``(symbol, display name)`` the script flow handed in (``ctx.spotlight_recent``: the insider
+      spotlights ACCEPTED on runs dated within the cooldown — exact on the run date the key cannot carry).
+
+    A symbol counts by its ROOT (`_issuer_root`): a share-class twin is the same issuer."""
+    oldest = ctx.run_date - timedelta(days=R.SPOTLIGHT_ISSUER_COOLDOWN_DAYS)
+    roots: Set[str] = set()
+    names: Set[str] = set()
+    for ref in ctx.exclude:
+        parts = R.insider_spotlight_key_parts(ref)
+        if parts is not None and parts[1] >= oldest:
+            roots.update(_issuer_root(sym) for sym in parts[0])
+    for sym, name in ctx.spotlight_recent:
+        if sym:
+            roots.add(_issuer_root(sym))
+        if name:
+            names.add(name.casefold())
+    return roots, names
+
+
+def _spotlight_company(ctx: _Ctx, people: Sequence[Any]) -> Optional[Any]:
+    """`R.InsiderSpotlightCompany` of one issuer's checked people (`R.spotlight_person_order`: the largest leads, then up
+    to `R.SPOTLIGHT_MAX_OTHERS` more). A group the row refuses whole is tried with its lead ALONE before it is refused
+    (``record_invalid``): the others are a lower bound ("at least N other insiders"), so fewer is never a false claim."""
+    lead, others = people[0], tuple(people[1:1 + R.SPOTLIGHT_MAX_OTHERS])
+    attempts = [others, ()] if others else [()]
+    for i, group in enumerate(attempts):
+        try:
+            return R.InsiderSpotlightCompany(lead=lead, others=group)
+        except ValueError as e:
+            if i + 1 < len(attempts):
+                logger.warning("company news %s: %s row with %d other insider(s) refused (%s) — tried with its lead "
+                               "alone", ctx.series, lead.company.symbol, len(group), _describe(e))
+            else:
+                logger.info("company news %s: %s row refused as record_invalid (%s)", ctx.series,
+                            lead.company.symbol, _describe(e))
+    ctx.reject("record_invalid")
+    return None
+
+
+def _spotlight_list(ctx: _Ctx, checked: Sequence[Tuple[Any, Sequence[Any]]]) -> List[Any]:
+    """The insider list's rows (owner decisions 2026-11-20): each checked issuer's people as one
+    `R.InsiderSpotlightCompany`, ONE person once across the list — a named person already in an earlier (larger) row is
+    dropped from a later one (``same_person``: one man at two affiliated issuers is one buyer; the next person of that
+    issuer then leads) — sorted by `R.spotlight_company_order` (the largest TOTAL first), at most `R.INSIDER_MAX_ROWS`."""
+    def key(name: Optional[str]) -> Optional[str]:
+        return " ".join(name.split()).casefold() if name else None
+
+    seen: Set[str] = set()
+    rows: List[Any] = []
+    for _g, people in checked:
+        kept: List[Any] = []
+        for p in people:
+            k = key(p.person_name)
+            if k is not None and k in seen:
+                ctx.reject("same_person")
+                continue
+            kept.append(p)
+        if not kept:
+            continue
+        row = _spotlight_company(ctx, kept)
+        if row is None:
+            continue
+        seen |= {k for k in (key(p.person_name) for p in row.people) if k is not None}
+        rows.append(row)
+    rows.sort(key=R.spotlight_company_order)
+    return rows[: R.INSIDER_MAX_ROWS]
+
+
+def _spotlight_posted(ctx: _Ctx, window_start: date) -> Set[str]:
+    """Every symbol an insider list ledger key among ``ctx.exclude`` names for THIS window (`R.insider_spotlight_key_parts`,
+    each company of a posted list keyed once) — each is ``already_posted`` before any profile call."""
+    out: Set[str] = set()
+    for ref in ctx.exclude:
+        parts = R.insider_spotlight_key_parts(ref)
+        if parts is not None and parts[1] == window_start:
+            out.update(parts[0])
+    return out
+
+
+def _group_total(g: _SpotlightGroup) -> float:
+    """An issuer's total BEFORE the per-person check: its first `SPOTLIGHT_PEOPLE_PER_ISSUER` people's amounts."""
+    return math.fsum(row.amount_usd for row, _lines in g.people[:SPOTLIGHT_PEOPLE_PER_ISSUER])
+
+
+async def _collect_insider_spotlight(ctx: _Ctx) -> Candidates:
+    """The spotlight lane's insider LIST over the spotlight's window (owner decisions 2026-11-20: "each post or each
+    image/video will have more than 2,3, ideally are 3 - 5 companies at once" — it replaces the one-issuer post of
+    2026-11-15, B decisions 5-8): ONE record of `R.INSIDER_MIN_ROWS`..`R.INSIDER_MAX_ROWS` issuers, the largest total
+    first; fewer than `R.INSIDER_MIN_ROWS` is no post (``insider_spotlight_too_few_companies`` — the chain falls
+    through to the theme — or ``insider_spotlight_none_qualified`` with none).
+
+    * **Window** (`R.spotlight_window`): from the day after the last window an earlier insider spotlight CHECKED
+      (``ctx.spotlight_checked_through``, the script flow's ledger read of the recorded trail — C0, 2026-11-16; none
+      within the cooldown → the run date − 7, and never earlier) to the day before the newest filing the market-wide
+      walk holds on or before the run date — any row of the walk (it carries open-market purchases only: FMP filters
+      the code server-side), and that filing proves the feed passed every earlier day: a Saturday run ends on
+      Thursday, and Friday rolls into the next window. The window checked is handed back on the answer
+      (``Candidates.checked_window``) — chosen, refused or nothing qualified — for the script flow to record.
+      No new day to check: a quiet skip ``insider_spotlight_no_new_window`` while the feed is current
+      (`R.spotlight_feed_current`: its newest filing at most two federal business days old — the Tuesday after a
+      Monday holiday, at 10:00), else ``insider_feed_behind`` (UNAVAILABLE: an infrastructure outcome the digest
+      alerts on, never "nothing qualified").
+    * **Two windows** (the content review's major #2): the LOOK-BACK ``amend_since`` = min(window start, window end
+      − 6) — never shorter than the roundups' week — for THE amendment rule (the company-level 4/A refusal), the
+      sitting-role allow-list and the co-officer refusal, on the walk and on every per-issuer read; the PURCHASE
+      window for what a person's row must hold whole (``partial_person``: an earlier purchase is another window's).
+    * **Every Form 4 gate** of the roundups (`_insider_gated_lines`, `_issuer_lines`, `_reporter_rows`): the block-
+      list and roster refusals, role-only inside the members-elect window, the symbol grammar, co-officers, two
+      holders of one officer role, the whole-person Congress drop (a member never leads and never joins a row — the
+      next person leads), the price PLAUSIBILITY check (the profile price never travels), the floor, the cap share;
+      one listing per issuer (`_one_row_per_issuer`); every person through the per-issuer Form 4/A check
+      (`_spotlight_checked`, keyed (symbol, reporter)); one person once across the list (`_spotlight_list`).
+    * **Roles** CEO, CFO and director (`SPOTLIGHT_ROLES`); a row's lead is its largest qualifying person, up to
+      `R.SPOTLIGHT_MAX_OTHERS` more of the same issuer.
+    * **Ledger and cooldown**: an issuer an earlier list of THIS window named is ``already_posted``
+      (`_spotlight_posted`: every company of a posted list is in its key once); one listed within
+      `R.SPOTLIGHT_ISSUER_COOLDOWN_DAYS` — by its root symbol BEFORE any profile call, by its display name after — is
+      ``spotlight_cooldown``.
+    * **Rank**: issuers by their total before the check (`_group_total`), then the list by its checked totals
+      (`R.spotlight_company_order`). The revenue line of the one-issuer post is retired with it."""
+    none_reason = "insider_spotlight_none_qualified"
+    few_reason = "insider_spotlight_too_few_companies"
+    _insider_series_open(ctx)
+    base = ctx.run_date - timedelta(days=R.INSIDER_WINDOW_DAYS)
+    rows = await _insider_walk(ctx, base)
+    newest = _newest_filed(rows, ctx.run_date)
+    window = R.spotlight_window(ctx.run_date, ctx.spotlight_checked_through, newest)
+    if window is None:
+        if R.spotlight_feed_current(newest, ctx.run_date):
+            # Nothing new to check yet (the last checked window already reaches the day before the newest filing, and
+            # that filing is recent): a quiet content skip — the chain falls through, and the days stay unchecked for
+            # the next spotlight. No window was checked, so none is recorded.
+            logger.info("company news %s: no new day to check on %s — the last checked window ends %s and the newest "
+                        "filing is %s (the feed is current): %s", ctx.series, ctx.run_date,
+                        ctx.spotlight_checked_through, newest, "insider_spotlight_no_new_window")
+            return ctx.done((), "insider_spotlight_no_new_window")
+        raise MarketingNewsUnavailable(
+            ctx.series, "insider_feed_behind",
+            f"stage=insider_walk; the newest filing on or before {ctx.run_date} is {newest} — the feed has not "
+            f"passed the window's first day (last checked window ends {ctx.spotlight_checked_through})")
+    window_start, window_end = window
+    amend_since = min(window_start, window_end - timedelta(days=R.INSIDER_WINDOW_DAYS - 1))
+    if amend_since < base:
+        rows = await _insider_walk(ctx, amend_since)
+    ctx.checked_window = (window_start, window_end)
+    logger.info("company news %s: window %s..%s (last checked window ends %s, newest filing %s), look-back from %s",
+                ctx.series, window_start, window_end, ctx.spotlight_checked_through, newest, amend_since)
+    kept, amended_ciks = _insider_gated_lines(ctx, rows, window_start=window_start, window_end=window_end,
+                                              roles=SPOTLIGHT_ROLES, amend_since=amend_since)
+
+    ranked = rank_buy_symbols(kept, min_dollars=R.INSIDER_MIN_AMOUNT_USD)
+    ranked_syms = [s for s, _total, _latest in ranked]
+    below = {b.symbol for b in kept} - set(ranked_syms)
+    if below:
+        ctx.reject("below_dollar_floor", len(below))
+    # The ledger (every company of a posted list of this window) and the cooldown by ROOT symbol — before any profile
+    # call.
+    posted = _spotlight_posted(ctx, window_start)
+    cooled_roots, cooled_names = _spotlight_cooldown(ctx)
+    open_syms: List[str] = []
+    for sym in ranked_syms:
+        if sym in posted:
+            ctx.reject("already_posted")
+        elif _issuer_root(sym) in cooled_roots:
+            ctx.reject("spotlight_cooldown")
+        else:
+            open_syms.append(sym)
+    top = open_syms[:INSIDER_PROFILE_CANDIDATES]
+
+    profiles = await _profiles(ctx, top) if top else {}
+    purchase_index = _purchase_index(rows)
+    groups: List[_SpotlightGroup] = []
+    for sym in top:
+        profile = profiles.get(sym)
+        got = _issuer_lines(ctx, sym, profile, kept, amended_ciks)
+        if got is None:
+            continue
+        company, issuer, good = got
+        if company.name.casefold() in cooled_names:
+            ctx.reject("spotlight_cooldown")         # the issuer, under another symbol or a twin the root missed
+            continue
+        people: List[Tuple[Any, List[Any]]] = []
+        seen: Set[str] = set()
+        for lines, row in _reporter_rows(ctx, company, profile, issuer, good, purchase_index=purchase_index,
+                                         window_start=window_start, window_end=window_end):
+            if isinstance(row, str):
+                ctx.reject(row)                      # one count per person refused
+                continue
+            keys = _person_keys(lines)
+            if keys & seen:                          # one person under two reporter keys: the larger stays
+                ctx.reject("same_person")
+                continue
+            seen |= keys
+            people.append((row, list(lines)))
+        if not people:
+            continue
+        people.sort(key=lambda p: R.spotlight_person_order(p[0]))
+        groups.append(_SpotlightGroup(symbol=sym, company=company, issuer=issuer,
+                                      issuer_of=issuer if any(b.company_cik for b in good) else None,
+                                      people=people))
+    ctx.check_profiles()
+
+    groups.sort(key=lambda g: (-_group_total(g), g.company.name.casefold(), g.symbol))
+    leads = _one_row_per_issuer(ctx, [g.people[0][0] for g in groups], {g.symbol: g.issuer_of for g in groups})
+    one_each = {r.company.symbol for r in leads}
+    groups = [g for g in groups if g.symbol in one_each]
+    checked = await _spotlight_checked(ctx, groups, rows, amend_since=amend_since,
+                                       purchase_window=(window_start, window_end), keep=R.INSIDER_MAX_ROWS)
+    companies = _spotlight_list(ctx, checked)
+    if not companies:
+        return ctx.done((), none_reason)
+    if len(companies) < R.INSIDER_MIN_ROWS:
+        # owner decisions 2026-11-20: never a one- or two-company insider post — the chain falls through to the theme.
+        # Review of 2026-11-26: and the window is NOT recorded as checked — its one or two companies stay in reach, so
+        # the next spotlight's window reaches back over these days (`spotlight_window`: from the last RECORDED window,
+        # at most SPOTLIGHT_MAX_WINDOW_DAYS) and a company filed a day later can make them a list of three. Recording it
+        # dropped every sub-threshold slice for good (each window is only 1-2 business days on the Tue/Thu/Sat cadence)
+        ctx.checked_window = None
+        logger.info("company news %s: only %d compan%s qualified for %s..%s (fewer than %d) — no post, the window is "
+                    "left unchecked for the next spotlight: %s", ctx.series, len(companies),
+                    "y" if len(companies) == 1 else "ies", window_start, window_end, R.INSIDER_MIN_ROWS, few_reason)
+        return ctx.done((), few_reason)
+    try:
+        record = R.InsiderSpotlight(series="insider_spotlight", window_start=window_start, window_end=window_end,
+                                    companies=tuple(companies))
+    except ValueError as e:
+        logger.warning("company news %s: list record refused (%s)", ctx.series, _describe(e))
+        ctx.reject("record_invalid")
+        return ctx.done((), none_reason)
+    want = (f"{R.LEDGER_PREFIX}insider_spotlight:"
+            f"{R.INSIDER_SPOTLIGHT_KEY_JOIN.join(r.company.symbol for r in companies)}:{window_start.isoformat()}")
+    if R.ledger_key(record) != want:     # every company's own key part, exactly once, in row order
+        raise RuntimeError(f"ledger key drift: {R.ledger_key(record)} != {want}")
+    return ctx.done((record,), none_reason)
 
 
 # ── thirteen_f ────────────────────────────────────────────────────────────────
@@ -2381,28 +3006,151 @@ def _move_order(m: Mapping[str, Any]) -> Tuple[Any, ...]:
     return (_KIND_RANK[m["move"]], -_move_size(m), m["symbol"])
 
 
-def _select_moves(moves: Sequence[Mapping[str, Any]], limit: int) -> List[Mapping[str, Any]]:
-    """At most ``limit`` moves chosen by SIZE (review round 8; kind order used to cut first, so a
-    $2B increase never reached a record of nine new holdings): each kind's
-    `THIRTEEN_F_KIND_RESERVE` largest moves are reserved — taken tier by tier (every kind's
-    largest, then every kind's second …), largest first within a tier, while room is left — and
-    the rest of the room is filled largest first. So each kind with moves keeps its largest move
-    whenever ``limit`` reaches the number of kinds. Returned in `_size_order`."""
-    ordered = sorted(moves, key=_size_order)
-    seen: Counter = Counter()
-    reserved: List[Tuple[int, Mapping[str, Any]]] = []
-    rest: List[Mapping[str, Any]] = []
-    for m in ordered:
-        tier = seen[m["move"]]
-        if tier < THIRTEEN_F_KIND_RESERVE:
-            reserved.append((tier, m))
-            seen[m["move"]] += 1
+def _spotlight_gated(ctx: _Ctx, moves: Sequence[Mapping[str, Any]], *, cik: str, period: str,
+                     omit_counts: FrozenSet[str]) -> List[Mapping[str, Any]]:
+    """The 13F SPOTLIGHT's own per-move gates over pre-gated moves, BEFORE any cut (review of the 13F list,
+    2026-11-19: they used to run in `_spotlight_holding`, after the roundup's kind-balanced cut to
+    `R.THIRTEEN_F_MAX_MOVES`, so a filing's five largest eligible changes were never all in the record — two of each
+    kind were, and a 10-25% trim held a slot it was then dropped from). A more / fewer move stays only when the filing
+    VOUCHES for it — neither kind's count withheld (``omit_counts``) and the split re-check run over the filing
+    (`ctx.split_checked`; else ``split_unchecked``) — when no split the build restated touches it (``split_restated``:
+    its symbol among the restated, or any for a club filing, `ctx.split_restated_any`), and when its share count moved
+    by at least `R.THIRTEEN_F_SPOTLIGHT_MIN_CHANGE` (``spotlight_change_too_small``). New and exited moves pass. Each
+    move refused is counted; refusing one never refuses another. `_spotlight_holding` keeps the same gates as its
+    backstop."""
+    key = (cik, period)
+    vouched = not (omit_counts & _SPLIT_SENSITIVE_MOVES) and key in ctx.split_checked
+    restated = ctx.split_checked.get(key, frozenset())
+    kept: List[Mapping[str, Any]] = []
+    for m in moves:
+        if m["move"] in _SPLIT_SENSITIVE_MOVES:
+            if not vouched:
+                ctx.reject("split_unchecked")
+                continue
+            if key in ctx.split_restated_any or m["symbol"] in restated:
+                ctx.reject("split_restated")
+                logger.info("company news %s: cik=%s %s %s %s — its split was restated by the build; the previous "
+                            "count is not the previous 13F's (split_restated)", ctx.series, cik, period, m["move"],
+                            m["symbol"])
+                continue
+            if not R.thirteen_f_change_clear(m["shares"], m["prev_shares"]):
+                ctx.reject("spotlight_change_too_small")
+                continue
+        kept.append(m)
+    return kept
+
+
+def _cut(moves: Sequence[Mapping[str, Any]], limit: int) -> List[Mapping[str, Any]]:
+    """At most ``limit`` moves, in the record's order (`_move_order`), chosen by dollar size alone (`_size_order`) — in
+    BOTH 13F series (review 2026-11-20: the roundup's kind reserve is gone), so a record holds the filing's largest
+    eligible moves — the ones its ranked list shows, whatever their kinds."""
+    return sorted(sorted(moves, key=_size_order)[:limit], key=_move_order)
+
+
+def _delisted_day(raw: Any) -> Optional[date]:
+    """A delisted-companies row's ``delistedDate`` as a date, or None (absent / malformed — never a guess)."""
+    return _day(raw) if isinstance(raw, str) else None
+
+
+async def _fetch_delisted_since(fmp: Any, since: date) -> FrozenSet[str]:
+    """Every canonical symbol FMP's delisted-companies list dates on or after ``since`` (future-dated, scheduled rows
+    included: a pending delisting is as unclear as a done one), read newest first, page by page, until a page's
+    oldest row is older than ``since``. RuntimeError when the list cannot vouch for the whole span — an empty page 0
+    (FMP's list is never empty), a non-list page, a page with no readable date, a page that ends before reaching
+    ``since``, or `CLOSED_OUT_DELISTED_MAX_PAGES` pages without reaching it: the caller fails closed."""
+    out: Set[str] = set()
+    for page in range(CLOSED_OUT_DELISTED_MAX_PAGES):
+        rows = await fmp.get_delisted_companies(page, CLOSED_OUT_DELISTED_PAGE_SIZE)
+        if not isinstance(rows, list):
+            raise RuntimeError(f"delisted-companies page {page} is a {type(rows).__name__}, not a list")
+        if not rows:
+            raise RuntimeError(f"delisted-companies page {page} is empty before reaching {since}")
+        oldest: Optional[date] = None
+        for row in rows:
+            if not isinstance(row, Mapping):
+                continue
+            day = _delisted_day(row.get("delistedDate"))
+            if day is None:
+                continue
+            oldest = day if oldest is None else min(oldest, day)
+            sym = R.canonical_symbol(row.get("symbol"))
+            if sym is not None and day >= since:
+                out.add(sym)
+        if oldest is None:
+            raise RuntimeError(f"delisted-companies page {page} has no readable delistedDate")
+        if oldest < since:
+            return frozenset(out)
+        if len(rows) < CLOSED_OUT_DELISTED_PAGE_SIZE:
+            raise RuntimeError(f"delisted-companies list ends at page {page} ({oldest}) before reaching {since}")
+    raise RuntimeError(f"delisted-companies list not back to {since} within {CLOSED_OUT_DELISTED_MAX_PAGES} pages")
+
+
+async def _delisted_since(ctx: _Ctx, since: date) -> Optional[FrozenSet[str]]:
+    """`_fetch_delisted_since` memoized (`CLOSED_OUT_DELISTED_TTL_SECONDS`, shared by both 13F series), or None when it
+    cannot answer — the read failed, timed out, or too little of the call's budget is left (WARNING): the caller then
+    drops every closed-out row (fail closed). Never raises but for cancellation."""
+    left = ctx.left()
+    if left < MIN_STEP_SECONDS:
+        logger.warning("company news %s: no budget left for the delisted-companies read (%.1fs) — the buy-out check "
+                       "cannot run", ctx.series, left)
+        return None
+    key = ("delisted_since", since.isoformat())
+    try:
+        return await asyncio.wait_for(
+            _shared(key, CLOSED_OUT_DELISTED_TTL_SECONDS, lambda: _fetch_delisted_since(ctx.fmp, since)),
+            timeout=min(left, CLOSED_OUT_DELISTED_TIMEOUT_SECONDS))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — every failure is "cannot vouch": the caller fails closed
+        logger.warning("company news %s: the delisted-companies list could not be read back to %s (%s) — the buy-out "
+                       "check cannot run", ctx.series, since, _describe(e))
+        return None
+
+
+async def _closed_out_checked(ctx: _Ctx, final: List[Tuple[Mapping[str, Any], Any]],
+                              profiles: Mapping[str, Any], *, cik: str, period: str,
+                              prev_end: date) -> List[Tuple[Mapping[str, Any], Any]]:
+    """The BUY-OUT CHECK (news-v23, owner 2026-11-19 — "Closed out + buy-out check"): a closed-out holding (a move
+    ``no_longer_reported``) is kept only when its company is still trading — its profile says
+    ``isActivelyTrading`` exactly True (``closed_out_not_trading`` otherwise: False, absent, junk) and FMP's
+    delisted-companies list holds no row of its symbol dated on or after the quarter's first day
+    (``closed_out_delisted``); when that list cannot be read back so far, every closed-out holding of the filing is
+    dropped (``closed_out_unchecked``). Each drop is counted and logged at WARNING with the filer and the symbol; a
+    company bought out, delisted or merged during or after the quarter is never called "closed out". Every other move
+    passes untouched, in order."""
+    kept: List[Tuple[Mapping[str, Any], Any]] = []
+    for m, mv in final:
+        if m["move"] != "no_longer_reported":
+            kept.append((m, mv))
+            continue
+        trading = (profiles.get(m["symbol"]) or {}).get("isActivelyTrading")
+        if trading is not True:
+            ctx.reject("closed_out_not_trading")
+            logger.warning("company news %s: cik=%s %s closed-out %s — its profile does not say it is actively "
+                           "trading (%r): dropped, never called closed out (closed_out_not_trading)", ctx.series, cik,
+                           period, m["symbol"], trading if trading is None or isinstance(trading, bool) else "junk")
+            continue
+        kept.append((m, mv))
+    if not any(m["move"] == "no_longer_reported" for m, _mv in kept):
+        return kept
+    since = prev_end + timedelta(days=1)
+    delisted = await _delisted_since(ctx, since)
+    out: List[Tuple[Mapping[str, Any], Any]] = []
+    for m, mv in kept:
+        if m["move"] != "no_longer_reported":
+            out.append((m, mv))
+        elif delisted is None:
+            ctx.reject("closed_out_unchecked")
+            logger.warning("company news %s: cik=%s %s closed-out %s — the delisted-companies list could not be "
+                           "checked: dropped (closed_out_unchecked)", ctx.series, cik, period, m["symbol"])
+        elif m["symbol"] in delisted:
+            ctx.reject("closed_out_delisted")
+            logger.warning("company news %s: cik=%s %s closed-out %s — FMP lists it delisted on or after %s (bought "
+                           "out, merged or delisted): dropped, never called closed out (closed_out_delisted)",
+                           ctx.series, cik, period, m["symbol"], since)
         else:
-            rest.append(m)
-    reserved.sort(key=lambda t: (t[0],) + _size_order(t[1]))
-    picked = [m for _tier, m in reserved[:limit]]
-    picked += rest[: max(0, limit - len(picked))]
-    return sorted(picked, key=_size_order)
+            out.append((m, mv))
+    return out
 
 
 async def _filing_record(
@@ -2410,20 +3158,29 @@ async def _filing_record(
     prev_end: date, filed_on: Optional[date], amended_on: Optional[date], total: Any,
     position_count: Any, raw_moves: Sequence[Mapping[str, Any]], counts: Mapping[str, Any],
     current_book: Sequence[_BookEntry], previous_book: Sequence[_BookEntry],
-    omit_counts: FrozenSet[str] = frozenset(),
+    omit_counts: FrozenSet[str] = frozenset(), roundup: bool = True,
 ) -> Optional[Any]:
     """``omit_counts`` (Batch 1): the kinds whose count the record must not state at all — their key
     is left out of ``counts`` (`ThirteenFFiling` takes a subset; the templates say nothing of a kind
     they are not given), never written as 0, which would be a false "no holding increased". Their
-    moves were dropped by the caller (`_split_unchecked_dropped`)."""
+    moves were dropped by the caller (`_split_unchecked_dropped`).
+
+    ``roundup`` (the spotlight lane, 2026-11-15): since the 13F list (review 2026-11-19) the spotlight's record
+    (False) runs its own per-move gates BEFORE the cuts (`_spotlight_gated`); both lanes' cuts are by dollar size alone
+    (`_cut`; review 2026-11-20: the roundup's kind reserve is gone), so each record holds the filing's largest ELIGIBLE
+    moves. Either way (news-v23, owner 2026-11-19): a closed-out holding passes the
+    BUY-OUT CHECK (`_closed_out_checked`) before the final cut, and a filing left with fewer than
+    `R.THIRTEEN_F_LIST_MIN_MOVES` moves yields no record (``too_few_holdings``) — never a single-holding 13F post."""
     total_f = _num(total)
     if total_f is None or total_f <= 0 or not isinstance(position_count, int) or isinstance(position_count, bool):
         ctx.reject("record_invalid")
         return None
     pre = [g for g in (_pre_gate_move(ctx, m, total_f) for m in raw_moves) if g is not None]
     pre = _class_overlaps(ctx, pre, current=current_book, previous=previous_book)
-    # Chosen by size with each kind's largest reserved (`_select_moves`), profiled in record order.
-    presented = sorted(_select_moves(pre, THIRTEEN_F_MAX_PROFILED), key=_move_order)
+    if not roundup:
+        pre = _spotlight_gated(ctx, pre, cik=cik, period=period, omit_counts=omit_counts)
+    # Both lanes: chosen by dollar size alone (`_cut`). Profiled in record order.
+    presented = _cut(pre, THIRTEEN_F_MAX_PROFILED)
     if not presented:
         return None
     # The filer's own ticker rides in the same profile batch: it is kept only when it passes
@@ -2494,12 +3251,22 @@ async def _filing_record(
         if by_name[mv.company.name.casefold()] > 1:
             ctx.reject("share_class_overlap")
     final = [(m, mv) for m, mv in final if by_name[mv.company.name.casefold()] == 1]
-    # The final cut is by size too (each kind's largest reserved), then the record's kind order.
+    # news-v23 (owner 2026-11-19, "Closed out + buy-out check"): a closed-out holding whose company stopped trading
+    # during or after the quarter is dropped BEFORE the final cut, so the next eligible move takes its place
+    final = await _closed_out_checked(ctx, final, profiles, cik=cik, period=period, prev_end=prev_end)
+    # The final cut is by dollar size too, then the record's kind order.
     move_of = {id(m): mv for m, mv in final}
-    kept_moves = sorted(_select_moves([m for m, _mv in final], R.THIRTEEN_F_MAX_MOVES), key=_move_order)
+    kept_moves = _cut([m for m, _mv in final], R.THIRTEEN_F_MAX_MOVES)
     moves = tuple(move_of[id(m)] for m in kept_moves)
-    headline = sum(1 for mv in moves if mv.move in ("newly_reported", "no_longer_reported"))
-    if not moves or (headline == 0 and len(moves) < 2):
+    if not moves:
+        return None
+    if len(moves) < R.THIRTEEN_F_LIST_MIN_MOVES:
+        # news-v23 (owner 2026-11-19, "the range from 2 to 6 are okay"): never a single-holding 13F post, in either
+        # lane — the walk moves on to the next filer (the 13F spotlight checks its own count again after its backstop
+        # gates: `_spotlight_holding`)
+        ctx.reject("too_few_holdings")
+        logger.info("company news %s: cik=%s %s has %d eligible holding(s), fewer than %d — no 13F post "
+                    "(too_few_holdings)", ctx.series, cik, period, len(moves), R.THIRTEEN_F_LIST_MIN_MOVES)
         return None
 
     count_pairs = []
@@ -2528,6 +3295,26 @@ def _counts_of(obj: Any) -> Dict[str, Any]:
     if isinstance(obj, Mapping):
         return dict(obj)
     return {k: getattr(obj, k, None) for k in R.THIRTEEN_F_MOVES} if obj is not None else {}
+
+
+def _field_of(obj: Any, key: str) -> Any:
+    """``obj[key]`` of a mapping, else the attribute (a stored row's dict or a response model's object); None when
+    absent."""
+    return obj.get(key) if isinstance(obj, Mapping) else getattr(obj, key, None)
+
+
+def _is_zero_count(n: Any) -> bool:
+    """A count that is a plain integer 0 — anything else (missing, a bool, junk, a positive count) is NOT zero."""
+    return isinstance(n, int) and not isinstance(n, bool) and n == 0
+
+
+def _mark_counts_partial(ctx: _Ctx, cik: str, period: str, why: Sequence[str]) -> None:
+    """Record (``ctx.counts_partial``) that a filing's four change counts may not be every holding change it reports,
+    with ``why`` (the reasons found, never empty when called): the 13F spotlight then states no count as the
+    filing's (fail closed, INFO — a degraded wording, never a refused filing)."""
+    ctx.counts_partial.add((cik, period))
+    logger.info("company news %s: cik=%s %s — its change counts may not be every holding change it reports (%s); "
+                "a 13F spotlight list never states them as the filing's", ctx.series, cik, period, "; ".join(why))
 
 
 #: The moves a held-through stock split can fake (Batch 1, 2026-10-15): the split check restates only a
@@ -2668,6 +3455,7 @@ async def _split_window_problem(ctx: _Ctx, rows: Sequence[Mapping[str, Any]], *,
         return ("split_unchecked", f"its more / fewer rows ({dict(listed)}) are not what its counts count "
                                    f"({stated}), so the counts cannot be re-checked")
     if not sensitive:
+        ctx.split_checked[(cik, period)] = frozenset()      # nothing to verify: no more / fewer row at all
         return None
     symbols = [_lookup_symbol(r.get("symbol")) for r in sensitive]
     if any(s is None for s in symbols):
@@ -2708,8 +3496,18 @@ async def _split_window_problem(ctx: _Ctx, rows: Sequence[Mapping[str, Any]], *,
                 tainted.append(f"{sym}:{why}")
                 break
     if not tainted:
+        # The spotlight lane (2026-11-15), out of band: the rows whose split the BUILD restated are clean for the
+        # roundup ("reported more shares" stays true) but their previous count is the previous book × the ratio, a
+        # number the previous 13F never reported — the 13F spotlight's "down from Y the quarter before" must not
+        # print it (``split_restated``). Every symbol the row was looked up under, canonical.
+        restated: Set[str] = set()
+        for syms, r in zip(row_symbols, sensitive):
+            if any(_split_found(windows.get(s)) for s in syms):
+                restated.update(c for c in (R.canonical_symbol(s) for s in (*syms, r.get("symbol"))) if c)
+        ctx.split_checked[(cik, period)] = frozenset(restated)
         logger.info("company news thirteen_f: cik=%s %s — %d more / fewer row(s) re-checked: no split or adjustment "
-                    "the build did not restate", cik, period, len(sensitive))
+                    "the build did not restate%s", cik, period, len(sensitive),
+                    f" ({len(restated)} symbol(s) restated by the build: {sorted(restated)[:10]})" if restated else "")
         return None
     shown = ",".join(sorted(set(tainted))[:10]) + (" …" if len(set(tainted)) > 10 else "")
     return ("split_in_window", f"the split re-check refused {len(tainted)} of {len(sensitive)} more / fewer row(s) "
@@ -2749,12 +3547,10 @@ async def _club_stored_row(ctx: _Ctx, cik: str, period: str, *, stage: str, colu
     return row
 
 
-async def _club_stored_holdings(ctx: _Ctx, cik: str, period: str, *, stage: str,
-                                consequence: str) -> Optional[List[Any]]:
-    """One club filer's STORED holdings for ``period`` (`_club_stored_row`), or None — logged at WARNING with
-    ``consequence`` — when the row or its holdings are missing or unreadable."""
-    row = await _club_stored_row(ctx, cik, period, stage=stage, columns="cik,period,holdings",
-                                 consequence=consequence)
+def _holdings_of_row(row: Optional[Mapping[str, Any]], cik: str, period: str, *, consequence: str
+                     ) -> Optional[List[Any]]:
+    """A stored build row's holdings list, or None — logged at WARNING with ``consequence`` when the row was read but
+    its holdings are missing or unreadable (a missing row was logged by `_club_stored_row`)."""
     holdings = row.get("holdings") if row is not None else None
     if not isinstance(holdings, list):
         if row is not None:
@@ -2818,10 +3614,18 @@ async def _club_more_fewer_problem(ctx: _Ctx, *, current: Mapping[str, Any], cik
                                        "two reads, or a count that is not a number)")
     rows = [{"move": r.get("change"), "symbol": r.get("symbol"), "cusip": r.get("cusip"),
              "prev_shares": r.get("prev_shares")} for r in stored_rows if isinstance(r, Mapping)]
-    return await _split_window_problem(ctx, rows, counts=stored_counts,
-                                       prev_shares=lambda: _shares_by_cusip(previous_holdings),
-                                       cik=cik, period=period, prev_end=prev_end, period_end=period_end,
-                                       cusip_symbols=_symbols_by_cusip(holdings, previous_holdings, cusip_key="cusip"))
+    problem = await _split_window_problem(ctx, rows, counts=stored_counts,
+                                          prev_shares=lambda: _shares_by_cusip(previous_holdings),
+                                          cik=cik, period=period, prev_end=prev_end, period_end=period_end,
+                                          cusip_symbols=_symbols_by_cusip(holdings, previous_holdings,
+                                                                          cusip_key="cusip"))
+    # The spotlight lane (2026-11-15): the detail's change rows carry ROUTABLE symbols (the current holding's), the
+    # stored rows the FILED ones the re-check used — they cannot be tied to each other by symbol, so a restated row
+    # anywhere in the filing counts every more / fewer move of it as restated (fail closed: the 13F spotlight then
+    # offers only its newly reported and exited holdings).
+    if ctx.split_checked.get((cik, period)):
+        ctx.split_restated_any.add((cik, period))
+    return problem
 
 
 @dataclass
@@ -2858,11 +3662,12 @@ def _lead_split(rows: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], L
 
 async def _club_filings(ctx: _Ctx, *, year: int, quarter: int, period: str, period_end: date,
                         prev_end: date, room: int, club_ciks: Set[str],
-                        skip_ciks: FrozenSet[str] = frozenset()) -> List[Any]:
+                        skip_ciks: FrozenSet[str] = frozenset(), roundup: bool = True) -> List[Any]:
     """Trillion Club 13F filers (`card_kind == "thirteen_f"` with `use_13f`), in group order.
     Data from the stored builds (`get_detail`, unredacted): zero FMP calls for the filing.
     ``skip_ciks`` (Batch 1): the lead filers' CIKs — already read live from the registry, first —
-    so a club company that is also a lead filer is never a second record."""
+    so a club company that is also a lead filer is never a second record (the 13F spotlight: never
+    read at all, `R.THIRTEEN_F_LEAD_FILERS` belong to the main lane). ``roundup``: `_filing_record`'s."""
     prev_period = R.period_label(*_tc_rules.previous_quarter(year, quarter))
     group = await ctx.step("club_group", lambda: ctx.club.get_group(), reason="club_unavailable")
     rows = await _club_rows(ctx, reason="club_unavailable")
@@ -2931,7 +3736,7 @@ async def _club_filings(ctx: _Ctx, *, year: int, quarter: int, period: str, peri
         current = None
         if raw_moves:
             current = await _club_stored_row(ctx, cik, period, stage="club_current_filing",
-                                             columns="cik,period,holdings,changes,build_status",
+                                             columns="cik,period,holdings,changes,build_status,excluded_rows",
                                              consequence="filer refused, no move shown")
             if current is None:
                 ctx.reject("filer_unavailable")
@@ -2948,11 +3753,11 @@ async def _club_filings(ctx: _Ctx, *, year: int, quarter: int, period: str, peri
         # carries none) AND the previous book the share-class tie needs (review round 9 #8: with no
         # previous book, "Newly reported: Alphabet" was published while class C was held last
         # quarter). Missing or unreadable → the filer is refused (fail closed, WARNING).
-        previous = await _club_previous_book(ctx, cik, prev_period) if raw_moves else ({}, [], [])
+        previous = await _club_previous_book(ctx, cik, prev_period) if raw_moves else ({}, [], [], None)
         if previous is None:
             ctx.reject("filer_unavailable")
             continue
-        prev_values, previous_book, previous_holdings = previous
+        prev_values, previous_book, previous_holdings, previous_excluded = previous
         for m in raw_moves:
             if m["move"] == "no_longer_reported":
                 m["prev_value"] = prev_values.get(_sym_key(m["symbol"])) if m["symbol"] else None
@@ -2979,13 +3784,26 @@ async def _club_filings(ctx: _Ctx, *, year: int, quarter: int, period: str, peri
             if problem is not None:
                 raw_moves, omit = _more_fewer_dropped(ctx, raw_moves, reason=problem[0], why=problem[1],
                                                       cik=cik, period=period)
+        if not roundup and raw_moves:        # the 13F spotlight's ``filing_moves`` (review of the 13F list)
+            why = []
+            if not _is_zero_count(_field_of(getattr(company, "change_counts", None), "corporate_action")):
+                why.append("a corporate_action row, or no readable count of them")
+            # The stored builds keep no option / note row (above), only an `excluded_rows` count mixed with other
+            # exclusions: an option position that changed is visible nowhere, so only a build pair with NO excluded
+            # row (both read as a plain 0) can stand behind "every change".
+            if current is None or not _is_zero_count(current.get("excluded_rows")) \
+                    or not _is_zero_count(previous_excluded):
+                why.append("an excluded row on the current or previous stored build (options are not kept), or no "
+                           "readable count of them")
+            if why:
+                _mark_counts_partial(ctx, cik, period, why)
         rec = await _filing_record(
             ctx, filer_name=company.name, cik=cik, filer_symbol=getattr(company, "detail_symbol", None),
             period=period, period_end=period_end, prev_end=prev_end, filed_on=filed,
             amended_on=amended, total=getattr(company, "total_value", None),
             position_count=position_count, raw_moves=raw_moves, counts=counts,
             current_book=_book_of_club(getattr(detail, "holdings", None)), previous_book=previous_book,
-            omit_counts=omit,
+            omit_counts=omit, roundup=roundup,
         )
         if rec is not None:
             out.append(rec)
@@ -2993,15 +3811,18 @@ async def _club_filings(ctx: _Ctx, *, year: int, quarter: int, period: str, peri
 
 
 async def _club_previous_book(ctx: _Ctx, cik: str, prev_period: str
-                              ) -> Optional[Tuple[Dict[str, float], List[_BookEntry], List[Any]]]:
+                              ) -> Optional[Tuple[Dict[str, float], List[_BookEntry], List[Any], Any]]:
     """A club filer's stored PREVIOUS-quarter build (`trillion_club_filings.holdings`, one
     memoized read): (symbol key → value, for an exit's materiality; the book's entries — CUSIP,
     symbol, profiled display name — for the share-class tie; the stored holdings themselves, for
     the split-cap check, Batch 1, and the split re-check's restated counts, the review of
-    2026-10-16). None (WARNING) when the row is missing or unreadable — the caller refuses the
-    filer; only the budget running out raises."""
-    holdings = await _club_stored_holdings(ctx, cik, prev_period, stage="club_previous_filing",
-                                           consequence="filer refused, no move shown")
+    2026-10-16; the row's `excluded_rows` as stored, unchecked — the 13F spotlight's
+    ``filing_moves``, review of the 13F list 2026-11-19). None (WARNING) when the row is missing or
+    unreadable — the caller refuses the filer; only the budget running out raises."""
+    consequence = "filer refused, no move shown"
+    row = await _club_stored_row(ctx, cik, prev_period, stage="club_previous_filing",
+                                 columns="cik,period,holdings,excluded_rows", consequence=consequence)
+    holdings = _holdings_of_row(row, cik, prev_period, consequence=consequence)
     if holdings is None:
         return None
     out: Dict[str, float] = {}
@@ -3011,7 +3832,7 @@ async def _club_previous_book(ctx: _Ctx, cik: str, prev_period: str
         k, value = _sym_key(h.get("symbol")), _num(h.get("value"))
         if k and value is not None and value > 0:
             out[k] = out.get(k, 0.0) + value
-    return out, _book_of_holdings(holdings), holdings
+    return out, _book_of_holdings(holdings), holdings, (row or {}).get("excluded_rows")
 
 
 async def _registry_rows(ctx: _Ctx) -> List[Dict[str, Any]]:
@@ -3055,7 +3876,7 @@ async def _registry_rows(ctx: _Ctx) -> List[Dict[str, Any]]:
 
 async def _registry_filings(ctx: _Ctx, *, rows: Sequence[Dict[str, Any]], year: int, quarter: int, period: str,
                             period_end: date, prev_end: date, room: int, skip_ciks: Set[str],
-                            budget: _RegistryBudget) -> List[Any]:
+                            budget: _RegistryBudget, roundup: bool = True) -> List[Any]:
     """Whale-registry 13F filers (investors, lifecycle "" or "active") — ``rows``, in the order given:
     the lead filers, or the rest in registry order (`_collect_thirteen_f`). The pair is chosen with
     `select_13f_comparison` (owner rule 2026-10-09: never across a missing quarter); a live
@@ -3196,6 +4017,14 @@ async def _registry_filings(ctx: _Ctx, *, rows: Sequence[Dict[str, Any]], year: 
                                                       period=period)
         raw_moves, counts = _option_moves_dropped(ctx, raw_moves, changes.get("counts") or {}, raw_cur, raw_prev)
         raw_moves = _share_check(ctx, raw_moves, raw_cur, raw_prev)
+        if not roundup:                      # the 13F spotlight's ``filing_moves`` (review of the 13F list)
+            why = []
+            if not _is_zero_count(_field_of(changes.get("counts"), "corporate_action")):
+                why.append("a corporate_action row, or no readable count of them")
+            if _non_share_issuers(raw_cur) or _non_share_issuers(raw_prev):
+                why.append("option / note rows on the current or previous book, never diffed")
+            if why:
+                _mark_counts_partial(ctx, cik, period, why)
         rec = await _filing_record(
             ctx, filer_name=firm, cik=cik, filer_symbol=row.get("associated_ticker"), period=period,
             period_end=period_end, prev_end=prev_end, filed_on=filed,
@@ -3203,11 +4032,20 @@ async def _registry_filings(ctx: _Ctx, *, rows: Sequence[Dict[str, Any]], year: 
             total=getattr(built, "total_value", None), position_count=getattr(built, "position_count", None),
             raw_moves=raw_moves, counts=counts,
             current_book=_book_of_holdings(getattr(built, "holdings", None)),
-            previous_book=_book_of_raw(raw_prev), omit_counts=omit,
+            previous_book=_book_of_raw(raw_prev), omit_counts=omit, roundup=roundup,
         )
         if rec is not None:
             out.append(rec)
     return out
+
+
+def _widened_13f_exclude(exclude: FrozenSet[str]) -> FrozenSet[str]:
+    """``exclude`` plus the main lane's per-filer, per-quarter key of every 13F ledger key in it (`R.thirteen_f_filer_key`):
+    a 13F spotlight post (``news:thirteen_f_spotlight:<cik>:<period>:<SYM>``) reads as ``news:thirteen_f:<cik>:<period>``,
+    the key both lanes' filer walks check — ONE 13F post per filer per quarter across both lanes (the spotlight lane,
+    2026-11-15), in both directions. A roundup key maps to itself, so with no spotlight key the set is unchanged."""
+    extra = frozenset(k for k in (R.thirteen_f_filer_key(r) for r in exclude) if k is not None)
+    return exclude | extra
 
 
 async def _collect_thirteen_f(ctx: _Ctx) -> Candidates:
@@ -3215,10 +4053,12 @@ async def _collect_thirteen_f(ctx: _Ctx) -> Candidates:
     (`R.THIRTEEN_F_LEAD_FILERS`, read live from the registry), then the Trillion Club filers (stored
     builds), then the rest of the registry — every registry read under ONE budget
     (`_RegistryBudget`: still `MAX_LIVE_13F_BUILDS` live builds per call). A club company that is also
-    a lead filer is read once, as the lead."""
+    a lead filer is read once, as the lead. A filer the 13F spotlight already posted for the quarter is
+    ``already_posted`` here too (`_widened_13f_exclude`, the spotlight lane, 2026-11-15)."""
     season = selection.thirteen_f_season(ctx.run_date)
     if season is None:
         return ctx.done((), "thirteen_f_off_season")
+    ctx.exclude = _widened_13f_exclude(ctx.exclude)
     year, quarter = season
     period = R.period_label(year, quarter)
     period_end = R.period_end_of(period)
@@ -3244,14 +4084,170 @@ async def _collect_thirteen_f(ctx: _Ctx) -> Candidates:
     return ctx.done(records, "thirteen_f_none_qualified")
 
 
+# ── thirteen_f_spotlight (the spotlight lane, owner decisions 2026-11-15) ─────────────────────────────────
+
+
+#: The 13F spotlight's pick order among one filing's eligible holdings — THE order the record checks
+#: (`R.thirteen_f_spotlight_order`): the largest dollar size first (`R.thirteen_f_move_flow`, THE size the templates rank
+#: by; a move without one after every sized move), then the record's kind order, then the symbol.
+_spotlight_move_rank = R.thirteen_f_spotlight_order
+
+
+def _spotlight_holding(ctx: _Ctx, rec: Any) -> Optional[Any]:
+    """The holdings a filing (`ThirteenFFiling`, built by the roundup's walkers with every one of their gates) offers
+    the 13F spotlight → `R.ThirteenFSpotlight` of its largest `R.THIRTEEN_F_SPOTLIGHT_MAX_MOVES` eligible holdings
+    (owner feedback 2026-11-19: a list, "not just one"), or None when none is eligible. Each move refused is counted,
+    and refusing one never refuses the others:
+
+    * more / fewer shares only when the filing VOUCHES for them — both kinds' counts kept (a withheld count:
+      ``split_unchecked``) and the split re-check run over them (`ctx.split_checked`) — and never a holding whose
+      split the build restated (``split_restated``: "down from Y the quarter before" would print the previous book ×
+      the split ratio, a count the previous 13F never reported; for a club filer any restated row of the filing
+      counts, `ctx.split_restated_any`), and only a change of at least `R.THIRTEEN_F_SPOTLIGHT_MIN_CHANGE` of the
+      quarter before (``spotlight_change_too_small``, `R.thirteen_f_change_clear`, exact at 25%);
+    * a newly reported holding (its shares) and an exit (the quarter before's shares) as the roundup has them;
+    * one holding per ISSUER and per display name (``share_class_overlap``: `R.issuer_root` folds share-class twins
+      the roundup's CUSIP check may not have tied — the larger is kept).
+
+    The eligible holdings in `_spotlight_move_rank` (the largest first) — the first `R.THIRTEEN_F_SPOTLIGHT_MAX_MOVES`
+    go into the record, the lead first (its symbol keys the ledger); fewer than `R.THIRTEEN_F_LIST_MIN_MOVES` →
+    None (``too_few_holdings``: news-v23, no single-holding 13F post). A record built for the spotlight (`_filing_record` with
+    ``roundup=False``) already ran the per-move gates above BEFORE its cut, by dollar size alone (`_spotlight_gated`,
+    review 2026-11-19), so its moves are the filing's largest eligible ones and the gates here are a backstop.
+    ``eligible_moves`` records how many of the record's moves were eligible (the walker profiles only the largest, so
+    at most `R.THIRTEEN_F_MAX_MOVES`); ``filing_moves`` the filing's own count of every change — None when a kind's
+    count was withheld or the walker marked the counts partial (`ctx.counts_partial`) — which decides whether the list
+    may state its counts as the filing's. A record the rules refuse WHOLE gives the filing up (WARNING,
+    ``record_invalid``) — never retried with its lead alone (news-v23)."""
+    key = (rec.filer_cik, rec.period)
+    counts = dict(rec.counts)
+    vouched = "increased" in counts and "decreased" in counts and key in ctx.split_checked
+    restated = ctx.split_checked.get(key, frozenset())
+    eligible = []
+    for mv in rec.moves:
+        if mv.move in ("increased", "decreased"):
+            if not vouched:
+                ctx.reject("split_unchecked")
+                continue
+            if key in ctx.split_restated_any or mv.company.symbol in restated:
+                ctx.reject("split_restated")
+                logger.info("company news %s: cik=%s %s %s %s — its split was restated by the build; the previous "
+                            "count is not the previous 13F's (split_restated)", ctx.series, rec.filer_cik, rec.period,
+                            mv.move, mv.company.symbol)
+                continue
+            if not R.thirteen_f_change_clear(mv.shares, mv.prev_shares):
+                ctx.reject("spotlight_change_too_small")
+                continue
+        eligible.append(mv)
+    if not eligible:
+        return None
+    picked: List[Any] = []
+    roots: Set[Optional[str]] = set()
+    names: Set[str] = set()
+    for mv in sorted(eligible, key=_spotlight_move_rank):
+        root, name = R.issuer_root(mv.company.symbol), mv.company.name.casefold()
+        if root in roots or name in names:
+            ctx.reject("share_class_overlap")
+            logger.info("company news %s: cik=%s %s %s %s — another listing of the same issuer is larger; dropped "
+                        "(share_class_overlap)", ctx.series, rec.filer_cik, rec.period, mv.move, mv.company.symbol)
+            continue
+        roots.add(root)
+        names.add(name)
+        picked.append(mv)
+    if len(picked) < R.THIRTEEN_F_LIST_MIN_MOVES:
+        # news-v23 (owner 2026-11-19, "the range from 2 to 6 are okay"): no single-holding 13F post — the filing yields
+        # nothing and the walk (then the chain) moves on
+        ctx.reject("too_few_holdings")
+        logger.info("company news %s: cik=%s %s has %d eligible holding(s), fewer than %d — no 13F post "
+                    "(too_few_holdings)", ctx.series, rec.filer_cik, rec.period, len(picked),
+                    R.THIRTEEN_F_LIST_MIN_MOVES)
+        return None
+    shown = tuple(picked[:R.THIRTEEN_F_SPOTLIGHT_MAX_MOVES])
+    # The filing's own count of every change — unknown (None) when a kind's count was withheld, or when the walker
+    # found the counts may leave changes out (`ctx.counts_partial`: a corporate_action row, option / note rows, a
+    # club build's excluded rows — review of the 13F list, 2026-11-19), so the list never states them as the filing's.
+    filing_moves = (sum(counts[k] for k in R.THIRTEEN_F_MOVES)
+                    if key not in ctx.counts_partial and all(isinstance(counts.get(k), int)
+                                                             for k in R.THIRTEEN_F_MOVES) else None)
+    base = dict(series="thirteen_f_spotlight", filer_name=rec.filer_name, filer_cik=rec.filer_cik,
+                filer_symbol=rec.filer_symbol, period=rec.period, period_end=rec.period_end, filed_on=rec.filed_on,
+                amended_on=rec.amended_on)
+    try:
+        return R.ThirteenFSpotlight(**base, moves=shown, eligible_moves=len(picked), filing_moves=filing_moves)
+    except ValueError as e:
+        # never retried with its lead alone (news-v23: no single-holding 13F post) — the filing yields nothing
+        logger.warning("company news %s: cik=%s %s list of %d holdings refused as record_invalid (%s)", ctx.series,
+                       rec.filer_cik, rec.period, len(shown), _describe(e))
+        ctx.reject("record_invalid")
+        return None
+
+
+async def _collect_thirteen_f_spotlight(ctx: _Ctx) -> Candidates:
+    """ONE filer's latest 13F — up to `R.THIRTEEN_F_SPOTLIGHT_MAX_MOVES` of its holdings (owner decisions 2026-11-15; B
+    decision 7; a list since the owner's feedback of 2026-11-19) — in 13F season only.
+
+    * The filers: the Trillion Club filers (stored builds), then the rest of the registry — through the roundup's
+      own walkers (`_club_filings`, `_registry_filings`) and every one of their gates (materiality, options, share
+      classes, the share-count cross-check, the split re-check, a degraded build), under ONE registry budget. Never a
+      `R.THIRTEEN_F_LEAD_FILERS` filer (Berkshire's quarter is the main lane's 13F roundup: ``lead_filer_reserved``,
+      never read).
+    * One 13F post per filer per quarter across BOTH lanes (`_widened_13f_exclude`): a filer the roundup or a
+      spotlight posted is ``already_posted`` before any read of it.
+    * Per filing, the holdings `_spotlight_holding` picks (owner feedback 2026-11-19: up to
+      `R.THIRTEEN_F_SPOTLIGHT_MAX_MOVES`, the largest dollar size first; a more / fewer holding only when vouched,
+      unrestated and moved by at least 25%); a filing with none yields nothing. A filing whose only move is one more /
+      fewer holding still counts (``roundup=False``).
+    * At most ``ctx.limit`` records, in walk order; `THIRTEEN_F_SPOTLIGHT_SPARE_FILINGS` more filings are read for
+      the ones that yield nothing."""
+    season = selection.thirteen_f_season(ctx.run_date)
+    if season is None:
+        return ctx.done((), "thirteen_f_off_season")
+    ctx.exclude = _widened_13f_exclude(ctx.exclude)
+    year, quarter = season
+    period = R.period_label(year, quarter)
+    period_end = R.period_end_of(period)
+    prev_end = _tc_rules.quarter_end(*_tc_rules.previous_quarter(year, quarter))
+    window = dict(year=year, quarter=quarter, period=period, period_end=period_end, prev_end=prev_end)
+    lead_rows, rest_rows = _lead_split(await _registry_rows(ctx))
+    reserved = frozenset(c for cik in (*R.THIRTEEN_F_LEAD_FILERS, *(r["cik"] for r in lead_rows))
+                         for c in (cik, _filer_cik(cik)))
+    if lead_rows:
+        ctx.reject("lead_filer_reserved", len(lead_rows))
+        logger.info("company news %s: %d lead filer(s) %s reserved for the main lane's 13F roundup — never read",
+                    ctx.series, len(lead_rows), sorted(r["cik"] for r in lead_rows))
+    room = ctx.limit + THIRTEEN_F_SPOTLIGHT_SPARE_FILINGS
+    filings: List[Any] = []
+    club_ciks: Set[str] = set()
+    if settings.TRILLION_CLUB_ENABLED:
+        filings += await _club_filings(ctx, room=room, club_ciks=club_ciks, skip_ciks=reserved, roundup=False,
+                                       **window)
+    else:
+        logger.info("company news %s: TRILLION_CLUB_ENABLED is off — no club filers", ctx.series)
+    if len(filings) < room:
+        filings += await _registry_filings(ctx, rows=rest_rows, room=room - len(filings),
+                                           skip_ciks=set(club_ciks) | set(reserved), budget=_RegistryBudget(),
+                                           roundup=False, **window)
+    records: List[Any] = []
+    for rec in filings:
+        if len(records) >= ctx.limit:
+            break
+        got = _spotlight_holding(ctx, rec)
+        if got is not None:
+            records.append(got)
+    ctx.check_profiles()
+    return ctx.done(records, "thirteen_f_spotlight_none_qualified")
+
+
 # ── money_map ─────────────────────────────────────────────────────────────────
 
 
-async def _club_symbols(ctx: _Ctx) -> List[str]:
+async def _club_symbols(ctx: _Ctx, *, purpose: str = "money_map") -> List[str]:
     """US-listed Trillion Club MEMBERS (the group's cards and its also-in-club list), in group
-    order. Best effort: the curated seed alone is a full pool, so a failed read is a WARNING."""
+    order. Best effort: the curated seed alone is a full pool, so a failed read is a WARNING.
+    ``purpose`` names the reader in the log lines only (Money Map's pool; the insider spotlight's
+    revenue line, 2026-11-15)."""
     if not settings.TRILLION_CLUB_ENABLED:
-        logger.info("company news money_map: TRILLION_CLUB_ENABLED is off — no club symbols")
+        logger.info("company news %s: TRILLION_CLUB_ENABLED is off — no club symbols", purpose)
         return []
     try:
         group = await ctx.step("club_group", lambda: ctx.club.get_group(), reason="club_unavailable")
@@ -3259,42 +4255,13 @@ async def _club_symbols(ctx: _Ctx) -> List[str]:
     except MarketingNewsUnavailable as e:
         if e.reason == "budget_exhausted":
             raise
-        logger.warning("company news money_map: club members unavailable (%s) — seed only", e)
+        logger.warning("company news %s: club members unavailable (%s) — seed only", purpose, e)
         return []
     out = [getattr(c, "detail_symbol", None) for c in (getattr(group, "companies", None) or ())]
     for brief in getattr(group, "also_in_club", None) or ():
         row = rows.get(getattr(brief, "slug", None)) or {}
         out.append(row.get("detail_symbol"))
     return [s for s in out if isinstance(s, str) and s]
-
-
-async def _theme_symbols(ctx: _Ctx) -> List[str]:
-    """Emerging Frontiers members (`trending_themes` tickers minus blocked), theme order. Best
-    effort, like `_club_symbols`. Never reads quotes, images, subtitles or Gemini text."""
-    try:
-        rows = await _rows(
-            ctx, "themes", ("themes",),
-            lambda sb: sb.table(_THEMES_TABLE).select("slug,tickers,blocked_tickers,sort_order")
-            .eq("is_active", True).order("sort_order").limit(200),
-            reason="themes_unavailable",
-        )
-    except MarketingNewsUnavailable as e:
-        if e.reason == "budget_exhausted":
-            raise
-        logger.warning("company news money_map: theme members unavailable (%s) — seed + club only", e)
-        return []
-
-    def order(r: Mapping[str, Any]) -> Tuple[int, str]:
-        so = r.get("sort_order")
-        return (so if isinstance(so, int) and not isinstance(so, bool) else 10 ** 9, str(r.get("slug") or ""))
-
-    out: List[str] = []
-    for r in sorted(rows, key=order):
-        blocked = {_sym_key(b) for b in (r.get("blocked_tickers") or ()) if isinstance(b, str)}
-        for t in r.get("tickers") or ():
-            if isinstance(t, str) and _sym_key(t) not in blocked:
-                out.append(t)
-    return out
 
 
 def _row_fy(row: Mapping[str, Any]) -> str:
@@ -3642,8 +4609,9 @@ async def _money_map_record(ctx: _Ctx, sym: str, bd: Any, fy: str) -> Any:
 
 async def _collect_money_map(ctx: _Ctx) -> Candidates:
     """Owner decision 2 (2026-10-09): the curated seed FIRST, then the US-listed Trillion Club
-    members, then the Emerging Frontiers members — de-duplicated, every candidate through every
-    gate. Symbols never posted come before those posted for an earlier fiscal year, and after both
+    members — de-duplicated, every candidate through every gate. news-v23 (the restyle, owner
+    2026-11-19: "make sure to use big or popular companies only"): the Emerging Frontiers theme members
+    are no longer in the pool (they were its third source; a theme's own post still names them). Symbols never posted come before those posted for an earlier fiscal year, and after both
     groups every symbol the memo knows cannot publish now — a due year, the year already posted, or
     a refusal when it was last read (`_money_map_order`, the review of 2026-10-16, the re-review of
     2026-10-19, MM-4-R, and B3PD-1 of 2026-10-20) or when its template last refused its record
@@ -3652,7 +4620,8 @@ async def _collect_money_map(ctx: _Ctx) -> Candidates:
     year, no fan-out either. A re-read of a year the memo already refused (B3PD-1) is answered the
     same way: one breakdown read, no fan-out, and it counts only with a record held (like a due year)
     — never toward the content cap."""
-    pool = R.merge_money_map_pool(await _club_symbols(ctx), await _theme_symbols(ctx))
+    # news-v23 (owner 2026-11-19 "make sure to use big or popular companies only"): the seed and the club ONLY
+    pool = R.merge_money_map_pool(await _club_symbols(ctx))
     posted: Dict[str, Set[str]] = {}
     for ref in ctx.exclude:
         parts = ref.split(":") if isinstance(ref, str) else []
@@ -3673,7 +4642,7 @@ async def _collect_money_map(ctx: _Ctx) -> Candidates:
         ctx.considered += 1
         answered = False
         try:
-            bd = await ctx.step("money_map_breakdown", lambda s=sym: ctx.revenue.get_revenue_breakdown(s),
+            bd = await ctx.step("money_map_breakdown", lambda s=sym: _breakdown(ctx, s, ("revenue_breakdown", s), 0),
                                 reason="revenue_unavailable")
             fy = getattr(bd, "fiscal_year", None)
             if not isinstance(fy, str) or not re.fullmatch(r"[0-9]{4}", fy):
@@ -3741,22 +4710,28 @@ def remember_template_refusal(record: Any, codes: Iterable[Any] = (), *, run_dat
     the next call that stake is offered after every other candidate (`_collect_company_stakes`; an edit to its row
     lifts it) — the same wall, which five refused stakes at the head of the newest-first walk built every day.
 
+    news-v23 (one investor's stakes in several public companies a post): a `CompanyStakes` the template refused WHOLE
+    is remembered stake by stake (each the same entry), and a single `CompanyStake` is still accepted — the script flow
+    reports each stake its template DROPPED from a post (`news_templates.drop_refused_rows`) that way, so a stake only
+    the template refuses never wins its investor the head of the walk again (`_stakes_records`).
+
     True when remembered; False — nothing written — for any other record (the other series' walks are bounded by
     their windows, or not in the planned series) or a run date that is not a date. Process-local like the whole memo
     (a new process re-learns it at the first refusal); never raises on a well-formed call."""
     if isinstance(run_date, datetime):
         run_date = run_date.date()
-    if not isinstance(record, (R.MoneyMap, R.CompanyStake)) or not isinstance(run_date, date):
+    if not isinstance(record, (R.MoneyMap, R.CompanyStake, R.CompanyStakes)) or not isinstance(run_date, date):
         return False
     if not isinstance(codes, (list, tuple, set, frozenset)):
         codes = (codes,)                 # one bare code (or junk): the log names what it can
     said = sorted({c[:40] for c in codes if isinstance(c, str)})
-    if isinstance(record, R.CompanyStake):
-        _memo_put(_stake_refused_key(record.stake_id), (_stake_fingerprint(record), run_date),
-                  STAKE_TEMPLATE_REFUSAL_TTL_SECONDS)
-        logger.info("company news company_stakes: stake %s was refused by its template on %s (%s) — remembered: "
-                    "tried after every other candidate until its row changes", record.stake_id, run_date.isoformat(),
-                    ", ".join(said[:6]) or "no code")
+    if isinstance(record, (R.CompanyStake, R.CompanyStakes)):
+        for stake in (record.stakes if isinstance(record, R.CompanyStakes) else (record,)):
+            _memo_put(_stake_refused_key(stake.stake_id), (_stake_fingerprint(stake), run_date),
+                      STAKE_TEMPLATE_REFUSAL_TTL_SECONDS)
+            logger.info("company news company_stakes: stake %s was refused by its template on %s (%s) — remembered: "
+                        "tried after every other candidate until its row changes", stake.stake_id,
+                        run_date.isoformat(), ", ".join(said[:6]) or "no code")
         return True
     sym, fy = record.company.symbol, record.fiscal_year
     _money_map_remember_refusal(sym, fy, _TEMPLATE_REFUSED, run_date)
@@ -4126,13 +5101,49 @@ async def _collect_congress_count(ctx: _Ctx) -> Candidates:
     ctx.check_profiles()
     # Backstop: two candidates that resolved to one display name are one company counted twice.
     by_name = Counter(rec.company.name.casefold() for rec in found)
-    records = []
+    counts = []
     for rec in found:
         if by_name[rec.company.name.casefold()] > 1:
             ctx.reject("share_class_overlap")
         else:
-            records.append(rec)
-    return ctx.done(records, "congress_none_qualified")
+            counts.append(rec)
+    return _congress_month_record(ctx, month, counts)
+
+
+def _congress_month_record(ctx: _Ctx, month: str, counts: Sequence[Any]) -> Candidates:
+    """news-v23 (the restyle, owner 2026-11-19: "for congress disclosed, i want to have 2-3 companies at once"): the
+    ONE `R.CongressMonth` record of the month — the companies whose counts passed every gate, the most members first
+    (then the symbol), up to `R.CONGRESS_MONTH_COMPANIES`' most; one whose issuer root is already in the post
+    (`R.issuer_root`: `_issuer_clash` should have refused it) is left out as `share_class_overlap`. Fewer than the
+    post's minimum: no record — ``congress_too_few_companies`` (exactly one qualified) or ``congress_none_qualified``
+    (none). Its ledger key is the month's, so every company it draws is posted once for the month."""
+    lo, hi = R.CONGRESS_MONTH_COMPANIES
+    picked: List[Any] = []
+    for rec in counts:
+        if len(picked) >= hi:
+            break
+        if any(R.issuer_root(rec.company.symbol) == R.issuer_root(p.company.symbol) for p in picked):
+            logger.info("company news congress_count: %s left out as share_class_overlap — its issuer is already in "
+                        "the post", rec.company.symbol)
+            ctx.reject("share_class_overlap")
+            continue
+        picked.append(rec)
+    if len(picked) < lo:
+        if picked:
+            logger.info("company news congress_count: only %s qualified for %s — a Congress Count shows at least %d "
+                        "companies, so none is posted (congress_too_few_companies)", picked[0].company.symbol, month,
+                        lo)
+        return ctx.done((), "congress_too_few_companies" if picked else "congress_none_qualified")
+    try:
+        rec = R.CongressMonth(series="congress_count", month=month, fetched_on=ctx.run_date, counts=tuple(picked))
+    except ValueError as e:
+        logger.error("company news congress_count: the month's %d counts (%s) do not make a record (%s) — none is "
+                     "posted", len(picked), ",".join(c.company.symbol for c in picked), _describe(e))
+        ctx.reject("record_invalid")
+        return ctx.done((), "congress_none_qualified")
+    logger.info("company news congress_count: ONE post of %d companies for %s (%s), the most members first",
+                len(picked), month, ",".join(f"{c.company.symbol}={c.members}" for c in picked))
+    return ctx.done((rec,), "congress_none_qualified")
 
 
 # ── company_stakes (Drop 2b) ──────────────────────────────────────────────────
@@ -4167,10 +5178,6 @@ class _StakeCandidate:
     listed_since: Optional[date]
     local_listing: Optional[str]
     is_new: bool
-
-    @property
-    def ledger_key(self) -> str:
-        return f"{R.LEDGER_PREFIX}company_stakes:{self.stake_id}"
 
 
 def _stake_refused_key(stake_id: str) -> Tuple[str, str]:
@@ -4460,62 +5467,173 @@ async def _collect_company_stakes(ctx: _Ctx) -> Candidates:
         logger.info("company news company_stakes: %d of %d stake(s) were refused by their template when last "
                     "offered — tried after the others (RR3-STAKES-TEMPLATE-WALL)", held, len(eligible))
     ctx.considered = len(eligible)
+    # news-v23: a post's key names every stake it held (`R.stake_ref_ids`): each one is posted once
+    posted = _posted_stake_ids(ctx.exclude)
     fresh = []
     for c in eligible:
-        if c.ledger_key in ctx.exclude:
+        if c.stake_id in posted:
             ctx.reject("already_posted")      # before any profile call
         else:
             fresh.append(c)
-    batch = fresh[:STAKES_PROFILE_CANDIDATES]
+    # PUBLIC ONLY (news-v23, owner 2026-11-19: "filter for companies that public only. no private"): a stake whose kind
+    # is never public (a private or non-U.S.-listed investee) or that carries no listed U.S. symbol is dropped before
+    # any profile call — its investee never named, here or anywhere
+    shaped: List[_StakeCandidate] = []
+    for c in fresh:
+        if c.kind not in R.PUBLIC_STAKE_KINDS or not c.investee_symbol:
+            ctx.reject("stake_not_public")
+            logger.info("company news company_stakes: stake %s dropped as stake_not_public — %s, %s (public "
+                        "companies only)", c.stake_id, _scrub(c.kind, 40),
+                        "a listed U.S. symbol" if c.investee_symbol else "no listed U.S. symbol")
+        else:
+            shaped.append(c)
+    batch = shaped[:STAKES_PROFILE_CANDIDATES]
+    if len(shaped) > len(batch):
+        logger.info("company news company_stakes: %d of %d stake(s) with a listed symbol reach the profile stage "
+                    "(STAKES_PROFILE_CANDIDATES) — the rest wait for a later call", len(batch), len(shaped))
     symbols: List[str] = []
     for c in batch:
         symbols.append(c.investor_symbol)
-        if c.investee_symbol:
-            symbols.append(c.investee_symbol)
+        symbols.append(c.investee_symbol)
     profiles = await _profiles(ctx, symbols) if symbols else {}
-    records: List[Any] = []
+    # the public stakes of each investor, in the walk's order (an investor's first stake places it)
+    groups: Dict[str, Tuple[R.CompanyRef, List[Any]]] = {}
     for c in batch:
         investor = R.company_from_profile(profiles.get(c.investor_symbol), c.investor_symbol, purpose="listing")
         if isinstance(investor, str):
             ctx.reject(investor)
             continue
         if R.longest_word(investor.name) > R.STAKE_PAIR_NAME_WORD_MAX_CHARS:
-            # RR3-STAKES-TEMPLATE-WALL: the investor's name sits under its plate in half the column too
+            # RR3-STAKES-TEMPLATE-WALL: the investor's name is drawn whole too (the title)
             logger.info("company news company_stakes: stake %s refused as company_name_unusable — its investor %s's "
                         "display name holds a word of %d characters (the template draws at most %d)", c.stake_id,
                         investor.symbol, R.longest_word(investor.name), R.STAKE_PAIR_NAME_WORD_MAX_CHARS)
             ctx.reject("company_name_unusable")
             continue
-        investee = None
-        if c.investee_symbol:
-            ref = R.company_from_profile(profiles.get(c.investee_symbol), c.investee_symbol, purpose="common")
-            if isinstance(ref, R.CompanyRef) and ref.symbol != investor.symbol and _names_agree(ref.name, c.investee_name):
-                investee = ref
-            else:
-                logger.info("company news company_stakes: stake %s investee %s shown by name only (%s)",
-                            c.stake_id, c.investee_symbol, ref if isinstance(ref, str) else "name or symbol disagrees")
+        investee = _public_investee(ctx, c, investor, profiles)
+        if investee is None:
+            continue
         try:
-            records.append(R.CompanyStake(
+            row = R.CompanyStake(
                 series="company_stakes", stake_id=c.stake_id, investor=investor, investee_name=c.investee_name,
                 investee=investee, kind=c.kind, value_usd=c.value_usd, value_basis=c.value_basis,
                 ownership_pct=c.ownership_pct, as_of=c.as_of, verified_on=c.verified_on,
                 source_title=c.source_title, background=c.background, listed_since=c.listed_since,
                 local_listing=c.local_listing, is_new=c.is_new,
-            ))
+            )
         except ValueError as e:
             logger.info("company news company_stakes: stake %s refused as record_invalid (%s)", c.stake_id, _describe(e))
             ctx.reject("record_invalid")
             continue
-        if len(records) >= ctx.limit:
-            break
+        groups.setdefault(investor.symbol, (investor, []))[1].append(row)
     ctx.check_profiles()
+    records = _stakes_records(ctx, groups, refused_on)
     if records:
         return ctx.done(records, None)
     if eligible and not fresh:
         return ctx.done((), "stakes_none_unposted")
+    if fresh:
+        return ctx.done((), "stakes_none_public")
     if not R.STAKES_INCLUDE_CATALOGUE and not eligible:
         return ctx.done((), "stakes_none_new")
     return ctx.done((), "stakes_none_qualified")
+
+
+def _posted_stake_ids(exclude: FrozenSet[str]) -> Set[str]:
+    """Every stake id a posted company_stakes ledger key names (`R.stake_ref_ids`: a one-stake key of any post before
+    news-v23, or a several-stake post's joined key). A malformed key is skipped whole. Pure; never raises."""
+    out: Set[str] = set()
+    for key in exclude:
+        out.update(R.stake_ref_ids(key) or ())
+    return out
+
+
+def _public_investee(ctx: _Ctx, c: _StakeCandidate, investor: R.CompanyRef,
+                     profiles: Mapping[str, Any]) -> Optional[R.CompanyRef]:
+    """The investee's CompanyRef when it is a PUBLIC company (news-v23, owner 2026-11-19 "public only"), else None —
+    the stake DROPPED, counted and logged (its id and symbol, never its name): `stake_not_trading` — the investee's
+    profile does not say ``isActivelyTrading`` exactly True (False, absent or junk: fail closed, `_closed_out_checked`'s
+    reading); `stake_listing_unverified` — no profile, a profile `R.company_from_profile` refuses (purpose "common": a
+    major U.S. exchange, USD, no ETF / fund / ADR, a common listing, a drawable name), one that names another company
+    (`_names_agree`), or the investor itself."""
+    sym = c.investee_symbol
+    profile = profiles.get(sym)
+    trading = profile.get("isActivelyTrading") if isinstance(profile, Mapping) else None
+    if isinstance(profile, Mapping) and trading is not True:
+        ctx.reject("stake_not_trading")
+        logger.warning("company news company_stakes: stake %s investee %s dropped as stake_not_trading — its profile "
+                       "does not say it is actively trading (%r): public companies only", c.stake_id, sym,
+                       trading if trading is None or isinstance(trading, bool) else "junk")
+        return None
+    ref = R.company_from_profile(profile, sym, purpose="common")
+    if not isinstance(ref, R.CompanyRef) or ref.symbol == investor.symbol or not _names_agree(ref.name, c.investee_name):
+        ctx.reject("stake_listing_unverified")
+        logger.info("company news company_stakes: stake %s investee %s dropped as stake_listing_unverified (%s)",
+                    c.stake_id, sym, ref if isinstance(ref, str) else
+                    "the investor itself" if ref.symbol == investor.symbol else "its listing names another company")
+        return None
+    return ref
+
+
+def _stakes_records(ctx: _Ctx, groups: Mapping[str, Tuple[R.CompanyRef, List[Any]]],
+                    refused_on: Mapping[str, Optional[date]]) -> List[Any]:
+    """news-v23 (owner 2026-11-19: "add 1-3 more companies for the NVIDIA (or the other trillion companies)"): ONE
+    `R.CompanyStakes` per investor, the investor with the most not-yet-posted public stakes first — counting only the
+    stakes no template refused when last offered (RR3-STAKES-TEMPLATE-WALL: a refused stake never wins its investor
+    the head of the walk), then every stake, then the walk's own order (an investor's first stake) — at most
+    ``ctx.limit`` of them (the next investor is the script flow's fallback when the template refuses the first). Each
+    holds at most `R.STAKES_POST_STAKES` stakes — its unrefused ones first, then the refused ones least recently
+    refused first — drawn in `R.stake_rank_key` order (the largest figure first).
+
+    ONE row per investee ISSUER (review 2026-11-20): the club table is unique only on (investor, investee name, kind),
+    so an investor may hold two postable rows of one listed company — an equity stake and a commitment in it, or two
+    spellings of its name — which `R.CompanyStakes` refuses whole ("two rows of one company"), every run. Before the
+    investors are ranked (a duplicate never wins its investor the head of the walk), each investor keeps the FIRST row
+    of an issuer in that order — unrefused before refused, the largest figure first — by the keys the record checks
+    (`R._distinct_companies`: symbol, `R.issuer_root`, the case-folded name); every later one is DROPPED from the post
+    (``share_class_overlap``, logged with both stake ids and the symbol) and stays unposted for a later run."""
+    ranked = []
+    for first, (sym, (investor, rows)) in enumerate(groups.items()):
+        fresh = sorted((r for r in rows if refused_on.get(r.stake_id) is None), key=R.stake_rank_key)
+        held = sorted((r for r in rows if refused_on.get(r.stake_id) is not None),
+                      key=lambda r: (refused_on[r.stake_id], R.stake_rank_key(r)))
+        kept_rows: List[Any] = []
+        seen: Dict[Tuple[str, Any], Any] = {}
+        for r in fresh + held:
+            keys = [("symbol", r.investee.symbol), ("issuer", R.issuer_root(r.investee.symbol)),
+                    ("name", r.investee.name.casefold())]
+            twin = next((seen[k] for k in keys if k in seen), None)
+            if twin is not None:
+                ctx.reject("share_class_overlap")
+                logger.warning("company news company_stakes: %s's stake %s in %s DROPPED as share_class_overlap — the "
+                               "post already holds its stake %s in the same company (%s); it waits for a later post",
+                               investor.symbol, r.stake_id, r.investee.symbol, twin.stake_id, twin.investee.symbol)
+                continue
+            for k in keys:
+                seen[k] = r
+            kept_rows.append(r)
+        fresh = [r for r in kept_rows if refused_on.get(r.stake_id) is None]
+        ranked.append(((-len(fresh), -len(kept_rows), first), investor, kept_rows))
+    ranked.sort(key=lambda t: t[0])
+    records: List[Any] = []
+    for _key, investor, rows in ranked:
+        if len(records) >= ctx.limit:
+            break
+        chosen = sorted(rows[:R.STAKES_POST_STAKES[1]], key=R.stake_rank_key)
+        if len(rows) > len(chosen):
+            logger.info("company news company_stakes: %s holds %d public stakes — the post takes %d, the rest wait for "
+                        "a later post", investor.symbol, len(rows), len(chosen))
+        try:
+            rec = R.CompanyStakes(series="company_stakes", investor=investor, stakes=tuple(chosen))
+        except ValueError as e:
+            logger.error("company news company_stakes: %s's %d public stakes do not make a record (%s) — not posted",
+                         investor.symbol, len(chosen), _describe(e))
+            ctx.reject("record_invalid")
+            continue
+        logger.info("company news company_stakes: ONE post of %s's %d public stake(s) (%s), the largest figure first",
+                    investor.symbol, len(chosen), ",".join(r.investee.symbol for r in chosen))
+        records.append(rec)
+    return records
 
 
 # ── earnings (Drop 2b; Batch 1, 2026-10-15) ───────────────────────────────────
@@ -4663,26 +5781,20 @@ def _posted_in_window(exclude: FrozenSet[str], days: Sequence[date]) -> Set[str]
     for any day of the week is this week's report — FMP re-dating the row a day later must not post it twice
     (review of 2026-10-16) — and (the re-review of 2026-10-19, EME-1) neither must a re-dating ACROSS two windows:
     a report posted under the last day of one window and re-dated onto the first day of the next was offered again,
-    with no posted key inside the new window. The ledger key format is unchanged. A key dated after the window is
-    not counted (a later run's window). Never raises on a malformed key (it is skipped)."""
-    prefix = f"{R.LEDGER_PREFIX}earnings:"
+    with no posted key inside the new window. A key dated after the window is not counted (a later run's window).
+    news-v23 (the restyle, owner 2026-11-19): ONE earnings post holds 2-4 companies, and its key names every one of
+    them (``news:earnings:<SYM>:<day>+<SYM>:<day>…``, `R.ledger_key`) — EACH company it drew counts here as posted,
+    read by `R.earnings_ref_items` (a one-company key, every post before news-v23, reads the same). Never raises on a
+    malformed key (it is skipped whole)."""
     if not days:
         return set()
     first, last = min(days), max(days)
     oldest = first - timedelta(days=EARNINGS_POSTED_LOOKBACK_DAYS)
     out: Set[str] = set()
     for key in exclude:
-        if not key.startswith(prefix):
-            continue
-        sym, sep, raw_day = key[len(prefix):].rpartition(":")
-        if not sep or R.canonical_symbol(sym) != sym:
-            continue
-        try:
-            day = date.fromisoformat(raw_day) if _LEDGER_DAY_RE.fullmatch(raw_day) else None
-        except ValueError:                    # "2027-02-30": shaped like a day, not one
-            day = None
-        if day is not None and oldest <= day <= last:
-            out.add(sym)
+        for sym, day in R.earnings_ref_items(key) or ():
+            if oldest <= day <= last:
+                out.add(sym)
     return out
 
 
@@ -4855,7 +5967,7 @@ def _one_listing_per_issuer(ctx: _Ctx, gated: Sequence[Tuple[Tuple[float, float,
 
 
 async def _collect_earnings(ctx: _Ctx) -> Candidates:
-    days = [ctx.run_date - timedelta(days=i) for i in range(EARNINGS_WINDOW_DAYS, 0, -1)]
+    days = [ctx.run_date - timedelta(days=i) for i in range(R.earnings_window_days(ctx.run_date), 0, -1)]
     by_day = await _earnings_days(ctx, days)
     reports: Dict[str, List[Tuple[date, Any]]] = {}
     listed: Set[str] = set()                                # every listing with a row in the window
@@ -4948,14 +6060,51 @@ async def _collect_earnings(ctx: _Ctx) -> Candidates:
     ranked = _one_listing_per_issuer(ctx, gated, figures)
     # The series' rank order, across everything profiled: the largest company first.
     ranked.sort(key=lambda t: t[0])
-    held = await _earnings_reads(ctx, ranked)
-    return ctx.done([rec for _key, rec in held], "earnings_none_qualified")
+    held = await _earnings_reads(ctx, ranked, hold=R.EARNINGS_DAY_COMPANIES[1])
+    return _earnings_day(ctx, [rec for _key, rec in held])
 
 
-async def _earnings_reads(ctx: _Ctx, gated: Sequence[Tuple[Tuple[float, float, str], Any, Dict[str, Any]]]
-                          ) -> List[Tuple[Tuple[float, float, str], Any]]:
+def _earnings_day(ctx: _Ctx, reports: Sequence[Any]) -> Candidates:
+    """news-v23 (the restyle, owner 2026-11-19: "combine 2 to 4 companies at once"): the ONE `R.EarningsDay` record of
+    the call — the held reports (each through every per-company gate), the largest company first, up to
+    `R.EARNINGS_DAY_COMPANIES`' most; a report whose issuer is already in the post (`R.issuer_root`, the display name —
+    `_one_listing_per_issuer` should have caught it) is left out as `share_class_overlap`. Fewer than the post's
+    minimum after that: no record — ``earnings_too_few_companies`` (exactly one qualified) or
+    ``earnings_none_qualified`` (none), the chain falls through."""
+    lo, hi = R.EARNINGS_DAY_COMPANIES
+    picked: List[Any] = []
+    for rec in reports:
+        if len(picked) >= hi:
+            break
+        if any(R.issuer_root(rec.company.symbol) == R.issuer_root(p.company.symbol)
+               or rec.company.name.casefold() == p.company.name.casefold() for p in picked):
+            logger.info("company news earnings: %s left out as share_class_overlap — its issuer is already in the post",
+                        rec.company.symbol)
+            ctx.reject("share_class_overlap")
+            continue
+        picked.append(rec)
+    if len(picked) < lo:
+        if picked:
+            logger.info("company news earnings: only %s qualified after every gate — an earnings post shows at least "
+                        "%d companies, so none is posted (earnings_too_few_companies)", picked[0].company.symbol, lo)
+        return ctx.done((), "earnings_too_few_companies" if picked else "earnings_none_qualified")
+    try:
+        day = R.EarningsDay(series="earnings", reports=tuple(picked))
+    except ValueError as e:
+        logger.error("company news earnings: the day's %d reports (%s) do not make a record (%s) — none is posted",
+                     len(picked), ",".join(r.company.symbol for r in picked), _describe(e))
+        ctx.reject("record_invalid")
+        return ctx.done((), "earnings_none_qualified")
+    logger.info("company news earnings: ONE post of %d companies (%s), the largest first", len(picked),
+                ",".join(r.company.symbol for r in picked))
+    return ctx.done((day,), "earnings_none_qualified")
+
+
+async def _earnings_reads(ctx: _Ctx, gated: Sequence[Tuple[Tuple[float, float, str], Any, Dict[str, Any]]],
+                          *, hold: Optional[int] = None) -> List[Tuple[Tuple[float, float, str], Any]]:
     """The read stage, in the gated rank order (market cap, gap, symbol): one quarterly-statement read per
-    report, in waves of the reports still needed, at most `EARNINGS_MAX_STATEMENT_READS` in all. A report
+    report, in waves of the reports still needed — until `hold` reports are held (news-v23: the post's most companies,
+    `R.EARNINGS_DAY_COMPANIES`; None: the call's `limit`) — at most `EARNINGS_MAX_STATEMENT_READS` in all. A report
     is HELD only when its statements report in USD and `R.earnings_period` places it (the record then
     carries the quarter's end); every refusal is counted ONCE, a held report never. Out of budget on a later
     wave ends the walk with the reports already held (each fully checked); with none held — or on any other
@@ -4967,12 +6116,13 @@ async def _earnings_reads(ctx: _Ctx, gated: Sequence[Tuple[Tuple[float, float, s
     reads = failed = 0
     last_failure = ""
     queue = list(gated)
-    while queue and len(held) < ctx.limit:
+    target = ctx.limit if hold is None else hold
+    while queue and len(held) < target:
         if reads >= EARNINGS_MAX_STATEMENT_READS:
             logger.info("company news earnings: statement-read cap %d reached with %d record(s) kept and %d "
                         "report(s) unread", EARNINGS_MAX_STATEMENT_READS, len(held), len(queue))
             break
-        want = min(ctx.limit - len(held), EARNINGS_MAX_STATEMENT_READS - reads)
+        want = min(target - len(held), EARNINGS_MAX_STATEMENT_READS - reads)
         wave: List[Tuple[Tuple[float, float, str], Dict[str, Any], Any]] = []
         while queue and len(wave) < want:
             key, company, b = queue.pop(0)
@@ -5101,12 +6251,14 @@ async def _quarter_statements(ctx: _Ctx, sym: str) -> List[Dict[str, Any]]:
 # tickers, but GOOG and GOOGL are one company — review round 15).
 
 
-def _segment_fact(bd: Any, run_date: date) -> Optional[Tuple[str, float, str]]:
+def _segment_fact(bd: Any, run_date: date, *, max_age_years: int = THEME_FACT_MAX_AGE_YEARS
+                  ) -> Optional[Tuple[str, float, str]]:
     """(largest named segment, its share of revenue in (0, 1], fiscal year) — or None whenever
     the claim "largest segment, X% of revenue" could be wrong: a degraded breakdown, an old or
-    unreadable fiscal year, segments that include intersegment sales (eliminations), no reported
-    revenue, one segment only, a tie for the top, an unnamed remainder bigger than the top, or
-    segments adding up to more than revenue. The names are `_segments`' own (Batch 1: a code such as
+    unreadable fiscal year (older than `max_age_years` before the run's: the insider spotlight's 2, a theme member's
+    `R.THEME_TAGGED_FACT_MAX_AGE_YEARS` — drawn with its own year tag), segments that include intersegment sales
+    (eliminations), no reported revenue, one segment only, a tie for the top, an unnamed remainder bigger than the
+    top, or segments adding up to more than revenue. The names are `_segments`' own (Batch 1: a code such as
     "QCT" or a generic "Products" is folded into the remainder, so it is never a tile's line — and a
     folded line larger than every named one leaves the remainder above the top: no fact)."""
     if list(getattr(bd, "degraded", None) or ()):
@@ -5114,7 +6266,7 @@ def _segment_fact(bd: Any, run_date: date) -> Optional[Tuple[str, float, str]]:
     fy = getattr(bd, "fiscal_year", None)
     if not isinstance(fy, str) or not re.fullmatch(r"[0-9]{4}", fy):
         return None
-    if not (run_date.year - THEME_FACT_MAX_AGE_YEARS <= int(fy) <= run_date.year):
+    if not (run_date.year - max_age_years <= int(fy) <= run_date.year):
         return None
     elim = _num(getattr(bd, "intersegment_eliminations", None))
     if elim is not None and elim > 0:
@@ -5139,56 +6291,850 @@ def _segment_fact(bd: Any, run_date: date) -> Optional[Tuple[str, float, str]]:
     return top.name, share, fy
 
 
-async def _theme_facts(ctx: _Ctx, refs: Sequence[Any]) -> Dict[str, Tuple[str, float, str]]:
-    """{symbol: segment fact} for ``refs`` (≤ `THEME_SEGMENT_LOOKUPS`, `THEME_LOOKUP_CONCURRENCY`
-    at a time). One member's failed lookup is that member's missing fact (WARNING); every lookup
-    failing is the service being down → ``revenue_unavailable``."""
+def _stack_is_gross(bd: Any) -> bool:
+    """True when ``bd`` (a revenue breakdown, or one of `get_segment_years`' years) is a readable, non-degraded stack of
+    a four-digit fiscal year whose segments INCLUDE intersegment sales (`intersegment_eliminations` > 0 — the
+    service's reconciliation's "gross" outcome): no segment's share of revenue can be stated from it. Pure."""
+    if list(getattr(bd, "degraded", None) or ()):
+        return False
+    fy = getattr(bd, "fiscal_year", None)
+    if not isinstance(fy, str) or not re.fullmatch(r"[0-9]{4}", fy):
+        return False
+    elim = _num(getattr(bd, "intersegment_eliminations", None))
+    return elim is not None and elim > 0
+
+
+def _walked_back_fact(sym: str, newest: Any, years: Any, run_date: date
+                      ) -> Optional[Tuple[str, float, str, str]]:
+    """Phase 4 (2026-11-20, the owner's "for AI CHIPS, i don't see ARM, Intel and SNPS? add for me"): a theme member
+    whose NEWEST segment stack is gross (`_stack_is_gross`: INTC since its Intel Foundry reorganisation) — the segment
+    fact of the newest fiscal year whose stack is NOT, walking back year by year from ``newest``'s, within
+    `R.THEME_TAGGED_FACT_MAX_AGE_YEARS` of the run: (segment, share, its fiscal year, the company's newest fiscal year)
+    — the last tells the template the fact is never the company's latest year (it always draws its "FY2022" tag). A
+    share is never computed from a gross stack. None — fail closed — whenever the walk could pick a wrong year:
+    ``newest`` not gross or dated after the run's year; ``years`` (`get_segment_years`, newest first) not a sequence,
+    holding a year that is not four
+    digits, another company's year, or one fiscal year twice; its newest year not ``newest``'s, or not gross there too
+    (the two reads disagree); a year missing on the way (never skipped); every year gross down to the bound; the
+    newest non-gross year older than the bound, degraded (unpaired, conflicting, thin, unreconciled) or giving no
+    fact (`_segment_fact`: a tie for the top, one segment, an unnamed remainder above the top …) — the walk never
+    goes past it to an older year. Pure."""
+    if not _stack_is_gross(newest) or not isinstance(years, (list, tuple)):
+        return None
+    latest = int(newest.fiscal_year)
+    if latest > run_date.year:
+        return None                            # a newest year dated after the run is a broken feed, never walked
+    floor = run_date.year - R.THEME_TAGGED_FACT_MAX_AGE_YEARS
+    by_year: Dict[int, Any] = {}
+    for y in years:
+        fy = getattr(y, "fiscal_year", None)
+        if (not isinstance(fy, str) or not re.fullmatch(r"[0-9]{4}", fy) or getattr(y, "symbol", None) != sym
+                or int(fy) in by_year):
+            return None
+        by_year[int(fy)] = y
+    if not by_year or max(by_year) != latest or not _stack_is_gross(by_year[latest]):
+        return None
+    for year in range(latest - 1, floor - 1, -1):
+        y = by_year.get(year)
+        if y is None:
+            return None
+        if _stack_is_gross(y):
+            continue
+        fact = _segment_fact(y, run_date, max_age_years=R.THEME_TAGGED_FACT_MAX_AGE_YEARS)
+        return None if fact is None else (fact[0], fact[1], fact[2], newest.fiscal_year)
+    return None
+
+
+async def _theme_member_fact(ctx: _Ctx, sym: str, bd: Any, years_sem: asyncio.Semaphore
+                             ) -> Optional[Tuple[str, float, str, Optional[str]]]:
+    """One theme member's segment fact (segment, share, fiscal year, None) from its newest breakdown (`_segment_fact`,
+    up to `R.THEME_TAGGED_FACT_MAX_AGE_YEARS` old) — or, when that newest stack is GROSS, the walked-back fact
+    (`_walked_back_fact`, its last item the company's newest year) from ONE older-years read (`get_segment_years`:
+    the card's own two licensed feeds; ``years_sem`` in flight; memoised THEME_BREAKDOWN_TTL_SECONDS when it holds
+    years). A failed older-years read is that member's missing fact (WARNING), never a guess."""
+    fact = _segment_fact(bd, ctx.run_date, max_age_years=R.THEME_TAGGED_FACT_MAX_AGE_YEARS)
+    if fact is not None:
+        return fact[0], fact[1], fact[2], None
+    if not _stack_is_gross(bd):
+        return None
+    years = _memo_get(("theme_segment_years", sym))
+    if years is _MISS:
+        try:
+            async with years_sem:
+                years = await ctx.revenue.get_segment_years(sym)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — that member's fact only; logged
+            logger.warning("company news theme_explainer: %s's newest segment stack (fiscal %s) includes intersegment "
+                           "sales and its older years could not be read — listed without a segment (%s)", sym,
+                           bd.fiscal_year, _describe(e))
+            return None
+        if isinstance(years, (list, tuple)) and years:
+            _memo_put(("theme_segment_years", sym), years, THEME_BREAKDOWN_TTL_SECONDS)
+    walked = _walked_back_fact(sym, bd, years, ctx.run_date)
+    if walked is None:
+        logger.info("company news theme_explainer: %s's newest segment stack (fiscal %s) includes intersegment sales "
+                    "and no older year within %d years gives a certain fact — listed without a segment", sym,
+                    bd.fiscal_year, R.THEME_TAGGED_FACT_MAX_AGE_YEARS)
+    else:
+        logger.info("company news theme_explainer: %s's newest segment stack (fiscal %s) includes intersegment sales "
+                    "— its fact is fiscal %s's, drawn with that year", sym, bd.fiscal_year, walked[2])
+    return walked
+
+
+def _breakdown_memoisable(bd: Any) -> bool:
+    """May a revenue breakdown sit in the adapter's memo? Only a COMPLETE build — the revenue service's own rule
+    (`revenue_breakdown_service._is_cacheable`): a DEGRADED build (a 429 its gather swallowed, a feed that failed) lives
+    60 s there so the next read retries the feed; memoised THEME_BREAKDOWN_TTL_SECONDS here it would freeze that failure
+    as "no segment fact" for every theme read for 30 minutes (final review 2026-11-20: a cached failure is not an
+    answer). A build with no reported revenue (the service's "no revenue data at all" placeholder among them) gives no
+    fact either, and is never memoised. Pure."""
+    return not list(getattr(bd, "degraded", None) or ()) and getattr(bd, "reported_revenue", None) is not None
+
+
+async def _breakdown(ctx: _Ctx, sym: str, key: Tuple[Any, ...], ttl: float) -> Any:
+    """One company's revenue breakdown through `_shared` (final review 2026-11-20): the read runs as the adapter's OWN
+    leader task, so a caller whose deadline expires — an angle's share, a step's `wait_for` — cancels only its own wait.
+    Awaited directly, the cancelled caller WAS the revenue service's in-flight leader, and the service fails its shared
+    future with RuntimeError("in-flight fetch was cancelled"): a user opening that ticker's revenue card, or a paid
+    report collecting it, that had joined the same build got that error. Memoised `ttl` seconds when
+    `_breakdown_memoisable` (0: never — dedupe and detach only). The leader keeps running after a cancelled caller and
+    lands in the service's own cache for the next read."""
+    return await _shared(key, ttl, lambda: ctx.revenue.get_revenue_breakdown(sym), keep=_breakdown_memoisable)
+
+
+async def _theme_facts(ctx: _Ctx, refs: Sequence[Any]) -> Dict[str, Tuple[str, float, str, Optional[str]]]:
+    """{symbol: (segment, share, fiscal year, the company's newest fiscal year when the fact walked back past a gross
+    one — else None)} for ``refs``, READ IN THE ORDER GIVEN (the caller's: the largest market value first):
+    THEME_SEGMENT_CONCURRENCY breakdowns at a time (`_breakdown`: each a complete build memoised
+    THEME_BREAKDOWN_TTL_SECONDS; the service keeps its own two-tier cache behind it), each member's fact by
+    `_theme_member_fact`. Bounded by the angle's time: the waits still running when it is spent are cancelled and THOSE
+    members are listed without a segment (WARNING) — the smallest, since the largest were started first; the reads
+    already started run on as the adapter's own leaders (never cancelled inside the shared revenue service, whose
+    other callers may have joined them) and no new one starts; the answers in hand are kept (each is a whole, checked
+    fact). One
+    member's failed lookup is that member's missing fact (WARNING). No lookup answered at all: every one failed →
+    ``revenue_unavailable`` (the service is down); the time ran out first → ``budget_exhausted`` (the angle's turn
+    lost). Less than MIN_STEP_SECONDS left → ``budget_exhausted`` before any read."""
     if not refs:
         return {}
+    left = ctx.left()
+    if left < MIN_STEP_SECONDS:
+        raise MarketingNewsUnavailable(ctx.series, "budget_exhausted", f"stage=theme_segments left={left:.1f}s")
+    reads = asyncio.Semaphore(THEME_SEGMENT_CONCURRENCY)
+    years_sem = asyncio.Semaphore(THEME_SEGMENT_YEARS_CONCURRENCY)
+
+    async def one(sym: str) -> Optional[Tuple[str, float, str, Optional[str]]]:
+        bd = _memo_get(("theme_breakdown", sym))
+        if bd is _MISS:
+            async with reads:                  # FIFO: the reads start in the order the tasks were made
+                bd = await _breakdown(ctx, sym, ("theme_breakdown", sym), THEME_BREAKDOWN_TTL_SECONDS)
+        return await _theme_member_fact(ctx, sym, bd, years_sem)
+
+    tasks = [asyncio.ensure_future(one(r.symbol)) for r in refs]
+    try:
+        _done, pending = await asyncio.wait(tasks, timeout=left)
+    except asyncio.CancelledError:
+        for t in tasks:
+            t.cancel()
+        raise
+    for t in pending:
+        t.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    out: Dict[str, Tuple[str, float, str, Optional[str]]] = {}
+    failed: List[BaseException] = []
+    unread: List[str] = []
+    for ref, task in zip(refs, tasks):
+        if task in pending or task.cancelled():
+            unread.append(ref.symbol)
+            continue
+        err = task.exception()
+        if err is not None:
+            failed.append(err)
+            logger.warning("company news theme_explainer: %s segment lookup failed — listed without a segment (%s)",
+                           ref.symbol, _describe(err))
+            continue
+        fact = task.result()
+        if fact is not None:
+            out[ref.symbol] = fact
+    if len(failed) + len(unread) == len(refs):
+        if unread:
+            raise MarketingNewsUnavailable(ctx.series, "budget_exhausted",
+                                           f"stage=theme_segments; none of {len(refs)} lookups answered within "
+                                           f"{left:.1f}s")
+        raise MarketingNewsUnavailable(ctx.series, "revenue_unavailable",
+                                       f"stage=theme_segments; all {len(refs)} lookups failed; "
+                                       f"first {_describe(failed[0])}")
+    if unread:
+        logger.warning("company news theme_explainer: %d of %d segment lookup(s) not answered within the angle's "
+                       "%.1f s — listed without a segment (read last: the smallest by market value): %s", len(unread),
+                       len(refs), left, unread[:12])
+    return out
+
+
+@dataclass(frozen=True)
+class _ThemeIn:
+    """One theme past its gates and its profile batch: what every angle reads."""
+
+    slug: str
+    title: str
+    refs: Tuple[Any, ...]                  # the members (CompanyRef), theme order, every gate passed
+    profiles: Mapping[str, Mapping[str, Any]]
+    size: Optional[int]
+    as_of: date
+    #: True when the row has no `tickers_as_of` (the app's live list, owner 2026-11-20): `as_of` is then the run day
+    #: and is never printed (the record's `tickers_as_of_from_row`).
+    as_of_from_row: bool = False
+
+
+def _theme_as_of(row: Mapping[str, Any], run_date: date) -> Tuple[Optional[date], bool]:
+    """(the date a theme's member list is aged from, whether that date is the list's OWN) — None: ``theme_stale``.
+
+    OWNER DECISION 2026-11-20 ("Trust the app's lists (Recommended)": "Your app already shows these exact lists to
+    users, so when a theme has no review date, posts treat its list as current … Each company still passes its own
+    checks (still trading, has data)."): `trending_themes.tickers_as_of` NULL (every production row, 2026-11-20) →
+    the live list counts as current — (run_date, False): never refused `theme_stale`, never dated in public
+    (`ThemeExplainer.tickers_as_of_from_row`), and the row's `updated_at` is not read at all (it neither gates nor
+    dates the list). A PRESENT `tickers_as_of` (a reviewed list) keeps THEME_STALE_DAYS exactly as before: the caller
+    refuses a day after the run or more than 70 days old, and a present value that is not an ISO date is None (fail
+    closed — a malformed value is a broken row, never read as a missing one). Pure."""
+    raw = row.get("tickers_as_of")
+    if raw is None:
+        return run_date, False
+    return (_day(raw) if isinstance(raw, str) else None), True
+
+
+def _theme_history(ctx: _Ctx) -> Dict[str, Tuple[date, str]]:
+    """{slug: (the day of its LAST theme post, that post's angle)} from every theme key the call sees — the exclude
+    refs and the build's own theme ledger read (`ctx.theme_history`, THEME_HISTORY_DAYS back) — read strictly by
+    `R.theme_ref_items` (an old key counts as "how they make money" on its date). A key dated after the run (a hand
+    edit) counts as the run day: excluding more is the safe side. Two keys of one day: the later angle in rotation
+    order. Pure."""
+    out: Dict[str, Tuple[date, str]] = {}
+    for ref in ctx.exclude | ctx.theme_history:
+        items = R.theme_ref_items(ref)
+        if items is None:
+            continue
+        slug, angle, day = items
+        day = min(day, ctx.run_date)
+        cur = out.get(slug)
+        if cur is None or (day, R.THEME_ANGLES.index(angle)) > (cur[0], R.THEME_ANGLES.index(cur[1])):
+            out[slug] = (day, angle)
+    return out
+
+
+def _theme_order(rows: Sequence[Mapping[str, Any]], history: Mapping[str, Tuple[date, str]]) -> List[Mapping[str, Any]]:
+    """The rotation (owner 2026-11-19): the theme never posted first, then the one posted LONGEST ago; ties by
+    `sort_order` (a missing one last), then the slug."""
+    def key(r: Mapping[str, Any]) -> Tuple[int, date, int, str]:
+        so = r.get("sort_order")
+        last = history.get(str(r.get("slug") or ""))
+        return (0 if last is None else 1, date.min if last is None else last[0],
+                so if isinstance(so, int) and not isinstance(so, bool) else 10 ** 9, str(r.get("slug") or ""))
+
+    return sorted(rows, key=key)
+
+
+def _theme_read_priority(t: _ThemeIn) -> List[Any]:
+    """The order "how they make money" READS its members' breakdowns in (phase 4, 2026-11-20): the largest market value
+    first by the theme's own profile batch (`marketCap` — the rank only, never leaves, as the earnings series ranks; the
+    market-value batch that orders the TILES runs beside the reads, so its answer is not in hand when they start), ties
+    by the symbol; a member without a positive one after, in the theme's own order. A share of the time cut short thus
+    leaves only the smallest members unread. Pure."""
+    def cap(ref: Any) -> Optional[float]:
+        v = _num((t.profiles.get(ref.symbol) or {}).get("marketCap"))
+        return v if v is not None and v > 0 else None
+
+    capped = sorted((r for r in t.refs if cap(r) is not None), key=lambda r: (-(cap(r) or 0.0), r.symbol))
+    return capped + [r for r in t.refs if cap(r) is None]
+
+
+async def _theme_tile_values(ctx: _Ctx, t: _ThemeIn) -> Dict[str, float]:
+    """{symbol: market value} that orders the "how they make money" TILES: the ONE market-capitalization batch the
+    "biggest" angle reads (memoised per member set, so the two angles share it), through the same checks
+    (`_usable_market_values`: USD listing, one dated value per member, the post's day within the week). Order only —
+    never drawn, never on the record (`ThemeExplainer` refuses market values outside a market-value post). Its read
+    failing or outlasting the angle's time is NOT the angle's failure: no values (WARNING), so the tiles keep the
+    theme's own order."""
+    try:
+        rows = await _theme_value_rows(ctx, t)
+    except MarketingNewsUnavailable as e:
+        logger.warning("company news theme_explainer: %s — no market values for the tile order (%s: %s); the members "
+                       "with a fact keep the theme's own order", t.slug, e.reason, e.detail)
+        return {}
+    values, _as_of, _left_out = _usable_market_values(rows, t, ctx.run_date)
+    return values
+
+
+def _theme_tile_order(t: _ThemeIn, facts: Mapping[str, Any], values: Mapping[str, float]) -> List[Any]:
+    """The record's member order for "how they make money" (the template draws its tiles in it, the members with a
+    fact first): the members WITH a fact, the largest market value first (ties by the symbol — the "biggest" angle's
+    rule), those without a usable value after them in the theme's own order; then every member without a fact, in the
+    theme's own order (the captions' "{co} is also in …"). Pure."""
+    with_fact = [r for r in t.refs if r.symbol in facts]
+    valued = sorted((r for r in with_fact if r.symbol in values), key=lambda r: (-values[r.symbol], r.symbol))
+    return (valued + [r for r in with_fact if r.symbol not in values]
+            + [r for r in t.refs if r.symbol not in facts])
+
+
+async def _theme_make_money(ctx: _Ctx, t: _ThemeIn) -> Union[Any, str]:
+    """Angle 1, "how they make money" (theme_ai_chips.jpg, theme_ai_chips_more.jpg): every member, each with its largest
+    revenue line and that line's share of revenue where certain. Phase 4 (2026-11-20, the owner's "for AI CHIPS, i don't
+    see ARM, Intel and SNPS? add for me"): EVERY member's breakdown is read (`_theme_facts`, in `_theme_read_priority`'s
+    market-value order), a member whose newest stack is gross walks back to the newest year that is not
+    (`_walked_back_fact`), and the record lists the members with a fact LARGEST MARKET VALUE FIRST (the market-value
+    batch "biggest" reads, beside the breakdown reads: `_theme_tile_values`), so the picture's 12 tiles are the largest
+    companies that have one — and only those THEME_FACT_TILES carry their fact (the rest are named: the captions' "+N
+    more"). At least THEME_ANGLE_MIN_COMPANIES members with a fact, else ``theme_facts_thin``."""
+    values_task = asyncio.ensure_future(_theme_tile_values(ctx, t))
+    try:
+        facts = await _theme_facts(ctx, _theme_read_priority(t)[:THEME_SEGMENT_LOOKUPS])
+        values = await values_task
+    except BaseException:
+        values_task.cancel()
+        await asyncio.gather(values_task, return_exceptions=True)
+        raise
+    if len(facts) < max(R.THEME_MIN_FACTS, R.THEME_ANGLE_MIN_COMPANIES):
+        return "theme_facts_thin"
+    # the picture's tiles carry the facts: the THEME_FACT_TILES largest members with one; the rest are named only
+    ranked = [r.symbol for r in _theme_tile_order(t, facts, values) if r.symbol in facts]
+    if len(ranked) > THEME_FACT_TILES:
+        logger.info("company news theme_explainer: %s — %d member(s) with a fact past the picture's %d tiles are listed "
+                    "without it (the captions name them): %s", t.slug, len(ranked) - THEME_FACT_TILES,
+                    THEME_FACT_TILES, ranked[THEME_FACT_TILES:])
+        facts = {s: facts[s] for s in ranked[:THEME_FACT_TILES]}
+
+    def member(ref: Any) -> Any:
+        f = facts.get(ref.symbol)
+        if f is None:
+            return R.ThemeMember(company=ref, top_segment=None, top_segment_share=None, fiscal_year=None)
+        return R.ThemeMember(company=ref, top_segment=f[0], top_segment_share=f[1], fiscal_year=f[2],
+                             latest_fiscal_year=f[3])
+
+    members = tuple(member(ref) for ref in _theme_tile_order(t, facts, values))
+    return R.ThemeExplainer(series="theme_explainer", slug=t.slug, title=t.title, members=members,
+                            tickers_as_of=t.as_of, tickers_as_of_from_row=t.as_of_from_row, theme_size=t.size,
+                            angle="make_money", posted_on=ctx.run_date)
+
+
+async def _fetch_market_values(fmp: Any, symbols: Sequence[str]) -> List[Dict[str, Any]]:
+    got = await fmp.get_market_cap_batch(list(symbols))
+    if not isinstance(got, list):
+        raise FMPUnavailableException(f"market-capitalization batch returned {type(got).__name__}, not a list")
+    return [r for r in got if isinstance(r, dict)]
+
+
+async def _theme_value_rows(ctx: _Ctx, t: _ThemeIn) -> List[Dict[str, Any]]:
+    """The theme members' market-capitalization batch rows: ONE licensed call ("3 Company Information"), memoised
+    THEME_MARKET_VALUE_TTL_SECONDS per member set — shared by "biggest" (its values) and "how they make money" (its
+    tile order). A failed call is ``profiles_unavailable``-shaped; the time running out, ``budget_exhausted``."""
+    symbols = sorted(r.symbol for r in t.refs)
+    return await ctx.step("theme_market_values",
+                          lambda: _shared(("theme_market_values", tuple(symbols)), THEME_MARKET_VALUE_TTL_SECONDS,
+                                          lambda: _fetch_market_values(ctx.fmp, symbols)),
+                          reason="profiles_unavailable")
+
+
+def _usable_market_values(rows: Sequence[Mapping[str, Any]], t: _ThemeIn, run_date: date
+                          ) -> Tuple[Dict[str, float], Optional[date], List[str]]:
+    """({symbol: market value in USD}, their ONE date, the members left out) from the batch ``rows``. Only `symbol`,
+    `date` and `marketCap` of a row are read — never a price. A member is LEFT OUT (never ranked on a guess) when its
+    listing does not trade in USD (the batch's figure is in the listing's own currency), it has no row, its value is
+    missing / not a positive finite number / over THEME_MARKET_VALUE_MAX_USD, it has two rows that disagree, or its row
+    is dated another day than the post's. The post's day is the day most rows carry (ties: the newest), and only within
+    THEME_MARKET_VALUE_MAX_AGE_DAYS before the run (else every member is left out — WARNING). Pure but for the log."""
+    symbols = sorted(r.symbol for r in t.refs)
+    seen: Dict[str, Tuple[float, date]] = {}
+    bad: Set[str] = set()
+    for row in rows:
+        sym = R.canonical_symbol(row.get("symbol"))
+        if sym is None or sym not in symbols:
+            continue
+        value, day = _num(row.get("marketCap")), _day(row.get("date"))
+        if (value is None or not 0 < value <= R.THEME_MARKET_VALUE_MAX_USD or day is None
+                or (sym in seen and seen[sym] != (value, day))):
+            bad.add(sym)
+            continue
+        seen[sym] = (value, day)
+    usd = {r.symbol for r in t.refs
+           if str((t.profiles.get(r.symbol) or {}).get("currency") or "").strip().upper() == "USD"}
+    for sym in symbols:
+        if sym in bad or sym not in seen or sym not in usd:
+            bad.add(sym)
+    good = {s: v for s, v in seen.items() if s not in bad}
+    days = Counter(d for _v, d in good.values())
+    as_of = max(days, key=lambda d: (days[d], d)) if days else None
+    if as_of is not None and not 0 <= (run_date - as_of).days <= R.THEME_MARKET_VALUE_MAX_AGE_DAYS:
+        logger.warning("company news theme_explainer: %s market values are dated %s — not within %d days before the "
+                       "run %s; none used", t.slug, as_of, R.THEME_MARKET_VALUE_MAX_AGE_DAYS, run_date)
+        as_of, good = None, {}
+    out = {s: v for s, (v, d) in good.items() if d == as_of}
+    return out, as_of, sorted(set(symbols) - set(out))
+
+
+async def _theme_market_values(ctx: _Ctx, t: _ThemeIn) -> Tuple[Dict[str, float], Optional[date]]:
+    """({symbol: market value in USD}, their ONE date) for the "biggest" angle: the memoised batch
+    (`_theme_value_rows`) through `_usable_market_values`; every member left out is counted
+    (``market_value_unusable``) and the post says "{n} of its {m} companies". A failed call is
+    ``profiles_unavailable``-shaped: the angle is unavailable (the caller tries the next angle)."""
+    rows = await _theme_value_rows(ctx, t)
+    out, as_of, left_out = _usable_market_values(rows, t, ctx.run_date)
+    if left_out:
+        ctx.reject("market_value_unusable", len(left_out))
+        logger.info("company news theme_explainer: %s — %d of %d member(s) left out of the market-value post (no "
+                    "usable, same-day USD value: %s)", t.slug, len(left_out), len(t.refs), left_out[:12])
+    return out, as_of
+
+
+async def _theme_biggest(ctx: _Ctx, t: _ThemeIn) -> Union[Any, str]:
+    """Angle 2, "who's biggest" by market value (theme_biggest_power.jpg): the members ranked by their dated market
+    value, the largest first (`_theme_market_values`; a member without a usable value is left out and the post says
+    "{n} of its {m} companies"). At least THEME_ANGLE_MIN_COMPANIES valued members, else ``theme_values_thin``. A
+    fact only — never a price, a % move or a verdict."""
+    values, as_of = await _theme_market_values(ctx, t)
+    valued = [ref for ref in t.refs if ref.symbol in values]
+    if len(valued) < R.THEME_ANGLE_MIN_COMPANIES or as_of is None:
+        return "theme_values_thin"
+    ranked = sorted(valued, key=lambda r: (-values[r.symbol], r.symbol))
+    members = tuple(R.ThemeMember(company=r, top_segment=None, top_segment_share=None, fiscal_year=None,
+                                  market_value_usd=values[r.symbol]) for r in ranked)
+    return R.ThemeExplainer(series="theme_explainer", slug=t.slug, title=t.title, members=members,
+                            tickers_as_of=t.as_of, tickers_as_of_from_row=t.as_of_from_row, theme_size=t.size,
+                            angle="biggest", posted_on=ctx.run_date,
+                            values_as_of=as_of)
+
+
+# ── the theme post's last three angles (news-v23 phase 3, 2026-11-20) ─────────────────────────────────────────────
+
+
+def _theme_table_refs(ctx: _Ctx, t: _ThemeIn, angle: str) -> List[Any]:
+    """The theme's members (theme order) whose display name the angle's TABLE can draw (`R.theme_table_name_fits`);
+    the others are left out before any read (``company_name_unusable``), so the template never refuses the record — a
+    theme is never stuck on an angle it cannot draw."""
+    out: List[Any] = []
+    for ref in t.refs:
+        if R.theme_table_name_fits(angle, ref.name):
+            out.append(ref)
+        else:
+            logger.info("company news theme_explainer: %s left out of the %s post — its name does not fit the table's "
+                        "name column", ref.symbol, angle)
+            ctx.reject("company_name_unusable")
+    return out
+
+
+async def _fetch_annual_statements(fmp: Any, sym: str) -> List[Dict[str, Any]]:
+    """``sym``'s latest THEME_STATEMENT_ROWS ANNUAL income statements — ONE licensed call — as dict rows; no dict row
+    raises (the caller leaves the member out: an exception is never memoised)."""
+    rows = await fmp.get_income_statement(sym, "annual", limit=THEME_STATEMENT_ROWS)
+    dated = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    if not dated:
+        raise FMPUnavailableException(f"annual income statement of {sym}: {type(rows).__name__} with no row")
+    return dated
+
+
+def _theme_growth_fact(rows: Sequence[Any], run_date: date) -> Union[Tuple[str, float, float, float], str]:
+    """(latest fiscal year, its revenue, the year before's revenue, its net income) from a member's annual income
+    statements — or the reason the claim "revenue grew X% and it kept $Y per $100" could be wrong (`growth_unusable`,
+    with the detail logged by the caller): fewer than two dated years, two rows of one date that disagree, the latest
+    year after the run or more than `R.THEME_STATEMENT_MAX_AGE_DAYS` before it, the two years' ends not
+    `R.THEME_GROWTH_YEAR_GAP_DAYS` apart, an unreadable or not consecutive fiscal year, two reporting currencies, a
+    missing or non-positive revenue, a missing net income, growth above `R.THEME_GROWTH_MAX_ABS`, net income above
+    revenue or a loss past `R.THEME_LOSS_MAX_RATIO` × revenue, or a profit per $100 too small to print (under a cent,
+    not zero). The figures are in the company's reporting currency: the post states only the two ratios. Pure."""
+    by_day: Dict[date, Mapping[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        day = _day(row.get("date"))
+        if day is None:
+            continue
+        if day in by_day and any(by_day[day].get(k) != row.get(k) for k in ("revenue", "netIncome")):
+            return "two rows of one year disagree"
+        by_day.setdefault(day, row)
+    days = sorted(by_day, reverse=True)
+    if len(days) < 2:
+        return "fewer than two dated years"
+    latest, prior = by_day[days[0]], by_day[days[1]]
+    age = (run_date - days[0]).days
+    if age < 0 or age > R.THEME_STATEMENT_MAX_AGE_DAYS:
+        return f"latest year ended {days[0]} ({age} days before the run)"
+    gap = (days[0] - days[1]).days
+    lo, hi = R.THEME_GROWTH_YEAR_GAP_DAYS
+    if not lo <= gap <= hi:
+        return f"the two years end {gap} days apart"
+    fy, fy_prior = _row_fy(latest), _row_fy(prior)
+    if not re.fullmatch(r"[0-9]{4}", fy) or not re.fullmatch(r"[0-9]{4}", fy_prior) or int(fy) != int(fy_prior) + 1:
+        return f"fiscal years {fy[:8]!r} / {fy_prior[:8]!r} are not consecutive"
+    if not run_date.year - 3 <= int(fy) <= run_date.year + 1:
+        return f"fiscal year {fy} is not near the run"
+    cur = [str(r.get("reportedCurrency") or "").strip().upper() for r in (latest, prior)]
+    if not cur[0] or cur[0] != cur[1]:
+        return "the two years' reporting currencies differ or are missing"
+    revenue, before, net = _num(latest.get("revenue")), _num(prior.get("revenue")), _num(latest.get("netIncome"))
+    if revenue is None or before is None or revenue <= 0 or before <= 0:
+        return "revenue missing or not positive"
+    if net is None:
+        return "net income missing"
+    growth = (revenue - before) / before
+    if abs(growth) > R.THEME_GROWTH_MAX_ABS:
+        return f"growth {growth:+.2f} past the plausibility bound"
+    if net > revenue or net < -R.THEME_LOSS_MAX_RATIO * revenue:
+        return "net income above revenue, or an implausible loss"
+    per_100 = 100.0 * net / revenue
+    if net != 0 and abs(per_100) < 0.005:
+        return "profit per $100 under a cent"
+    return fy, revenue, before, net
+
+
+async def _theme_growth_profit(ctx: _Ctx, t: _ThemeIn) -> Union[Any, str]:
+    """Angle 3, "growth + profit" (theme_growth_profit_silicon.jpg): the first THEME_STATEMENT_LOOKUPS members (theme
+    order) read, the first `R.THEME_GROWTH_MAX_MEMBERS` of them with a certain fact kept (the rest are spares), each
+    with its latest fiscal year's revenue growth over the year before and its net income per $100 of revenue
+    (`_theme_growth_fact`); a member without a certain fact is LEFT OUT (``growth_unusable`` /
+    ``statements_unreadable``, never a guess). At least THEME_ANGLE_MIN_COMPANIES members with the fact, else
+    ``theme_growth_thin``; every read failing → ``revenue_unavailable`` (the source is down, not "nothing qualified").
+    The rows keep the THEME's order: no ranking word."""
+    refs = _theme_table_refs(ctx, t, "growth_profit")[:THEME_STATEMENT_LOOKUPS]
     sem = asyncio.Semaphore(THEME_LOOKUP_CONCURRENCY)
 
     async def one(sym: str) -> Any:
         async with sem:
-            return await ctx.revenue.get_revenue_breakdown(sym)
+            return await _shared(("theme_annual", sym), THEME_STATEMENT_TTL_SECONDS,
+                                 lambda: _fetch_annual_statements(ctx.fmp, sym))
+
+    results = await ctx.step("theme_statements",
+                             lambda: asyncio.gather(*(one(r.symbol) for r in refs), return_exceptions=True),
+                             reason="revenue_unavailable")
+    failed = [r for r in results if isinstance(r, BaseException)]
+    if refs and len(failed) == len(results):
+        raise MarketingNewsUnavailable(ctx.series, "revenue_unavailable",
+                                       f"stage=theme_statements; all {len(results)} reads failed; "
+                                       f"first {_describe(failed[0])}")
+    members: List[Any] = []
+    for ref, rows in zip(refs, results):
+        if isinstance(rows, BaseException):
+            logger.warning("company news theme_explainer: %s annual statements unreadable — left out of the growth + "
+                           "profit post (%s)", ref.symbol, _describe(rows))
+            ctx.reject("statements_unreadable")
+            continue
+        fact = _theme_growth_fact(rows, ctx.run_date)
+        if isinstance(fact, str):
+            logger.info("company news theme_explainer: %s left out of the growth + profit post — %s", ref.symbol, fact)
+            ctx.reject("growth_unusable")
+            continue
+        if len(members) >= R.THEME_GROWTH_MAX_MEMBERS:
+            continue                           # the post's companies are taken (theme order); a spare read only
+        fy, revenue, before, net = fact
+        members.append(R.ThemeMember(company=ref, top_segment=None, top_segment_share=None, fiscal_year=fy,
+                                     revenue_usd=revenue, prior_revenue_usd=before, net_income_usd=net))
+    if len(members) < R.THEME_ANGLE_MIN_COMPANIES:
+        return "theme_growth_thin"
+    return R.ThemeExplainer(series="theme_explainer", slug=t.slug, title=t.title, members=tuple(members),
+                            tickers_as_of=t.as_of, tickers_as_of_from_row=t.as_of_from_row, theme_size=t.size,
+                            angle="growth_profit", posted_on=ctx.run_date)
+
+
+def _theme_insider_totals(rows: Sequence[Any], *, cik: str, window_start: date, window_end: date
+                          ) -> Union[Tuple[float, float], str]:
+    """(purchases, sales) — code P and code S lines, "open market or private" (never drawn as "open-market") — in
+    dollars AS FILED (Σ shares × each line's own per-share amount) over one ISSUER's Form 4 rows FILED in
+    [window_start, window_end], or the reason the totals could be wrong
+    (the member is then LEFT OUT, never shown with a guessed zero):
+
+    * ``amended_filing`` — ANY amendment row of the issuer (a "/A" form, any code, any security, any reporter) filed on
+      or after `window_start` (the Form 4 posts' company-level rule, `_is_amendment_row` / `_filed_since`);
+    * ``insider_feed_unusable`` — a row of another issuer (the read was not filtered), or a code-P / code-S line in the
+      window whose filing date, security, direction, shares or per-share amount cannot be read (a blank security on
+      such a line is not known to be stock — fail closed).
+
+    Counted: Form 4 lines (a blank form reads "4"), code P (purchases) and code S (sales) by the code before the dash
+    of `transactionType` ("S-Sale", "S-Sale+OE"), COMMON stock only (`is_common_stock`: an option, a warrant, a note, a
+    preferred or a unit line is a derivative or another security — excluded), acquisition "A" for P and disposition
+    "D" for S when stated. Never an award, an option exercise, a gift or tax withholding (codes A, M, G, F …). The same
+    line (reporter, trade date, code, ownership, shares, per-share amount) on two filings counts once, on the earliest
+    — identical lines on ONE filing are separate fills (`extract_insider_buys`' rule).
+
+    JOINT FILERS (fix round 2026-11-20): a fund, its general partner and its manager — or a trust and its trustee —
+    each report the SAME Form 4 line under their own reporter, so summing every reporter's copy counted one $50M sale
+    as $150M. The COUNTED lines go through `_insider_common.distinct_trades` (one copy per issuer, trade date, code,
+    shares, per-share amount, security and post-trade balance, across different reporters — the holders and report
+    paths' rule) AFTER every raw row was read for the issuer and amendment checks above (a 4/A filed under a second
+    co-filer alone is still seen: `distinct_trades` has no form type). A copy it cannot match — the same-looking line
+    (trade date, code, shares, per-share amount, security) under another reporter with no readable balance on one of
+    them — could be a joint copy or a second trade: ``insider_feed_unusable`` (fail closed, never a doubled total).
+    Pure."""
+    want = R.cik10(cik)
+    kept: List[Tuple[Dict[str, Any], Tuple[Any, ...], date, str, float]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        issuer = normalize_cik(row.get("companyCik"))
+        if issuer is not None and R.cik10(issuer) != want:
+            return "insider_feed_unusable"
+        if _is_amendment_row(row) and _filed_since(row, window_start):
+            return "amended_filing"
+        tx = row.get("transactionType")
+        code = tx.split("-", 1)[0].strip().upper() if isinstance(tx, str) else ""
+        if code not in ("P", "S"):
+            continue
+        form = row.get("formType")
+        form_type = str(form).strip().upper() if form not in (None, "") else "4"
+        if not form_type.startswith("4"):
+            continue
+        filed = _day(row.get("filingDate"))
+        if filed is None:
+            return "insider_feed_unusable"
+        if not window_start <= filed <= window_end:
+            continue
+        security = row.get("securityName")
+        if not isinstance(security, str) or not security.strip():
+            return "insider_feed_unusable"
+        if not is_common_stock(security):
+            continue                                  # a derivative or another security: not the stock
+        direction = str(row.get("acquisitionOrDisposition") or "").strip().upper()
+        if direction and direction != ("A" if code == "P" else "D"):
+            return "insider_feed_unusable"
+        shares, each = _num(row.get("securitiesTransacted")), _num(row.get("price"))
+        if shares is None or each is None or shares <= 0 or each <= 0:
+            return "insider_feed_unusable"
+        dollars = shares * each
+        if not math.isfinite(dollars) or dollars > _FORM4_MAX_ROW_DOLLARS:
+            return "insider_feed_unusable"
+        traded = _day(row.get("transactionDate"))
+        key = (insider_reporter_key(row), traded, code, str(row.get("directOrIndirect") or "").strip().upper(),
+               round(shares, 4), round(each, 4))
+        kept.append((dict(row), key, filed, code, dollars))
+    # joint filers: one copy of each line (the copies handed in are the very objects `distinct_trades` returns)
+    survivors = {id(r) for r in distinct_trades([k[0] for k in kept])}
+    kept = [k for k in kept if id(k[0]) in survivors]
+    reporters: Dict[Tuple[Any, ...], Set[str]] = {}
+    unmatched: Set[Tuple[Any, ...]] = set()
+    for row, key, _filed, _code, _d in kept:
+        line = key[1:3] + key[4:] + (str(row.get("securityName") or "").strip().casefold(),)
+        reporters.setdefault(line, set()).add(key[0])
+        if _num(row.get("securitiesOwned")) is None:
+            unmatched.add(line)
+    if any(len(reporters[line]) > 1 for line in unmatched):
+        return "insider_feed_unusable"           # a joint copy or a second trade — cannot tell: never a doubled total
+    first: Dict[Tuple[Any, ...], date] = {}
+    for _row, key, filed, _code, _d in kept:
+        if key not in first or filed < first[key]:
+            first[key] = filed
+    buys = math.fsum(d for _row, key, filed, code, d in kept if code == "P" and filed == first[key])
+    sells = math.fsum(d for _row, key, filed, code, d in kept if code == "S" and filed == first[key])
+    if 0 < buys < 1 or 0 < sells < 1:
+        return "insider_feed_unusable"           # a total under $1 would print as "$0" — a zero that is not one
+    return buys, sells
+
+
+async def _walk_theme_issuer(fmp: Any, cik: str, window_start: date) -> List[Dict[str, Any]]:
+    """One ISSUER's insider rows filed since `window_start` (every code, class and form, by CIK): the fail-closed
+    per-issuer feed, at most THEME_INSIDER_MAX_PAGES pages (past them `FMPPartialPageException`: the issuer is left
+    out, never totalled on a partial window)."""
+    rows = await fmp.get_insider_trades_since(window_start.isoformat(), company_cik=cik,
+                                              page_size=THEME_INSIDER_PAGE_SIZE, max_pages=THEME_INSIDER_MAX_PAGES)
+    if not isinstance(rows, list):
+        raise FMPUnavailableException(f"per-issuer insider feed returned {type(rows).__name__}, not a list")
+    return rows
+
+
+async def _theme_insiders(ctx: _Ctx, t: _ThemeIn) -> Union[Any, str]:
+    """Angle 4, the "insider scorecard" (theme_insiders_cyber.jpg; owner 2026-11-19): for the first
+    THEME_INSIDER_LOOKUPS members (theme order), each issuer's Form 4 purchases (code P) and sales (code S) FILED in the
+    THEME_INSIDER_WINDOW_DAYS days before the run (`_theme_insider_totals`, by the profile's issuer CIK). A member is
+    CHECKED when its read is whole and clean; it is LISTED when it has a purchase or a sale. A member with no CIK, a
+    failed or partial read, another issuer's rows, an unreadable P / S line (``insider_feed_unusable``) or a Form 4/A
+    in the window (``amended_filing``) is neither — never a zero. At least THEME_ANGLE_MIN_COMPANIES listed members,
+    else ``theme_insiders_thin``; every read failing → ``insider_feed_unavailable``. Company-level totals only: no
+    person, role or name of anyone is read into the record.
+
+    CHECKED needs a Form 4 FILER (fix round 2026-11-20): the post says "No purchase or sale … was disclosed at the
+    other {k} companies checked", which is true only of a company whose insiders file Form 4 and whose read came back.
+    So, before any read, a member that is not a US common listing — an ADR, a non-USD listing or a non-common line
+    (`R.company_from_profile(purpose="common")`: the Congress Count's and the Form 4 posts' gate; a foreign private
+    issuer is exempt from Section 16 and files no Form 4) — is left out with that reason (never read, never checked);
+    and a read that holds NO row of the issuer at all is not a check (``insider_feed_unusable``): the per-issuer read
+    sends no date filter, so any issuer that ever filed returns its newest rows — an empty answer is a foreign issuer
+    the flags missed (ASML, CHKP: ordinary shares, `isAdr` False), a wrong CIK, or a refused read (FMP answers a page-0
+    403/404 with ``[]``). Such reads are never memoised (``keep=bool``, as `_issuer_feed`). Every read failing or empty
+    → ``insider_feed_unavailable`` (an outage, never "thin")."""
+    window_end = ctx.run_date - timedelta(days=1)
+    window_start = ctx.run_date - timedelta(days=R.THEME_INSIDER_WINDOW_DAYS)
+    refs: List[Any] = []
+    for r in _theme_table_refs(ctx, t, "insiders")[:THEME_INSIDER_LOOKUPS]:
+        listing = R.company_from_profile(t.profiles.get(r.symbol), r.symbol, purpose="common")
+        if isinstance(listing, str):
+            logger.info("company news theme_explainer: %s left out of the insider scorecard before any read — %s (not "
+                        "a US common listing: its insiders may file no Form 4)", r.symbol, listing)
+            ctx.reject(listing)
+            continue
+        refs.append(r)
+    ciks: Dict[str, Optional[str]] = {r.symbol: R.cik10((t.profiles.get(r.symbol) or {}).get("cik")) for r in refs}
+    readable = [r for r in refs if ciks[r.symbol] is not None]
+    for r in refs:
+        if ciks[r.symbol] is None:
+            logger.warning("company news theme_explainer: %s has no issuer CIK on its profile — left out of the insider "
+                           "scorecard (its Form 4s cannot be read by issuer)", r.symbol)
+            ctx.reject("insider_feed_unusable")
+    sem = asyncio.Semaphore(THEME_INSIDER_CONCURRENCY)
+
+    async def one(cik: str) -> Any:
+        async with sem:
+            return await _shared(("theme_insider_issuer", cik, window_start.isoformat()), INSIDER_RAW_TTL_SECONDS,
+                                 lambda: _walk_theme_issuer(ctx.fmp, cik, window_start), keep=bool)
 
     results = await ctx.step(
-        "theme_segments",
-        lambda: asyncio.gather(*(one(r.symbol) for r in refs), return_exceptions=True),
-        reason="revenue_unavailable",
-    )
-    failed = [r for r in results if isinstance(r, BaseException)]
-    if len(failed) == len(results):
-        raise MarketingNewsUnavailable(ctx.series, "revenue_unavailable",
-                                       f"stage=theme_segments; all {len(results)} lookups failed; "
+        "theme_insider_feeds",
+        lambda: asyncio.gather(*(one(ciks[r.symbol] or "") for r in readable), return_exceptions=True),
+        reason="insider_feed_unavailable")
+    failed = [x for x in results if isinstance(x, BaseException)]
+    if readable and len(failed) == len(results):
+        raise MarketingNewsUnavailable(ctx.series, "insider_feed_unavailable",
+                                       f"stage=theme_insider_feeds; all {len(results)} reads failed; "
                                        f"first {_describe(failed[0])}")
-    out: Dict[str, Tuple[str, float, str]] = {}
-    for ref, bd in zip(refs, results):
-        if isinstance(bd, BaseException):
-            logger.warning("company news theme_explainer: %s segment lookup failed — listed without a "
-                           "segment (%s)", ref.symbol, _describe(bd))
+
+    def issuer_rows(rows: Any, cik: str) -> int:
+        want = R.cik10(cik)
+        return sum(1 for row in rows if isinstance(row, Mapping)
+                   and (issuer := normalize_cik(row.get("companyCik"))) is not None and R.cik10(issuer) == want)
+
+    if readable and all(isinstance(x, BaseException) or not issuer_rows(x, ciks[r.symbol] or "")
+                        for r, x in zip(readable, results)):
+        raise MarketingNewsUnavailable(ctx.series, "insider_feed_unavailable",
+                                       f"stage=theme_insider_feeds; none of {len(results)} reads held a row of its "
+                                       f"issuer ({len(failed)} failed)")
+    checked = 0
+    members: List[Any] = []
+    for ref, rows in zip(readable, results):
+        if isinstance(rows, BaseException):
+            logger.warning("company news theme_explainer: %s Form 4 read failed or ran past %d pages — left out of the "
+                           "insider scorecard (%s)", ref.symbol, THEME_INSIDER_MAX_PAGES, _describe(rows))
+            ctx.reject("insider_feed_unusable")
             continue
-        fact = _segment_fact(bd, ctx.run_date)
-        if fact is not None:
-            out[ref.symbol] = fact
-    return out
+        if not issuer_rows(rows, ciks[ref.symbol] or ""):
+            logger.warning("company news theme_explainer: %s per-issuer Form 4 read held no row of its issuer (%d row(s) "
+                           "in all) — a foreign issuer, a wrong CIK or a refused read: left out of the insider "
+                           "scorecard, not counted as checked", ref.symbol, len(rows))
+            ctx.reject("insider_feed_unusable")
+            continue
+        got = _theme_insider_totals(rows, cik=ciks[ref.symbol] or "", window_start=window_start,
+                                    window_end=window_end)
+        if isinstance(got, str):
+            logger.info("company news theme_explainer: %s left out of the insider scorecard — %s", ref.symbol, got)
+            ctx.reject(got)
+            continue
+        checked += 1
+        buys, sells = got
+        if buys > 0 or sells > 0:
+            members.append(R.ThemeMember(company=ref, top_segment=None, top_segment_share=None, fiscal_year=None,
+                                         purchases_usd=buys, sales_usd=sells))
+    if len(members) < R.THEME_ANGLE_MIN_COMPANIES:
+        return "theme_insiders_thin"
+    members.sort(key=R.theme_insider_order_key)
+    return R.ThemeExplainer(series="theme_explainer", slug=t.slug, title=t.title, members=tuple(members),
+                            tickers_as_of=t.as_of, tickers_as_of_from_row=t.as_of_from_row, theme_size=t.size,
+                            angle="insiders", posted_on=ctx.run_date,
+                            window_start=window_start, window_end=window_end, companies_checked=checked)
+
+
+async def _theme_congress(ctx: _Ctx, t: _ThemeIn) -> Union[Any, str]:
+    """Angle 5, "Congress" (theme_congress_defense.jpg): the theme's members whose stock at least
+    `R.CONGRESS_MIN_MEMBERS` DISTINCT members of Congress disclosed PURCHASES of in the disclosure month — the
+    congress_count series' own month (`selection.congress_disclosure_month`, due `CONGRESS_DUE_DAYS` after it ends),
+    its own memoised walk of both chambers (`_congress_month` under the ``("congress", month)`` key: ONE walk of the
+    feeds per build, whichever series reads it first) and its own identity-free count (purchases only, stock only,
+    members deduplicated on hashed identity keys and dropped at the source — never a name, a party, a state or a
+    chamber). A member whose in-month purchases may be another spelling of the same company is left out
+    (`_issuer_clash`), and so is one the Congress Count's listing gate refuses (`purpose="common"`: an ADR, a non-USD or
+    a non-common listing — fix round 2026-11-20; theme members are built as "listing" refs, which keep ADRs). At least
+    THEME_ANGLE_MIN_COMPANIES such members, else ``theme_congress_thin``.
+
+    The same (company, month) may also be on that month's congress_count post: both read the SAME memoised
+    aggregate through the SAME listing gate, so the two counts can never disagree and a company refused there is
+    refused here too; the theme post is a theme's view of those disclosures (its key is the theme's, never the
+    month's) — a repeat of a true count, never a second fact (decided 2026-11-20)."""
+    month = selection.congress_disclosure_month(ctx.run_date)
+    if ctx.run_date < R.month_end_of(month) + timedelta(days=CONGRESS_DUE_DAYS):
+        return "theme_congress_not_due"
+    agg = await ctx.step(
+        "congress_walk",
+        lambda: _shared(("congress", month), CONGRESS_TTL_SECONDS, lambda: _congress_month(ctx.fmp, month)),
+        reason="congress_feed_unavailable",
+    )
+    counts, refused = agg["counts"], agg["refused"]
+    members: List[Any] = []
+    for ref in _theme_table_refs(ctx, t, "congress"):
+        n = counts.get(ref.symbol)
+        if ref.symbol in refused:
+            ctx.reject(refused[ref.symbol])
+            continue
+        if not isinstance(n, int) or n < R.CONGRESS_MIN_MEMBERS:
+            continue
+        # the Congress Count's own listing gate (`purpose="common"`, fix round 2026-11-20): a US common stock only — an
+        # ADR, a non-USD or a non-common listing is refused there with this reason, so it is here too (the two posts
+        # list the same companies, never only the counts)
+        listing = R.company_from_profile(t.profiles.get(ref.symbol), ref.symbol, purpose="common")
+        if isinstance(listing, str):
+            logger.info("company news theme_explainer: %s left out of the Congress post — %s (the Congress Count's "
+                        "listing gate)", ref.symbol, listing)
+            ctx.reject(listing)
+            continue
+        clash = _issuer_clash(ref.symbol, ref, agg["stock_purchases"])
+        if clash:
+            logger.info("company news theme_explainer: %s left out of the Congress post (%s) — another in-month "
+                        "purchase may be the same company", ref.symbol, clash)
+            ctx.reject(clash)
+            continue
+        members.append(R.ThemeMember(company=ref, top_segment=None, top_segment_share=None, fiscal_year=None,
+                                     congress_members=n))
+    if len(members) < R.THEME_ANGLE_MIN_COMPANIES:
+        return "theme_congress_thin"
+    members.sort(key=R.theme_congress_order_key)
+    return R.ThemeExplainer(series="theme_explainer", slug=t.slug, title=t.title, members=tuple(members),
+                            tickers_as_of=t.as_of, tickers_as_of_from_row=t.as_of_from_row, theme_size=t.size,
+                            angle="congress", posted_on=ctx.run_date,
+                            month=month)
+
+
+#: The theme ANGLES whose collector exists, by `R.THEME_ANGLES` name (pinned == `R.THEME_BUILT_ANGLES` and the
+#: templates' angle builders). An angle is ONE function `(ctx, theme) -> record | rejection reason`; an angle not listed
+#: would be skipped by the rotation with ``theme_angle_not_built`` and no read (every angle is built since 2026-11-20).
+THEME_ANGLE_COLLECTORS: Dict[str, Callable[[_Ctx, _ThemeIn], Awaitable[Union[Any, str]]]] = {
+    "make_money": _theme_make_money,
+    "biggest": _theme_biggest,
+    "growth_profit": _theme_growth_profit,
+    "insiders": _theme_insiders,
+    "congress": _theme_congress,
+}
 
 
 async def _collect_theme_explainer(ctx: _Ctx) -> Candidates:
+    """The weekly theme post (news-v23 phase 3, owner 2026-11-19): ONE record per theme evaluated, in ROTATION order
+    (`_theme_order`: never posted first, then the oldest post; ties by sort order, then slug), each theme at its NEXT
+    angle (`R.next_theme_angle` after its last posted one, from `_theme_history`) — or the angle after, while an angle
+    is not built (``theme_angle_not_built``), cannot be drawn by the run's worker (``theme_angle_unsupported``,
+    `ctx.theme_angles`), or has fewer than THEME_ANGLE_MIN_COMPANIES companies with its data (``theme_facts_thin`` /
+    ``theme_values_thin``). A theme posted fewer than THEME_REPEAT_DAYS days ago is ``already_posted`` before any read.
+    Bounded: THEME_MAX_EVALUATED themes profiled, THEME_MAX_ANGLE_ATTEMPTS angle evaluations that read.
+
+    An angle's source failing (``revenue_unavailable``, a market-value read) — or its reads outlasting the angle's own
+    share of the time (THEME_ANGLE_BUDGET_SECONDS, fix round 2026-11-20) — is that angle's turn lost: the next angle
+    is tried; with no record at all the first such failure is raised (an outage, never "nothing qualified"). Only the
+    SERIES' deadline ends the walk (``budget_exhausted``, raised with no record). A held record survives a later
+    theme's failure (review round 9 #10)."""
     rows = await _rows(
         ctx, "themes_explainer", ("themes_explainer",),
         lambda sb: sb.table(_THEMES_TABLE).select(_THEME_COLUMNS)
         .eq("is_active", True).order("sort_order").limit(200),
         reason="themes_unavailable",
     )
-
-    def order(r: Mapping[str, Any]) -> Tuple[int, str]:
-        so = r.get("sort_order")
-        return (so if isinstance(so, int) and not isinstance(so, bool) else 10 ** 9, str(r.get("slug") or ""))
-
+    history = _theme_history(ctx)
     records: List[Any] = []
-    evaluated = 0
-    for r in sorted(rows, key=order):
-        if len(records) >= ctx.limit or evaluated >= THEME_MAX_EVALUATED:
+    evaluated = attempts = 0
+    unavailable: Optional[MarketingNewsUnavailable] = None
+    for r in _theme_order(rows, history):
+        if len(records) >= ctx.limit or evaluated >= THEME_MAX_EVALUATED or attempts >= THEME_MAX_ANGLE_ATTEMPTS:
             break
         if r.get("is_active") is not True:
             continue
@@ -5196,14 +7142,14 @@ async def _collect_theme_explainer(ctx: _Ctx) -> Candidates:
         if not isinstance(slug, str) or not _THEME_SLUG_RE.fullmatch(slug):
             ctx.reject("record_invalid")
             continue
-        raw_as_of = r.get("tickers_as_of")
-        as_of = _day(raw_as_of) if isinstance(raw_as_of, str) else None
+        as_of, reviewed = _theme_as_of(r, ctx.run_date)
         if as_of is None or as_of > ctx.run_date or (ctx.run_date - as_of).days > R.THEME_STALE_DAYS:
-            ctx.reject("theme_stale")
+            ctx.reject("theme_stale")         # only a list with its OWN date (or a broken one) can be stale
             continue
         ctx.considered += 1
-        if f"{R.LEDGER_PREFIX}theme_explainer:{slug}:{as_of.isoformat()}" in ctx.exclude:
-            ctx.reject("already_posted")      # before any profile call
+        last = history.get(slug)
+        if last is not None and (ctx.run_date - last[0]).days < R.THEME_REPEAT_DAYS:
+            ctx.reject("already_posted")      # the same theme within four weeks — before any profile call
             continue
         title = r.get("title")
         problem = R.theme_title_problem(title)
@@ -5233,67 +7179,112 @@ async def _collect_theme_explainer(ctx: _Ctx) -> Candidates:
             ctx.reject("theme_members_thin")
             continue
         evaluated += 1
-        # Review round 9 (#10): a theme already held was built and checked on complete data; a
-        # LATER theme's lookups failing or running out of budget (profiles, segments) ends the walk
-        # with the held record(s) — never throws them away. With none held the series raises as
-        # before (the `_collect_earnings` / `_collect_money_map` precedent, every upstream reason).
+        # Review round 9 (#10): a theme already held was built and checked on complete data; a LATER theme's profile
+        # batch failing or running out of budget ends the walk with the held record(s) — never throws them away.
         try:
             profiles = await _profiles(ctx, members)
-            refs: List[Any] = []
-            names: Set[str] = set()
-            ciks: Set[str] = set()
-            for sym in members:
-                company = R.company_from_profile(profiles.get(sym), sym, purpose="listing")
-                if isinstance(company, str):
-                    ctx.reject(company)
-                    continue
-                # GOOG beside GOOGL: one company, listed once — the same display name, or the same
-                # issuer CIK under another name (review round 15; the size below merges the same way).
-                cik = R.cik10(profiles[sym].get("cik"))
-                if company.name.casefold() in names or (cik is not None and cik in ciks):
-                    ctx.reject("share_class_overlap")
-                    continue
-                names.add(company.name.casefold())
-                if cik is not None:
-                    ciks.add(cik)
-                refs.append(company)
-            # The theme's size in COMPANIES before any gate (the shared contract's `theme_size`):
-            # the copy says "{n} of its {m} companies" whenever a gate dropped one, so share classes
-            # of one issuer count once (review round 15: GOOG + GOOGL read "7 of the 8 companies").
-            size = R.theme_company_count(tickers, profiles)
-            if len(refs) < lo:
-                ctx.reject("theme_members_thin")
-                continue
-            facts = await _theme_facts(ctx, refs[:THEME_SEGMENT_LOOKUPS])
         except MarketingNewsUnavailable as e:
             if not records:
                 raise
             logger.warning("company news theme_explainer: %s unavailable at theme %s with %d record(s) held — "
                            "returning them (%s)", e.reason, slug, len(records), e.detail)
             break
-        if len(facts) < R.THEME_MIN_FACTS:
-            ctx.reject("theme_facts_thin")
+        refs: List[Any] = []
+        names: Set[str] = set()
+        ciks: Set[str] = set()
+        for sym in members:
+            company = R.company_from_profile(profiles.get(sym), sym, purpose="listing")
+            if isinstance(company, str):
+                ctx.reject(company)
+                continue
+            # GOOG beside GOOGL: one company, listed once — the same display name, or the same
+            # issuer CIK under another name (review round 15; the size below merges the same way).
+            cik = R.cik10(profiles[sym].get("cik"))
+            if company.name.casefold() in names or (cik is not None and cik in ciks):
+                ctx.reject("share_class_overlap")
+                continue
+            names.add(company.name.casefold())
+            if cik is not None:
+                ciks.add(cik)
+            refs.append(company)
+        # The theme's size in COMPANIES before any gate (the shared contract's `theme_size`):
+        # the copy says "{n} of its {m} companies" whenever a gate dropped one, so share classes
+        # of one issuer count once (review round 15: GOOG + GOOGL read "7 of the 8 companies").
+        size = R.theme_company_count(tickers, profiles)
+        if len(refs) < lo:
+            ctx.reject("theme_members_thin")
             continue
-        try:
-            members_out = tuple(
-                R.ThemeMember(company=ref, top_segment=facts[ref.symbol][0] if ref.symbol in facts else None,
-                              top_segment_share=facts[ref.symbol][1] if ref.symbol in facts else None,
-                              fiscal_year=facts[ref.symbol][2] if ref.symbol in facts else None)
-                for ref in refs)
-            records.append(R.ThemeExplainer(series="theme_explainer", slug=slug, title=title,
-                                            members=members_out, tickers_as_of=as_of, theme_size=size))
-        except ValueError as e:
-            logger.info("company news theme_explainer: %s refused as record_invalid (%s)", slug, _describe(e))
-            ctx.reject("record_invalid")
+        theme = _ThemeIn(slug=slug, title=title, refs=tuple(refs), profiles=profiles, size=size, as_of=as_of,
+                         as_of_from_row=not reviewed)
+        start = R.THEME_ANGLES.index(R.next_theme_angle(None if last is None else last[1]))
+        for k in range(len(R.THEME_ANGLES)):
+            angle = R.THEME_ANGLES[(start + k) % len(R.THEME_ANGLES)]
+            collect = THEME_ANGLE_COLLECTORS.get(angle)
+            if collect is None:
+                ctx.reject("theme_angle_not_built")
+                continue
+            klass = R.THEME_ANGLE_CLASSES.get(angle)
+            if klass is not None and ctx.theme_classes is not None and klass not in ctx.theme_classes:
+                ctx.reject("theme_angle_class_off")      # an angle of filings while class C is off — no read
+                continue
+            if angle not in ctx.theme_angles:
+                ctx.reject("theme_angle_unsupported")
+                continue
+            if attempts >= THEME_MAX_ANGLE_ATTEMPTS:
+                logger.info("company news theme_explainer: the call's %d angle evaluations are spent — %s stops at "
+                            "%s", THEME_MAX_ANGLE_ATTEMPTS, slug, angle)
+                break
+            attempts += 1
+            # the angle's OWN share of the time (THEME_ANGLE_BUDGET_SECONDS), never past the series' deadline
+            series_deadline = ctx.deadline
+            ctx.deadline = min(series_deadline, ctx.deps.monotonic() + THEME_ANGLE_BUDGET_SECONDS[angle])
+            try:
+                got = await collect(ctx, theme)
+            except MarketingNewsUnavailable as e:
+                if e.reason == "budget_exhausted" and series_deadline - ctx.deps.monotonic() >= MIN_STEP_SECONDS:
+                    # the ANGLE's share ran out, not the series': that angle's turn lost (an outage — it might have
+                    # qualified), the next angle tried with the series' time
+                    unavailable = unavailable or e
+                    logger.warning("company news theme_explainer: %s angle %s ran out of its own %.0f s — trying the "
+                                   "next angle (%s)", slug, angle, THEME_ANGLE_BUDGET_SECONDS[angle], e.detail)
+                    continue
+                if e.reason == "budget_exhausted":
+                    if not records:
+                        raise
+                    logger.warning("company news theme_explainer: budget exhausted at theme %s angle %s with %d "
+                                   "record(s) held — returning them", slug, angle, len(records))
+                    return _theme_done(ctx, records)
+                unavailable = unavailable or e
+                logger.warning("company news theme_explainer: %s angle %s unavailable (%s: %s) — trying the next "
+                               "angle", slug, angle, e.reason, e.detail)
+                continue
+            finally:
+                ctx.deadline = series_deadline
+            if isinstance(got, str):
+                logger.info("company news theme_explainer: %s angle %s refused as %s — trying the next angle", slug,
+                            angle, got)
+                ctx.reject(got)
+                continue
+            records.append(got)
+            logger.info("company news theme_explainer: %s at angle %s (last posted %s) with %d member(s)", slug,
+                        angle, "never" if last is None else f"{last[0]} as {last[1]}", len(got.members))
+            break
+    if not records and unavailable is not None:
+        raise unavailable
+    return _theme_done(ctx, records)
+
+
+def _theme_done(ctx: _Ctx, records: Sequence[Any]) -> Candidates:
     ctx.check_profiles()
     return ctx.done(records, "theme_none_qualified")
 
 
 # ── the public entry points ───────────────────────────────────────────────────
 
-#: One collector per series whose code exists (2a + 2b). Pinned == `selection.SHIPPED_SERIES` once
-#: the plumbing step ships the 2b ids there; production still runs only what the per-series switch
-#: MARKETING_NEWS_SERIES lists (its default is the 2a four).
+#: One collector per series whose code exists (2a + 2b, and the spotlight lane's two single-company series,
+#: 2026-11-15, shipped with their templates in news-v22): exactly `selection.SHIPPED_SERIES` (pinned), and a chain
+#: never names an unshipped series.
+#: Production still runs only what the per-series switch MARKETING_NEWS_SERIES lists (its default is the 2a four).
 COLLECTORS: Dict[str, Callable[[_Ctx], Awaitable[Candidates]]] = {
     "ceo_buys": _collect_ceo_buys,
     "insider_buys": _collect_insider_buys,
@@ -5303,17 +7294,107 @@ COLLECTORS: Dict[str, Callable[[_Ctx], Awaitable[Candidates]]] = {
     "earnings": _collect_earnings,
     "money_map": _collect_money_map,
     "theme_explainer": _collect_theme_explainer,
+    "insider_spotlight": _collect_insider_spotlight,
+    "thirteen_f_spotlight": _collect_thirteen_f_spotlight,
 }
+#: The most ``spotlight_recent`` entries one call takes — more is a caller's bug, refused. Sized from the data (review
+#: of 2026-11-26): the script flow sends one (symbol, name) pair for EVERY company of every insider list accepted in
+#: [run_date − SPOTLIGHT_ISSUER_COOLDOWN_DAYS, run_date] (its own run left out) — at most one list a day (one run per
+#: day and lane), each of at most INSIDER_MAX_ROWS companies: (14 + 1) × 5 = 75 (final review of 2026-11-26: the owner's
+#: "at most 5"). The old 64 dated from the one-issuer post and, at 8 a list, refused EVERY insider list once a
+#: 5-day-a-week schedule (MARKETING_SPOTLIGHT_WEEKDAYS takes any days) had 9 full lists in the cooldown; 75 fits 15.
+SPOTLIGHT_RECENT_MAX = (R.SPOTLIGHT_ISSUER_COOLDOWN_DAYS + 1) * R.INSIDER_MAX_ROWS
+
+
+def _spotlight_recent_arg(raw: Any) -> Tuple[Tuple[str, str], ...]:
+    """``spotlight_recent`` checked: ``(symbol, display name)`` pairs of strings — the symbol canonical or ``""``
+    (unknown), the name 1..80 characters or ``""``, never both empty — at most `SPOTLIGHT_RECENT_MAX`. Anything else
+    is a caller's bug: ValueError, never a silently shorter cooldown."""
+    if isinstance(raw, (str, bytes, Mapping)):
+        raise ValueError("spotlight_recent must be an iterable of (symbol, name) pairs")
+    try:
+        entries = iter(raw)
+    except TypeError:
+        raise ValueError("spotlight_recent must be an iterable of (symbol, name) pairs") from None
+    out: List[Tuple[str, str]] = []
+    for entry in entries:
+        if not (isinstance(entry, tuple) and len(entry) == 2 and all(isinstance(x, str) for x in entry)):
+            raise ValueError(f"spotlight_recent entry {entry!r:.80} is not a (symbol, name) pair of strings")
+        sym, name = entry[0].strip(), " ".join(entry[1].split())
+        if sym and R.canonical_symbol(sym) != sym:
+            raise ValueError(f"spotlight_recent symbol {sym!r:.20} is not canonical")
+        if len(name) > 80 or not (sym or name):
+            raise ValueError(f"spotlight_recent entry {entry!r:.80} names nothing usable")
+        out.append((sym, name))
+        if len(out) > SPOTLIGHT_RECENT_MAX:
+            raise ValueError(f"spotlight_recent holds more than {SPOTLIGHT_RECENT_MAX} entries")
+    return tuple(out)
+
+
+#: The most theme ledger refs one call takes (THEME_HISTORY_DAYS of two lanes is at most 168; more is a caller's bug).
+THEME_HISTORY_MAX = 256
+
+
+def _theme_classes_arg(classes: Any) -> Optional[FrozenSet[str]]:
+    """``theme_classes`` checked: None (every class), or an iterable of the content classes switched on — strings only
+    (ValueError otherwise: a caller's bug, never a silently wider set of angles)."""
+    if classes is None:
+        return None
+    if isinstance(classes, (str, bytes, Mapping)):
+        raise ValueError("theme_classes must be an iterable of content class names")
+    got = frozenset(classes)
+    if not all(isinstance(c, str) for c in got):
+        raise ValueError("theme_classes must hold strings")
+    return got
+
+
+def _theme_args(history: Any, angles: Any) -> Tuple[FrozenSet[str], FrozenSet[str]]:
+    """``theme_history`` / ``theme_angles`` checked (ValueError on a caller's bug, never a silently different rotation):
+    the refs as a frozenset of strings (at most THEME_HISTORY_MAX), the angles a subset of `R.THEME_ANGLES` (None:
+    every one)."""
+    if isinstance(history, (str, bytes, Mapping)):
+        raise ValueError("theme_history must be an iterable of ledger refs")
+    refs = list(history or ())
+    if len(refs) > THEME_HISTORY_MAX or not all(isinstance(r, str) for r in refs):
+        raise ValueError(f"theme_history must hold at most {THEME_HISTORY_MAX} strings")
+    if angles is None:
+        return frozenset(refs), frozenset(R.THEME_ANGLES)
+    if isinstance(angles, (str, bytes, Mapping)):
+        raise ValueError("theme_angles must be an iterable of angle names")
+    got = frozenset(angles)
+    if not got <= frozenset(R.THEME_ANGLES):
+        raise ValueError(f"theme_angles names unknown angle(s) {sorted(map(str, got - set(R.THEME_ANGLES)))[:5]}")
+    return frozenset(refs), got
 
 
 async def candidates(series: str, *, run_date: date, exclude: FrozenSet[str], limit: int = 5,
-                     deadline: float, deps: Optional[NewsDeps] = None) -> Candidates:
+                     deadline: float, deps: Optional[NewsDeps] = None,
+                     spotlight_checked_through: Optional[date] = None,
+                     spotlight_recent: Iterable[Tuple[str, str]] = (),
+                     theme_history: Iterable[str] = (), theme_angles: Optional[Iterable[str]] = None,
+                     theme_classes: Optional[Iterable[str]] = None) -> Candidates:
     """The qualifying records of one series for ``run_date``, best first (contract D6).
 
     ``exclude`` holds the recent ledger refs (`marketing_scripts.source_ref`); a candidate whose
     ledger key is in it is dropped before any profile or logo call and counted ``already_posted``.
     ``deadline`` is an absolute `NewsDeps.monotonic` time. Raises ValueError for an unknown series
-    or a bad argument, `MarketingNewsUnavailable` for everything that is not an honest answer."""
+    or a bad argument, `MarketingNewsUnavailable` for everything that is not an honest answer.
+
+    The insider spotlight's two inputs (the spotlight lane, 2026-11-15; the script flow passes them for that
+    series only, every other series ignores them): ``spotlight_checked_through`` — the END of the last Form 4 window an
+    earlier insider spotlight checked (C0, 2026-11-16), before ``run_date``, or None (its window starts a week back) —
+    and ``spotlight_recent`` —
+    ``(symbol, display name)`` of the insider spotlights accepted within the issuer cooldown
+    (`_spotlight_recent_arg`).
+
+    The theme explainer's two inputs (news-v23 phase 3, the weekly theme post; every other series ignores them):
+    ``theme_history`` — the theme ledger refs of the build's own bounded read (`R.THEME_HISTORY_DAYS` back; the
+    rotation reads them beside ``exclude``), and ``theme_angles`` — the angles the run's worker can draw (None: every
+    angle; a worker without WORKER_CAPABILITY_THEME_ANGLES draws "how they make money" only). A history entry that is
+    not a string, more than THEME_HISTORY_MAX entries, or an angle outside `R.THEME_ANGLES` is a caller's bug:
+    ValueError. ``theme_classes`` (2026-11-20): the content classes switched on (MARKETING_CONTENT_CLASSES; None: every
+    class) — an angle of filings (`R.THEME_ANGLE_CLASSES`: the insider scorecard, Congress) is skipped with
+    ``theme_angle_class_off`` and no read while its class is off."""
     if series not in COLLECTORS:
         raise ValueError(f"unknown or unshipped company-news series {series!r}")
     if not isinstance(run_date, date) or isinstance(run_date, datetime):
@@ -5322,9 +7403,18 @@ async def candidates(series: str, *, run_date: date, exclude: FrozenSet[str], li
         raise ValueError(f"limit must be a positive int, got {limit!r}")
     if _num(deadline) is None:
         raise ValueError("deadline must be a finite monotonic time")
+    if spotlight_checked_through is not None and (
+            not isinstance(spotlight_checked_through, date) or isinstance(spotlight_checked_through, datetime)
+            or spotlight_checked_through >= run_date):
+        raise ValueError(f"spotlight_checked_through must be a date before {run_date}, "
+                         f"got {spotlight_checked_through!r}")
+    recent = _spotlight_recent_arg(spotlight_recent)
+    history, angles = _theme_args(theme_history, theme_angles)
+    classes = _theme_classes_arg(theme_classes)
     deps = deps or NewsDeps()
     ctx = _Ctx(series, run_date, frozenset(x for x in (exclude or ()) if isinstance(x, str)),
-               limit, float(deadline), deps)
+               limit, float(deadline), deps, spotlight_checked_through=spotlight_checked_through,
+               spotlight_recent=recent, theme_history=history, theme_angles=angles, theme_classes=classes)
     started = deps.monotonic()
     try:
         if ctx.left() < MIN_STEP_SECONDS:
@@ -5434,12 +7524,58 @@ async def _fetch_logo(sym: str, max_bytes: int, timeout: float, deps: NewsDeps) 
     return body, ctype
 
 
+#: `company_facts`: a sector or industry name as the profile writes it ("Technology", "Software - Infrastructure",
+#: "Banks—Regional"): letters first, then letters, digits, spaces and plain punctuation, 2..60 characters.
+_COMPANY_FACT_RE = re.compile(r"[A-Za-z][A-Za-z0-9 &,.'()/\-\u2013\u2014]{1,59}")
+
+
+async def company_facts(symbol: str, *, timeout: float = COMPANY_FACTS_TIMEOUT_SECONDS,
+                        deps: Optional[NewsDeps] = None) -> Optional[Dict[str, str]]:
+    """``{"sector": …, "industry": …}`` of a company (B decision 8, 2026-11-15; workstream C's art brief) — the two
+    NAME-FREE words of its FMP profile, a key left out when its value is missing or not a plain name, None when
+    neither is known. Never the company's or a person's name, a price, a market cap, a URL or a description (the
+    brief takes name-free facts only).
+
+    From the profile memo a collector filled this process (no call — the template build that chose the record read
+    the profile minutes before), else ONE profile read under ``timeout`` through the same shared fetch. Reachable
+    from the script flow through `MarketingScriptService._news_source_fn` (no new import of this module). Never
+    raises (cancellation aside): a bad symbol, a failed or slow read is None, logged at WARNING with the symbol."""
+    sym = R.canonical_symbol(symbol) if isinstance(symbol, str) else None
+    if sym is None or sym != symbol:
+        logger.warning("company news company_facts: %r is not a canonical symbol — no facts", str(symbol)[:20])
+        return None
+    profile = _memo_get(("profile", sym))
+    if profile is _MISS:
+        deps = deps or NewsDeps()
+        try:
+            fmp = deps.fmp if deps.fmp is not None else get_fmp_client()
+            got = await asyncio.wait_for(
+                _shared(("profiles", (sym,)), 0, lambda: _fetch_profiles(fmp, [sym])), timeout=timeout)
+            profile = got.get(sym) if isinstance(got, Mapping) else None
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 — never raises: the art brief goes without the facts
+            logger.warning("company news company_facts: %s profile read failed — no facts (%s)", sym, _describe(e))
+            return None
+    if not isinstance(profile, Mapping):
+        logger.warning("company news company_facts: %s has no profile — no facts", sym)
+        return None
+    out: Dict[str, str] = {}
+    for key in ("sector", "industry"):
+        value = profile.get(key)
+        text = " ".join(value.split()) if isinstance(value, str) else ""
+        if text and _COMPANY_FACT_RE.fullmatch(text) and not _URL_RE.search(text):
+            out[key] = text
+    if not out:
+        logger.info("company news company_facts: %s profile names no usable sector or industry", sym)
+    return out or None
+
 __all__ = [
-    "MarketingNewsUnavailable", "Candidates", "NewsDeps", "candidates", "fetch_logo", "COLLECTORS",
+    "MarketingNewsUnavailable", "Candidates", "NewsDeps", "candidates", "fetch_logo", "company_facts", "COLLECTORS",
     "remember_template_refusal", "clear_memo", "MIN_STEP_SECONDS", "INSIDER_RAW_TTL_SECONDS", "PROFILE_TTL_SECONDS",
     "BUILT_13F_TTL_SECONDS", "LOGO_TTL_SECONDS", "LIST_TTL_SECONDS", "INSIDER_PAGE_SIZE",
     "INSIDER_MAX_PAGES", "INSIDER_PROFILE_CANDIDATES", "INSIDER_MAX_CAP_SHARE", "MAX_LIVE_13F_BUILDS",
-    "THIRTEEN_F_MAX_UNAVAILABLE", "THIRTEEN_F_MAX_PROFILED", "THIRTEEN_F_KIND_RESERVE", "THIRTEEN_F_MIN_CHANGE",
+    "THIRTEEN_F_MAX_UNAVAILABLE", "THIRTEEN_F_MAX_PROFILED", "THIRTEEN_F_MIN_CHANGE",
     "THIRTEEN_F_MATERIAL_MIN_USD", "THIRTEEN_F_MATERIAL_SHARE", "THIRTEEN_F_MAX_SPLIT_CHECKS",
     "MONEY_MAP_MAX_ATTEMPTS", "MONEY_MAP_MAX_CONTENT_REJECTIONS", "MONEY_MAP_MAX_LOOKUPS",
     "MONEY_MAP_MAX_OTHER_SHARE",
@@ -5454,4 +7590,12 @@ __all__ = [
     "EARNINGS_MAX_GAP_MULTIPLE", "EARNINGS_CLASS_LETTERS", "STAKES_READ_LIMIT",
     "STAKES_PROFILE_CANDIDATES", "STAKE_TEMPLATE_REFUSAL_TTL_SECONDS", "THEME_MAX_EVALUATED", "THEME_SEGMENT_LOOKUPS",
     "THEME_LOOKUP_CONCURRENCY", "THEME_FACT_MAX_AGE_YEARS", "THEME_SEGMENT_SUM_TOLERANCE",
+    # phase 4 (2026-11-20): every member read, in market-value order; the gross stack walk-back
+    "THEME_SEGMENT_CONCURRENCY", "THEME_SEGMENT_YEARS_CONCURRENCY", "THEME_FACT_TILES",
+    # news-v23 phase 3: the weekly theme post's rotation and angles
+    "THEME_MAX_ANGLE_ATTEMPTS", "THEME_BREAKDOWN_TTL_SECONDS", "THEME_MARKET_VALUE_TTL_SECONDS", "THEME_HISTORY_MAX",
+    "THEME_ANGLE_COLLECTORS", "THEME_STATEMENT_LOOKUPS", "THEME_STATEMENT_ROWS", "THEME_STATEMENT_TTL_SECONDS",
+    "THEME_INSIDER_LOOKUPS", "THEME_INSIDER_PAGE_SIZE", "THEME_INSIDER_MAX_PAGES", "THEME_INSIDER_CONCURRENCY",
+    "SPOTLIGHT_ROLES", "SPOTLIGHT_PEOPLE_PER_ISSUER", "SPOTLIGHT_AMENDMENT_MAX_ISSUERS", "SPOTLIGHT_AMENDMENT_MAX_PEOPLE",
+    "THIRTEEN_F_SPOTLIGHT_SPARE_FILINGS", "COMPANY_FACTS_TIMEOUT_SECONDS", "SPOTLIGHT_RECENT_MAX",
 ]

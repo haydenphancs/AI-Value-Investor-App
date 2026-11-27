@@ -59,10 +59,10 @@ struct SignInView: View {
         /// True right after a sign-up, when an email has just gone out: the code screen then
         /// starts its resend cooldown. False on the sign-in path, which sends nothing.
         let codeJustSent: Bool
-        /// The sign-up response's sentence ("…Already have an account? Sign in or reset your
-        /// password."), shown on the code screen. The server words it identically for a new, a
-        /// pending and an already-confirmed address, and it is the only hint an existing user
-        /// gets that no code is coming (IOS-CONF-2). nil on the sign-in path.
+        /// The sign-up response's sentence (the backend's `SIGN_UP_PENDING_MESSAGE`), carried
+        /// to the code screen; nil on the sign-in path. Only a NEW or never-confirmed address
+        /// gets here: since 2026-11-26 an address with a confirmed account is refused on the
+        /// form itself (409 AUTH_EMAIL_ALREADY_REGISTERED). Never branched on.
         let signUpMessage: String?
     }
 
@@ -507,6 +507,15 @@ struct SignInView: View {
         errorMessage = nil
     }
 
+    /// The server's "this email is already in use" (409, `/auth/register` only). Read from the
+    /// raw code: `AppError` maps it to `.validationFailed`, which other codes share.
+    static func isEmailAlreadyRegistered(_ error: Error) -> Bool {
+        if case .businessError(let code, _)? = error as? APIError {
+            return code == "AUTH_EMAIL_ALREADY_REGISTERED"
+        }
+        return false
+    }
+
     private func submit() {
         // `.onSubmit` on the password field reaches here too, so the button's own gate is
         // repeated rather than assumed.
@@ -527,8 +536,8 @@ struct SignInView: View {
                     )
                     // Confirmation required is the NORMAL path — there is no session yet, so
                     // go to the code screen rather than dismissing as if signed in. The server's
-                    // sentence travels with it: for an address that already has an account it
-                    // is the only thing saying "sign in instead" (IOS-CONF-2).
+                    // sentence travels with it. An address that already has an account never
+                    // gets here: it is refused below (AUTH_EMAIL_ALREADY_REGISTERED).
                     if case .needsEmailConfirmation(let message) = outcome {
                         showConfirmation(for: address, codeJustSent: true, signUpMessage: message)
                     }
@@ -537,11 +546,19 @@ struct SignInView: View {
                 // The password checked out and only the ADDRESS is unconfirmed: the user needs
                 // the code screen, not a red line. Nothing is emailed from here — the old
                 // auto-resend rotated the code on every attempt, killing the one the user was
-                // about to type, and spent the hourly resend budget before they tapped anything.
+                // about to type, and spent the resend budget before they tapped anything.
                 // The code screen has an explicit "Send a new code".
                 if case .emailNotConfirmed = AppError.from(error) {
                     showConfirmation(for: address, codeJustSent: false)
                     return
+                }
+                // Create Account with an address that already has an account (owner decision
+                // 2026-11-26: say so right away). Flip the form to Sign In, keeping the address,
+                // so "Forgot password?" and the Sign In button sit right under the sentence.
+                // The mode change comes FIRST: `toggleMode()` would clear the message.
+                if submittedMode == .signUp, Self.isEmailAlreadyRegistered(error) {
+                    mode = .signIn
+                    showPassword = false
                 }
                 // The code only — never the address or anything typed.
                 let action = submittedMode == .signIn ? "sign-in" : "sign-up"

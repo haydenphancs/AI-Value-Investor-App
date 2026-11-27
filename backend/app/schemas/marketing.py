@@ -35,6 +35,14 @@ RUN_STAGES = ("planned", "selected", "scripted", "voiced", "rendered", "assets_r
 CONTENT_CLASSES = ("A", "C", "F")
 #: The template ("news") classes: composed by code from an as-filed record, never by the writer.
 NEWS_CLASSES = ("C", "F")
+#: `marketing_runs.lane` / `marketing_scripts.lane` (migration 210, owner decision 2026-11-15: "Add a second
+#: daily post"). A day holds at most one run per lane — the claim is UNIQUE (run_date, lane). MAIN is the
+#: afternoon run every day has had since migration 170 (its claiming INSERT never sends the column, which
+#: defaults to it); SPOTLIGHT is the second, morning run on MARKETING_SPOTLIGHT_WEEKDAYS, claimed through its
+#: own route. Pinned == both lane CHECKs of migration 210 (tests/test_marketing_run_service.py).
+RUN_LANE_MAIN = "main"
+RUN_LANE_SPOTLIGHT = "spotlight"
+RUN_LANES = (RUN_LANE_MAIN, RUN_LANE_SPOTLIGHT)
 #: `output.authorship` of a template package (the writer's packages are "ai", or carry none).
 TEMPLATE_AUTHORSHIP = "template"
 #: The one `output.video_layout` value: one text card per narration line, after an opening card.
@@ -149,6 +157,37 @@ SERVER_OWNED_RUN_METADATA = ("claim_nonce", "closed", "worker_capabilities", "se
 #: declared it at write time: an older worker gets [] and renders today's video. A feature only ALLOWS
 #: more on-screen strings (`run_service._check_onscreen_text`), it never requires one, so a holder change
 #: after the freeze (either way) costs the feature at most, never the day.
+#: WORKER_CAPABILITY_LAYOUT_FEATURE (2026-11-15, the spotlight series): the worker draws the `feature`
+#: template image (WORKER_LAYOUTS_FEATURE: the art band with the kicker and the logo plate, the figure, its
+#: label, the headline and up to four fact rows). Exactly the LAYOUTS_2B rule: `script_service` drops every
+#: series whose image is a feature layout from the chain of a holder that did not declare it (WARNING; the
+#: chain falls through), `_frozen_output` freezes such a template's posts as TEXT under one (a re-claim by
+#: an older image during the build), and `run_service` refuses a feature picture registered by one (422).
+#: Appended LAST: an older web drops it with a WARNING, and the worker keeps its claims.
+#: WORKER_CAPABILITY_POST_ART (2026-11-16, workstream C — per-post art, owner decisions 2026-11-15): the worker
+#: downloads, verifies and draws the accepted output's `art` (the read-back's `WorkerScript.art`) on the `feature`
+#: picture's band and on a template video's opening card, burning the code-owned ART_LABEL and DECLARING what it
+#: drew (`metadata.art_sha256` on the post image, `metadata.opening_art_sha256` on the video). The server makes
+#: art (`script_service._attach_art`: money spent) only for a run whose holder declared it at write time. NEVER a
+#: required capability anywhere: art is optional — a holder without it simply gets no art (`no_capability`), and
+#: the day is otherwise untouched. Appended LAST (an older web drops it with a WARNING).
+#: WORKER_CAPABILITY_LOOK_V23 (2026-11-19, the restyle news-v23): the worker draws the approved look's new picture
+#: parts — a `rows` row's ticker chip (`rows[].chip`) and the Money Map plate's ticker chip (`bars` `header.chip`) —
+#: and draws the look's own strings only for a read-back carrying READBACK_LOOK. A holder WITHOUT it (an older
+#: worker, a worker rollback) is sent the picture spec WITHOUT those chips (`script_service.worker_script`): its
+#: closed walker refuses an unknown key and would fail the render. The stored output keeps them (the allow-list is a
+#: superset, so a picture drawn without them still registers). Appended LAST (an older web drops it with a WARNING).
+#: WORKER_CAPABILITY_THEME_ANGLES (2026-11-20, news-v23 phase 3 — the weekly theme post): the worker draws the theme
+#: angles' pictures and covers — the `ranked` layout (angle 2, "who's biggest" by market value: WORKER_LAYOUTS_THEME),
+#: the theme grid's ticker chips, decoration (`icon`) and hand-set sub-line break (`sub_break`), and the theme's LIST
+#: cover. A holder WITHOUT it gets only angle 1 ("how they make money", on the `grid` it already draws): the adapter is
+#: told which angles the holder can draw (`script_service`), `worker_script` sends it the grid without the new keys and
+#: the opening card without its list (both a subset of the stored strings), `_frozen_output` freezes a `ranked` picture
+#: as TEXT under it (at WRITE time) and `run_service` refuses one registered by it; a run a newer worker built and froze
+#: that such a holder then re-claims is sent its angle picture unchanged, and its walker fails the render loudly. The last three angles ("growth_profit",
+#: "insiders", "congress": the `figures`, `ledger` and `tally` layouts, 2026-11-20) draw under the SAME capability:
+#: they ship in the same release as it, so no worker can hold one without the others. Appended LAST (an older web
+#: drops it with a WARNING).
 #: Mirrored by `marketing/main.py` WORKER_CAPABILITIES (pinned equal by tests/test_marketing_worker.py).
 #: Known values only: `RunClaimRequest` DROPS an unknown value with a WARNING (a newer worker against
 #: an older web keeps its claims and is simply not credited with it) — never recorded on the run.
@@ -156,11 +195,37 @@ WORKER_CAPABILITY_POST_IMAGE = "post_image"
 WORKER_CAPABILITY_NEWS_TEMPLATES = "news_templates"
 WORKER_CAPABILITY_LAYOUTS_2B = "layouts_2b"
 WORKER_CAPABILITY_VIDEO_V2 = "video_v2"
+WORKER_CAPABILITY_LAYOUT_FEATURE = "layout_feature"
+WORKER_CAPABILITY_POST_ART = "post_art"
+WORKER_CAPABILITY_LOOK_V23 = "look_v23"
+WORKER_CAPABILITY_THEME_ANGLES = "theme_angles"
 WORKER_CAPABILITIES: Tuple[str, ...] = (WORKER_CAPABILITY_POST_IMAGE, WORKER_CAPABILITY_NEWS_TEMPLATES,
-                                        WORKER_CAPABILITY_LAYOUTS_2B, WORKER_CAPABILITY_VIDEO_V2)
+                                        WORKER_CAPABILITY_LAYOUTS_2B, WORKER_CAPABILITY_VIDEO_V2,
+                                        WORKER_CAPABILITY_LAYOUT_FEATURE, WORKER_CAPABILITY_POST_ART,
+                                        WORKER_CAPABILITY_LOOK_V23, WORKER_CAPABILITY_THEME_ANGLES)
 #: The template image layouts only a WORKER_CAPABILITY_LAYOUTS_2B worker draws (template_onscreen.LAYOUTS
 #: members; pinned ⊆ template_onscreen.SHIPPED_LAYOUTS and the worker's cards.SHIPPED_LAYOUTS by the tests).
 WORKER_LAYOUTS_2B: Tuple[str, ...] = ("pair", "grid")
+#: The template image layouts only a WORKER_CAPABILITY_LAYOUT_FEATURE worker draws (same pins as above).
+WORKER_LAYOUTS_FEATURE: Tuple[str, ...] = ("feature",)
+#: The template image layouts only a WORKER_CAPABILITY_THEME_ANGLES worker draws (news-v23 phase 3; same pins).
+WORKER_LAYOUTS_THEME: Tuple[str, ...] = ("ranked", "figures", "ledger", "tally")
+
+
+def layout_capabilities(image_layout: Any) -> Tuple[str, ...]:
+    """The capabilities a worker needs, BEYOND news_templates, to draw a template image of `image_layout`:
+    (WORKER_CAPABILITY_LAYOUTS_2B,) for a drop-2b layout, (WORKER_CAPABILITY_LAYOUT_FEATURE,) for `feature`,
+    (WORKER_CAPABILITY_THEME_ANGLES,) for `ranked`, `figures`, `ledger` and `tally` (news-v23 phase 3),
+    () for any other value (a drop-2a layout, None, junk — whose spec the validators refuse on their own).
+    The one table `script_service` (the chain gate and the write-time freeze) and `run_service` (the
+    registration check) read. Pure."""
+    if image_layout in WORKER_LAYOUTS_2B:
+        return (WORKER_CAPABILITY_LAYOUTS_2B,)
+    if image_layout in WORKER_LAYOUTS_FEATURE:
+        return (WORKER_CAPABILITY_LAYOUT_FEATURE,)
+    if image_layout in WORKER_LAYOUTS_THEME:
+        return (WORKER_CAPABILITY_THEME_ANGLES,)
+    return ()
 RUN_WORKER_CAPABILITIES_KEY = "worker_capabilities"
 
 #: The formats the server will record a post in, per platform. The accepted package composes
@@ -214,13 +279,16 @@ IMAGE_PLATFORMS: Tuple[str, ...] = ("bluesky", "facebook", "linkedin", "threads"
 #: decision message and the weekly digest name it in these owner words. A platform left off
 #: MARKETING_IMAGE_PLATFORMS on purpose, or X while MARKETING_X_IMAGES is off, is NOT a fallback.
 #: "worker_capability" says THIS picture (review CTA-3, 2026-10-16): `_holder_image_block` stamps it when the
-#: holder lacks ANY capability the day's picture needs — post_image, or news_templates / layouts_2b for a
-#: template's layout — and a worker lacking only those draws a lesson picture every day.
+#: holder lacks ANY capability the day's picture needs — post_image, or news_templates / layouts_2b /
+#: layout_feature for a template's layout (`layout_capabilities`) — and a worker lacking only those draws a
+#: lesson picture every day.
 IMAGE_FALLBACK_REASONS: Dict[str, str] = {
     "image_dropped": "the picture text did not pass the checks",
     "worker_capability": "the worker that ran the day cannot draw this picture",
     "image_spec_invalid": "the picture layout did not validate",
     "threads_caption_long": "the Threads caption is too long for a picture post",
+    # review 2026-11-20: a list post's X / Bluesky caption could not also list the rows its picture leaves out
+    "caption_list_long": "the caption is too short to list the rows the picture leaves out",
     "freeze_failed": "the picture could not be prepared",
 }
 POST_METADATA_IMAGE_FALLBACK = "image_fallback"
@@ -243,6 +311,18 @@ POST_METADATA_VIDEO_FEATURES = "video_features"
 #: by `create_posts` from the accepted output's `served_by` / `judge.served_by`, ONLY when a role was routed to
 #: Claude (a default Gemini day writes byte-identical rows). A note for the review message: it gates nothing.
 POST_METADATA_WRITTEN_BY = "written_by"
+#: Per-post art (workstream C, owner decisions 2026-11-15): `create_posts` stamps the run's art NOTE on EVERY post
+#: of the run as `metadata[POST_METADATA_ART]` — only when the accepted output carries an `art` record (switch off:
+#: byte-identical rows) — `run_service.art_note`: {status, reason, subject, treatment, redrawn, flags, surfaces,
+#: drawn {picture, cover}}. A note for the review message and the digest: it gates nothing. Never a model name.
+POST_METADATA_ART = "art"
+#: What a drawn surface DECLARES about the art it drew (the worker's asset metadata): the post image's sha256 of
+#: the accepted art (`art_sha256`) and the video opening card's (`opening_art_sha256`). Each is None or 64
+#: lower-case hex, and only on its own asset kind (`AssetRegisterRequest`); `run_service` refuses one that is not
+#: the accepted output's art, a declaration without the burned ART_LABEL, the label without a declaration, or any
+#: art on a lesson (422). Art is never required: no declaration is always accepted.
+ASSET_METADATA_ART_SHA = "art_sha256"
+ASSET_METADATA_OPENING_ART_SHA = "opening_art_sha256"
 
 #: Batch 3 (2026-10-20; owner decision 2, 2026-10-15): the EXTRA formats — a platform's SECOND post of a run,
 #: beside its PRIMARY one (POST_FORMATS_BY_PLATFORM above, unchanged). Facebook and LinkedIn may post the day's
@@ -341,14 +421,21 @@ MEDIA_REQUIRED_FORMATS: FrozenSet[str] = frozenset({"video", "carousel", "image"
 #: `marketing_scripts.status` (migration 173). One row per run, written ONLY by the web side.
 SCRIPT_STATUSES = ("rest_day", "selected", "generating", "accepted", "rejected")
 
-#: `marketing_scripts.reject_reason` (migration 176) and the `reason` of a `rejected` kick body.
-#: The worker maps it to the run's skip_reason — only `content` is a compliance verdict:
+#: `marketing_scripts.reject_reason` (the LATEST migration that ADDs `marketing_scripts_reject_reason_valid`:
+#: 176 created it, 210 added `nothing_qualified`) and the `reason` of a `rejected` kick body. The worker maps
+#: it to the run's skip_reason (marketing/main.py REJECTION_SKIP_REASONS, pinned equal) — only `content` is a
+#: compliance verdict:
 #:   content            — MAX_GENERATIONS generations were rejected by the validators
 #:   writer_unavailable — MAX_WRITER_FAILURES generations ended without a verdict (Gemini
 #:                        failures, a ledger blip, a crashed or cancelled owner)
 #:   empty_pool         — selection found nothing eligible
 #:   source_ineligible  — the selected item left the eligible pool before it was written
-SCRIPT_REJECT_REASONS = ("content", "writer_unavailable", "empty_pool", "source_ineligible")
+#:   nothing_qualified  — a SPOTLIGHT day whose series chain found no record (`selection.spotlight_plan_for`
+#:                        ends in SKIP, never in the lesson): the run closes `skipped` and the day stays
+#:                        visible — never a `rest_day` (2026-11-15). The weekly digest lists it; the run-health
+#:                        texts stay quiet on a plain quiet day and alert when its trail shows a failed data
+#:                        source (digest_service `_quiet_nothing_qualified`)
+SCRIPT_REJECT_REASONS = ("content", "writer_unavailable", "empty_pool", "source_ineligible", "nothing_qualified")
 
 _SHA256_HEX_LEN = 64
 
@@ -378,6 +465,29 @@ VIDEO_END_CARD_CTA = "Search Caydex on the App Store"
 #: Batch 2 (2026-10-19) made it a SUPERSET — the wordmark, the legacy CTA (an older worker, a rollback)
 #: and the new one — so neither deploy order can turn the end card into a 422.
 VIDEO_BRAND_TEXT: Tuple[str, ...] = ("Caydex", VIDEO_LEGACY_CTA, VIDEO_END_CARD_CTA)
+#: The BRAND ROW (restyle news-v23, owner-approved 2026-11-19 — owner: "add our LOGO and 'Caydex' some where on top
+#: of the image (or video)"): the word the worker draws beside the Caydex logo tile, top-left of every post picture
+#: and of every video card. A small top mark, never a brand card — a video still OPENS on its content (owner
+#: 2026-10-09: never open on our logo). It is VIDEO_BRAND_TEXT's own wordmark, so a video already allowed it.
+BRAND_ROW_WORD = "Caydex"
+#: The kicker pill a LESSON draws right-aligned on its brand row — on its picture and on every card of its video. A
+#: class-A lesson has no template kicker; a TEMPLATE draws its own (`image_spec.kicker` on the picture,
+#: `opening_card.kicker` on every video card — the same string for every series, pinned in the templates' tests).
+LESSON_KICKER = "INVESTING LESSON"
+#: What EVERY post picture may draw beyond its own allow-list (a lesson's image_post + footer, a template's
+#: image_spec strings + footer): the brand row's word. Allowed, never required — a worker without the brand row
+#: still registers its picture (either deploy order is safe).
+PICTURE_BRAND_TEXT: Tuple[str, ...] = (BRAND_ROW_WORD,)
+#: What a LESSON's picture and its video may draw besides: the brand row's word and the lesson kicker — EXACT
+#: strings only (a template's surfaces never take the lesson kicker). The worker mirrors BRAND_ROW_WORD and
+#: LESSON_KICKER (`marketing/cards.py`, pinned equal by tests).
+LESSON_BRAND_TEXT: Tuple[str, ...] = (BRAND_ROW_WORD, LESSON_KICKER)
+#: The read-back's `look` (WorkerScript.look, sent on EVERY read-back by this web): tells a news-v23 worker this web
+#: allows the look's own strings — the brand row's word on a picture, LESSON_KICKER, and the short footer on every
+#: video card. A news-v23 worker draws NONE of them for a read-back without it (an older web, a web rollback), whose
+#: allow-list refuses each one with a 422 that would fail the render and lose the day (`marketing/cards.LOOK`,
+#: pinned equal). Not TEMPLATE_VERSION: it changes only when the look's strings do.
+READBACK_LOOK = "news-v23"
 ONSCREEN_TEXT_MAX = 64
 ONSCREEN_TEXT_MAX_CHARS = 600
 
@@ -520,6 +630,10 @@ class MarketingRun(_Row):
     timings: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
     last_error: Optional[str] = None
+    # Additive echo (migration 210): which lane this run is (RUN_LANES). A row read before 210 is applied
+    # has no column and is the main lane, which is also the column's default. A worker image older than the
+    # spotlight lane ignores the key (it reads the run as a plain dict).
+    lane: str = RUN_LANE_MAIN
 
 
 class MarketingAsset(_Row):
@@ -560,9 +674,13 @@ class RunClaimRequest(BaseModel):
     run_date: str = Field(..., description="ET calendar day, YYYY-MM-DD")
     worker_version: str = Field(..., min_length=1, max_length=64)
     dry_run: bool = True
-    # A per-process nonce the worker mints once. If the response to its own successful claim
-    # is lost (timeout after the INSERT committed), the retry finds a fresh `in_progress` row
-    # carrying its own nonce and is told CLAIMED again instead of "someone else has it".
+    # The nonce of THIS claim. A worker image older than the spotlight lane (2026-11-15) minted one per
+    # process; since then the worker mints a fresh one per candidate claim (one per lane it tries in a
+    # tick), so two runs held by one process never share a claim pair — `/assets/{id}/complete` carries
+    # no run id, so a shared nonce would weaken its fence. If the response to its own successful claim
+    # is lost (timeout after the INSERT committed), the in-request retry resends the same body — the
+    # same nonce — finds a fresh `in_progress` row carrying it, and is told CLAIMED again instead of
+    # "someone else has it".
     # REQUIRED since the caller-claim fence (2026-09-26): every later worker call presents
     # `X-Marketing-Claim: <attempts>.<claim_nonce>`, and a claim with no nonce could never be
     # presented. Lower-case hex, the shape `uuid.uuid4().hex` mints.
@@ -571,11 +689,14 @@ class RunClaimRequest(BaseModel):
     # the ET window to finish a run killed after the last in-window tick.
     resume_only: bool = False
     # What this worker image can render (WORKER_CAPABILITIES; drop 1). Optional: an older worker
-    # sends none and keeps today's text posts. Bounded (≤ 8) and typed — a non-list or a non-string
+    # sends none and keeps today's text posts. Bounded and typed — a non-list or a non-string
     # value is a 422 — but an UNKNOWN string is dropped with a WARNING, never a 422: a newer worker
     # (one that declares a capability this web does not know yet) must not lose every claim to a web
-    # rollback; it is simply not credited with what this web cannot use.
-    capabilities: List[str] = Field(default_factory=list, max_length=8)
+    # rollback; it is simply not credited with what this web cannot use. news-v23 phase 3 (2026-11-20): the
+    # worker now declares EIGHT (theme_angles) — exactly the bound of every web before this one (8), so it still
+    # claims against them; the bound here is 16, so the NEXT capability can be declared once this web is live
+    # (deploy the web first for a ninth).
+    capabilities: List[str] = Field(default_factory=list, max_length=16)
 
     @field_validator("capabilities")
     @classmethod
@@ -598,10 +719,15 @@ class RunClaimRequest(BaseModel):
 class RunClaimResponse(BaseModel):
     claimed: bool
     # Why the claim was or was not granted: claimed | already_done | in_progress |
-    # media_ready | attempts_exhausted | no_run. The worker branches on this and exits 0 on
-    # every non-claimed reason.
+    # media_ready | attempts_exhausted | no_run | not_scheduled. The worker branches on this and
+    # exits 0 on every non-claimed reason. `not_scheduled` (the spotlight lane's claim route only,
+    # 2026-11-15) is answered before any read or write when the lane is closed for that run date:
+    # MARKETING_SPOTLIGHT_ENABLED off, not one of MARKETING_SPOTLIGHT_WEEKDAYS, the lane's hours
+    # failing their rule (selection.spotlight_lane_open), or no news class (C or F) in
+    # MARKETING_CONTENT_CLASSES.
     reason: str
-    # None only for reason == no_run (a resume_only request found nothing to resume).
+    # None only for reason == no_run (a resume_only request found nothing to resume) and for
+    # not_scheduled (the spotlight lane read and wrote nothing).
     run: Optional[MarketingRun] = None
 
 
@@ -721,6 +847,19 @@ class AssetRegisterRequest(BaseModel):
         elif post_image:
             # Mandatory for the same reason: an image post's picture IS its words.
             raise ValueError("a post image must declare metadata.onscreen_text")
+        # Per-post art (workstream C): each surface declares the art it drew on its OWN asset kind only — the post
+        # image `art_sha256`, the video `opening_art_sha256` — as None or 64 lower-case hex. Whether it is the
+        # accepted art (and the label is drawn) is the service's check (`run_service`, 422).
+        for key, allowed_here, what in ((ASSET_METADATA_ART_SHA, post_image, "a post image"),
+                                        (ASSET_METADATA_OPENING_ART_SHA, self.kind == "video", "a video")):
+            if key not in self.metadata:
+                continue
+            if not allowed_here:
+                raise ValueError(f"only {what} carries metadata.{key}")
+            value = self.metadata[key]
+            if value is not None and not (isinstance(value, str) and len(value) == _SHA256_HEX_LEN
+                                          and all(c in "0123456789abcdef" for c in value)):
+                raise ValueError(f"metadata.{key} must be null or 64 lower-case hex characters")
         return self
 
 
@@ -760,6 +899,9 @@ class RunAssetsResponse(BaseModel):
     #: run. What every image post of the run carries. Drop 1 (add-only).
     image_asset_id: Optional[str] = None
     assets: List[MarketingAssetView] = Field(default_factory=list)
+    #: The run's lane (RUN_LANES, migration 210): an additive echo a resumed stage may check its own lane
+    #: against. An older worker ignores it.
+    lane: str = RUN_LANE_MAIN
 
 
 class AssetCompleteResponse(BaseModel):
@@ -870,6 +1012,15 @@ class WorkerScript(BaseModel):
     #: draws a data card only with data_card AND a valid slot (an int, not a bool, inside `cards`, a text
     #: card); else no data card — today's text cards.
     data_card_slot: Optional[int] = None
+    #: Per-post ART (workstream C, 2026-11-16; add-only): {url, sha256, bytes, width, height} of the accepted output's
+    #: checked, stored picture (`post_art.worker_art`) — sent ONLY while MARKETING_ART_ENABLED is on, read at call
+    #: time (the kill switch: off, the next render draws none), and never the models, the subject, the checks or the
+    #: usage. None otherwise (a lesson, no art, a failed record, an older web). The worker draws it on the `feature`
+    #: picture's band and the template video's opening card, and declares what it drew; art is never required.
+    art: Optional[Dict[str, Any]] = None
+    #: news-v23 (2026-11-19; add-only): READBACK_LOOK on every read-back of this web — the look's own strings are
+    #: allowed (see READBACK_LOOK). None only from an older web: the worker then draws without them.
+    look: Optional[str] = None
 
 
 class ScriptKickResponse(BaseModel):
@@ -882,7 +1033,9 @@ class ScriptKickResponse(BaseModel):
     * `accepted`   — `script` is set. Final.
     * `rejected`   — the day is skipped. Final. `reason` (SCRIPT_REJECT_REASONS) says why, and
       only `content` means the drafts failed the compliance checks — `violations` is filled
-      for that reason alone. `writer_unavailable` is an outage, not a content verdict.
+      for that reason alone. `writer_unavailable` is an outage, not a content verdict;
+      `nothing_qualified` is a spotlight day whose series chain found no record (never the
+      lesson).
     """
 
     status: str

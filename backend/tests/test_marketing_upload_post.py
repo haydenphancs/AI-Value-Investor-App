@@ -1606,3 +1606,15 @@ async def test_notes_never_rescue_an_unclear_answer(monkeypatch, creds, status, 
     _install(monkeypatch, _answer(status, body))
     with pytest.raises(upload_post.UploadPostAmbiguousError):
         await _text()
+
+
+def test_a_spotlight_key_is_a_valid_request_id():
+    """Migration 210: a spotlight post's key `<run_date>:spotlight:<platform>:<format>` plus the attempt suffix is a
+    request id the client sends byte for byte (it is also the Idempotency-Key) — and distinct from the main key."""
+    from app.services.marketing.run_service import idempotency_key_for
+
+    main = idempotency_key_for(date(2026, 11, 17), "tiktok", "video") + ":a1"
+    spot = idempotency_key_for(date(2026, 11, 17), "tiktok", "video", lane="spotlight") + ":a1"
+    assert spot == "2026-11-17:spotlight:tiktok:video:a1" != main
+    for rid in (main, spot):
+        assert upload_post._check_request_id("upload", rid) == rid

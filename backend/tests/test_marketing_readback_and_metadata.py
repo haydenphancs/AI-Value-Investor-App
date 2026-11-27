@@ -109,6 +109,33 @@ async def test_read_back_lists_only_ready_assets_with_public_urls(svc, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_the_read_back_carries_the_runs_lane(svc, monkeypatch):
+    """Migration 210: the read-back echoes the run's lane (main for a row with no lane column) — what a resumed stage
+    may check its own lane against — and a spotlight run's ready objects live under `<run_date>/spotlight/`."""
+    run = await _claim(svc)
+    assert (await svc.read_back(run["id"], claim=_holder(run)))["lane"] == "main"
+    # the insider spotlight listed: that Thursday the main lane's chain holds Money Map, so with the 2a series alone the
+    # spotlight would hold no series and not be scheduled (C0, 2026-11-16)
+    for name, value in (("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "thu"),
+                        ("MARKETING_CONTENT_CLASSES", "A,C,F"), ("MARKETING_SPOTLIGHT_HOUR_ET", 10),
+                        ("MARKETING_RUN_HOUR_ET", 16),
+                        ("MARKETING_NEWS_SERIES", "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight")):
+        monkeypatch.setattr(mrs.settings, name, value)
+    spot, reason = await svc.claim_run(date(2026, 9, 17), worker_version="t", dry_run=True, now=NOW,
+                                       claim_nonce="0" * 31 + "1", lane="spotlight")
+    assert reason == mrs.CLAIMED
+    a, _ = await svc.register_asset(spot["id"], kind="audio", ext="m4a", sha256=SHA, size_bytes=1,
+                                    claim=_holder(spot))
+    svc.fake.objects.add(a["storage_path"])
+    await svc.complete_asset(a["id"], claim=_holder(spot))
+    back = await svc.read_back(spot["id"], claim=_holder(spot))
+    assert back["lane"] == "spotlight" and [r["storage_path"] for r in back["assets"]] == [
+        f"2026-09-17/spotlight/audio-{SHA[:16]}.m4a"]
+    assert sch.RunAssetsResponse().lane == "main"                           # an older service: the main lane
+    assert sch.RunAssetsResponse.model_validate({"lane": "spotlight"}).lane == "spotlight"
+
+
+@pytest.mark.asyncio
 async def test_the_voice_pointer_is_returned_only_when_it_verifies(svc, caplog):
     run = await _claim(svc)
     claim = _holder(run)
@@ -134,7 +161,7 @@ async def test_the_image_pointer_rides_the_workers_patch_and_is_returned_only_wh
     assert "image_asset_id" not in sch.SERVER_OWNED_RUN_METADATA
     run = await _claim(svc)
     claim = _holder(run)
-    footer = "Educational only · not investment advice · Written with AI assistance · Sep 17, 2026 · Caydex"
+    footer = "Not investment advice"      # news-v23: the lesson picture's short footer
     await svc.insert_script({"run_id": run["id"], "status": "accepted", "source_ref": "journey:x",
                              "template_id": "checklist", "generation_id": "g",
                              "output": {"hook": "h", "video_script": [], "posts": {},
@@ -279,3 +306,78 @@ def test_spoken_words_fold_case_and_edge_punctuation_only():
     assert mrs.spoken_words("“Mr. Market,” he said — U.S. S&P 500!") == [
         "mr", "market", "he", "said", "u.s", "s&p", "500"]
     assert mrs.narration_words({"hook": "A b.", "video_script": ["C d?", "E"]}) == ["a", "b", "c", "d", "e"]
+
+
+# ── per-post art (workstream C, slice C3, 2026-11-16): the wire contract ──────
+
+
+_ART = "c" * 64
+
+
+def _post_image_request(**meta):
+    return sch.AssetRegisterRequest(kind="card", ext="jpg", sha256=SHA, bytes=1,
+                                    metadata={"image_role": sch.IMAGE_ROLE_POST, "onscreen_text": ["Footer"], **meta})
+
+
+def _video_request(**meta):
+    return sch.AssetRegisterRequest(kind="video", ext="mp4", sha256=SHA, bytes=1,
+                                    metadata={"onscreen_text": ["Kicker"], **meta})
+
+
+def test_each_surface_declares_its_art_on_its_own_asset_kind_only():
+    assert sch.ASSET_METADATA_ART_SHA == "art_sha256" and sch.ASSET_METADATA_OPENING_ART_SHA == "opening_art_sha256"
+    assert _post_image_request(art_sha256=_ART).metadata["art_sha256"] == _ART
+    assert _post_image_request(art_sha256=None).metadata["art_sha256"] is None       # "no art" said out loud
+    assert _video_request(opening_art_sha256=_ART).metadata["opening_art_sha256"] == _ART
+    assert _video_request(opening_art_sha256=None).metadata["opening_art_sha256"] is None
+    # each key on the other surface, or on an asset that draws nothing, is a 422
+    with pytest.raises(ValidationError, match="only a post image carries metadata.art_sha256"):
+        _video_request(art_sha256=_ART)
+    with pytest.raises(ValidationError, match="only a video carries metadata.opening_art_sha256"):
+        _post_image_request(opening_art_sha256=_ART)
+    for kind, ext in (("card", "png"), ("audio", "m4a"), ("manifest", "json")):
+        for key in ("art_sha256", "opening_art_sha256"):
+            with pytest.raises(ValidationError):
+                sch.AssetRegisterRequest(kind=kind, ext=ext, sha256=SHA, bytes=1, metadata={key: _ART})
+
+
+@pytest.mark.parametrize("bad", ["C" * 64, "c" * 63, "c" * 65, "g" * 64, 7, True, ["c" * 64], {"sha": _ART}, ""])
+def test_an_art_declaration_is_null_or_64_lower_case_hex(bad):
+    with pytest.raises(ValidationError, match="64 lower-case hex"):
+        _post_image_request(art_sha256=bad)
+    with pytest.raises(ValidationError, match="64 lower-case hex"):
+        _video_request(opening_art_sha256=bad)
+
+
+def test_the_script_read_back_declares_art_as_an_optional_object():
+    """`WorkerScript.art` must be declared (Pydantic drops an undeclared key from the response) — None by default (a
+    lesson, no art, the switch off, an older web) — and it crosses the wire as the five keys the web sent."""
+    from typing import Any, Dict, Optional
+
+    field = sch.WorkerScript.model_fields["art"]
+    assert field.annotation == Optional[Dict[str, Any]] and field.default is None
+    base = {"hook": "h", "video_script": [], "cards": [], "carousel_slides": [], "disclaimer_card": "d"}
+    assert sch.WorkerScript.model_validate(base).art is None
+    art = {"url": "https://sb.example/storage/v1/object/public/marketing-media/art/" + "c" * 32 + ".jpg",
+           "sha256": _ART, "bytes": 480_000, "width": 1376, "height": 774}
+    sent = sch.ScriptKickResponse.model_validate({"status": "accepted", "script": {**base, "art": art}})
+    assert json.loads(sent.model_dump_json())["script"]["art"] == art
+    assert json.loads(sch.ScriptKickResponse.model_validate(
+        {"status": "accepted", "script": base}).model_dump_json())["script"]["art"] is None
+
+
+def test_post_art_is_a_known_capability_appended_last_and_never_dropped(caplog):
+    import logging
+
+    assert sch.WORKER_CAPABILITY_POST_ART == "post_art" and sch.WORKER_CAPABILITIES[-3] == "post_art"
+    assert sch.WORKER_CAPABILITIES[-2] == sch.WORKER_CAPABILITY_LOOK_V23 == "look_v23"   # news-v23, appended after it
+    # news-v23 phase 3 (the weekly theme post's angles), appended after that
+    assert sch.WORKER_CAPABILITIES[-1] == sch.WORKER_CAPABILITY_THEME_ANGLES == "theme_angles"
+    assert sch.POST_METADATA_ART == "art"
+    body = {"run_date": "2026-11-17", "worker_version": "c", "claim_nonce": "ab" * 16,
+            "capabilities": list(sch.WORKER_CAPABILITIES)}
+    with caplog.at_level(logging.WARNING):
+        assert sch.RunClaimRequest.model_validate(body).capabilities == sorted(sch.WORKER_CAPABILITIES)
+    assert not [r for r in caplog.records if "does not know" in r.getMessage()]
+    # the claim's bound still holds every capability this web knows
+    assert len(sch.WORKER_CAPABILITIES) <= sch.RunClaimRequest.model_fields["capabilities"].metadata[0].max_length

@@ -121,10 +121,15 @@ def tg(monkeypatch):
     return fake
 
 
+#: The fake's own plain-column read, kept before the fixture below swaps `_col` out — it carries the column read
+#: defaults (migration 210: a row with no `lane` reads as 'main', the column default).
+_PLAIN_COL = fake_db._col
+
+
 def _col_nested(row: Dict[str, Any], col: str) -> Any:
     """`_col` with PostgREST's nested JSON path (`a->b->>c`), as the bundle fence filters on."""
     if "->>" not in col:
-        return row.get(col)
+        return _PLAIN_COL(row, col)
     path, key = col.rsplit("->>", 1)
     parts = path.split("->")
     doc: Any = row.get(parts[0])
@@ -389,6 +394,25 @@ def test_a_caption_message_lists_its_platforms_and_previews(configured):
     assert rs.compose_bundle_caption_text([_row(caption="   ")], set(), "d", False).endswith("(no caption)")
     # a junk format is never echoed
     assert "(?)" in rs.compose_bundle_caption_text([_row(fmt="<b>video</b>")], set(), "d", False)
+
+
+@pytest.mark.parametrize("pid", ["insider.breaking", "insider.alert", "thirteen_f.filing"])
+def test_news_v22_a_prefixed_caption_is_shown_exactly_and_sized_in_utf16_units(configured, pid):
+    """news-v22 (first-line prefixes): the owner reviews the caption EXACTLY as it will post — the prefix and its emoji
+    first, plain text (no parse mode) — and Telegram's 4,096 is counted in UTF-16 units, where the emoji is 2: a long
+    prefixed caption splits into chunks within the limit, never cut inside the emoji."""
+    from app.services.marketing import news_templates
+
+    prefix = news_templates.FIRST_LINE_PREFIXES[pid]
+    caption = f"{prefix} {SHORT}"
+    text = rs.compose_bundle_caption_text([_row("facebook", "image", caption=caption)], set(), "2026-11-19", False)
+    assert text == f"CAPTION · FACEBOOK (image) · run 2026-11-19\n\n{caption}"
+    assert rs.utf16_len(f"{prefix} ") == len(f"{prefix} ") + 1
+    long = rs.compose_bundle_caption_text([_row("facebook", "image", caption=f"{prefix} " + "word " * 1200)], set(),
+                                          "2026-11-19", False)
+    chunks = rs.split_message(long)
+    assert len(chunks) >= 2 and all(rs.utf16_len(c) <= 4096 for c in chunks)
+    assert "".join(chunks).count(prefix) == 1 and prefix in chunks[0]
 
 
 def test_the_decision_text_says_what_is_sent_what_is_not_and_why(configured, monkeypatch):
@@ -3267,3 +3291,312 @@ def test_the_decision_text_names_the_models_only_when_the_posts_carry_them(confi
                                    "judge gemini (Claude fallback: ClaudeRefusalException)")
     plain = rs.compose_bundle_decision_text("post", [_row("x", "text")], [], "2026-10-30", False, [])
     assert "Models:" not in plain
+
+
+# ── the spotlight lane (migration 210, 2026-11-15) ────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_e2e_spotlight_two_runs_one_day_two_labelled_decisions_and_the_lane_key_on_the_wire(
+        bundles, tg, wakes, monkeypatch):
+    """Switch ON end to end, REAL pieces: the day's main run and its spotlight run each go claim (`/runs/claim`'s and
+    the lane's) → an accepted Money Map template → `create_posts` (the spotlight's keys `<date>:spotlight:<p>:<f>`) →
+    the sweep offers EACH run its own POSTS decision: the spotlight run's names it "run <date> · spotlight" in every
+    caption message and in the decision, the main run's exactly as before → Approve all on the spotlight decision
+    decides its own posts only → the Upload-Post outlet's request id is `<date>:spotlight:facebook:text:a1`."""
+    from datetime import date
+
+    svc = bundles
+    day = date(2026, 9, 17)                                  # a Thursday: a spotlight day of "tue,thu,sat"
+    for name, value in (("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "tue,thu,sat"),
+                        ("MARKETING_SPOTLIGHT_HOUR_ET", 10), ("MARKETING_MAX_RUN_ATTEMPTS", 6),
+                        ("MARKETING_RUN_HOUR_ET", 16), ("MARKETING_CONTENT_CLASSES", "A,C,F"),
+                        # the insider spotlight listed: that Thursday the main chain holds Money Map, so without it
+                        # the spotlight's chain holds no series and the day is not scheduled (C0, 2026-11-16)
+                        ("MARKETING_NEWS_SERIES", "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"),
+                        ("MARKETING_RUN_STALE_SECONDS", 3600), ("MARKETING_AUTO_PUBLISH", False),
+                        ("MARKETING_UPLOAD_POST_API_KEY", "UPkeyE2E0123456789abcdefghijKLMNOPqrs"),
+                        ("MARKETING_UPLOAD_POST_USER", "caydex"),
+                        ("MARKETING_UPLOAD_POST_FACEBOOK_PAGE_ID", "104857600123456")):
+        monkeypatch.setattr(settings, name, value)
+    monkeypatch.setattr(mrs.news_templates, "revalidate", lambda *_a, **_k: [])
+    platforms = ("x", "bluesky", "facebook")
+    runs: Dict[str, Dict[str, Any]] = {}
+    for lane in ("main", "spotlight"):
+        run, why = await svc.claim_run(day, worker_version="t", dry_run=False, now=fake_db.NOW,
+                                       claim_nonce=fake_db._n(), lane=lane)
+        assert run is not None, why
+        posts = {p: {"platform": p, "title": None, "caption": f"{lane} copy for {p}"} for p in platforms}
+        await svc.insert_script({"run_id": run["id"], "status": "accepted", "template_id": "money_map",
+                                 "source_ref": f"news:money_map:{'COST' if lane == 'main' else 'ZQCT'}:2025",
+                                 "fact_sheet": {}, "output": {"posts": posts, "content_class": "F",
+                                                              "authorship": "template", "series": "money_map"}})
+        created = await svc.create_posts(run["id"], [{"platform": p, "format": "text"} for p in platforms],
+                                         claim=fake_db._holder(svc, run["id"]))
+        prefix = day.isoformat() + (":spotlight" if lane == "spotlight" else "")
+        assert [p["idempotency_key"] for p in created] == [f"{prefix}:{p}:text" for p in platforms]
+        next(r for r in _rows(svc, mrs.RUNS) if r["id"] == run["id"]).update(
+            {"status": "media_ready", "stage": "assets_ready"})
+        runs[lane] = run
+    assert runs["spotlight"]["lane"] == "spotlight" and "lane" not in _rows(svc, mrs.RUNS)[0]   # main: no lane sent
+
+    counters = await rs.review_cycle()
+    assert counters["bundles"] == 2 and counters["failed"] == 0
+    decisions = _decision_messages(tg)
+    by_header = {d["text"].split("\n", 1)[0]: d for d in decisions}
+    assert set(by_header) == {"DECISION · POSTS · run 2026-09-17", "DECISION · POSTS · run 2026-09-17 · spotlight"}
+    captions = [p["text"] for m, p in tg.calls if m == "sendMessage" and p["text"].startswith("CAPTION · ")]
+    for lane, label in (("main", "run 2026-09-17"), ("spotlight", "run 2026-09-17 · spotlight")):
+        shown = [c for c in captions if f"{lane} copy for" in c]
+        assert len(shown) == 3 and all(c.split("\n", 1)[0].endswith(f"· {label}") for c in shown), shown
+    assert not any("spotlight" in c for c in captions if "main copy for" in c)            # main: as before
+
+    # Approve all on the SPOTLIGHT decision: its own three posts, never the main run's
+    assert (await rs.handle_update(_tap_on(by_header["DECISION · POSTS · run 2026-09-17 · spotlight"],
+                                           "g")))["outcome"] == "decided"
+    status = {(r["run_id"], r["platform"]): r["status"] for r in _rows(svc, mrs.POSTS)}
+    assert {status[(runs["spotlight"]["id"], p)] for p in platforms} == {"approved"}
+    assert {status[(runs["main"]["id"], p)] for p in platforms} == {"pending_review"}
+    fb = next(r for r in _rows(svc, mrs.POSTS) if r["run_id"] == runs["spotlight"]["id"] and r["platform"] == "facebook")
+    prepared = outlet_upload_post.UploadPostAdapter("facebook").prepare(fb)
+    assert prepared.payload["request_id"] == "2026-09-17:spotlight:facebook:text:a1"
+
+
+@pytest.mark.parametrize("run, label", [({"run_date": "2026-09-17"}, "run 2026-09-17"),
+                                        ({"run_date": "2026-09-17", "lane": "spotlight"},
+                                         "run 2026-09-17 · spotlight")])
+def test_spotlight_every_bundle_message_names_the_run_with_its_lane(run, label):
+    """The four bundle texts take the run label `_run_date` built: the media caption, a caption message, the decision —
+    and the per-post flow's run video caption is built from the same label."""
+    post = {"id": str(uuid.uuid4()), "platform": "x", "format": "text", "caption": SHORT, "title": None,
+            "status": "pending_review", "metadata": {"dry_run": False}, "idempotency_key": "garbage"}
+    run_label = rs._run_date(run, post)
+    assert f"run {run_label}" == label
+    assert rs.compose_bundle_media_caption("video", [post], [], run_label, False).split("\n")[0].endswith(label)
+    assert rs.compose_bundle_caption_text([post], set(), run_label, False).split("\n")[0].endswith(label)
+    assert rs.compose_bundle_decision_text("post", [post], [], run_label, False, []).split("\n")[0] == (
+        f"DECISION · POSTS · {label}")
+
+
+# ── per-post art (workstream C, decision 13, 2026-11-16): the "Art:" line ─────────────────────
+#
+# `create_posts` stamps `metadata.art` (`run_service.art_note`) on every post of a run whose accepted output carries
+# an art record; the decision message then carries ONE "Art: …" line right after the models line. No model is ever
+# named; the subject is model text — scrubbed, folded onto one line and capped; a day without art reads as before.
+
+from app.services.marketing import post_art as _pa  # noqa: E402
+
+_ART_SUBJECT = "A blank payment card resting on a vault door, seen at an angle"
+#: Model and provider names the line must never carry (identity rule) — the record they come from does carry them.
+_ART_MODEL_WORDS = ("gemini", "google", "claude", "anthropic", "opus", "imagen", "sonnet", "-pro-")
+
+
+def _art_note(**over: Any) -> Dict[str, Any]:
+    """A note as `run_service.art_note` writes it: art drawn on both spotlight surfaces, the check passed first time."""
+    note = {"status": "ok", "reason": None, "subject": _ART_SUBJECT, "treatment": "flat_deco", "redrawn": False,
+            "flags": [], "surfaces": ["picture", "cover"], "drawn": {"picture": True, "cover": True}}
+    note.update(over)
+    return note
+
+
+def _with_art(row: Dict[str, Any], note: Any) -> Dict[str, Any]:
+    row["metadata"] = {**(row.get("metadata") or {}), "art": note}
+    return row
+
+
+_ART_OK_LINE = (f"Art: {_ART_SUBJECT} (Flat vector, warm and confident) · check passed · on: picture, video cover")
+
+
+@pytest.mark.parametrize("kind", ["post", "video"])
+def test_art_the_line_follows_the_models_line_in_both_decisions(configured, kind):
+    from app.services.marketing.run_service import written_by_note
+
+    fmt = "image" if kind == "post" else "video"
+    members = [_row("bluesky", fmt), _row("facebook", fmt)]
+    plain = rs.compose_bundle_decision_text(kind, members, [], "2026-11-21", False, [],
+                                            series_note="Insider Spotlight")
+    note = written_by_note({"served_by": "claude:claude-sonnet-5-5"})
+    for row in members:
+        row["metadata"]["written_by"] = note
+    modelled = rs.compose_bundle_decision_text(kind, members, [], "2026-11-21", False, [],
+                                               series_note="Insider Spotlight").split("\n")
+    for row in members:
+        _with_art(row, _art_note())
+    text = rs.compose_bundle_decision_text(kind, members, [], "2026-11-21", False, [],
+                                           series_note="Insider Spotlight").split("\n")
+    assert modelled[2].startswith("Models: ") and text[:3] == modelled[:3]
+    assert text == modelled[:3] + [_ART_OK_LINE] + modelled[3:]
+    # without a models line it follows the series line — every other line is the text of before
+    for row in members:
+        row["metadata"].pop("written_by")
+    no_models = rs.compose_bundle_decision_text(kind, members, [], "2026-11-21", False, [],
+                                                series_note="Insider Spotlight").split("\n")
+    assert no_models == plain.split("\n")[:2] + [_ART_OK_LINE] + plain.split("\n")[2:]
+
+
+def test_art_a_day_without_an_art_note_reads_byte_for_byte_as_before(configured):
+    """The switch off: `create_posts` stamps no `metadata.art` — the members' metadata has no such key (or, by hand,
+    None) — and the decision text is the one of before, pinned literally."""
+    members = [_row("x", "text"), _row("bluesky", "image")]
+    expected = ["DECISION · POSTS · run 2026-09-28", "Approve all sends: X (text), BLUESKY (image)",
+                "✂ drop = reject that one platform and keep the rest (optional)."]
+    assert rs.art_line(members) == ""
+    assert rs.compose_bundle_decision_text("post", members, [], "2026-09-28", False, []).split("\n") == expected
+    for row in members:
+        _with_art(row, None)
+    assert rs.art_line(members) == ""
+    assert rs.compose_bundle_decision_text("post", members, [], "2026-09-28", False, []).split("\n") == expected
+    assert rs.art_line([]) == "" and rs.art_line("junk") == "" and rs.art_line([{"metadata": "junk"}, 7]) == ""
+
+
+def test_art_the_first_member_carrying_a_note_decides():
+    members = [_row("x", "text"), _with_art(_row("bluesky", "image"), _art_note()),
+               _with_art(_row("threads", "image"), _art_note(subject="Something else entirely, drawn here"))]
+    assert rs.art_line(members) == _ART_OK_LINE
+
+
+@pytest.mark.parametrize("over, line", [
+    # a redraw: the first check's flags in the owner's words, distinct, in order — an unknown flag left out
+    ({"redrawn": True, "flags": ["text_or_numbers", "junk", "logo_or_brand", "text_or_numbers"]},
+     f"Art: {_ART_SUBJECT} (Flat vector, warm and confident) · check passed after one redraw — first showed text or "
+     "numbers, a logo or brand · on: picture, video cover"),
+    ({"redrawn": True, "flags": []},
+     f"Art: {_ART_SUBJECT} (Flat vector, warm and confident) · check passed after one redraw · on: picture, video "
+     "cover"),
+    # the main lane: the cover only
+    ({"surfaces": ["cover"], "drawn": {"picture": False, "cover": True}},
+     f"Art: {_ART_SUBJECT} (Flat vector, warm and confident) · check passed · on: video cover"),
+    # a surface the record allowed that the worker did not draw (no fit, an unreadable download)
+    ({"drawn": {"picture": False, "cover": True}},
+     f"Art: {_ART_SUBJECT} (Flat vector, warm and confident) · check passed · on: video cover (not on the picture)"),
+    ({"drawn": {"picture": False, "cover": False}},
+     f"Art: {_ART_SUBJECT} (Flat vector, warm and confident) · check passed · not drawn today (the media worker kept "
+     "today's drawing)"),
+    ({"drawn": "junk"},
+     f"Art: {_ART_SUBJECT} (Flat vector, warm and confident) · check passed · not drawn today (the media worker kept "
+     "today's drawing)"),
+    # a treatment that is not a marketing one is never named (no raw value); a missing subject is said so
+    ({"treatment": "specimen_plate"}, f"Art: {_ART_SUBJECT} · check passed · on: picture, video cover"),
+    ({"treatment": None, "subject": None}, "Art: (no subject recorded) · check passed · on: picture, video cover"),
+    ({"subject": "   \n "}, "Art: (no subject recorded) (Flat vector, warm and confident) · check passed · on: "
+                           "picture, video cover"),
+])
+def test_art_the_line_says_how_the_check_went_and_where_it_was_drawn(over, line):
+    assert rs.art_line([_with_art(_row("bluesky", "image"), _art_note(**over))]) == line
+
+
+@pytest.mark.parametrize("reason", _pa.ART_REASONS)
+def test_art_no_art_is_said_in_the_owners_words_for_every_reason(reason):
+    note = {"status": "failed", "reason": reason, "subject": None, "treatment": None, "redrawn": False, "flags": [],
+            "surfaces": [], "drawn": {"picture": False, "cover": False}}
+    line = rs.art_line([_with_art(_row("bluesky", "image"), note)])
+    assert line == f"Art: none today — {_pa.REASON_WORDS[reason]}"
+    assert reason not in line or reason in _pa.REASON_WORDS[reason]          # the owner's words, never the code
+    assert not any(w in line.lower() for w in _ART_MODEL_WORDS), line
+
+
+@pytest.mark.parametrize("over, tail", [
+    ({"redrawn": True, "flags": ["text_or_numbers", "logo_or_brand"]},
+     "the picture check failed after one redraw (text or numbers, a logo or brand)"),
+    ({"redrawn": False, "flags": ["people_faces_or_hands"]}, "the picture check failed (people, faces or hands)"),
+    ({"redrawn": True, "flags": ["not_recognisable"]},
+     "the picture check failed after one redraw (the object could not be recognised)"),
+    ({"redrawn": False, "flags": []}, "the picture check failed"),
+])
+def test_art_a_failed_check_names_the_redraw_and_the_flags(over, tail):
+    note = {"status": "failed", "reason": "check_failed", "surfaces": [], "drawn": {}, **over}
+    assert rs.art_line([_with_art(_row("x", "text"), note)]) == f"Art: none today — {tail}"
+
+
+@pytest.mark.parametrize("note", ["junk", 7, [], {"status": "unreadable", "reason": None},
+                                  {"status": "weird"}, {}])
+def test_art_a_note_that_does_not_read_back_says_so(note):
+    assert rs.art_line([_with_art(_row("x", "text"), note)]) == rs.ART_LINE_UNREADABLE
+
+
+@pytest.mark.parametrize("reason", [None, "junk_code", 7, "<b>raw</b>"])
+def test_art_an_unknown_failure_reason_is_never_shown_raw(reason):
+    line = rs.art_line([_with_art(_row("x", "text"), {"status": "failed", "reason": reason})])
+    assert line == "Art: none today — a reason that could not be read (see the web logs)"
+
+
+def test_art_the_subject_is_scrubbed_folded_and_capped():
+    """Model text inside Telegram: a line break, a tab, a control or format character, or a run of spaces never
+    starts a line of its own or survives; a secret-shaped string is redacted; past 160 characters it is cut with
+    "…" (one line, whatever the subject)."""
+    from test_marketing_metrics import TOKEN_LIKE, TOKEN_SECRET
+
+    hostile = ("A blank card\n\nINJECTED line\r\x00\x1b[31m​  on a desk\t" + TOKEN_LIKE + " "
+               + "vault door " * 60)
+    line = rs.art_line([_with_art(_row("x", "text"), _art_note(subject=hostile))])
+    assert "\n" not in line and "\r" not in line and "\t" not in line
+    assert all(ch.isprintable() for ch in line), line
+    assert TOKEN_SECRET not in line
+    subject = line[len("Art: "):line.index(" (Flat vector")]
+    assert len(subject) == rs.ART_LINE_SUBJECT_MAX_CHARS and subject.endswith("…")
+    assert subject.startswith("A blank card INJECTED line") and "  " not in subject
+    assert line.endswith(" · check passed · on: picture, video cover")
+    # a subject at the cap is kept whole
+    exact = "x" * rs.ART_LINE_SUBJECT_MAX_CHARS
+    assert rs.art_line([_with_art(_row("x", "text"), _art_note(subject=exact, treatment=None))]) == (
+        f"Art: {exact} · check passed · on: picture, video cover")
+
+
+def test_art_the_line_never_names_a_model_even_from_a_real_record(monkeypatch):
+    """The record names its models (`output.art.models`, server-side only); the note `create_posts` stamps and the
+    line built from it never do."""
+    from app.services.marketing import run_service as mrs_
+
+    monkeypatch.setattr(settings, "SUPABASE_URL", "https://sb.example")
+    sha = "a" * 64
+    record = {"version": "art-v1", "status": "ok", "reason": None, "subject": _ART_SUBJECT, "treatment": "tech_noir",
+              "attempts": 2, "checks": [{"pass": False, "flags": ["chart_money_or_flag"], "notes": "Gemini drew it"},
+                                        {"pass": True, "flags": [], "notes": ""}],
+              "models": {"brief": "claude-opus-5-5", "check": "claude-opus-5-5", "image": "gemini-3-pro-image"},
+              "surfaces": ["cover"], "url": _pa.expected_art_url(sha), "sha256": sha, "bytes": 400_000,
+              "width": _pa.ART_WIDTH, "height": _pa.ART_HEIGHT,
+              "usage": {"images": 2, "images_uncertain": 0, "estimated_micros": 400_000}}
+    # the kept art code's series (owner decision 2026-11-20, "use it nowhere for now": shipped, none carries art — the
+    # Money Map is put back for this test only, test_marketing_post_art.keep_art_on_money_map)
+    from test_marketing_post_art import keep_art_on_money_map
+    keep_art_on_money_map(monkeypatch)
+    note = mrs_.art_note({"series": "money_map", "authorship": "template", "art": record},
+                         picture=False, cover=True)
+    line = rs.art_line([_with_art(_row("tiktok", "video"), note)])
+    assert line == (f"Art: {_ART_SUBJECT} (Designed light, carved out of black) · check passed after one redraw — "
+                    "first showed a chart, money or a flag · on: video cover")
+    assert not any(w in line.lower() for w in _ART_MODEL_WORDS), line
+
+
+def test_art_a_bug_in_the_line_costs_only_the_line(configured, monkeypatch, caplog):
+    caplog.set_level(logging.ERROR, logger=rs.__name__)
+    members = [_with_art(_row("x", "text"), _art_note()), _row("bluesky", "image")]
+
+    def boom(note):
+        raise KeyError("probe")
+
+    monkeypatch.setattr(rs, "_art_text", boom)
+    assert rs.art_line(members) == ""
+    (rec,) = [r for r in caplog.records if "art line could not be built" in r.getMessage()]
+    assert rec.levelno == logging.ERROR and rec.exc_info is not None and members[0]["id"] in rec.getMessage()
+    plain = [_row("x", "text"), _row("bluesky", "image")]
+    assert rs.compose_bundle_decision_text("post", members, [], "2026-09-28", False, []) == (
+        rs.compose_bundle_decision_text("post", plain, [], "2026-09-28", False, []))
+
+
+@pytest.mark.asyncio
+async def test_art_the_sweeps_two_decisions_carry_the_art_line_create_posts_stamped(bundles, tg):
+    """End to end through the sweep: the members the decision text reads are the re-read, bundle-stamped rows — the
+    note create_posts stamped reaches BOTH decision messages, once each, right after the header (no models line, no
+    series note on this day)."""
+    ids = _seed_day(bundles)
+    for pid in ids.values():
+        _with_art(_post(bundles, pid), _art_note(redrawn=True, flags=["logo_or_brand"]))
+    await rs.review_cycle()
+    video, post = _decision_messages(tg)
+    line = (f"Art: {_ART_SUBJECT} (Flat vector, warm and confident) · check passed after one redraw — first showed a "
+            "logo or brand · on: picture, video cover")
+    for decision in (video, post):
+        lines = decision["text"].split("\n")
+        assert lines.count(line) == 1 and lines.index(line) == 1, lines
+        assert "parse_mode" not in decision

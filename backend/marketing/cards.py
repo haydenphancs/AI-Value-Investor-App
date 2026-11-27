@@ -22,8 +22,9 @@ A TEMPLATE (news) script's video (drop 2a, `video_layout == "per_line"`) is diff
 OPENING card (`opening_card`: kicker, 1-2 company logos, chip, figure, headline) is shown alone
 over the hook, then one text card per narration line, then the disclaimer (`cards_for_script`,
 timed by `video.timeline(..., hook_card=True)`). A company logo is drawn UNALTERED — only scaled —
-on a light rounded plate (`draw_plate`); a logo that is missing or did not verify is a WORDMARK
-plate carrying the company name, which is then a drawn (declared) string. Its post image is drawn
+on a disc (`look.draw_disc`: white, dark for a logo made for a dark background, the plate's own colour for
+a logo served on a light plate); a logo that is missing or did not verify is a WORDMARK disc carrying the
+company name, which is then a drawn (declared) string. Its post image is drawn
 by `news_layouts.py` from the closed `image_spec` (`render_post_image` dispatches; a template never
 falls back to the lesson layout, which would draw its alt text).
 
@@ -32,8 +33,8 @@ freezes them per run and sends them in the script read-back (`video_features`, r
 — only the kind's own: LESSON_VIDEO_FEATURES / TEMPLATE_VIDEO_FEATURES). Each only ADDS to today's video
 and each falls back to it — never a skipped day:
 
-* `hook_card` (a lesson): the video OPENS on a HOOK card — the accepted hook, verbatim, big and centred
-  under an accent rule — shown alone over the narrated hook (`video.timeline(..., hook_card=True)`;
+* `hook_card` (a lesson): the video OPENS on a HOOK card — the accepted hook, verbatim, the two-tone
+  headline — shown alone over the narrated hook (`video.timeline(..., hook_card=True)`;
   `opens_on_hook_card`). A hook that is not one drawable string, lacks a glyph or cannot fit at the floor
   size is logged (WARNING) and the video opens on its first content card, as before.
 * `data_card` (a template): the ONE text card the read-back names (`data_card_slot`, an index into its
@@ -49,11 +50,20 @@ and each falls back to it — never a skipped day:
 The server ALLOWS each feature card's strings only while the feature is frozen (`run_service.
 _check_onscreen_text`); a worker that drew them unfrozen would be refused (422).
 
-What the post image shows (`ImageSpec`, `render_image`): the accepted output's `image_post` title
-and its 2-4 paragraphs on a panel, and the server's code-owned `image_footer` burned under it — no
-logo, no brand card. Same rules as a card: every string declared verbatim (`image_onscreen_strings`
-— the server allows only the accepted `image_post` strings and the footer, and requires the
-footer), never truncated, a glyph Inter lacks refused up front. Encoded as a BASELINE JPEG
+PER-POST ART (workstream C, owner decisions 2026-11-15 — "Picture and video cover"): a template's opening card
+may draw the run's verified art (`ArtImage`, from `art.resolve_art`): a band across the top of the card, edge to
+edge (OPENING_ART_W × OPENING_ART_H, the brand row on a navy scrim over it), its ONE logo disc in a gold ring on
+the band's bottom edge, the chip, headline and figure under it in sizes of their own, and the code-owned ART_LABEL ("AI illustration") burned on the band in a PAGE pill — declared
+like any string (`onscreen_strings`), beside the video's `opening_art_sha256` (the server allows the label only
+then). `cards_for_script(..., art=)` checks it with the render's font and engine and keeps the plain opening card
+(WARNING) when it cannot be drawn: two companies, a glyph, no fit at the floor sizes, an unreadable file, too many
+strings — never a skipped day. A card that draws no art keeps its bytes.
+
+What the post image shows (`ImageSpec`, `render_image`): the brand row (the Caydex tile + BRAND_ROW_WORD, the
+LESSON_KICKER pill), the accepted output's `image_post` title as the two-tone headline and its 2-4 paragraphs each
+on a warm card along a gold rail, and the server's code-owned `image_footer` as the short footer line. Same rules
+as a card: every string declared verbatim (`image_onscreen_strings` — the server allows only the accepted
+`image_post` strings, the footer and LESSON_BRAND_TEXT, and requires the footer), never truncated, a glyph Inter lacks refused up front. Encoded as a BASELINE JPEG
 (sRGB by convention: RGB, no ICC profile, no EXIF; 4:4:4 so coloured text stays crisp), stepping
 the quality down until it is at most POST_IMAGE_MAX_BYTES — `ImageTooLarge` when even the lowest
 step is not, never a bigger file.
@@ -86,17 +96,24 @@ Why each piece is shaped the way it is:
   any drawn string longer than the server's ONSCREEN_TEXT_MAX_CHARS (600) is refused before any
   measuring (the server would refuse it anyway).
 
-Palette: PAGE, CARD, ACCENT and TEXT (the brand hexes), and alpha variants of them composited
-over the background they sit on — nothing else (tests/test_marketing_cards.py checks every pixel
-of the logo-less cards). Bump CARD_RENDER_VERSION with ANY change to what a card looks like: it is
-part of the video's reuse key (`render.render_key`).
+THE LOOK (news-v23, owner 2026-11-19: "i need exactly these styles, colors, words"): `look.py` holds the approved
+kit — the navy→black gradient with its gold glow, the brand row (the vendored Caydex tile + "Caydex", the kicker in
+the gold pill right-aligned), the two-tone UPPERCASE headline, warm-white cards, chips, logo discs, the short footer
+line, the colour rules by series (GREEN a purchase / an increase / a profit, RED a decrease / a loss, GOLD_INK a
+stake or a share) — and `card_layouts.py` places each video card kind and the lesson picture with it (the brand row
+140 px from the top, nothing in the safe bottom VIDEO_SAFE_BOTTOM). Every card draws the brand row; a lesson card
+its LESSON_KICKER and LESSON_FOOTER, a template card its opening kicker and its image_footer (`CardSpec.pill` /
+`.footer`), all declared. Bump CARD_RENDER_VERSION with ANY change to what a card looks like: it is part of the
+video's reuse key (`render.render_key`).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import logging
 import math
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -124,9 +141,9 @@ CAPTION_BAND_Y: Tuple[int, int] = (captions.POS[1] - _CAPTION_HALF, captions.POS
 
 # ── brand ────────────────────────────────────────────────────────────────────
 
-PAGE = "#171B26"
-CARD = "#1E2330"
-ACCENT = "#60A5FA"
+#: The page colour of a logo tile and the white of the logo disc (news-v23: the full palette — the gradient, the
+#: gold, the warm card, the inks, green / red / gold-ink — is marketing/look.py's).
+PAGE = "#111827"
 TEXT = "#FFFFFF"
 WORDMARK = "Caydex"
 #: The end card's call to action (owner decision 6, Batch 2: post_copy.SEARCH_LINE without its full
@@ -141,6 +158,23 @@ END_CARD_CTAS: Tuple[str, ...] = (LEGACY_CTA, CTA)
 #: app.schemas.marketing.VIDEO_BRAND_TEXT — a superset since Batch 2, so neither deploy order turns the
 #: end card into a 422; tests/test_marketing_cards.py pins them equal).
 BRAND_TEXT: Tuple[str, ...] = (WORDMARK, LEGACY_CTA, CTA)
+#: news-v23 (2026-11-19) — mirrors of app.schemas.marketing.BRAND_ROW_WORD / LESSON_KICKER and
+#: post_copy.IMAGE_FOOTER_HEAD (pinned equal by tests/test_marketing_cards.py): the brand row's word (on every
+#: card and picture), the lesson's kicker pill and the lesson's short footer (on every lesson card and picture).
+BRAND_ROW_WORD = "Caydex"
+LESSON_KICKER = "INVESTING LESSON"
+LESSON_FOOTER = "Not investment advice"
+#: news-v23 — mirrors app.schemas.marketing.READBACK_LOOK (pinned equal): the value of the script read-back's
+#: `look` key that tells this worker its web allow-lists the look's own strings — the brand row's word on a PICTURE,
+#: the lesson's kicker pill (picture and cards) and the short footer on every video card. A read-back without it (a
+#: web before news-v23, or after a web rollback) is drawn WITHOUT them (`new_look`): that web refuses each one with a
+#: 422, which would fail the whole render and lose the day.
+LOOK = "news-v23"
+
+
+def new_look(script: Any) -> bool:
+    """Whether the read-back `script` comes from a web that allows the news-v23 look's strings (`LOOK`)."""
+    return isinstance(script, dict) and script.get("look") == LOOK
 
 #: Batch 2 (2026-10-19) — mirrors of app.schemas.marketing (pinned equal by tests/test_marketing_cards.py):
 #: the video features the server may freeze into a run, and which a script of each kind may carry (a
@@ -157,8 +191,17 @@ TEMPLATE_VIDEO_FEATURES: Tuple[str, ...] = (VIDEO_FEATURE_DATA_CARD, VIDEO_FEATU
 #: brand card; the 4:5 post image was added. v3 (drop 2a): the template opening card, the company
 #: logo plates and wordmark tiles, the template post-image layouts (news_layouts.py). v4 (Batch 2):
 #: the hook card, the data card and the App Store end card (a lesson card or post image that draws
-#: none of them keeps its v3 bytes — tests/test_marketing_cards.py pins the drop-1 goldens).
-CARD_RENDER_VERSION = "cards/v4"
+#: none of them keeps its v3 bytes — tests/test_marketing_cards.py pins the drop-1 goldens). v5
+#: (2026-11-15, the spotlight posts): the `feature` template image — the art band (FEATURE_BAND_*:
+#: kicker pill + logo plate), the figure, its label, the headline and the fact rows — and, in the same
+#: release (workstream C), the per-post art in that band and on the opening card. Bumped ONCE for both:
+#: every card and post image that draws neither keeps its v4 bytes (tests/test_marketing_news_layouts.py
+#: pins them).
+#: v6 (news-v23, 2026-11-19 — owner: "i need exactly these styles, colors, words"): the approved look on every
+#: card and post image (marketing/look.py: the gradient + glow, the brand row with its kicker pill, the two-tone
+#: headline, warm cards, logo discs — dark for a logo made for a dark background — the short footer, the
+#: green / red / gold figures). Every card and picture changes its bytes.
+CARD_RENDER_VERSION = "cards/v6"
 
 KINDS: Tuple[str, ...] = ("brand", "text", "stat", "disclaimer", "opening", "hook", "data")
 #: The kinds shown ALONE over the narrated hook as card 0 — `video.timeline(..., hook_card=True)`.
@@ -172,41 +215,141 @@ TEMPLATE_AUTHORSHIP = "template"
 #: app.schemas.marketing.VIDEO_LAYOUT_PER_LINE — [opening] + one text card per narration line.
 VIDEO_LAYOUT_PER_LINE = "per_line"
 #: app.services.marketing.template_onscreen: the closed image_spec / opening_card schema.
-LAYOUTS: Tuple[str, ...] = ("rows", "spotlight", "pair", "bars", "grid")
+LAYOUTS: Tuple[str, ...] = ("rows", "spotlight", "pair", "bars", "grid", "feature", "ranked", "figures", "ledger",
+                            "tally")
 #: What this worker ACCEPTS from the server (mirrors template_onscreen.SHIPPED_LAYOUTS, same members,
 #: same order). Drop 2b (2026-10-10) ships `pair` and `grid` with their series — both sides' literals
-#: were flipped together; news_layouts derives what it accepts from this tuple.
-SHIPPED_LAYOUTS: Tuple[str, ...] = ("rows", "spotlight", "pair", "bars", "grid")
+#: were flipped together; news_layouts derives what it accepts from this tuple. 2026-11-15 ships
+#: `feature` (the spotlight series' art-band picture): this image declares `layout_feature` for it. news-v23 phase 3
+#: (2026-11-20) ships `ranked` (the weekly theme post's angle 2, a theme's members by market value): this image
+#: declares `theme_angles` for it — and, in the same release (2026-11-20), `figures`, `ledger` and `tally` (the theme's
+#: last three angles), under the same capability.
+SHIPPED_LAYOUTS: Tuple[str, ...] = ("rows", "spotlight", "pair", "bars", "grid", "feature", "ranked", "figures",
+                                    "ledger", "tally")
+#: The layouts a template video may draw as its DATA CARD (mirrors template_onscreen.DATA_CARD_LAYOUTS):
+#: never `feature` — `news_layouts.layout_data_card` refuses any other (CardOverflow: the text card stays).
+DATA_CARD_LAYOUTS: Tuple[str, ...] = ("rows", "spotlight", "pair", "bars", "grid")
 SPEC_VERSION = 1
 MAX_LOGOS = 12
 MAX_ROWS = 8
 MAX_SECTIONS = 3
-MAX_SECTION_ROWS = 5
+#: news-v23 (the 13F list): one section of up to six rows (template_onscreen.MAX_SECTION_ROWS, pinned equal).
+MAX_SECTION_ROWS = 6
 MAX_CELLS = 3
+#: news-v23 — the earnings TABLE (template_onscreen.TABLE_CELLS / MAX_TABLE_LINES / TABLE_KEYS, pinned equal): a `rows`
+#: row's `table` of 1..MAX_TABLE_LINES lines, each exactly TABLE_CELLS cells (a label, then one per column), under its
+#: section's `columns` (TABLE_CELLS − 1 labels); every row of such a section carries one, and only such rows may.
+TABLE_CELLS = 4
+MAX_TABLE_LINES = 2
+TABLE_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("cells",), ())
 MAX_NOTES = 2
 MAX_LINES = 2
 MIN_BARS, MAX_BARS = 2, 7
 MIN_FLOW, MAX_FLOW = 2, 4
 MIN_TILES, MAX_TILES = 3, 12
+#: news-v23 phase 3 — a `ranked` picture's rows (template_onscreen.MIN_RANKED_ROWS / MAX_RANKED_ROWS / RANKED_ROW_KEYS,
+#: pinned equal): `{rank, logo, chip?, name, value, ratio}`, ranked 1..n in order, the ratio the bar (never drawn).
+MIN_RANKED_ROWS, MAX_RANKED_ROWS = 4, 10
+RANKED_ROW_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("rank", "logo", "name", "value", "ratio"), ("chip",))
+#: news-v23 phase 3 — the theme picture's decoration tokens (template_onscreen.THEME_ICONS, pinned equal), each drawn
+#: by `marketing.theme_art` from the approved mock's own drawing; never text.
+THEME_ICONS: Tuple[str, ...] = ("chip", "bolt", "wafer", "shield", "radar")
+#: news-v23 phase 3, the theme's last three angles (2026-11-20) — mirrors of template_onscreen (pinned equal): the table
+#: layouts, their rows' bounds and keys, the two column heads of 1..MAX_HEAD_LINES lines, the figures' shapes (each
+#: drawn GREEN or RED by its sign: MINUS = red), the empty cell, and a table cover's rows (`opening_card.list.layout`).
+THEME_TABLE_LAYOUTS: Tuple[str, ...] = ("figures", "ledger", "tally")
+MIN_THEME_TABLE_ROWS = 4
+MAX_THEME_TABLE_ROWS: Dict[str, int] = {"figures": 10, "ledger": 10, "tally": 6}
+THEME_HEADS, MAX_HEAD_LINES = 2, 2
+THEME_TABLE_ROW_KEYS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
+    "figures": (("logo", "name", "growth", "ratio", "profit"), ("chip",)),
+    "ledger": (("logo", "name", "buys", "sells"), ("chip",)),
+    "tally": (("logo", "name", "count"), ("chip",)),
+}
+MINUS = "−"
+EMPTY_CELL = "—"
+GROWTH_FIGURE_RE = re.compile(r"(?:\+|−)[1-9][0-9]{0,2}(?:,[0-9]{3})*%|0%")
+PROFIT_FIGURE_RE = re.compile(r"−?\$(?:[1-9][0-9]{0,2}(?:,[0-9]{3})*|0\.(?:0[1-9]|[1-9][0-9]))|\$0")
+LEDGER_AMOUNT_RE = re.compile(r"\$[1-9][0-9]{0,2}(?:\.[0-9])?[KMBT]?|—")
+TALLY_COUNT_RE = re.compile(r"[1-9][0-9]{0,2}")
+MAX_OPENING_TABLE_ROWS = 6
+#: The server's NAME bound of each table (company_news_rules.THEME_TABLE_NAME_W / THEME_TABLE_NAME_LINES by angle,
+#: THEME_TABLE_NAME_FLOOR_PX, pinned equal): a company whose name takes at most that many lines of that width
+#: at the floor is the only one the server lists, and this worker's rows draw it (one line, else two) on the picture
+#: and on the cover with the widest chips and figures — tests/test_marketing_news_layouts.py lays the widest out.
+THEME_TABLE_NAME_W: Dict[str, int] = {"figures": 250, "ledger": 275, "tally": 600}
+THEME_TABLE_FLOOR_PX = 22
+THEME_TABLE_NAME_LINES: Dict[str, int] = {"figures": 2, "ledger": 2, "tally": 1}
+#: news-v23 phase 3 — the theme TILE's text column and floor size, and the most lines a tile and its name draw at the
+#: floor: the server's bounds (news_templates.THEME_TILE_TEXT_W / THEME_TILE_FLOOR_PX / THEME_TILE_MAX_LINES /
+#: THEME_NAME_MAX_LINES, pinned equal), which this worker's grid placer keeps (tests/test_marketing_news_layouts.py
+#: lays the widest tiles out). And the ranked row's narrowest name column at the floor (THEME_RANKED_NAME_W /
+#: THEME_RANKED_FLOOR_PX).
+THEME_TILE_TEXT_W = 347
+THEME_TILE_FLOOR_PX = 22
+THEME_TILE_MAX_LINES = 3
+THEME_NAME_MAX_LINES = 2
+THEME_RANKED_NAME_W = 440
+THEME_RANKED_FLOOR_PX = 22
+MIN_FACTS, MAX_FACTS = 1, 4
 MAX_OPENING_LOGOS = 2
 LOGO_KEY_MAX_CHARS = 16
+#: news-v23 — a `rows` row's ticker CHIP (mock_form4.wide_row_card, drawn over the row's name): at most this long
+#: (template_onscreen.ROW_CHIP_MAX_CHARS, pinned equal) — a ticker, never a phrase.
+ROW_CHIP_MAX_CHARS = 10
+#: news-v23 — a `rows` row's keys, (required, optional), and its `label`'s longest (template_onscreen.ROW_KEYS /
+#: ROW_LABEL_MAX_CHARS, pinned equal): company stakes (stakes_nvidia.jpg) draw the basis word ("invested") over the
+#: row's figure.
+#: Owner decisions 2026-11-20 (the insider list, insider_multi3.jpg): a row's `detail`, its one small grey line under the
+#: name and roles ("28K shares · $71.20–$71.80 a share, as filed"), at most ROW_DETAIL_MAX_CHARS long
+#: (template_onscreen.ROW_DETAIL_MAX_CHARS, pinned equal).
+ROW_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("cells",), ("logo", "chip", "label", "detail"))
+ROW_LABEL_MAX_CHARS = 16
+ROW_DETAIL_MAX_CHARS = 64
 BAR_STYLES: Tuple[str, ...] = ("fill", "outline")
+#: Owner decision 2026-11-20 ("A: costs vs revenue (Recommended)", money_map_loss_A_rivian.jpg) — a Money Map LOSS
+#: year's COSTS card, on its picture (`bars` spec `costs`) and its video cover (opening card `costs` + `subtitle`):
+#: template_onscreen.COSTS_KEYS / COSTS_BAR_KEYS / COSTS_NET_KEYS / COSTS_PARTS / COSTS_CALLOUT_LINES, pinned equal.
+#: news_layouts draws it in place of the flow's steps and the one-line callout (`_costs_card`).
+COSTS_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("revenue", "net", "total", "parts", "callout"), ("note",))
+COSTS_BAR_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("label", "value", "ratio"), ())
+COSTS_NET_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("label", "value"), ())
+COSTS_PARTS: Tuple[int, ...] = (0, 2, 3)
+COSTS_CALLOUT_LINES = 2
 COMMON_KEYS: Tuple[str, ...] = ("layout", "version", "kicker", "footer")
 LAYOUT_KEYS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
     "rows": (("title", "sections"), ("header", "subtitle", "notes")),
     "spotlight": (("header", "figure", "headline"), ("lines",)),
     "pair": (("left", "right", "figure", "label"), ("lines",)),
-    "bars": (("header", "title", "subtitle", "segments", "flow", "callout"), ()),
-    "grid": (("title", "subtitle", "tiles"), ("more",)),
+    "bars": (("header", "title", "subtitle", "segments", "flow", "callout"), ("costs",)),
+    "grid": (("title", "subtitle", "tiles"), ("more", "icon", "sub_break")),
+    "feature": (("header", "figure", "figure_label", "headline", "facts"), ()),
+    "ranked": (("title", "subtitle", "rows"), ("more", "icon")),
+    "figures": (("title", "subtitle", "heads", "rows"), ("more", "icon", "note")),
+    "ledger": (("title", "subtitle", "heads", "rows"), ("more", "icon", "note")),
+    "tally": (("title", "subtitle", "unit", "rows"), ("more", "icon", "note")),
 }
-OPENING_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("kicker", "logos", "headline"), ("chip", "figure"))
+OPENING_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("kicker", "logos", "headline"), ("chip", "figure", "list",
+                                                                                "figure_label", "subtitle", "costs"))
+#: news-v23 (2026-11-20, the Money Map cover) — the opening card's `figure_label`, drawn under the figure inside its
+#: warm card (template_onscreen.OPENING_FIGURE_LABEL_MAX_CHARS, pinned equal): only beside a figure.
+OPENING_FIGURE_LABEL_MAX_CHARS = 60
+#: news-v23 — the LIST cover's `list` (template_onscreen.OPENING_LIST_KEYS / MAX_OPENING_ROWS, pinned equal): the
+#: column label (optional since the Congress Count's list, which has none), an earnings table's `columns`, 1..MAX_OPENING_ROWS
+#: `rows` rows and the "+N more changes in the caption" line.
+OPENING_LIST_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("rows",), ("heading", "columns", "more", "layout",
+                                                                         "heads", "unit", "note"))
+#: Owner decisions 2026-11-20: five — the Form 4 lists' compact all-rows cover (insider_multi5_cover_alt_all5.jpg).
+MAX_OPENING_ROWS = 5
+#: A `feature` fact row (2026-11-15): template_onscreen.FACT_KEYS, pinned equal.
+FACT_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("label", "value"), ())
 #: Drop 2b: a pair's sides (the investee may have no logo key — a wordmark plate of its name) and a
 #: grid tile, (required, optional) — template_onscreen's, pinned equal by tests/test_marketing_layouts_2b.py.
 PAIR_SIDE_KEYS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
     "left": (("logo", "name"), ()),
     "right": (("name",), ("logo",)),
 }
-GRID_TILE_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("logo", "name"), ("line",))
+GRID_TILE_KEYS: Tuple[Tuple[str, ...], Tuple[str, ...]] = (("logo", "name"), ("chip", "line"))
 #: app.schemas.marketing.ONSCREEN_TEXT_MAX: the most strings one asset may declare.
 ONSCREEN_TEXT_MAX = 64
 #: What `str.splitlines()` splits on, and a tab: a drawn string is one line (template_onscreen).
@@ -232,29 +375,53 @@ class _Style:
         return self.start - ((self.start - self.floor) * step) // RAMP_STEPS
 
 
-TITLE_STYLE = _Style(76, 44, 1.16)         # text card title (ACCENT)
-BODY_STYLE = _Style(58, 34, 1.28)          # text card body (TEXT)
-FIGURE_STYLE = _Style(168, 84, 1.08)       # stat figure (ACCENT)
-LABEL_STYLE = _Style(52, 32, 1.2)          # stat label (TEXT)
-STAT_BODY_STYLE = _Style(44, 30, 1.3)      # stat body (TEXT at 82 % over CARD)
-DISCLAIMER_STYLE = _Style(46, 28, 1.3)     # disclaimer body (TEXT at 86 % over PAGE)
-CTA_STYLE = _Style(60, 40, 1.2)            # "caydexinvest.com" (ACCENT)
-#: "Search Caydex on the App Store" (ACCENT): 885 px at 56 px — ONE line in the 920 px column at every
-#: step (CTA_STYLE's 60 px would wrap "Store" alone onto a second line).
+# The video cards' sizes (news-v23: the approved look, laid out by marketing/card_layouts.py).
+TITLE_STYLE = _Style(76, 40, 1.08)              # a text card's title: the two-tone headline (WHITE, then GOLD)
+BODY_STYLE = _Style(52, 30, 1.28)               # its body on the warm card (INK)
+FIGURE_STYLE = _Style(168, 84, 1.04)            # a stat card's figure (its tone)
+LABEL_STYLE = _Style(52, 32, 1.2)               # its label (INK)
+STAT_BODY_STYLE = _Style(44, 30, 1.3)           # its body (INK2)
+DISCLAIMER_STYLE = _Style(46, 28, 1.3)          # the end card's disclaimer text (SUB)
+CTA_STYLE = _Style(60, 40, 1.2)                 # "caydexinvest.com" (GOLD)
+#: "Search Caydex on the App Store" (GOLD): 885 px at 56 px — ONE line in the 920 px column at every step.
 STORE_CTA_STYLE = _Style(56, 40, 1.2)
-WORDMARK_STYLE = _Style(132, 96, 1.2)      # "Caydex" on the brand card (TEXT)
-BADGE_SIZE = 30                            # the pill's text; fixed, never wrapped
-#: The template opening card (drop 2a): the logo tile(s) step down with everything else.
-OPENING_TILE_ONE = _Style(400, 240, 1.0)        # one company: its logo plate's side, px
-OPENING_TILE_TWO = _Style(320, 200, 1.0)        # two companies, side by side
-OPENING_TILE_GAP = 64                           # between two tiles
-OPENING_LOGO_GAP = 56                           # tiles → the first line under them
-OPENING_HEADLINE_STYLE = _Style(72, 40, 1.16)   # the headline (TEXT)
-#: The lesson hook card (Batch 2): the accepted hook, centred, under an accent rule. Every real hook of the
-#: test corpora fits at the start size; 14 words of 8-15 letters (writer_prompts.HOOK_MAX_WORDS) need
-#: step 8 (74 px); the floor is still a large, legible line.
-HOOK_STYLE = _Style(92, 56, 1.12)               # the hook (TEXT)
-HOOK_RULE_GAP = 40                              # the accent rule → the hook
+WORDMARK_STYLE = _Style(132, 96, 1.2)           # "Caydex" on the brand card (WHITE)
+BRAND_TILE_STYLE = _Style(360, 240, 1.0)        # the brand card's logo tile (side)
+CHIP_STYLE = _Style(30, 22, 1.0)                # a cover's chip in its gold pill; a text card's badge
+#: The template opening card — the cover (drop 2a; news-v23 look): its headline beside the company plate (the logo
+#: disc, OPENING_DISC radius — × 0.75 each for two companies — in a gold ring, the chip in a gold pill under it,
+#: OPENING_CHIP_STYLE), the figure big on a warm card in the series' tone. Visual-fidelity round (2026-11-20): the
+#: plate is the LIST covers' (cover_13f_berkshire.jpg: news_layouts.PLATE_DISC r 86, CHIP_PX 24 — pinned equal) and the
+#: headline starts at the content's top, under the brand row, as theirs does — the card's room is never centred (it was
+#: r 110 / 30 px, the block centred ~170 px under the brand row; the mock's headline sits ~60 px under it).
+OPENING_HEADLINE_STYLE = _Style(80, 40, 1.08)
+OPENING_DISC = _Style(86, 46, 1.0)
+OPENING_CHIP_STYLE = _Style(24, 22, 1.0)
+OPENING_FIGURE_STYLE = _Style(200, 84, 1.04)
+#: news-v23 (2026-11-20): the figure's label under it, inside its card (INK; the Money Map cover's "of every $100 of
+#: revenue was net income" — the picture callout's words, money_map_costco.jpg).
+OPENING_FIGURE_LABEL_STYLE = _Style(44, 30, 1.2)
+#: The opening card WITH per-post art (workstream C, owner decisions 2026-11-15: "Picture and video cover"; news-v23
+#: look): the art across the TOP of the card, edge to edge, OPENING_ART_W × OPENING_ART_H (16:9 of the full width),
+#: under a navy scrim the brand row reads on; the logo disc (OPENING_ART_DISC radius) in its gold ring cut into the
+#: band's bottom-left edge; ART_LABEL burned at the band's bottom-right; the chip beside the disc, then the headline
+#: and the figure card under the band — every line above the caption band (cards.TEXT_ZONE_Y[1]).
+OPENING_ART_W = WIDTH
+OPENING_ART_H = 608
+OPENING_ART_DISC = _Style(100, 64, 1.0)
+#: The code-owned label burned on every per-post art (mirrors app.services.marketing.template_onscreen.ART_LABEL,
+#: pinned equal by tests/test_marketing_news_layouts.py): the disclosure on the picture and the cover. Never a
+#: model or provider name. Drawn at ART_LABEL_PX (fixed, never wrapped, never stepped down) in a PAGE pill with
+#: TEXT ink (ART_LABEL_FILL / ART_LABEL_INK, set with the colours below) — on palette and legible over any art.
+ART_LABEL = "AI illustration"
+ART_LABEL_PX = 24
+#: The pill (mock_spotlight.ai_pill): the label's width + 2 × ART_LABEL_PAD_X wide, ART_LABEL_PX + 2 × ART_LABEL_PAD_Y
+#: tall (size + 20), the label's baseline ART_LABEL_BASE_UP above the pill's bottom ("ls").
+ART_LABEL_PAD_X, ART_LABEL_PAD_Y = 16, 10
+ART_LABEL_BASE_UP = 10
+#: The lesson hook card (Batch 2; news-v23 look): the accepted hook alone, big, two-tone, centred in the content
+#: zone. 14 words of 8-15 letters (writer_prompts.HOOK_MAX_WORDS) fit before the floor.
+HOOK_STYLE = _Style(92, 56, 1.08)
 #: A logo plate: corner radius and inner padding as fractions of its shorter side; the padding
 #: keeps the logo clear of the rounded corners (it exceeds radius × (1 − 1/√2)).
 PLATE_RADIUS_RATIO = 0.14
@@ -267,11 +434,6 @@ WORDMARK_START_RATIO = 0.2
 WORDMARK_LEADING = 1.12
 WORDMARK_MIN_PX = 9
 
-PANEL_PAD_X, PANEL_PAD_Y, PANEL_RADIUS = 56, 64, 40
-RULE_W, RULE_H, RULE_GAP = 72, 8, 32       # the accent rule on top of a panel (no badge)
-BADGE_PAD_X, BADGE_PAD_Y, BADGE_GAP = 20, 10, 32
-LOGO_BRAND_PX, LOGO_SMALL_PX = 440, 176
-LOGO_GAP_BRAND, LOGO_GAP_SMALL = 48, 56
 _AA = 4                                    # supersampling factor for panel / pill edges
 _PNG_COMPRESS_LEVEL = 6
 
@@ -347,6 +509,31 @@ class LogoArt:
 
 
 @dataclass(frozen=True)
+class ArtImage:
+    """The per-post ART a template card or picture may draw (workstream C, owner decisions 2026-11-15): `path` is
+    a VERIFIED local JPEG (`art.resolve_art`: the read-back's content-addressed object, sha256-checked and decoded
+    under its own pixel bound) of exactly `width` × `height`; `sha256` is the stored object's — what the surface
+    that draws it DECLARES (`metadata.art_sha256` / `metadata.opening_art_sha256`) and what the render keys carry.
+    Drawn only with the code-owned ART_LABEL burned on it."""
+
+    sha256: str
+    path: str
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sha256, str) or len(self.sha256) != 64 or any(
+                c not in "0123456789abcdef" for c in self.sha256):
+            raise ValueError("ArtImage.sha256 must be 64 lower-case hex characters")
+        if not isinstance(self.path, str) or not self.path:
+            raise TypeError(f"ArtImage.path must be a non-empty str, not {self.path!r}")
+        for name in ("width", "height"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"ArtImage.{name} must be a positive int, not {value!r}")
+
+
+@dataclass(frozen=True)
 class CardSpec:
     """One card. Which fields a kind draws (and requires) is fixed, and a field the kind does not
     draw must be empty — so `onscreen_strings` is always exactly what `render_card` draws:
@@ -359,15 +546,25 @@ class CardSpec:
       Batch 2)
     * opening    — a template video's first card (drop 2a, `opening_card`): badge = kicker
       (required), `logos` = 1-2 company logos (a wordmark tile — the company name — for one that
-      is not verified), label = chip, figure, title = headline (required). Drawn centred on the
-      page, over the hook.
+      is not verified), label = chip, figure, body = the figure's label (news-v23, `figure_label`: only beside a
+      figure), title = headline (required). Drawn under the brand row (the kicker in its pill), the headline
+      two-tone beside the logo disc, the figure on a warm card with its label under it, over the hook.
+      news-v23: a 13F LIST cover (the card's `list`) carries `image` — the list as a news_layouts.TemplateImage
+      (`news_layouts.cover_image`), drawn by the 13F list placer on the 9:16 frame (cover_13f_berkshire.jpg) and
+      declaring exactly its strings.
     * hook       — a LESSON video's first card (Batch 2, the frozen feature `hook_card`): title = the
-      accepted hook, VERBATIM (required). Drawn big and centred on the page under an accent rule,
+      accepted hook, VERBATIM (required). Drawn big as the two-tone headline under the brand row,
       shown alone over the narrated hook.
     * data       — a TEMPLATE video's data card (Batch 2, `data_card`): `image` = the day's post
       image, a news_layouts.TemplateImage (required) — drawn in the card's text zone in place of the
       text card the read-back names (`data_card_slot`), declaring exactly its strings
       (`TemplateImage.strings`).
+
+    `art` (workstream C, owner decision 2026-11-15 "Picture and video cover"): an OPENING card with ONE company
+    may carry the run's per-post art (an ArtImage) — drawn as a band across the top, edge to edge (OPENING_ART_W ×
+    OPENING_ART_H, under a navy scrim the brand row reads on) with the logo disc on its bottom edge, the chip,
+    headline and figure under it, and
+    ART_LABEL burned on the band (`onscreen_strings` then ends with ART_LABEL). Every other kind draws no art.
     """
 
     kind: str
@@ -380,9 +577,20 @@ class CardSpec:
     cta: str = ""
     #: A data card's picture (news_layouts.TemplateImage). Compared, never hashed (it holds dicts).
     image: Any = field(default=None, hash=False)
+    #: An opening card's per-post art (an ArtImage), or None — today's opening card.
+    art: Any = field(default=None, hash=False)
+    #: news-v23: the KICKER in the brand row's pill (a template's opening-card kicker, a lesson's LESSON_KICKER; ""
+    #: — no pill) — every kind but the opening card (its `badge` IS its kicker), the brand and the data card.
+    pill: str = ""
+    #: news-v23: the card's short FOOTER line (a template's image_footer, a lesson's LESSON_FOOTER; "" — none),
+    #: under the caption band — every kind but the brand, disclaimer and data card.
+    footer: str = ""
+    #: news-v23: the figure's colour ("gain" GREEN, "loss" RED, "gold" GOLD_INK, "" neutral) — an opening or stat
+    #: card's, from the script's series (look.figure_tone). Draws no string.
+    tone: str = ""
 
     def __post_init__(self) -> None:
-        for name in ("kind", "title", "body", "figure", "label", "badge", "cta"):
+        for name in ("kind", "title", "body", "figure", "label", "badge", "cta", "pill", "footer", "tone"):
             value = getattr(self, name)
             if not isinstance(value, str):
                 raise TypeError(f"CardSpec.{name} must be a str, not {type(value).__name__}")
@@ -393,7 +601,7 @@ class CardSpec:
             "text": ("title", "body", "badge"),
             "stat": ("figure", "label", "body", "badge"),
             "disclaimer": ("body",),
-            "opening": ("title", "figure", "label", "badge"),
+            "opening": ("title", "figure", "label", "badge", "body"),
             "hook": ("title",),
             "data": (),
         }[self.kind]
@@ -416,21 +624,43 @@ class CardSpec:
                              f"(a {self.kind} card with cta {self.cta[:40]!r})")
         if self.kind == "hook" and not _present(self.title):
             raise ValueError("a hook card needs its hook (title)")
-        if self.kind == "data":
+        if self.kind == "data" or (self.kind == "opening" and self.image is not None):
             from marketing import news_layouts
 
             if not isinstance(self.image, news_layouts.TemplateImage):
-                raise TypeError(f"a data card needs its picture (a news_layouts.TemplateImage), "
+                raise TypeError(f"a {self.kind} card's picture must be a news_layouts.TemplateImage, "
                                 f"not {type(self.image).__name__}")
         elif self.image is not None:
             raise ValueError(f"a {self.kind} card draws no picture")
         if self.kind == "opening":
             if not (_present(self.badge) and _present(self.title)):
                 raise ValueError("an opening card needs its kicker (badge) and its headline (title)")
+            if _present(self.body) and not _present(self.figure):
+                raise ValueError("an opening card's figure label (body) explains a figure: it has none")
             keys = [a.key for a in self.logos]
             if not 1 <= len(keys) <= MAX_OPENING_LOGOS or len(set(keys)) != len(keys):
                 raise ValueError(f"an opening card draws 1-{MAX_OPENING_LOGOS} distinct company logos, "
                                  f"not {keys}")
+        for name in ("pill", "footer"):
+            value = getattr(self, name)
+            if value and not drawable_text(value):
+                raise ValueError(f"CardSpec.{name} must be one drawable string or empty")
+        if self.pill and self.kind in ("opening", "brand", "data"):
+            raise ValueError(f"a {self.kind} card draws no kicker pill of its own")
+        if self.footer and self.kind in ("brand", "disclaimer", "data"):
+            raise ValueError(f"a {self.kind} card draws no footer line")
+        if self.tone not in ("", "gain", "loss", "gold"):
+            raise ValueError(f"CardSpec.tone {self.tone!r} is not one of '', 'gain', 'loss', 'gold'")
+        if self.art is not None:
+            if self.kind != "opening":
+                raise ValueError(f"a {self.kind} card draws no art (only a template's opening card does)")
+            if self.image is not None:
+                raise ValueError("a 13F list cover draws no art (several companies: decision 4)")
+            if not isinstance(self.art, ArtImage):
+                raise TypeError(f"an opening card's art must be an ArtImage, not {type(self.art).__name__}")
+            if len(self.logos) != 1:
+                raise ValueError("an opening card draws art only for ONE company (decision 4: single-company "
+                                 f"records), not {len(self.logos)}")
 
     @property
     def logo_keys(self) -> Tuple[str, ...]:
@@ -493,12 +723,31 @@ def logo_table(script: Dict[str, Any], resolved: Optional[Dict[str, Any]] = None
     return table
 
 
-def opening_spec(card: Any, logos: Dict[str, LogoArt]) -> CardSpec:
+def money_map_net_tone(series: Any, image_spec: Any) -> Optional[str]:
+    """A Money Map's net-income tone from its post image's spec (the flow's LAST line: "fill" a profit → "gain",
+    "outline" a loss → "loss" — the flag news_layouts._lay_bars colours the callout by), so the video cover's "per
+    $100" figure is GREEN / RED as on the picture (RESTYLE_SPEC §2.6). None for another series or a spec it cannot
+    read (the figure then keeps `look.figure_tone`'s neutral INK)."""
+    if series != "money_map" or not isinstance(image_spec, dict):
+        return None
+    flow = image_spec.get("flow")
+    if not isinstance(flow, list) or not flow or not isinstance(flow[-1], dict):
+        return None
+    return {"fill": "gain", "outline": "loss"}.get(flow[-1].get("style"))
+
+
+def opening_spec(card: Any, logos: Dict[str, LogoArt], *, footer: str = "", series: Any = None,
+                 look: bool = True, image_spec: Any = None) -> CardSpec:
     """The template video's opening CardSpec from the script's `opening_card` (`{kicker, logos[1-2],
-    chip?, figure?, headline}`, closed — the server validated it with
+    chip?, figure?, headline, list?}`, closed — the server validated it with
     template_onscreen.validate_opening_card): kicker → badge, chip → label, figure → figure,
     headline → title, each VERBATIM. ValueError on anything else (an unknown key, a logo key the
-    script carries no entry for, a string that is not drawable) — contract drift, never guessed."""
+    script carries no entry for, a string that is not drawable) — contract drift, never guessed.
+
+    news-v23: a 13F LIST cover (`list`, OPENING_LIST_KEYS) also carries `image` — the cover as a
+    news_layouts.TemplateImage (`news_layouts.cover_image`: the card's kicker and headline, the filer's plate beside a
+    chip, the list and the short `footer`), drawn by the 13F list placer (cover_13f_berkshire.jpg). A list without a
+    footer to draw (an older web) is ignored with a WARNING: today's opening card."""
     if not isinstance(card, dict):
         raise ValueError(f"script.opening_card must be an object, not {type(card).__name__}")
     required, optional = OPENING_KEYS
@@ -509,7 +758,7 @@ def opening_spec(card: Any, logos: Dict[str, LogoArt]) -> CardSpec:
         if card.get(k) is None:
             raise ValueError(f"script.opening_card has no {k}")
     texts: Dict[str, str] = {}
-    for k in ("kicker", "chip", "figure", "headline"):
+    for k in ("kicker", "chip", "figure", "figure_label", "headline"):
         value = card.get(k)
         if value is None:
             texts[k] = ""
@@ -527,8 +776,43 @@ def opening_spec(card: Any, logos: Dict[str, LogoArt]) -> CardSpec:
         if any(a.key == key for a in arts):
             raise ValueError(f"script.opening_card.logos[{i}] repeats {key!r}")
         arts.append(logos[key])
+    if texts["figure_label"] and not texts["figure"]:
+        raise ValueError("script.opening_card.figure_label explains a figure: the card has none")
+    if len(texts["figure_label"]) > OPENING_FIGURE_LABEL_MAX_CHARS:
+        raise ValueError(f"script.opening_card.figure_label is over {OPENING_FIGURE_LABEL_MAX_CHARS} characters")
+    tone = ""
+    if texts["figure"]:
+        from marketing import look as look_mod
+
+        tone = (money_map_net_tone(series, image_spec)
+                or look_mod.figure_tone(series if isinstance(series, str) else None, texts["figure"]) or "")
+    image = None
+    if card.get("subtitle") is not None and card.get("costs") is None:
+        raise ValueError("script.opening_card.subtitle is drawn only on a costs cover (it has no costs)")
+    if card.get("costs") is not None and card.get("list") is not None:
+        raise ValueError("script.opening_card carries both a costs card and a list")
+    if card.get("list") is not None:
+        if drawable_text(footer):
+            from marketing import news_layouts
+
+            image = news_layouts.cover_image(card, logos, footer=footer, series=series, look=look,
+                                             picture=image_spec)
+        else:
+            logger.warning("cards: the opening card carries a 13F list but no short footer to draw under it (an older "
+                           "web) — today's opening card")
+    elif card.get("costs") is not None:
+        # owner decision 2026-11-20 (money_map_loss_A_rivian_cover.jpg): a Money Map LOSS year's cover is its costs
+        # card — when it cannot be drawn (`_cover_or_plain`), today's figure card from the same opening card
+        if drawable_text(footer):
+            from marketing import news_layouts
+
+            image = news_layouts.costs_cover_image(card, logos, footer=footer, series=series, look=look)
+        else:
+            logger.warning("cards: the opening card carries a costs card but no short footer to draw under it (an "
+                           "older web) — today's opening card")
     return CardSpec("opening", badge=texts["kicker"], label=texts["chip"], figure=texts["figure"],
-                    title=texts["headline"], logos=tuple(arts))
+                    body=texts["figure_label"], title=texts["headline"], logos=tuple(arts), footer=footer, tone=tone,
+                    image=image)
 
 
 def video_features(script: Any) -> Tuple[str, ...]:
@@ -652,7 +936,8 @@ def _with_hook_card(script: Dict[str, Any], specs: List[CardSpec], font_path: st
         logger.warning("cards: hook_card is frozen but the script's hook is not one drawable string — no hook "
                        "card: the video opens on its first card")
         return specs
-    card = CardSpec("hook", title=hook)
+    card = (CardSpec("hook", title=hook, pill=LESSON_KICKER, footer=LESSON_FOOTER) if new_look(script)
+            else CardSpec("hook", title=hook))
     problem = _feature_card_problem(card, font_path, layout_engine) or _too_many_strings([card, *specs])
     if problem is not None:
         logger.warning("cards: no hook card (%s) — the video opens on its first card", problem)
@@ -699,8 +984,84 @@ def _with_data_card(script: Dict[str, Any], table: Dict[str, LogoArt], specs: Li
     return candidate
 
 
+def _cover_or_plain(opening: CardSpec, font_path: str, layout_engine: Optional[str]) -> CardSpec:
+    """A 13F LIST cover (news-v23, `opening.image`) when it can be drawn — its glyphs, and it fits legibly at the
+    floor (the render's own checks) — else today's plain opening card (the kicker, the logo, the chip, the headline:
+    a subset of the server's allow-list), with a WARNING: a cover never ends the day. CardAssetError (an unreadable
+    font) is not the cover's: it propagates."""
+    try:
+        check_glyphs([opening], font_path)
+        layout_card(opening, font_path=font_path, layout_engine=layout_engine)
+    except (MissingGlyphs, CardOverflow) as e:
+        logger.warning("cards: the %s cover cannot be drawn (%s: %s) — today's opening card instead",
+                       "costs" if opening.image is not None and opening.image.spec.get("costs") is not None
+                       else "13F list", type(e).__name__, str(e)[:200])
+        return dataclasses.replace(opening, image=None)
+    return opening
+
+
+#: Why per-post art offered to a template's opening card was not drawn (`cards_for_script(..., report=)`): the
+#: opening card names two companies (decision 4: single-company records only); a glyph of the label the face
+#: lacks; the text does not fit under the band at the floor sizes; the art file cannot be read now; the video
+#: would declare more than ONSCREEN_TEXT_MAX strings with the label; the cover is a Money Map loss year's COSTS card
+#: (owner decision 2026-11-20 — the server makes no art for one: post_art's `costs_cover`).
+OPENING_ART_SKIP_REASONS: Tuple[str, ...] = ("two_companies", "missing_glyphs", "no_fit", "unreadable",
+                                             "too_many_strings", "costs_cover")
+
+
+def _with_opening_art(specs: List[CardSpec], art: "ArtImage", font_path: str, layout_engine: Optional[str],
+                      report: Optional[Dict[str, Any]]) -> List[CardSpec]:
+    """`specs` ([opening, …]) with the opening card drawing the run's per-post art (workstream C, decision 6: the
+    cover) — or `specs` unchanged, with a WARNING naming why (and `report["opening_art_skipped"]`, one of
+    OPENING_ART_SKIP_REASONS), when it cannot be: two companies on the card, a label glyph the face lacks, no fit
+    under the band at the floor sizes, an unreadable art file, too many strings. Exactly the checks the render
+    makes, so an art card kept here never ends the day there; the plain opening card is today's cover. CardAssetError
+    for the FONT is not art: it propagates (the render would fail on it either way)."""
+    opening = specs[0]
+    reason: Optional[str] = None
+    detail = ""
+    card = opening
+    if opening.image is not None and opening.image.spec.get("costs") is not None:
+        reason, detail = "costs_cover", "a Money Map loss year's cover is its costs card"
+    elif opening.image is not None:
+        reason, detail = "two_companies", "a 13F list cover (several companies)"
+    elif len(opening.logos) != 1:
+        reason, detail = "two_companies", f"{len(opening.logos)} logos on the card"
+    else:
+        card = CardSpec("opening", badge=opening.badge, label=opening.label, figure=opening.figure,
+                        body=opening.body, title=opening.title, logos=opening.logos, art=art, footer=opening.footer,
+                        tone=opening.tone)
+        try:
+            check_glyphs([card], font_path)
+        except MissingGlyphs as e:
+            reason, detail = "missing_glyphs", str(e)[:200]
+        if reason is None:
+            try:
+                layout_card(card, font_path=font_path, layout_engine=layout_engine)
+            except CardOverflow as e:
+                reason, detail = "no_fit", str(e)[:200]
+        if reason is None:
+            try:
+                art_tile(art, OPENING_ART_W, OPENING_ART_H)
+            except CardAssetError as e:
+                reason, detail = "unreadable", str(e)[:200]
+        if reason is None:
+            too_many = _too_many_strings([card, *specs[1:]])
+            if too_many is not None:
+                reason, detail = "too_many_strings", too_many
+    if reason is not None:
+        logger.warning("cards: no art on the opening card (%s: %s) — the plain opening card, today's cover (art "
+                       "sha=%s…)", reason, detail, art.sha256[:12])
+        if report is not None:
+            report["opening_art_skipped"] = reason
+        return specs
+    logger.info("cards: the opening card draws the per-post art (sha=%s…) — the cover", art.sha256[:12])
+    return [card, *specs[1:]]
+
+
 def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]] = None, *,
-                     font_path: Optional[str] = None, layout_engine: Optional[str] = None) -> List[CardSpec]:
+                     font_path: Optional[str] = None, layout_engine: Optional[str] = None,
+                     art: Optional["ArtImage"] = None, report: Optional[Dict[str, Any]] = None) -> List[CardSpec]:
     """One text card per `script["cards"]` entry (title/body stripped; an entry with neither is
     skipped) + [disclaimer card, its text verbatim]. No brand card opens the video (drop 1): the
     first text card does, from frame 0 (`video.timeline(..., hook_card=False)`). Only when NO
@@ -724,9 +1085,20 @@ def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]]
     the render's own `font_path` / `layout_engine` — its glyphs, that it fits (legibly, for a data card),
     that the video stays within ONSCREEN_TEXT_MAX strings — and one that fails is left out with a
     WARNING: today's card, never a skipped day. `font_path` is REQUIRED when the script froze `hook_card`
-    or `data_card` (ValueError: the check is never skipped)."""
+    or `data_card` (ValueError: the check is never skipped).
+
+    Workstream C: `art` (an ArtImage — `art.resolve_art`'s verified read-back art, or None) makes a TEMPLATE's
+    opening card draw the per-post art (`_with_opening_art`: one company only, checked here with the render's own
+    font and engine, the plain opening card with a WARNING — and `report["opening_art_skipped"]` when a dict is
+    passed — otherwise; `font_path` is then REQUIRED too). A lesson never draws art: art passed for one is ignored
+    with a WARNING."""
     if not isinstance(script, dict):
         raise ValueError(f"script must be a dict, not {type(script).__name__}")
+    if art is not None and not isinstance(art, ArtImage):
+        raise TypeError(f"art must be an ArtImage or None, not {type(art).__name__}")
+    if art is not None and not font_path:
+        raise ValueError("cards_for_script was given art: it needs the render's font_path to check that the opening "
+                         "card can draw it")
     disclaimer = _script_str(script.get("disclaimer_card"), "script.disclaimer_card")
     if not _present(disclaimer):
         raise ValueError("the script has no disclaimer_card: a video without its disclaimer must not render")
@@ -746,10 +1118,18 @@ def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]]
     if drawn and not font_path:
         raise ValueError(f"the script froze {drawn}: cards_for_script needs the render's font_path to check "
                          "that each feature card can be drawn")
-    end = CardSpec("disclaimer", body=disclaimer, cta=end_card_cta(script))
     if layout == VIDEO_LAYOUT_PER_LINE:
         table = logo_table(script) if logos is None else logos
-        opening = opening_spec(script.get("opening_card"), table)
+        raw_footer = script.get("image_footer")
+        # the short footer on every card only from a news-v23 web (`new_look`): an older one stored the long footer
+        # and allows it on no video card (a 422 that loses the day)
+        footer = raw_footer if drawable_text(raw_footer) and new_look(script) else ""
+        opening = opening_spec(script.get("opening_card"), table, footer=footer, series=script.get("series"),
+                               look=new_look(script), image_spec=script.get("image_spec"))
+        if opening.image is not None and font_path:
+            opening = _cover_or_plain(opening, font_path, layout_engine)
+        pill = opening.badge
+        end = CardSpec("disclaimer", body=disclaimer, cta=end_card_cta(script), pill=pill)
         lines = script.get("video_script")
         if not isinstance(lines, list) or len(lines) != len(raw_cards) or not raw_cards:
             raise ValueError(f"a per-line video needs one card per narration line: {len(raw_cards)} card(s) "
@@ -762,11 +1142,18 @@ def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]]
             body = _script_str(entry.get("body"), f"script.cards[{i}].body").strip()
             if not title and not body:
                 raise ValueError(f"script.cards[{i}] draws nothing: a per-line video cannot skip a line's card")
-            per_line.append(CardSpec("text", title=title, body=body))
+            per_line.append(CardSpec("text", title=title, body=body, pill=pill, footer=footer))
         per_line.append(end)
+        if art is not None:
+            per_line = _with_opening_art(per_line, art, font_path, layout_engine, report)  # type: ignore[arg-type]
         if VIDEO_FEATURE_DATA_CARD in features:
             per_line = _with_data_card(script, table, per_line, font_path, layout_engine)  # type: ignore[arg-type]
         return per_line
+    if art is not None:
+        logger.warning("cards: art was given for a lesson script — ignored (only a template's opening card draws art)")
+    # the lesson's kicker pill and short footer only from a news-v23 web (`new_look`): an older one refuses both
+    pill, footer = (LESSON_KICKER, LESSON_FOOTER) if new_look(script) else ("", "")
+    end = CardSpec("disclaimer", body=disclaimer, cta=end_card_cta(script), pill=pill)
     specs: List[CardSpec] = []
     for i, entry in enumerate(raw_cards):
         if not isinstance(entry, dict):
@@ -776,7 +1163,7 @@ def cards_for_script(script: Dict[str, Any], logos: Optional[Dict[str, LogoArt]]
         if not title and not body:
             logger.warning("script.cards[%d] has neither title nor body — no card drawn for it", i)
             continue
-        specs.append(CardSpec("text", title=title, body=body))
+        specs.append(CardSpec("text", title=title, body=body, pill=pill, footer=footer))
     if not specs:
         # Never silent: the writer always emits three cards, so this is a malformed script that
         # still deserves a video (its narration and disclaimer are fine).
@@ -793,26 +1180,37 @@ def onscreen_strings(spec: CardSpec) -> List[str]:
     the accepted script). A whitespace-only field is neither drawn nor returned.
 
     An opening card returns them in template_onscreen.opening_strings' order — kicker, the company
-    name of each logo drawn as a WORDMARK (a verified logo draws no string), chip, figure,
-    headline — so it is always a subset of the server's allow-list, and equal to it when no logo
+    name of each logo drawn as a WORDMARK (a verified logo draws no string), chip, figure, the figure's
+    label (news-v23), headline — so it is always a subset of the server's allow-list, and equal to it when no logo
     verified. A hook card returns the hook; a data card its picture's `TemplateImage.strings` (kicker …
     footer, each wordmark's company name at its logo's place — a subset of the server's
-    template_onscreen.image_strings); a disclaimer card its text and its CTA (`end_cta`)."""
+    template_onscreen.image_strings); a disclaimer card its text and its CTA (`end_cta`). An opening card WITH
+    art (workstream C) also returns ART_LABEL, last — the server allows it only beside the video's
+    `opening_art_sha256` declaration (template_onscreen.art_allowed)."""
     if spec.kind == "brand":
         fields = [WORDMARK]
     elif spec.kind == "text":
         fields = [spec.title, spec.body, spec.badge]
     elif spec.kind == "stat":
         fields = [spec.figure, spec.label, spec.body, spec.badge]
+    elif spec.kind == "opening" and spec.image is not None:
+        # news-v23: a 13F list cover declares its picture's strings (kicker … footer; each wordmark's name)
+        fields = list(spec.image.strings)
     elif spec.kind == "opening":
-        fields = [spec.badge, *[a.name for a in spec.logos if a.wordmark], spec.label, spec.figure, spec.title]
+        fields = [spec.badge, *[a.name for a in spec.logos if a.wordmark], spec.label, spec.figure, spec.body,
+                  spec.title]
     elif spec.kind == "hook":
         fields = [spec.title]
     elif spec.kind == "data":
         fields = list(spec.image.strings)
     else:  # disclaimer
         fields = [spec.body, spec.end_cta]
-    return [s for s in fields if _present(s)]
+    # news-v23: the brand row's word (every card but the brand card, which draws WORDMARK — the same string), its
+    # kicker pill and the short footer line
+    fields += [spec.pill, spec.footer, BRAND_ROW_WORD]
+    if spec.kind == "opening" and spec.art is not None:
+        fields.append(ART_LABEL)
+    return list(dict.fromkeys(s for s in fields if _present(s)))
 
 
 # ── fonts, glyphs, engines ───────────────────────────────────────────────────
@@ -878,22 +1276,18 @@ def _rgb(hex_colour: str) -> RGB:
 
 
 def _mix(fg: str, bg: str, alpha: float) -> RGB:
-    """`fg` at `alpha` composited over `bg` — how every non-brand colour on a card is made."""
+    """`fg` at `alpha` composited over `bg`."""
     f, b = _rgb(fg), _rgb(bg)
     return tuple(int(round(bv + (fv - bv) * alpha)) for fv, bv in zip(f, b))  # type: ignore[return-value]
 
 
-BADGE_FILL = _mix(ACCENT, CARD, 0.16)
-STAT_BODY_FILL = _mix(TEXT, CARD, 0.82)
-DISCLAIMER_FILL = _mix(TEXT, PAGE, 0.86)
-#: Drop 2a: the light plate every company logo (or its wordmark) sits on — the brand's white, so
-#: a logo keeps its own colours unaltered — and the wordmark's ink on it (the page colour). The
-#: opening card's chip is TEXT at 78 % over the page. Still four brand hexes and their blends:
-#: no green or red anywhere (a verdict colour on a named company would be an opinion).
+#: Drop 2a: the WHITE disc a company logo sits on (news-v23: or the DARK one, look.NAVY_CHIP, for a logo made for
+#: a dark background — logos.disc_tone; logos.PLATE_RGB mirrors this), and a wordmark's ink on it (look.INK).
 PLATE = TEXT
-LOGO_INK = PAGE
-CHIP_FILL = _mix(TEXT, PAGE, 0.78)
-
+LOGO_INK = "#111827"
+#: The ART_LABEL pill (workstream C; news-v23 look): NAVY_CHIP, opaque, under white ink — legible over any art.
+ART_LABEL_FILL = _rgb("#111827")
+ART_LABEL_INK = _rgb(TEXT)
 
 # ── layout ───────────────────────────────────────────────────────────────────
 
@@ -925,6 +1319,20 @@ class CardLayout:
     #: Company logo plates (drop 2a): each plate's box and what it shows (a verified logo, or the
     #: company name as a wordmark — whose lines are in `lines`, field "wordmark:<key>").
     tiles: Tuple[Tuple[Box, "LogoArt"], ...] = ()
+    #: Per-post art (workstream C, an opening card only): the art band's box and the ART_LABEL pill's box (its
+    #: text is in `lines`, field "art_label"). None on every card that draws no art.
+    art_box: Optional[Box] = None
+    label_box: Optional[Box] = None
+    #: news-v23 (marketing/card_layouts.py): what the look draws besides text — cards, pills, rules (look.Rect),
+    #: dots and rings (look.Ellipse), the logo discs (look.Disc), the brand row's tile and kicker pill, the footer's
+    #: top.
+    rects: Tuple[Any, ...] = ()
+    ellipses: Tuple[Any, ...] = ()
+    discs: Tuple[Any, ...] = ()
+    stacks: Tuple[Any, ...] = ()
+    brand: Optional[Box] = None
+    pill: Optional[Box] = None
+    footer_top: int = 0
 
     def field_lines(self, name: str) -> List[str]:
         return [ln.text for ln in self.lines if ln.field == name]
@@ -954,69 +1362,6 @@ def _wrap(words: Sequence[str], font, max_width: float, max_lines: int, what: st
     return lines
 
 
-class _Stack:
-    """Top-to-bottom placement in a column of `width` px and at most `budget` px, relative to
-    (0, 0); the caller translates it onto the canvas. Each item names the gap it wants above it;
-    a LEAD item (the accent rule or the badge) names the gap below it instead, which replaces the
-    next item's own. The first item gets no gap."""
-
-    def __init__(self, width: int, budget: int, align: str, font_path: str, engine: str, step: int):
-        self.width, self.budget, self.align = width, budget, align
-        self.font_path, self.engine, self.step = font_path, engine, step
-        self.y = 0
-        self.boxes: Dict[str, Box] = {}
-        self.lines: List[Tuple[str, str, int, int, int, str, RGB]] = []
-        self.badge_text: Optional[Tuple[str, int, int, int]] = None
-        self._prev_lead: Optional[int] = None   # the gap a lead item owes the next one
-        self._empty = True
-
-    def _gap(self, own: int) -> int:
-        if self._empty:
-            return 0
-        return self._prev_lead if self._prev_lead is not None else own
-
-    def box(self, tag: str, w: int, h: int, gap: int = 0, lead_gap: Optional[int] = None) -> None:
-        if w > self.width:
-            raise _NoFit(f"{tag}: {w}px wider than the column ({self.width}px)")
-        self.y += self._gap(gap)
-        x = 0 if self.align == "left" else (self.width - w) // 2
-        self.boxes[tag] = (x, self.y, x + w, self.y + h)
-        self.y += h
-        if self.y > self.budget:
-            raise _NoFit(f"{tag}: the card is {self.y}px tall, room for {self.budget}px")
-        self._prev_lead, self._empty = lead_gap, False
-
-    def badge(self, text: str) -> None:
-        font = _font(self.font_path, BADGE_SIZE, self.engine)
-        asc, desc = font.getmetrics()
-        w = int(math.ceil(font.getlength(text))) + 2 * BADGE_PAD_X
-        self.box("badge", w, asc + desc + 2 * BADGE_PAD_Y, lead_gap=BADGE_GAP)
-        x0, y0, _, y1 = self.boxes["badge"]
-        self.badge_text = (text, x0 + BADGE_PAD_X, (y0 + y1) // 2, BADGE_SIZE)
-
-    def text(self, name: str, text: str, style: _Style, fill: RGB, gap_em: float = 0.0,
-             gap_px: int = 0) -> None:
-        size = style.size(self.step)
-        font = _font(self.font_path, size, self.engine)
-        asc, desc = font.getmetrics()
-        pitch = int(round(size * style.leading))
-        gap = self._gap(gap_px + int(round(gap_em * size)))
-        room = self.budget - self.y - gap
-        max_lines = 0 if room < asc + desc else (room - (asc + desc)) // pitch + 1
-        if max_lines <= 0:
-            raise _NoFit(f"{name}: no room left at {size}px")
-        lines = _wrap(text.split(), font, self.width, max_lines, name)
-        if not lines:                            # whitespace only: nothing drawn, no gap taken
-            return
-        self.y += gap
-        x = 0 if self.align == "left" else self.width // 2
-        anchor = "la" if self.align == "left" else "ma"
-        for i, line in enumerate(lines):
-            self.lines.append((name, line, size, x, self.y + i * pitch, anchor, fill))
-        self.y += (len(lines) - 1) * pitch + asc + desc
-        self._prev_lead, self._empty = None, False
-
-
 def _check_length(spec: CardSpec) -> None:
     for s in onscreen_strings(spec):
         if len(s) > MAX_STRING_CHARS:
@@ -1024,117 +1369,70 @@ def _check_length(spec: CardSpec) -> None:
                                f"{MAX_STRING_CHARS} (the server refuses it): {s[:60]!r}…")
 
 
-def _stack_for(spec: CardSpec, step: int, font_path: str, engine: str, with_logo: bool) -> Tuple[_Stack, bool]:
-    """The card's column content at `step`; returns (stack, on_panel)."""
-    zone_w = SAFE_X[1] - SAFE_X[0]
-    zone_h = TEXT_ZONE_Y[1] - TEXT_ZONE_Y[0]
-    if spec.kind in ("text", "stat"):
-        st = _Stack(zone_w - 2 * PANEL_PAD_X, zone_h - 2 * PANEL_PAD_Y, "left", font_path, engine, step)
-        if _present(spec.badge):
-            st.badge(spec.badge)
-        else:
-            st.box("rule", RULE_W, RULE_H, lead_gap=RULE_GAP)
-        if spec.kind == "text":
-            if _present(spec.title):
-                st.text("title", spec.title, TITLE_STYLE, _rgb(ACCENT))
-            if _present(spec.body):
-                st.text("body", spec.body, BODY_STYLE, _rgb(TEXT), gap_em=0.55)
-        else:
-            st.text("figure", spec.figure, FIGURE_STYLE, _rgb(ACCENT))
-            if _present(spec.label):
-                st.text("label", spec.label, LABEL_STYLE, _rgb(TEXT), gap_em=0.3)
-            if _present(spec.body):
-                st.text("body", spec.body, STAT_BODY_STYLE, STAT_BODY_FILL, gap_em=0.7)
-        return st, True
-    st = _Stack(zone_w, zone_h, "center", font_path, engine, step)
-    if spec.kind == "opening":
-        # kicker pill → the logo plate(s) → chip → figure → headline, centred on the page.
-        st.badge(spec.badge)
-        n = len(spec.logos)
-        tile = (OPENING_TILE_ONE if n == 1 else OPENING_TILE_TWO).size(step)
-        st.box("logos", n * tile + (n - 1) * OPENING_TILE_GAP, tile)
-        after_logos = {"gap_px": OPENING_LOGO_GAP}
-        if _present(spec.label):
-            st.text("label", spec.label, LABEL_STYLE, CHIP_FILL, **after_logos)
-            after_logos = {"gap_em": 0.3}
-        if _present(spec.figure):
-            st.text("figure", spec.figure, FIGURE_STYLE, _rgb(ACCENT), **after_logos)
-            after_logos = {"gap_em": 0.35}
-        st.text("title", spec.title, OPENING_HEADLINE_STYLE, _rgb(TEXT), **after_logos)
-        return st, False
-    if spec.kind == "hook":
-        # The accent rule, then the hook — centred on the page, no panel (the video's first frame).
-        st.box("rule", RULE_W, RULE_H, lead_gap=HOOK_RULE_GAP)
-        st.text("title", spec.title, HOOK_STYLE, _rgb(TEXT))
-        return st, False
-    if spec.kind == "brand":
-        if with_logo:
-            st.box("logo", LOGO_BRAND_PX, LOGO_BRAND_PX)
-        st.text("wordmark", WORDMARK, WORDMARK_STYLE, _rgb(TEXT), gap_px=LOGO_GAP_BRAND)
-    else:  # disclaimer
-        if with_logo:
-            st.box("logo", LOGO_SMALL_PX, LOGO_SMALL_PX)
-        st.text("body", spec.body, DISCLAIMER_STYLE, DISCLAIMER_FILL, gap_px=LOGO_GAP_SMALL)
-        cta = spec.end_cta
-        st.text("cta", cta, STORE_CTA_STYLE if cta == CTA else CTA_STYLE, _rgb(ACCENT), gap_em=0.9)
-    return st, False
-
-
 def _within(inner: Box, outer: Box) -> bool:
     return inner[0] >= outer[0] and inner[1] >= outer[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
 
 
 def _place(spec: CardSpec, step: int, font_path: str, engine: str, with_logo: bool) -> CardLayout:
-    st, on_panel = _stack_for(spec, step, font_path, engine, with_logo)
-    zone: Box = (SAFE_X[0], TEXT_ZONE_Y[0], SAFE_X[1], TEXT_ZONE_Y[1])
-    zone_h = TEXT_ZONE_Y[1] - TEXT_ZONE_Y[0]
-    panel: Optional[Box] = None
-    if on_panel:
-        panel_h = st.y + 2 * PANEL_PAD_Y
-        top = TEXT_ZONE_Y[0] + (zone_h - panel_h) // 2
-        panel = (SAFE_X[0], top, SAFE_X[1], top + panel_h)
-        dx, dy = SAFE_X[0] + PANEL_PAD_X, top + PANEL_PAD_Y
-        ink_bounds = panel
-    else:
-        dx, dy = SAFE_X[0], TEXT_ZONE_Y[0] + (zone_h - st.y) // 2
-        ink_bounds = zone
+    """`spec` at ramp `step`, in the approved look (news-v23: marketing/card_layouts.place_card)."""
+    from marketing import card_layouts
 
-    def shift(b: Box) -> Box:
-        return b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy
+    return card_layouts.place_card(spec, step, font_path, engine, with_logo)
 
-    lines: List[DrawnLine] = []
-    for name, text, size, x, y, anchor, fill in st.lines:
-        font = _font(font_path, size, engine)
-        l, t, r, b = font.getbbox(text, anchor=anchor)
-        ink = (x + dx + l, y + dy + t, x + dx + r, y + dy + b)
-        if not _within(ink, ink_bounds):
-            raise _NoFit(f"{name}: the ink of {text[:40]!r} at {size}px leaves its area")
-        lines.append(DrawnLine(name, text, size, x + dx, y + dy, anchor, fill, ink))
-    if st.badge_text is not None:
-        text, bx, by, size = st.badge_text
-        font = _font(font_path, size, engine)
-        l, t, r, b = font.getbbox(text, anchor="lm")
-        ink = (bx + dx + l, by + dy + t, bx + dx + r, by + dy + b)
-        if not _within(ink, shift(st.boxes["badge"])):
-            raise _NoFit(f"badge: the ink of {text[:40]!r} leaves its pill")
-        lines.append(DrawnLine("badge", text, size, bx + dx, by + dy, "lm", _rgb(ACCENT), ink))
-    boxes = {k: shift(v) for k, v in st.boxes.items()}
-    for tag, b in boxes.items():
-        if not _within(b, ink_bounds):          # defence in depth; the stack budget ensures it
-            raise _NoFit(f"{tag}: leaves its area")
-    tiles: List[Tuple[Box, LogoArt]] = []
-    if spec.kind == "opening":
-        row = boxes["logos"]
-        side = row[3] - row[1]
-        for i, art in enumerate(spec.logos):
-            x0 = row[0] + i * (side + OPENING_TILE_GAP)
-            tile_box: Box = (x0, row[1], x0 + side, row[3])
-            tiles.append((tile_box, art))
-            if art.wordmark:
-                lines.extend(wordmark_lines(art, tile_box, font_path, engine))
-    return CardLayout(kind=spec.kind, step=step, engine=engine, panel=panel, rule=boxes.get("rule"),
-                      badge=boxes.get("badge"), logo=boxes.get("logo"), lines=tuple(lines),
-                      tiles=tuple(tiles))
+
+def _overlap(a: Box, b: Box) -> bool:
+    return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
+
+
+def art_label_size(font_path: str, engine: str) -> Tuple[int, int]:
+    """(width, height) of the ART_LABEL pill: the label at ART_LABEL_PX — fixed, never wrapped, never stepped
+    down — plus ART_LABEL_PAD_X a side; ART_LABEL_PX + 2 × ART_LABEL_PAD_Y tall (mock_spotlight.ai_pill)."""
+    font = _font(font_path, ART_LABEL_PX, engine)
+    return int(math.ceil(font.getlength(ART_LABEL))) + 2 * ART_LABEL_PAD_X, ART_LABEL_PX + 2 * ART_LABEL_PAD_Y
+
+
+def art_label_line(box: Box, font_path: str, engine: str) -> DrawnLine:
+    """ART_LABEL laid out in its pill `box` (left-aligned on the pad, its baseline ART_LABEL_BASE_UP above the pill's
+    bottom — mock_spotlight.ai_pill — ART_LABEL_INK). _NoFit when its ink would leave the pill (defence in depth:
+    the pill is sized from the same font)."""
+    font = _font(font_path, ART_LABEL_PX, engine)
+    x, y = box[0] + ART_LABEL_PAD_X, box[3] - ART_LABEL_BASE_UP
+    l, t, r, b = font.getbbox(ART_LABEL, anchor="ls")
+    ink = (x + l, y + t, x + r, y + b)
+    if not _within(ink, box):
+        raise _NoFit("art label: its ink leaves its pill")
+    return DrawnLine("art_label", ART_LABEL, ART_LABEL_PX, x, y, "ls", ART_LABEL_INK, ink)
+
+
+def art_tile(art: ArtImage, w: int, h: int):
+    """The art as a w×h RGB PIL image: the verified file opened (its size must be the one it was verified at),
+    centre-CROPPED to the w:h aspect (never stretched, never letter-boxed) and resized with LANCZOS — deterministic
+    for the same file. CardAssetError when the file is unreadable now."""
+    from PIL import Image
+
+    if not isinstance(art, ArtImage):
+        raise TypeError(f"art_tile needs an ArtImage, not {type(art).__name__}")
+    try:
+        with Image.open(art.path) as src:
+            if src.size != (art.width, art.height):
+                raise CardAssetError(f"art {art.sha256[:12]}: the file is {src.size[0]}x{src.size[1]}, verified at "
+                                     f"{art.width}x{art.height}")
+            src.load()
+            rgb = src.convert("RGB")
+    except CardAssetError:
+        raise
+    except Exception as e:  # noqa: BLE001 — re-raised typed, with the sha (never the path's bytes)
+        raise CardAssetError(f"art {art.sha256[:12]} unreadable: {type(e).__name__}: {e}") from e
+    sw, sh = rgb.size
+    if sw * h > w * sh:                              # wider than the box: crop the sides
+        cw = max(1, int(round(sh * w / h)))
+        x0 = (sw - cw) // 2
+        crop = (x0, 0, x0 + cw, sh)
+    else:                                            # taller (or equal): crop the top and the bottom
+        ch = max(1, int(round(sw * h / w)))
+        y0 = (sh - ch) // 2
+        crop = (0, y0, sw, y0 + ch)
+    return rgb.resize((w, h), Image.LANCZOS, box=crop)
 
 
 # ── company logo plates (drop 2a) ────────────────────────────────────────────
@@ -1197,36 +1495,11 @@ def wordmark_lines(art: LogoArt, box: Box, font_path: str, engine: str) -> List[
 
 def blank_wordmarks(layout: Any) -> List[str]:
     """The keys of the wordmark plates of a laid-out card or image that are drawn BLANK (the name
-    did not fit legibly) — logged by the callers once the layout is final."""
+    did not fit legibly, and no ticker stood in — `look.Page.disc(ticker=…)`, field "ticker:<key>")
+    — logged by the callers once the layout is final."""
     drawn = {ln.field for ln in getattr(layout, "lines", ())}
     return [art.key for _box, art in getattr(layout, "tiles", ()) if art.wordmark
-            and f"wordmark:{art.key}" not in drawn]
-
-
-def draw_plate(img, box: Box, art: LogoArt) -> None:
-    """The light rounded plate in `box`, and on it the verified logo — scaled (LANCZOS) to fit the
-    padded inner box, aspect kept, centred, alpha composited over the plate; never recoloured,
-    cropped or otherwise altered. A wordmark plate is the plate alone (its lines are drawn with
-    the card's text). CardAssetError when a verified logo file is unreadable now."""
-    from PIL import Image
-
-    w, h = box[2] - box[0], box[3] - box[1]
-    radius, pad = plate_geometry(box)
-    plate = Image.new("RGBA", (w, h), _rgb(PLATE) + (255,))
-    if art.path is not None:
-        try:
-            with Image.open(art.path) as src:
-                src.load()
-                rgba = src.convert("RGBA")
-        except Exception as e:  # noqa: BLE001 — re-raised typed, with the key (never the path's bytes)
-            raise CardAssetError(f"logo {art.key} unreadable: {type(e).__name__}: {e}") from e
-        lw, lh = rgba.size
-        iw, ih = w - 2 * pad, h - 2 * pad
-        scale = min(iw / lw, ih / lh)
-        sw, sh = max(1, int(round(lw * scale))), max(1, int(round(lh * scale)))
-        scaled = rgba.resize((sw, sh), Image.LANCZOS)
-        plate.alpha_composite(scaled, (pad + (iw - sw) // 2, pad + (ih - sh) // 2))
-    img.paste(plate.convert("RGB"), (box[0], box[1]), _rounded_mask(w, h, radius))
+            and f"wordmark:{art.key}" not in drawn and f"ticker:{art.key}" not in drawn]
 
 
 def layout_card(spec: CardSpec, *, font_path: str, with_logo: bool = True,
@@ -1235,12 +1508,14 @@ def layout_card(spec: CardSpec, *, font_path: str, with_logo: bool = True,
     CardOverflow (with the floor step's reason) when none does."""
     engine = resolve_layout_engine(layout_engine)
     _check_length(spec)
-    if spec.kind == "data":
-        # The day's post image in the card's text zone — its own placers, with a legibility floor
-        # (news_layouts.layout_data_card; a news_layouts.TemplateLayout, CardOverflow when not legible).
+    if spec.kind == "data" or (spec.kind == "opening" and spec.image is not None):
+        # The day's post image in the card's text zone (a data card), or a 13F list cover (news-v23) — its own
+        # placers, with a legibility floor (news_layouts.layout_data_card; a news_layouts.TemplateLayout, CardOverflow
+        # when not legible).
         from marketing import news_layouts
 
-        return news_layouts.layout_data_card(spec.image, font_path=font_path, layout_engine=engine)  # type: ignore[return-value]
+        return news_layouts.layout_data_card(spec.image, font_path=font_path, layout_engine=engine,  # type: ignore[return-value]
+                                             cover=spec.kind == "opening")
     reason = ""
     for step in range(RAMP_STEPS + 1):
         try:
@@ -1301,39 +1576,26 @@ def render_card(spec: CardSpec, *, font_path: str, logo_path: Optional[str] = No
                 layout_engine: Optional[str] = None) -> bytes:
     """The card as deterministic PNG bytes (1080×1920 RGB, no metadata). CardOverflow when it
     cannot fit; CardAssetError when the font or logo is unreadable."""
-    from PIL import Image, ImageDraw
-
-    uses_logo = spec.kind in ("brand", "disclaimer")
+    uses_logo = spec.kind == "brand"
     if uses_logo and not logo_path:
-        _warn_once("no_logo", "cards: no logo path — the brand and disclaimer cards render without the logo")
-    if spec.kind == "data":
-        # The day's post image in the card's text zone (news_layouts draws it: its own panel, bars, plates).
+        _warn_once("no_logo", "cards: no logo path — the brand card renders without its big logo tile")
+    if spec.kind == "data" or (spec.kind == "opening" and spec.image is not None):
+        # The day's post image in the card's text zone, or a 13F list cover (news_layouts draws it: its own panel,
+        # rows, plates).
         from marketing import news_layouts
 
         _check_length(spec)
         img, data_layout = news_layouts.draw_data_card(spec.image, font_path=font_path,
-                                                       layout_engine=resolve_layout_engine(layout_engine))
+                                                       layout_engine=resolve_layout_engine(layout_engine),
+                                                       cover=spec.kind == "opening")
         _warn_blank(spec, data_layout)
         return _png_bytes(img, spec.kind, data_layout)
     layout = layout_card(spec, font_path=font_path, with_logo=bool(uses_logo and logo_path),
                          layout_engine=layout_engine)
     _warn_blank(spec, layout)
-    img = Image.new("RGB", (WIDTH, HEIGHT), _rgb(PAGE))
-    if layout.panel:
-        _fill_rounded(img, layout.panel, PANEL_RADIUS, _rgb(CARD))
-    if layout.rule:
-        _fill_rounded(img, layout.rule, RULE_H // 2, _rgb(ACCENT))
-    if layout.badge:
-        b = layout.badge
-        _fill_rounded(img, b, (b[3] - b[1]) // 2, BADGE_FILL)
-    if layout.logo and logo_path:
-        img.paste(_logo_tile(logo_path, layout.logo[2] - layout.logo[0]), layout.logo[:2])
-    for tile_box, art in layout.tiles:          # company logos on their plates (opening card)
-        draw_plate(img, tile_box, art)
-    draw = ImageDraw.Draw(img)
-    for ln in layout.lines:
-        draw.text((ln.x, ln.y), ln.text, font=_font(font_path, ln.size, layout.engine), fill=ln.fill,
-                  anchor=ln.anchor)
+    from marketing import card_layouts
+
+    img = card_layouts.draw_card(layout, spec, font_path, logo_path)
     return _png_bytes(img, spec.kind, layout)
 
 
@@ -1375,20 +1637,12 @@ IMAGE_PARAGRAPHS_MIN, IMAGE_PARAGRAPHS_MAX = 2, 4
 #: text card on flat colour is ~0.2-0.5 MB at the top step, so the ladder is a guard, not a dial.
 JPEG_QUALITIES: Tuple[int, ...] = (92, 88, 84, 80, 75, 70, 65, 60)
 
-IMAGE_MARGIN = 64                          # page margin on every side: nothing is drawn in it
-IMAGE_PANEL_PAD_X, IMAGE_PANEL_PAD_Y = 64, 60
-IMAGE_FOOTER_GAP = 32                      # between the panel's area and the footer
-#: The most of the height the footer may take (it is two lines; a longer one steps down).
-IMAGE_FOOTER_MAX_H = 240
-#: Sized so the writer's maximum (a 70-character title, four 220-character paragraphs of long
-#: words) fits one step above the floors with room to spare, on both layout engines (measured
-#: 2026-10-09; tests/test_marketing_cards.py pins that it fits).
-IMAGE_TITLE_STYLE = _Style(80, 40, 1.12)       # the title (ACCENT)
-IMAGE_PARAGRAPH_STYLE = _Style(48, 26, 1.32)   # each paragraph (TEXT)
-IMAGE_FOOTER_STYLE = _Style(30, 24, 1.3)       # the footer (TEXT at 72 % over PAGE)
-IMAGE_TITLE_GAP_EM = 0.8                   # title → first paragraph
-IMAGE_PARAGRAPH_GAP_EM = 0.75              # between paragraphs
-FOOTER_FILL = _mix(TEXT, PAGE, 0.72)
+#: The lesson picture (news-v23 look, marketing/card_layouts.place_lesson_image): the title two-tone, each
+#: paragraph on its own warm card, every card the same height (mock_lesson: paragraphs from 46 px, leading 1.28).
+#: Sized so the writer's maximum (a 70-character title, four 220-character paragraphs of long words) fits before
+#: the floor (tests/test_marketing_cards.py pins that it fits).
+IMAGE_TITLE_STYLE = _Style(80, 44, 1.08)
+IMAGE_PARAGRAPH_STYLE = _Style(46, 24, 1.28)
 
 
 class ImageTooLarge(Exception):
@@ -1405,6 +1659,9 @@ class ImageSpec:
     title: str
     paragraphs: Tuple[str, ...]
     footer: str
+    #: news-v23 — the read-back's web allows the look's own strings (`new_look`): the brand row's word and the
+    #: LESSON_KICKER pill are drawn and declared. False (an older web refuses both on a picture): the tile alone.
+    look: bool = True
 
     def __post_init__(self) -> None:
         for name in ("title", "footer"):
@@ -1445,16 +1702,18 @@ def image_for_script(script: Dict[str, Any]) -> Optional[ImageSpec]:
         raise ValueError("the script has an image_post but no image_footer: an image without its "
                          "footer must not render")
     try:
-        return ImageSpec(title=raw.get("title"), paragraphs=tuple(paragraphs), footer=footer)  # type: ignore[arg-type]
+        return ImageSpec(title=raw.get("title"), paragraphs=tuple(paragraphs), footer=footer,  # type: ignore[arg-type]
+                         look=new_look(script))
     except TypeError as e:
         raise ValueError(f"script.image_post is malformed: {e}") from e
 
 
 def image_onscreen_strings(spec: ImageSpec) -> List[str]:
-    """EXACTLY the strings the post image draws, verbatim and in order — title, paragraphs, footer
-    (a repeated string once): the image's `metadata.onscreen_text` and its alt text."""
+    """EXACTLY the strings the post image draws, verbatim and in order — title, paragraphs, footer, then (news-v23,
+    `ImageSpec.look`) the kicker pill's LESSON_KICKER and the brand row's BRAND_ROW_WORD (a repeated string once):
+    the image's `metadata.onscreen_text` (the server allows the last two: app.schemas.marketing.LESSON_BRAND_TEXT)."""
     out: List[str] = []
-    for s in (spec.title, *spec.paragraphs, spec.footer):
+    for s in (spec.title, *spec.paragraphs, spec.footer, *((LESSON_KICKER, BRAND_ROW_WORD) if spec.look else ())):
         if s not in out:
             out.append(s)
     return out
@@ -1466,38 +1725,10 @@ def check_image_glyphs(spec: ImageSpec, font_path: str) -> None:
 
 
 def _place_image(spec: ImageSpec, step: int, font_path: str, engine: str) -> CardLayout:
-    col_w = IMAGE_WIDTH - 2 * IMAGE_MARGIN
-    # The footer first: it sits on the page at the bottom, and what it leaves is the panel's.
-    foot = _Stack(col_w, IMAGE_FOOTER_MAX_H, "center", font_path, engine, step)
-    foot.text("footer", spec.footer, IMAGE_FOOTER_STYLE, FOOTER_FILL)
-    footer_top = IMAGE_HEIGHT - IMAGE_MARGIN - foot.y
-    area_top, area_h = IMAGE_MARGIN, footer_top - IMAGE_FOOTER_GAP - IMAGE_MARGIN
-    st = _Stack(col_w - 2 * IMAGE_PANEL_PAD_X, area_h - 2 * IMAGE_PANEL_PAD_Y, "left", font_path, engine, step)
-    st.box("rule", RULE_W, RULE_H, lead_gap=RULE_GAP)
-    st.text("title", spec.title, IMAGE_TITLE_STYLE, _rgb(ACCENT))
-    for i, p in enumerate(spec.paragraphs):
-        st.text(f"paragraph{i}", p, IMAGE_PARAGRAPH_STYLE, _rgb(TEXT),
-                gap_em=IMAGE_TITLE_GAP_EM if i == 0 else IMAGE_PARAGRAPH_GAP_EM)
-    panel_h = st.y + 2 * IMAGE_PANEL_PAD_Y
-    top = area_top + (area_h - panel_h) // 2
-    panel: Box = (IMAGE_MARGIN, top, IMAGE_WIDTH - IMAGE_MARGIN, top + panel_h)
-    footer_zone: Box = (IMAGE_MARGIN, footer_top, IMAGE_WIDTH - IMAGE_MARGIN, IMAGE_HEIGHT - IMAGE_MARGIN)
-    lines: List[DrawnLine] = []
-    for stack, dx, dy, bounds in ((st, IMAGE_MARGIN + IMAGE_PANEL_PAD_X, top + IMAGE_PANEL_PAD_Y, panel),
-                                  (foot, IMAGE_MARGIN, footer_top, footer_zone)):
-        for name, text, size, x, y, anchor, fill in stack.lines:
-            l, t, r, b = _font(font_path, size, engine).getbbox(text, anchor=anchor)
-            ink = (x + dx + l, y + dy + t, x + dx + r, y + dy + b)
-            if not _within(ink, bounds):
-                raise _NoFit(f"{name}: the ink of {text[:40]!r} at {size}px leaves its area")
-            lines.append(DrawnLine(name, text, size, x + dx, y + dy, anchor, fill, ink))
-    rx0, ry0, rx1, ry1 = st.boxes["rule"]
-    dx, dy = IMAGE_MARGIN + IMAGE_PANEL_PAD_X, top + IMAGE_PANEL_PAD_Y
-    rule: Box = (rx0 + dx, ry0 + dy, rx1 + dx, ry1 + dy)
-    if not _within(rule, panel) or footer_zone[1] < panel[3] + IMAGE_FOOTER_GAP or panel[1] < IMAGE_MARGIN:
-        raise _NoFit("post image: the panel, its rule or the footer leave their areas")   # defence in depth
-    return CardLayout(kind="post_image", step=step, engine=engine, panel=panel, rule=rule,
-                      lines=tuple(lines))
+    """The lesson picture at ramp `step`, in the approved look (news-v23: card_layouts.place_lesson_image)."""
+    from marketing import card_layouts
+
+    return card_layouts.place_lesson_image(spec, step, font_path, engine)
 
 
 def layout_image(spec: ImageSpec, *, font_path: str, layout_engine: Optional[str] = None) -> CardLayout:
@@ -1521,19 +1752,10 @@ def layout_image(spec: ImageSpec, *, font_path: str, layout_engine: Optional[str
 def draw_image(spec: ImageSpec, *, font_path: str, layout_engine: Optional[str] = None):
     """(the post image as an RGB PIL image, its layout) — before any JPEG encoding, so tests can
     check its pixels exactly. CardOverflow / CardAssetError as for a card."""
-    from PIL import Image, ImageDraw
+    from marketing import card_layouts
 
     layout = layout_image(spec, font_path=font_path, layout_engine=layout_engine)
-    img = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), _rgb(PAGE))
-    if layout.panel:
-        _fill_rounded(img, layout.panel, PANEL_RADIUS, _rgb(CARD))
-    if layout.rule:
-        _fill_rounded(img, layout.rule, RULE_H // 2, _rgb(ACCENT))
-    draw = ImageDraw.Draw(img)
-    for ln in layout.lines:
-        draw.text((ln.x, ln.y), ln.text, font=_font(font_path, ln.size, layout.engine), fill=ln.fill,
-                  anchor=ln.anchor)
-    return img, layout
+    return card_layouts.draw_lesson_image(layout, font_path), layout
 
 
 def encode_jpeg(img, quality: int) -> bytes:
@@ -1551,6 +1773,9 @@ class RenderedImage:
     data: bytes
     quality: int                # the JPEG_QUALITIES step that fit the cap
     layout: CardLayout
+    #: Workstream C: why the per-post art OFFERED to this picture was not drawn (news_layouts.ART_SKIP_REASONS:
+    #: the picture fell back to today's drawing), or None — no art offered, or the art drawn.
+    art_skipped: Optional[str] = None
 
 
 def render_image(spec: ImageSpec, *, font_path: str, layout_engine: Optional[str] = None,

@@ -53,7 +53,7 @@ struct ForgotPasswordView: View {
     /// When sending a code to an address unlocks again, keyed by `cooldownKey(_:)`. Every send
     /// REPLACES the previous code, so a second tap while the first email is still in flight
     /// kills the code the user is about to receive — and each send also spends one of the
-    /// address's few recovery emails per hour. Keyed PER ADDRESS so both Send buttons honour it
+    /// address's few recovery emails (3 per 15 minutes). Keyed PER ADDRESS so both Send buttons honour it
     /// ("Use a different email" → Send Code used to skip it) while a corrected address is never
     /// held back by the wait of the one it replaced.
     @State private var sendCooldowns: [String: SendCooldown] = [:]
@@ -73,8 +73,9 @@ struct ForgotPasswordView: View {
     /// The wait after every send the server accepted.
     private static let sendCooldownSeconds = 60
     /// The most a 429 can hold a Send button: the longest window any credential limiter uses
-    /// (a recovery email is 3 per address per hour), so a malformed `Retry-After` cannot lock
-    /// the button for the life of the sheet.
+    /// (the code-entry limits are 10 per address per hour; a recovery email is 3 per address
+    /// per 15 minutes), so a malformed `Retry-After` cannot lock the button for the life of
+    /// the sheet.
     private static let rateLimitWaitCapSeconds = 3600
 
     init(initialEmail: String = "") {
@@ -269,7 +270,7 @@ struct ForgotPasswordView: View {
 
     /// The new password with a show/hide control. There is no confirm field on this screen, and
     /// a mistyped hidden password spends the single-use code on a password the user never
-    /// meant — forcing another recovery email (a handful per hour per address).
+    /// meant — forcing another recovery email (3 per address per 15 minutes).
     ///
     /// Built by hand rather than through `labeled(_:content:)`: that pads its content 12 pt top
     /// and bottom, so a 44-pt eye inside it made this box ~20 pt taller than its neighbours.

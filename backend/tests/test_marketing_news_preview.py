@@ -9,6 +9,7 @@ postgrest builder: a refused request never reaches the transport, so nothing her
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import io
 import json
@@ -33,9 +34,26 @@ MON, TUE, THU = date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 19)
 RUN_DATES = {"ceo_buys": MON, "insider_buys": MON, "thirteen_f": TUE, "money_map": THU,
              # drop 2b: the December Congress Tuesday, the first stakes Tuesday, an earnings Thursday
              "congress_count": date(2026, 12, 8), "company_stakes": date(2026, 12, 29), "earnings": THU,
-             "theme_explainer": MON}
+             # news-v23 phase 3: the weekly theme post runs on Wednesdays only
+             "theme_explainer": date(2026, 11, 18),
+             # news-v22: the spotlight lane — a Thursday in the 13F season, and its Saturday (the 13F spotlight leads)
+             "insider_spotlight": THU, "thirteen_f_spotlight": date(2026, 11, 21)}
+
+
+def _lane_of(series):
+    """The lane whose calendar runs `series` (news-v22: the spotlight pair runs on the spotlight lane only)."""
+    return "spotlight" if series in selection.SPOTLIGHT_SERIES else "main"
+
+
+def _plan(day, series):
+    # news-v23 phase 3: a theme preview's calendar adds Wednesday, the weekly theme post's only day (`plan_of`)
+    return selection.spotlight_plan_for(day) if _lane_of(series) == "spotlight" else NP.plan_of(day, series=series)
 #: The 2b samples' image layouts (pair / grid shipped with their series).
-LAYOUTS_2B = {"congress_count": "spotlight", "company_stakes": "pair", "earnings": "rows", "theme_explainer": "grid"}
+#: news-v23 (the restyle, 2026-11-19): the Congress Count is ONE list of the month's 2-3 companies ("rows", was the
+#: one-company "spotlight"); earnings stays "rows" (now the 2-4 company table)
+LAYOUTS_2B = {"congress_count": "rows", "company_stakes": "rows", "earnings": "rows", "theme_explainer": "grid"}
+#: news-v23 phase 3: the theme's samples draw their ANGLE's layout — the grid, then the ranked list.
+THEME_SAMPLE_LAYOUTS = ["grid", "ranked", "figures", "ledger", "tally"]
 
 
 def _load_script():
@@ -212,29 +230,43 @@ def test_the_samples_are_fictional_companies():
 
     # every company a 2b record can draw is counted (the investor, a listed investee, every theme member)
     sym = {k: s for k, (s, _) in NP.SAMPLE_COMPANIES.items()}
-    (stake, listed) = NP.sample_records("company_stakes", RUN_DATES["company_stakes"])
-    assert stake.investee is None and stake.investee_name == "Relecloud"
-    assert NP.record_symbols(stake) == [sym["fabrikam"]]
-    assert NP.record_symbols(listed) == [sym["contoso"], sym["proseware"]]
-    (theme,) = NP.sample_records("theme_explainer", RUN_DATES["theme_explainer"])
+    # news-v23 (owner 2026-11-19, "public only"): ONE post of one investor's stakes, every investee a listed company
+    (stakes,) = NP.sample_records("company_stakes", RUN_DATES["company_stakes"])
+    assert [s.investee_name for s in stakes.stakes] == ["Proseware", "Litware"]
+    assert all(s.investee is not None for s in stakes.stakes)
+    assert NP.record_symbols(stakes) == [sym["contoso"], sym["proseware"], sym["litware"]]
+    # news-v23 phase 3: the theme's two built angles — "how they make money" (8 members) and "who's biggest" (6, ranked)
+    theme, ranked, growth, insiders, congress = NP.sample_records("theme_explainer", RUN_DATES["theme_explainer"])
     assert NP.record_symbols(theme) == [m.company.symbol for m in theme.members] and len(theme.members) == 8
-    assert {NP.record_symbols(r)[0] for r in NP.sample_records("congress_count", RUN_DATES["congress_count"])} == {
-        sym["contoso"], sym["fabrikam"]}
+    assert (theme.angle, ranked.angle) == ("make_money", "biggest") and len(ranked.members) == 6
+    # 2026-11-20: the last three angles, each of fictional companies only
+    assert [r.angle for r in (growth, insiders, congress)] == ["growth_profit", "insiders", "congress"]
+    for rec in (growth, insiders, congress):
+        assert {m.company.symbol for m in rec.members} <= set(sym.values()) and len(rec.members) >= 4
+    assert NP.record_symbols(ranked) == [m.company.symbol for m in ranked.members]
+    assert {m.company.symbol for m in ranked.members} <= set(sym.values())         # fictional companies only
+    (month,) = NP.sample_records("congress_count", RUN_DATES["congress_count"])      # news-v23: one post
+    assert NP.record_symbols(month) == [sym["contoso"], sym["fabrikam"]]
+    (day,) = NP.sample_records("earnings", RUN_DATES["earnings"])
+    assert NP.record_symbols(day) == [sym["tailspin"], sym["northwind"]]
 
 
 def test_the_preview_offers_exactly_the_shipped_series_in_calendar_order():
     assert set(NP.SHIPPED_SERIES) == set(selection.SHIPPED_SERIES)
     assert list(NP.SHIPPED_SERIES) == [s.id for s in selection.SERIES if s.id in selection.SHIPPED_SERIES]
+    assert NP.MAIN_SERIES == tuple(s for s in NP.SHIPPED_SERIES if s not in selection.SPOTLIGHT_SERIES)
     assert set(RUN_DATES) == set(NP.SHIPPED_SERIES)
     for series, day in RUN_DATES.items():
-        assert series in selection.plan_for(day).chain, (series, day)      # a day that runs it
+        assert series in _plan(day, series).chain, (series, day)           # a day that runs it, on its lane
 
 
 @pytest.mark.parametrize("series", sorted(LAYOUTS_2B))
 def test_a_2b_sample_composes_with_its_shipped_layout(series, tmp_path):
-    for rec in NP.sample_records(series, RUN_DATES[series]):
+    recs = NP.sample_records(series, RUN_DATES[series])
+    layouts = THEME_SAMPLE_LAYOUTS if series == "theme_explainer" else [LAYOUTS_2B[series]] * len(recs)
+    for rec, layout in zip(recs, layouts, strict=True):
         stored, script = NP.compose_stored(rec, RUN_DATES[series], logos_in=None, logos_out=tmp_path / "logos")
-        assert stored["series"] == series and stored["image_spec"]["layout"] == LAYOUTS_2B[series]
+        assert stored["series"] == series and stored["image_spec"]["layout"] == layout
         assert stored["post_formats"]["bluesky"] == "image"            # the image is drawable (not refused)
         assert script["image_spec"] == stored["image_spec"]
 
@@ -244,9 +276,9 @@ def test_sample_day_is_the_first_day_whose_calendar_runs_the_series_and_its_samp
     """Without --date each series is previewed on its own next calendar day — and its samples compose
     there, whatever the starting day of the year (a Congress Count needs its Tuesday, day 8..14)."""
     for start in (date(2026, 10, 10), date(2026, 12, 1), date(2027, 2, 27), date(2027, 5, 3), date(2027, 8, 30)):
-        day = NP.sample_day(series, start)
-        assert series in selection.plan_for(day).chain and day >= start
-        assert all(series not in selection.plan_for(start + timedelta(days=i)).chain
+        day = NP.sample_day(series, start, lane=_lane_of(series))
+        assert series in _plan(day, series).chain and day >= start
+        assert all(series not in _plan(start + timedelta(days=i), series).chain
                    for i in range((day - start).days))
         for rec in NP.sample_records(series, day):
             NP.compose_stored(rec, day, logos_in=None, logos_out=tmp_path / "logos")
@@ -275,7 +307,8 @@ def test_the_built_in_samples_run_end_to_end_from_today(tmp_path, capsys, monkey
 
     monkeypatch.setattr(NP, "datetime", _Clock)
     assert NP.main(["--fixture", "--out", str(tmp_path)]) == 0
-    for series in NP.SHIPPED_SERIES:
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(tuple(selection.SPOTLIGHT_SERIES))]
+    for series in NP.MAIN_SERIES:
         day = NP.sample_day(series, today)
         n = len(NP.sample_records(series, day))
         for i in range(1, n + 1):
@@ -285,7 +318,7 @@ def test_the_built_in_samples_run_end_to_end_from_today(tmp_path, capsys, monkey
             stored = json.loads((folder / "stored_output.json").read_text(encoding="utf-8"))
             assert stored["run_date"] == day.isoformat(), (series, i)
     out = capsys.readouterr().out
-    assert all(f"- {s}: sample day" in out for s in NP.SHIPPED_SERIES)
+    assert all(f"- {s}: sample day" in out for s in NP.MAIN_SERIES)
 
 
 def test_candidates_mark_the_series_the_switch_keeps_off(monkeypatch):
@@ -1120,3 +1153,657 @@ def test_r1_a_form4_roundup_without_the_data_card_shows_why_its_extras_are_not_f
     assert "NOT frozen today" not in page
     for platform in ("facebook", "linkedin"):
         assert f"### {platform} (video, extra)" in page
+
+
+# ── the spotlight lane (migration 210, 2026-11-15): --lane spotlight ─────────
+
+
+@pytest.fixture(autouse=True)
+def _declared_spotlight_lane(monkeypatch):
+    """`spotlight_plan_for` reads MARKETING_SPOTLIGHT_WEEKDAYS at call time: pin it (and the switch) to the declared
+    defaults, so a developer's .env never moves a spotlight sample day."""
+    from app.config import Settings, settings
+
+    for name in ("MARKETING_SPOTLIGHT_WEEKDAYS", "MARKETING_SPOTLIGHT_ENABLED"):
+        monkeypatch.setattr(settings, name, Settings.model_fields[name].default)
+
+
+SAT = date(2026, 11, 21)
+
+
+def _ledger_row(day, lane="main", *, template="earnings", ref=None, lead=None, run_id=None):
+    """A `run_service.lane_scripts_between` row: what the cross-lane read sees of an accepted script."""
+    output = {"image_spec": {"layout": "rows", "header": {"logo": lead}}} if lead else {}
+    return {"run_id": run_id or f"run-{day}-{lane}", "run_date": day.isoformat(), "lane": lane,
+            "source_ref": ref or f"news:{template}:{lead or 'X'}:{day.isoformat()}", "template_id": template,
+            "output": output}
+
+
+def _write_ledger(path, rows, *, wrapped=False):
+    path.write_text(json.dumps({"rows": rows} if wrapped else rows), encoding="utf-8")
+    return path
+
+
+def test_spotlight_the_preview_calendar_is_the_spotlight_lanes():
+    """The spotlight preview offers only what a spotlight chain can hold — never a weekly roundup, never the lesson or
+    the skip — and finds each series' next spotlight day; the main calendar is untouched."""
+    offered = NP.spotlight_chain_series(TUE)
+    assert offered and set(offered) <= set(NP.SHIPPED_SERIES) and "money_map" in offered
+    assert not set(offered) & (selection.WEEKLY_ROUNDUP_SERIES | {selection.LESSON, selection.SKIP})
+    # news-v22: the pair shipped; owner decisions 2026-11-20: the theme follows the insider list (a quiet Form 4 window)
+    assert offered == ("money_map", "theme_explainer", "insider_spotlight", "thirteen_f_spotlight")
+    # C0 (2026-11-16): Money Map is the main lane's on Tuesday and Thursday (their chains hold it), so the spotlight
+    # takes it only on Saturday, whose main day is the lesson alone
+    day = NP.sample_day("money_map", date(2026, 11, 16), lane="spotlight")
+    assert day == SAT and "money_map" in selection.spotlight_plan_for(day).chain
+    assert NP.main_lane_holds("money_map", TUE) and NP.main_lane_holds("money_map", THU)
+    assert not NP.main_lane_holds("money_map", SAT)
+    assert "money_map" not in NP.plan_of(THU, "spotlight").chain and "money_map" in NP.plan_of(SAT, "spotlight").chain
+    assert NP.sample_day("money_map", date(2026, 11, 16)) == date(2026, 11, 16)     # main: Monday's tail, as before
+    with pytest.raises(ValueError, match="spotlight lane"):
+        NP.sample_day("ceo_buys", TUE, lane="spotlight")
+    assert NP.next_lane_day(date(2026, 11, 18), "spotlight") == THU
+    assert NP.next_lane_day(date(2026, 11, 18), "main") == THU
+    assert NP.plan_of(date(2026, 11, 18), "spotlight").rest_day and NP.plan_of(THU, "spotlight").chain[-1] == "skip"
+    with pytest.raises(ValueError, match="unknown lane"):
+        NP.plan_of(THU, "morning")
+
+
+def test_spotlight_no_spotlight_weekday_means_no_day_to_preview(monkeypatch, tmp_path, capsys):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_WEEKDAYS", "")
+    assert NP.next_lane_day(TUE, "spotlight") is None
+    assert NP.main(["--candidates", "--lane", "spotlight", "--out", str(tmp_path / "o")]) == 2
+    assert "names no day" in capsys.readouterr().err and not (tmp_path / "o").exists()
+    assert NP.main(["--fixture", "--lane", "spotlight", "--out", str(tmp_path / "f")]) == 2
+
+
+def test_spotlight_built_in_samples_run_on_the_spotlight_calendar_end_to_end(tmp_path, capsys):
+    assert NP.main(["--fixture", "--lane", "spotlight", "--date", THU.isoformat(), "--out", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    # C0: on Thursday the main lane's chain holds Money Map — left out of the spotlight's, as the build would
+    assert "## money_map: left out — the main lane's chain holds it on Thu 2026-11-19" in out
+    assert not (tmp_path / "money_map-1").exists()
+    assert "(cross-lane exclusion not simulated: no --ledger)" in out
+    sat = tmp_path / "sat"
+    assert NP.main(["--fixture", "--lane", "spotlight", "--series", "money_map", "--date", SAT.isoformat(),
+                    "--out", str(sat)]) == 0
+    assert "- money_map: sample day Sat 2026-11-21 (spotlight lane)" in capsys.readouterr().out
+    page = (sat / "money_map-1" / "post.md").read_text(encoding="utf-8")
+    assert page.startswith("# money_map · Sat Nov 21, 2026 · spotlight lane\n") and "SAMPLE DATA" in page
+    assert not any(p.name.startswith(("ceo_buys", "insider_buys-", "thirteen_f-")) for p in tmp_path.iterdir())
+    # news-v22: the shipped pair composes on its own calendar — the insider spotlight's picture the insider LIST (`rows`,
+    # owner decisions 2026-11-20), the 13F spotlight's the ONE 13F list (`rows`, news-v23)
+    for series, layout in (("insider_spotlight", "rows"), ("thirteen_f_spotlight", "rows")):
+        assert f"- {series}: sample day Thu 2026-11-19 (spotlight lane)" in out
+        stored = json.loads((tmp_path / f"{series}-1" / "stored_output.json").read_text(encoding="utf-8"))
+        assert stored["series"] == series and stored["image_spec"]["layout"] == layout
+        assert "image" in stored["post_formats"].values()
+
+
+def test_spotlight_a_series_the_lane_never_runs_is_refused_before_anything_runs(tmp_path, capsys):
+    for series in ("ceo_buys", "insider_buys", "thirteen_f"):
+        code = NP.main(["--fixture", "--lane", "spotlight", "--series", series, "--out", str(tmp_path / series)])
+        assert code == 2 and f"never runs {series}" in capsys.readouterr().err
+        assert not (tmp_path / series).exists()
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_spotlight_a_lead_company_the_other_lane_drew_within_two_days_is_excluded(tmp_path, capsys, wrapped):
+    """Rule (b) against a --ledger file: the main lane drew Contoso (ZQCT, the Money Map sample's company) the day
+    before — the spotlight's Saturday Money Map is EXCLUDED (no post), the preview still succeeds."""
+    ledger = _write_ledger(tmp_path / "ledger.json", [_ledger_row(SAT - timedelta(days=1), lead="ZQCT")],
+                           wrapped=wrapped)
+    out_root = tmp_path / "out"
+    assert NP.main(["--fixture", "--lane", "spotlight", "--date", SAT.isoformat(), "--ledger", str(ledger),
+                    "--out", str(out_root)]) == 0
+    folder = out_root / "money_map-1"
+    assert "ZQCT" in (folder / "EXCLUDED.txt").read_text(encoding="utf-8")
+    assert not (folder / "post.md").exists() and not (folder / "script.json").exists()
+    out = capsys.readouterr().out
+    assert "EXCLUDED — a lane drew its lead company ZQCT (root:ZQCT) within 2 ET days" in out
+    assert f"lead companies drawn within 2 ET days ['root:ZQCT']" in out
+
+
+def test_spotlight_a_series_the_other_lane_used_that_day_falls_back_before_anything_is_composed(tmp_path, capsys):
+    ledger = _write_ledger(tmp_path / "ledger.json", [_ledger_row(SAT, template="money_map", lead="ZQFB")])
+    out_root = tmp_path / "out"
+    assert NP.main(["--fixture", "--lane", "spotlight", "--date", SAT.isoformat(), "--ledger", str(ledger),
+                    "--out", str(out_root)]) == 0
+    assert "## money_map: falls back — the other lane posted this series that day (other_lane)" in (
+        capsys.readouterr().out)
+    assert not (out_root / "money_map-1").exists()
+
+
+def test_spotlight_the_days_own_row_of_its_lane_is_never_read_as_the_other_lanes(tmp_path):
+    """A build runs before its own row exists: a ledger holding the previewed day's SPOTLIGHT row (the day already
+    ran) must not exclude the very post it shows."""
+    ledger = _write_ledger(tmp_path / "ledger.json",
+                           [_ledger_row(SAT, "spotlight", template="money_map", lead="ZQCT")])
+    assert NP.main(["--fixture", "--lane", "spotlight", "--date", SAT.isoformat(), "--ledger", str(ledger),
+                    "--out", str(tmp_path / "out")]) == 0
+    assert (tmp_path / "out" / "money_map-1" / "post.md").exists()
+
+
+def test_spotlight_the_cross_lane_answers_are_the_builds_own():
+    """`cross_lane` runs `_cross_lane` itself: for a SPOTLIGHT build, the main lane's same-day refs and series, and
+    the leads of every lane's rows within two ET days; for a MAIN build, only the spotlight rows' — the day's own row of
+    the previewed lane left out, rows older than two days ignored."""
+    rows = [_ledger_row(THU, "main", ref="news:earnings:ZQFB:2026-11-19", lead="ZQFB"),
+            _ledger_row(THU, "spotlight", template="money_map", ref="news:money_map:ZQXX:2025", lead="ZQXX"),
+            _ledger_row(THU - timedelta(days=1), "spotlight", lead="ZQNW"),
+            _ledger_row(THU - timedelta(days=2), "main", lead="ZQTT"),
+            _ledger_row(THU - timedelta(days=3), "main", lead="ZQOLD")]
+    spot = NP.cross_lane(rows, THU, "spotlight", "test")
+    assert spot == NP.CrossLane(frozenset({"news:earnings:ZQFB:2026-11-19"}), frozenset({"earnings"}),
+                                frozenset({"root:ZQFB", "root:ZQNW", "root:ZQTT"}), "test")
+    main = NP.cross_lane(rows, THU, "main", "test")
+    assert main == NP.CrossLane(frozenset({"news:money_map:ZQXX:2025"}), frozenset({"money_map"}),
+                                frozenset({"root:ZQXX", "root:ZQNW"}), "test")
+    # C0: a MAIN build also reads the next day — a spotlight pick of THU + 1 (a resumed main run of THU) counts
+    later = rows + [_ledger_row(THU + timedelta(days=1), "spotlight", template="money_map",
+                                ref="news:money_map:ZQNX:2025", lead="ZQNX")]
+    main = NP.cross_lane(later, THU, "main", "test")
+    assert "news:money_map:ZQNX:2025" in main.same_day_refs and "root:ZQNX" in main.avoid_leads
+
+
+def test_spotlight_a_record_the_other_lane_posted_that_day_is_excluded_before_it_is_composed(tmp_path, monkeypatch):
+    rec = NP.sample_records("money_map", THU)[0]
+    cross = NP.CrossLane(frozenset({R.ledger_key(rec)}), frozenset(), frozenset(), "test")
+
+    def never(*_a, **_k):
+        raise AssertionError("an excluded record is never composed")
+
+    monkeypatch.setattr(NP, "compose_stored", never)
+    assert NP.write_one(rec, THU, tmp_path / "x", logos_in=None, sample=True, do_render=False, lane="spotlight",
+                        cross=cross) is True
+    assert "posted this record that day" in (tmp_path / "x" / "EXCLUDED.txt").read_text(encoding="utf-8")
+    assert sorted(p.name for p in (tmp_path / "x").iterdir()) == ["EXCLUDED.txt"]
+
+
+@pytest.mark.parametrize("content", ['{"rows": "nope"}', "[1, 2]", "not json"])
+def test_spotlight_a_ledger_file_that_does_not_read_is_refused_never_read_as_empty(tmp_path, capsys, content):
+    bad = tmp_path / "ledger.json"
+    bad.write_text(content, encoding="utf-8")
+    assert NP.main(["--fixture", "--lane", "spotlight", "--date", THU.isoformat(), "--ledger", str(bad),
+                    "--out", str(tmp_path / "out")]) == 2
+    assert "refused: --ledger" in capsys.readouterr().err and not (tmp_path / "out").exists()
+
+
+def test_spotlight_live_candidates_are_judged_against_the_live_ledger_read_only(monkeypatch, tmp_path, capsys):
+    """--candidates --lane spotlight with no --ledger reads the LIVE ledger (the build's own read, a GET under the
+    guard): the other lane's same-day refs reach the adapter's exclude set, and its series of the day is never asked."""
+    from app.services.marketing import company_news_adapter as adapter
+
+    asked, reads = [], []
+
+    async def fake_candidates(series, *, run_date, exclude, limit, deadline, deps):
+        asked.append((series, run_date, exclude))
+        return SimpleNamespace(records=(), skip_reason="money_map_none_qualified", rejections={})
+
+    def live(run_date, lane="spotlight"):
+        reads.append((run_date, lane))
+        return [_ledger_row(THU, "main", ref="news:earnings:ZQFB:2026-11-19", lead="ZQFB")]
+
+    from app.config import Settings, settings
+
+    monkeypatch.setattr(settings, "MARKETING_NEWS_SERIES", Settings.model_fields["MARKETING_NEWS_SERIES"].default)
+    monkeypatch.setattr(adapter, "candidates", fake_candidates)
+    monkeypatch.setattr(NP, "load_live_ledger", live)
+    assert NP.main(["--candidates", "--lane", "spotlight", "--date", THU.isoformat(), "--out", str(tmp_path)]) == 0
+    assert reads == [(THU, "spotlight")]
+    # news-v22: a 13F-season Thursday's chain asks the shipped pair — each with the other lane's same-day refs as its
+    # exclude set — and (owner decisions 2026-11-20) the theme right after the insider list; Money Map is the MAIN
+    # lane's that Thursday (C0), never the spotlight's
+    refs = frozenset({"news:earnings:ZQFB:2026-11-19"})
+    assert asked == [("insider_spotlight", THU, refs), ("theme_explainer", THU, refs),
+                     ("thirteen_f_spotlight", THU, refs)]
+    out = capsys.readouterr().out
+    assert ("# Live candidates for Thu 2026-11-19 (spotlight_13f, spotlight lane): insider_spotlight (off in "
+            "MARKETING_NEWS_SERIES), theme_explainer (off in MARKETING_NEWS_SERIES), thirteen_f_spotlight (off in "
+            "MARKETING_NEWS_SERIES)\n") in out
+    assert "Cross-lane exclusion (against the live ledger)" in out
+    assert "the 14-day issuer cooldown is not applied" in out
+    # Saturday: Money Map is the spotlight's — and when the other lane posted it that day it falls back, the adapter
+    # never asked for it
+    asked.clear()
+    monkeypatch.setattr(NP, "load_live_ledger",
+                        lambda d, lane="spotlight": [_ledger_row(d, "main", template="money_map", lead="ZQFB")])
+    assert NP.main(["--candidates", "--lane", "spotlight", "--date", SAT.isoformat(), "--out", str(tmp_path)]) == 0
+    assert [a[0] for a in asked] == ["thirteen_f_spotlight", "insider_spotlight", "theme_explainer"]
+    assert "## money_map: falls back" in capsys.readouterr().out
+    # an explicit --series the main lane's chain holds that day is left out, as the build would
+    asked.clear()
+    assert NP.main(["--candidates", "--lane", "spotlight", "--series", "money_map", "--date", THU.isoformat(),
+                    "--out", str(tmp_path)]) == 0
+    assert asked == [] and "## money_map: left out — the main lane's chain holds it that day" in (
+        capsys.readouterr().out)
+
+
+def test_spotlight_a_live_ledger_that_cannot_be_read_refuses_the_preview(monkeypatch, tmp_path, capsys):
+    from app.services.marketing import company_news_adapter as adapter
+    from app.services.marketing import run_service as mrs
+
+    async def never(*_a, **_k):
+        raise AssertionError("the adapter is not asked on a guess about the other lane")
+
+    def broken(_run_date, _lane=None):
+        raise mrs.MarketingRunError("lane_scripts_between: 503")
+
+    monkeypatch.setattr(adapter, "candidates", never)
+    monkeypatch.setattr(NP, "load_live_ledger", broken)
+    assert NP.main(["--candidates", "--lane", "spotlight", "--date", THU.isoformat(), "--out", str(tmp_path)]) == 1
+    assert "could not be read (MarketingRunError" in capsys.readouterr().err
+
+
+def test_spotlight_the_main_lane_preview_never_reads_a_ledger_unless_given_one(monkeypatch, tmp_path, capsys):
+    """--lane main (the default) is the preview of before: no live ledger read, an empty exclude set, no new line."""
+    from app.services.marketing import company_news_adapter as adapter
+
+    asked = []
+
+    async def fake_candidates(series, *, run_date, exclude, limit, deadline, deps):
+        asked.append(exclude)
+        return SimpleNamespace(records=(), skip_reason="money_map_none_qualified", rejections={})
+
+    def no_read(_run_date):
+        raise AssertionError("the main lane's preview read the live ledger")
+
+    monkeypatch.setattr(adapter, "candidates", fake_candidates)
+    monkeypatch.setattr(NP, "load_live_ledger", no_read)
+    assert NP.main(_CANDIDATES_ARGS + ["--out", str(tmp_path)]) == 0
+    assert asked == [frozenset()]
+    out = capsys.readouterr().out
+    assert "# Live candidates for Thu 2026-11-19 (thursday_earnings): money_map" in out
+    lines = [line for line in out.splitlines() if not line.startswith("Output → ")]    # tmp_path names this test
+    assert not [line for line in lines if "Cross-lane" in line or "cross-lane" in line or "spotlight" in line]
+
+
+def test_news_v22_the_main_lane_never_previews_the_spotlight_pair(tmp_path, capsys):
+    """news-v22: the shipped spotlight pair runs on the spotlight lane only — asking the main lane's preview for one is
+    refused before anything runs (exit 2), as the spotlight lane refuses a weekly roundup."""
+    for series in ("insider_spotlight", "thirteen_f_spotlight"):
+        code = NP.main(["--fixture", "--series", series, "--out", str(tmp_path / series)])
+        assert code == 2 and f"the main lane never runs {series}" in capsys.readouterr().err
+        assert not (tmp_path / series).exists()
+
+
+@pytest.mark.parametrize("series", ["insider_spotlight", "thirteen_f_spotlight"])
+def test_news_v22_the_spotlight_samples_are_role_only_and_keep_the_cost_off_the_video(series, tmp_path):
+    """The built-in spotlight samples: fictional (the vetted ZQ symbols), role-only, the insider list's filed cost per
+    share on its picture rows' detail lines and in its captions only (owner decisions 2026-11-20: a list of three
+    companies or more), on federal business days."""
+    for rec in NP.sample_records(series, RUN_DATES[series]):
+        stored, script = NP.compose_stored(rec, RUN_DATES[series], logos_in=None, logos_out=tmp_path / "logos")
+        assert stored["persons"] == [] and set(NP.record_symbols(rec)) <= {s for s, _ in NP.SAMPLE_COMPANIES.values()}
+        video = json.dumps({k: script.get(k) for k in ("hook", "video_script", "cards", "opening_card")})
+        assert not re.search(r"\bas filed\b|\ba share\b", video)
+        if series == "insider_spotlight":
+            from app.services.trillion_club.rules import is_federal_business_day
+
+            assert len(rec.companies) >= 3
+            assert all(is_federal_business_day(d) for c in rec.companies for p in c.people for d in p.filing_dates)
+            details = [r["detail"] for r in stored["image_spec"]["sections"][0]["rows"]]
+            assert details and all(d.endswith("a share, as filed") for d in details)
+            assert not [d for d in details if d.split(" · ")[1].split(" a share")[0] in video]
+
+
+# ── news-v22 (B5): the first-line prefix switch is one of the freeze's ─────────────────────────────────────────────
+
+
+def test_news_v22_the_preview_reads_the_first_line_prefix_switch_like_the_build(monkeypatch, tmp_path):
+    """MARKETING_FIRST_LINE_PREFIX is a write-time switch the preview reads NOW, as `_build_template_day` does: it is
+    listed in FREEZE_SWITCHES (so post.md names it), pinned to its declared default (off) here, and only a real True
+    opens a caption on the series' prefix — the weekly Form 4 roundup's "🚨 Insider purchase alert:"."""
+    from app.services.marketing import news_templates
+
+    assert "MARKETING_FIRST_LINE_PREFIX" in NP.FREEZE_SWITCHES
+    assert NP.freeze_switches()["MARKETING_FIRST_LINE_PREFIX"] == "False"
+    alert = news_templates.FIRST_LINE_PREFIXES["insider.alert"]
+    rec = NP.sample_records("ceo_buys", MON)[0]
+    off, _ = NP.compose_stored(rec, MON, logos_in=None, logos_out=tmp_path)
+    assert off["first_line_prefix_on"] is False and off["first_line_prefix"] is None
+    assert not [b for b in off["captions"].values() if b.startswith(alert)]
+    _switches(monkeypatch, MARKETING_FIRST_LINE_PREFIX="true")          # not a real True: off (fail closed)
+    assert NP.compose_stored(rec, MON, logos_in=None, logos_out=tmp_path)[0]["first_line_prefix_on"] is False
+    _switches(monkeypatch, MARKETING_FIRST_LINE_PREFIX=True)
+    on, _ = NP.compose_stored(rec, MON, logos_in=None, logos_out=tmp_path)
+    assert on["first_line_prefix_on"] is True and on["first_line_prefix"] == alert
+    assert on["captions"]["facebook"].startswith(f"{alert} ")
+    assert {k: v for k, v in on.items() if k not in ("captions", "posts", "first_line_prefix", "first_line_prefix_on")
+            } == {k: v for k, v in off.items() if k not in ("captions", "posts", "first_line_prefix",
+                                                             "first_line_prefix_on")}
+    assert NP.write_one(rec, MON, tmp_path / "ceo-1", logos_in=None, sample=True, do_render=False) is True
+    page = (tmp_path / "ceo-1" / "post.md").read_text(encoding="utf-8")
+    assert "MARKETING_FIRST_LINE_PREFIX=True" in page and f"{alert} " in page
+
+
+# ── --art (workstream C, decision 13, 2026-11-16): the per-post art, made locally — it SPENDS only with the flag ──────
+#
+# The art step is the build's own (`post_art.make_post_art`) with a LOCAL store; here its two clients are the fakes of
+# tests/test_marketing_post_art.py (bound to the real clients' signatures), stood in through `NP.art_clients`, so no
+# model is reached. What must hold: no model call (and no art file) without --art; with it, art.jpg + art.json in the
+# record's folder and NOTHING written anywhere else; still under the read-only guard; --render passes the checked
+# picture as --art-file; a record that pictures no single company spends nothing.
+
+from app.services.marketing import post_art as _pa  # noqa: E402
+
+
+@pytest.fixture
+def art_env(monkeypatch):
+    """The art's settings at test values (a key, the default models and prices), the shared breaker reset, and the
+    fakes stood in for both clients — `(gemini, claude)` returned for the test to inspect."""
+    import test_marketing_post_art as PA
+
+    from app.config import settings
+    from app.services import llm_provider as lp
+
+    lp.reset_breaker()
+    monkeypatch.setattr(lp, "_logged_once", set())
+    monkeypatch.setattr(_pa, "_logged_once", set())
+    for name, value in {
+        "CAYDEX_ANTHROPIC_API_KEY": "sk-ant-test", "CAYDEX_CLAUDE_MAX_TOKENS": 16000,
+        "CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS": 120.0, "CAYDEX_CLAUDE_BREAKER_SECONDS": 3600.0,
+        "MARKETING_ART_ENABLED": False, "MARKETING_ART_BUDGET_SECONDS": 180,
+        "MARKETING_ART_CLAUDE_MODEL": "claude-opus-5-5", "MARKETING_ART_IMAGE_MODEL": "gemini-3-pro-image",
+        "MARKETING_ART_IMAGE_MICROS": 134_000, "MARKETING_MEDIA_BUCKET": "marketing-media",
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    clients = (PA.FakeGemini(), PA.FakeClaude())
+    monkeypatch.setattr(NP, "art_clients", lambda: clients)
+    # owner decision 2026-11-20 ("use it nowhere for now"): no shipped series carries art — the kept code (and the
+    # preview's --art) is exercised on the Money Map, put back into the art set for the test only
+    PA.keep_art_on_money_map(monkeypatch)
+    yield clients
+    lp.reset_breaker()
+
+
+_ART_NAMES = ("gemini", "google", "claude", "anthropic", "opus", "sonnet")
+
+
+def _files_under(root: Path) -> List[Path]:
+    return sorted(p for p in root.rglob("*") if p.is_file())
+
+
+def test_art_the_flag_and_its_cost_are_documented_and_the_holder_declares_post_art(capsys):
+    """The docstring says what --art costs and that it spends only with the flag; the constant the console prints is
+    the same range — at least one drawing, below the worst case the build's cap reserves; the holder the freeze reads
+    is today's worker, post_art included."""
+    from app.schemas.marketing import RUN_WORKER_CAPABILITIES_KEY, WORKER_CAPABILITY_POST_ART
+
+    doc = NP.__doc__
+    assert "--art (workstream C, 2026-11-16) SPENDS MONEY — about $0.15 to $0.45 per record" in doc
+    assert "ONLY with this explicit flag" in doc and "--art --render" in doc
+    assert NP.ART_COST_PER_RECORD_USD == (0.15, 0.45)
+    low, high = NP.ART_COST_PER_RECORD_USD
+    assert low * 1_000_000 >= 134_000                                            # at least one 2K drawing
+    assert high * 1_000_000 < _pa.run_worst_micros("claude-opus-5-5", 134_000)    # never claimed as the worst case
+    with pytest.raises(SystemExit) as done:
+        NP.main(["--help"])
+    assert done.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--art" in help_text and "SPENDS MONEY (about $0.15-$0.45 a record)" in help_text
+    run = asyncio.run(NP.PreviewHolder().get_run("r"))
+    assert WORKER_CAPABILITY_POST_ART in run["metadata"][RUN_WORKER_CAPABILITIES_KEY]
+
+
+def test_art_without_the_flag_no_model_is_called_and_the_output_is_as_before(monkeypatch, tmp_path, capsys):
+    """MUTATION TARGET: make art unconditionally and this fails. The default run calls neither client (both explode
+    if built), makes no art file, and its post.md / stored output carry no art."""
+    def no_clients():
+        raise AssertionError("an art client was asked for without --art")
+
+    async def no_art(**_k):
+        raise AssertionError("make_post_art ran without --art")
+
+    monkeypatch.setattr(NP, "art_clients", no_clients)
+    monkeypatch.setattr(_pa, "make_post_art", no_art)
+    assert NP.main(["--fixture", "--lane", "spotlight", "--date", THU.isoformat(), "--out", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "SPENDS MONEY" not in out and "art:" not in out
+    for series in ("insider_spotlight", "thirteen_f_spotlight"):
+        folder = tmp_path / f"{series}-1"
+        assert not (folder / NP.ART_FILE).exists() and not (folder / NP.ART_RECORD_FILE).exists()
+        assert "## Art" not in (folder / "post.md").read_text(encoding="utf-8")
+        assert "art" not in json.loads((folder / "stored_output.json").read_text(encoding="utf-8"))
+
+
+def test_art_with_the_flag_writes_the_checked_picture_and_record_under_out_only(art_env, monkeypatch, tmp_path,
+                                                                                 capsys):
+    """MUTATION TARGET: write the picture beside the script (or to the bucket path) and the no-stray-file check fails.
+    Owner decisions 2026-11-20 ("Drop it from insider posts (Recommended)"): the spotlight lane on Thursday — the insider
+    lists, the theme posts and the 13F lists — pictures no single company: every record gets the no-art record, nothing
+    spent, no picture; the main lane's Money Map (the one art series) gets art.jpg + art.json in its own folder, for its
+    video COVER; the record rides in the stored output; post.md's Art block names no model; and the runs wrote nothing
+    outside --out (the working directory stays empty)."""
+    gemini, claude = art_env
+    cwd, out_root = tmp_path / "cwd", tmp_path / "out"
+    cwd.mkdir()
+    monkeypatch.chdir(cwd)
+    assert NP.main(["--fixture", "--lane", "spotlight", "--date", THU.isoformat(), "--art", "--out",
+                    str(out_root / "spot")]) == 0
+    spot = [p for p in sorted((out_root / "spot").iterdir()) if p.is_dir()]
+    assert {p.name.rsplit("-", 1)[0] for p in spot} == {"insider_spotlight", "theme_explainer", "thirteen_f_spotlight"}
+    for listed in spot:
+        record = json.loads((listed / NP.ART_RECORD_FILE).read_text(encoding="utf-8"))
+        assert (record["status"], record["reason"], record["usage"]["estimated_micros"]) == (
+            "failed", "not_a_company_series", 0), listed.name
+        assert not (listed / NP.ART_FILE).exists()
+        assert "**No art:** this post is not about a single company (`not_a_company_series`)" in (
+            listed / "post.md").read_text(encoding="utf-8")
+    assert gemini.calls == [] and claude.calls == []
+    capsys.readouterr()
+    assert NP.main(["--fixture", "--series", "money_map", "--date", THU.isoformat(), "--art", "--out",
+                    str(out_root / "main")]) == 0
+    console = capsys.readouterr().out
+    assert "--art SPENDS MONEY: about $0.15-$0.45 per single-company record (at worst $1.91)" in console
+    assert _files_under(cwd) == []
+    assert all(p.is_relative_to(out_root) for p in _files_under(tmp_path))
+    folders = [p for p in sorted((out_root / "main").iterdir()) if p.is_dir()]
+    assert [p.name for p in folders] == ["money_map-1"]
+    for folder in folders:
+        record = json.loads((folder / NP.ART_RECORD_FILE).read_text(encoding="utf-8"))
+        assert record["status"] == "ok" and record["surfaces"] == ["cover"], folder.name
+        data = (folder / NP.ART_FILE).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == record["sha256"] and len(data) == record["bytes"]
+        assert record["url"] == _pa.expected_art_url(record["sha256"])
+        stored = json.loads((folder / "stored_output.json").read_text(encoding="utf-8"))
+        assert NP.art_drawable(stored, folder) == folder / NP.ART_FILE
+        assert stored["art"] == record and _pa.drawable_art(stored)["sha256"] == record["sha256"]
+        page = (folder / "post.md").read_text(encoding="utf-8")
+        block = page[page.index("## Art"):]
+        assert f"**Subject:** {record['subject']}" in block and "check 1: passed" in block
+        assert "**May be drawn on:** cover" in block and "**Spent:** ≈ $" in block
+        assert not any(w in block.lower() for w in _ART_NAMES), block
+        # the subject is the Money Map's company (decision 4)
+        assert record["company"]["symbol"] == "ZQCT"
+        assert "art: ok · spent ≈ $" in console
+    # one record, one brief + check pair and one drawing — through the image client, no text call
+    assert len(gemini.calls) == 1 and gemini.text_calls == []
+    assert claude.tags().count(_pa.BRIEF_USAGE_TAG) == 1 and claude.tags().count(_pa.CHECK_USAGE_TAG) == 1
+    # a sample (fictional company) brief reads no FMP facts: the facts reader is never built
+    assert NP.art_facts_fn(True) is None
+
+
+def test_art_a_record_that_pictures_no_single_company_spends_nothing(art_env, tmp_path):
+    """A weekly roundup (three companies) and a lesson-free main day: `not_a_company_series` from the build's own gate,
+    no client call, no picture — and its record says so in art.json and post.md."""
+    gemini, claude = art_env
+    rec = NP.sample_records("ceo_buys", MON)[0]
+    assert NP.write_one(rec, MON, tmp_path / "ceo-1", logos_in=None, sample=True, do_render=False, do_art=True)
+    record = json.loads((tmp_path / "ceo-1" / NP.ART_RECORD_FILE).read_text(encoding="utf-8"))
+    assert (record["status"], record["reason"], record["usage"]["estimated_micros"]) == ("failed",
+                                                                                         "not_a_company_series", 0)
+    assert not (tmp_path / "ceo-1" / NP.ART_FILE).exists() and gemini.calls == [] and claude.calls == []
+    page = (tmp_path / "ceo-1" / "post.md").read_text(encoding="utf-8")
+    assert "**No art:** this post is not about a single company (`not_a_company_series`)" in page
+    assert "**Spent:** ≈ $0.000" in page
+
+
+def test_art_a_main_lane_money_map_gets_cover_art_only(art_env, tmp_path):
+    """The main lane's single-company Money Map: art for the video cover only ("Video cover now, pictures later")."""
+    rec = NP.sample_records("money_map", THU)[0]
+    assert NP.write_one(rec, THU, tmp_path / "mm-1", logos_in=None, sample=True, do_render=False, do_art=True)
+    record = json.loads((tmp_path / "mm-1" / NP.ART_RECORD_FILE).read_text(encoding="utf-8"))
+    assert record["status"] == "ok" and record["surfaces"] == ["cover"]
+    assert "**May be drawn on:** cover" in (tmp_path / "mm-1" / "post.md").read_text(encoding="utf-8")
+
+
+def test_art_a_failed_check_stores_no_picture_and_render_gets_no_art_file(art_env, monkeypatch, tmp_path):
+    import test_marketing_post_art as PA
+
+    gemini = PA.FakeGemini()
+    claude = PA.FakeClaude(checks=[PA.FAIL_TEXT, PA.FAIL_TEXT])
+    monkeypatch.setattr(NP, "art_clients", lambda: (gemini, claude))
+    cmds = _fake_render(monkeypatch, tmp_path)
+    rec = NP.sample_records("money_map", THU)[0]                # owner decisions 2026-11-20: the one art series
+    assert NP.write_one(rec, THU, tmp_path / "mm-1", logos_in=None, sample=True, do_render=True, do_art=True)
+    record = json.loads((tmp_path / "mm-1" / NP.ART_RECORD_FILE).read_text(encoding="utf-8"))
+    assert (record["status"], record["reason"]) == ("failed", "check_failed")
+    stored = json.loads((tmp_path / "mm-1" / "stored_output.json").read_text(encoding="utf-8"))
+    assert not (tmp_path / "mm-1" / NP.ART_FILE).exists() and NP.art_drawable(stored, tmp_path / "mm-1") is None
+    (cmd,) = cmds
+    assert "--art-file" not in cmd
+    page = (tmp_path / "mm-1" / "post.md").read_text(encoding="utf-8")
+    assert "**No art:** the picture check failed (`check_failed`)" in page
+    assert "IGNORE PREVIOUS RULES" not in page            # the checker's notes stay in art.json, never post.md
+
+
+def _fake_render(monkeypatch, tmp_path) -> List[List[str]]:
+    """`render`'s child process, recorded instead of run (venv_marketing is never needed here)."""
+    python = tmp_path / "fake-venv-python"
+    python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(NP, "WORKER_PYTHON", python)
+    cmds: List[List[str]] = []
+
+    def run(cmd, **_k):
+        cmds.append(list(cmd))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(NP.subprocess, "run", run)
+    return cmds
+
+
+def test_art_render_passes_the_checked_picture_as_art_file_and_only_then(art_env, monkeypatch, tmp_path):
+    """MUTATION TARGET: drop `--art-file` from `render` and the worker's preview draws no art. With --art and a picture
+    that passed its check, the child gets `--art-file <folder>/art.jpg`; without --art (or with a file whose bytes no
+    longer match the record) it gets none."""
+    cmds = _fake_render(monkeypatch, tmp_path)
+    rec = NP.sample_records("money_map", THU)[0]                # owner decisions 2026-11-20: the one art series
+    folder = tmp_path / "with"
+    assert NP.write_one(rec, THU, folder, logos_in=None, sample=True, do_render=True, do_art=True)
+    assert NP.write_one(rec, THU, tmp_path / "without", logos_in=None, sample=True, do_render=True)
+    with_art, without = cmds
+    i = with_art.index("--art-file")
+    assert with_art[i + 1] == str(folder / NP.ART_FILE)
+    assert "--art-file" not in without and with_art[:i] == [
+        a.replace(str(tmp_path / "without"), str(folder)) for a in without]
+    stored = json.loads((folder / "stored_output.json").read_text(encoding="utf-8"))
+    assert NP.art_drawable(stored, folder) == folder / NP.ART_FILE
+    assert NP.art_drawable({k: v for k, v in stored.items() if k != "series"}, folder) is None   # never a lesson's
+    (folder / NP.ART_FILE).write_bytes(b"\xff\xd8 tampered")
+    assert NP.art_drawable(stored, folder) is None
+
+
+def test_art_the_read_only_guard_still_trips_during_the_art_step(art_env, monkeypatch, tmp_path):
+    """MUTATION TARGET: run the art outside the guard and the bucket write reaches the wire. The art step runs inside
+    `main`'s guard: a Supabase write attempted from within it (as a store that went to the bucket would make) is
+    refused and reaches nothing."""
+    import test_marketing_post_art as PA
+
+    wire, outcomes = _Wire(), []
+
+    class WritingGemini(PA.FakeGemini):
+        async def generate_image(self, prompt, **kwargs):
+            async with wire.async_client() as ac:
+                try:
+                    await ac.post(f"{_SB}/storage/v1/object/marketing-media/art/{'0' * 32}.jpg", content=b"x")
+                    outcomes.append("reached the wire")
+                except NP.SupabaseWriteRefused:
+                    outcomes.append("refused")
+            return await super().generate_image(prompt, **kwargs)
+
+    monkeypatch.setattr(NP, "art_clients", lambda: (WritingGemini(), art_env[1]))
+    before = _httpx_sends()
+    # owner decisions 2026-11-20: the Money Map is the one art series (its cover)
+    assert NP.main(["--fixture", "--series", "money_map", "--date", THU.isoformat(), "--art", "--out",
+                    str(tmp_path)]) == 0
+    assert outcomes == ["refused"] * len(NP.sample_records("money_map", THU)) and wire.seen == []
+    assert _httpx_sends() == before
+    assert json.loads((tmp_path / "money_map-1" / NP.ART_RECORD_FILE).read_text(encoding="utf-8"))[
+        "status"] == "ok"
+
+
+def test_art_a_live_record_reads_its_company_facts_inside_the_art_budget(art_env, monkeypatch, tmp_path):
+    """A non-sample record (live, or a --fixture FILE replay) reads its sector / industry through the adapter's
+    `company_facts` (stubbed: never FMP here), with the art's own facts timeout — and only the name-free facts reach
+    the brief."""
+    from app.services.marketing import company_news_adapter as adapter
+
+    calls = []
+
+    async def facts(symbol, *, timeout, deps=None):
+        calls.append((symbol, timeout))
+        return {"sector": "Technology", "industry": "Software Infrastructure"}
+
+    monkeypatch.setattr(adapter, "company_facts", facts)
+    fn = NP.art_facts_fn(False)
+    assert fn.keywords == {"timeout": _pa.STEP_SECONDS["facts"][1]}
+    rec = NP.sample_records("money_map", THU)[0]                # owner decisions 2026-11-20: the one art series
+    assert NP.write_one(rec, THU, tmp_path / "live-1", logos_in=None, sample=False, do_render=False, do_art=True)
+    assert calls == [("ZQCT", _pa.STEP_SECONDS["facts"][1])]
+    record = json.loads((tmp_path / "live-1" / NP.ART_RECORD_FILE).read_text(encoding="utf-8"))
+    assert record["facts"]["industry"] == "Software Infrastructure"
+    (brief_prompt, _kw) = next(c for c in art_env[1].calls if c[1].get("usage_tag") == _pa.BRIEF_USAGE_TAG)
+    assert "Software Infrastructure" in brief_prompt and "ZQCT" not in brief_prompt
+
+
+# ── review 2026-11-20: the preview narrows a several-company record exactly as the build does ─────────────────────
+
+
+def _earnings_with_a_refused_company():
+    """A 3-company earnings day whose LEAD fails a per-company template gate (a revenue pair under $1M: the pair writer
+    refuses it) — production DROPS it (`news_templates.drop_refused_rows`) and posts the other two."""
+    import test_marketing_news_templates as NTT
+
+    return NTT, NTT.earnings(lead=NTT.earnings_row(revenue_actual=900_000.0, revenue_estimate=800_000.0), others=2)
+
+
+def test_the_preview_narrows_a_several_company_record_as_the_build_does(tmp_path):
+    """Review 2026-11-20 (confirmed): `compose_stored` composed the record WHOLE and refused the post (`PreviewRefused:
+    implausible_figures`) that a real day narrows and posts — on exactly the days the owner reads before listing
+    earnings / congress_count / company_stakes. It now narrows first (`narrowed_record`, production's own
+    `drop_refused_rows`): the stored output is the 2-company post, with production's ledger key — which `write_one`'s
+    post.md names too — and a day left with one company is refused `too_few_rows`, as production refuses it.
+    Mutation-checked by hand: `narrowed_record` returning the round-tripped record unnarrowed turns this red."""
+    NTT, rec = _earnings_with_a_refused_company()
+    run_date = NTT.EARNINGS_RUN
+    narrowed = T.drop_refused_rows(rec, run_date)
+    assert [r.company.symbol for r in narrowed.reports] == [r.company.symbol for r in rec.reports[1:]]
+    stored, script = NP.compose_stored(rec, run_date, logos_in=None, logos_out=tmp_path / "logos")
+    assert stored["source_ref"] == R.ledger_key(narrowed) != R.ledger_key(rec)
+    assert isinstance(script, dict)
+    assert NP.write_one(rec, run_date, tmp_path / "earnings-1", logos_in=None, sample=True, do_render=False) is True
+    page = (tmp_path / "earnings-1" / "post.md").read_text(encoding="utf-8")
+    assert R.ledger_key(narrowed) in page and R.ledger_key(rec) not in page
+    assert not (tmp_path / "earnings-1" / "REFUSED.txt").exists()
+    lone = NTT.earnings(lead=NTT.earnings_row(revenue_actual=900_000.0, revenue_estimate=800_000.0), others=1)
+    with pytest.raises(NP.PreviewRefused, match="too_few_rows"):
+        NP.compose_stored(lone, run_date, logos_in=None, logos_out=tmp_path / "logos")
+    assert NP.write_one(lone, run_date, tmp_path / "earnings-2", logos_in=None, sample=True, do_render=False) is False
+    assert "too_few_rows" in (tmp_path / "earnings-2" / "REFUSED.txt").read_text(encoding="utf-8")
+
+
+def test_the_preview_freezes_the_picture_platforms_as_the_build_reads_them(monkeypatch, tmp_path):
+    """Review 2026-11-20: `compose_stored` passes the picture platforms the freeze will use (`template_picture_outlets`:
+    image posts on, MARKETING_X_IMAGES, MARKETING_IMAGE_PLATFORMS) into `compose` — X text under the production
+    switches, so its caption is a text post's; the stored output says so and re-checks."""
+    import test_marketing_news_templates as NTT
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "MARKETING_X_IMAGES", False)
+    monkeypatch.setattr(settings, "MARKETING_IMAGE_PLATFORMS", "bluesky,facebook,linkedin,threads")
+    stored, _ = NP.compose_stored(NTT.f13s_list8(), NTT.SPOT_SAT, logos_in=None, logos_out=tmp_path)
+    assert stored["picture_outlets"] == ["bluesky", "facebook", "linkedin", "threads"]
+    assert stored["post_formats"]["x"] == "text" and "x" not in stored["text_outlets"]

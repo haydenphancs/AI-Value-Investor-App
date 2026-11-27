@@ -1518,3 +1518,67 @@ def test_a_real_hook_card_video_shows_the_hook_once_then_captions_the_script(tmp
 
         assert (ink(under_hook) < 40) is with_hook, (with_hook, ink(under_hook))     # the hook, captioned or not
         assert ink(under_line1) > 150                                                  # line 1 is captioned
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg + ffprobe")
+def test_a_real_template_video_opens_on_its_art_cover(tmp_path):
+    """Workstream C (2026-11-16, "Picture and video cover"): the whole render path (real cards, captions and ffmpeg —
+    render.produce_video) of a template whose OPENING card draws the per-post art. Frame 0 — the platforms' cover —
+    shows the art in its band (the red block the art carries, at the band's middle, ±6 per channel after BT.709), the
+    plain opening card does not; the next card follows at its line; the caption band is never drawn into by a card."""
+    import hashlib
+
+    from PIL import Image, ImageDraw
+
+    from marketing import cards
+    from marketing import render as rd
+
+    art_path = tmp_path / "art.jpg"
+    im = Image.new("RGB", (1376, 774), (40, 70, 110))
+    ImageDraw.Draw(im).rectangle((200, 100, 1176, 674), fill=(200, 30, 30))
+    im.save(art_path, "JPEG", quality=92)
+    art = cards.ArtImage(sha256=hashlib.sha256(art_path.read_bytes()).hexdigest(), path=str(art_path), width=1376,
+                         height=774)
+    lines = ["GameStop's chief executive disclosed buying stock.", "The filing came in last week."]
+    words, t = [], 0.25
+    for li, line in enumerate(lines):
+        for word in line.split():
+            words.append(W(word, round(t, 3), round(t + 0.3, 3), li))
+            t += 0.34
+        t += 0.28
+    narration = round(t, 3)
+    # news-v23 (2026-11-19): the band runs edge to edge across the TOP (0, 0, OPENING_ART_W, OPENING_ART_H) under a
+    # navy scrim; the probe sits in the art's red block at the middle, below the scrim and above the disc and label
+    band = (0, 0, cards.OPENING_ART_W, cards.OPENING_ART_H)
+    probe_xy = ((band[0] + band[2]) // 2, int(band[3] * 0.72))
+    frames = {}
+    for name, with_art in (("art", True), ("plain", False)):
+        work = tmp_path / name
+        work.mkdir()
+        subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        f"sine=frequency=440:sample_rate=48000:duration={narration}", "-ac", "2", "-c:a", "aac",
+                        "-b:a", "160k", str(work / "narration.m4a")], check=True, capture_output=True, timeout=30)
+        opening = cards.CardSpec("opening", badge="FILED LAST WEEK · FORM 4", figure="$74.4M", label="GME",
+                                 title="GameStop's CEO disclosed buying stock",
+                                 logos=(cards.LogoArt("GME", "GameStop"),), art=art if with_art else None)
+        specs = [opening, cards.CardSpec("text", title="The filing", body="Filed last week."),
+                 cards.CardSpec("disclaimer", body="Educational only. Caydex")]
+        data, duration, shown = rd.produce_video(
+            workdir=work, specs=specs, words=words, narration_seconds=narration, audio_file="narration.m4a",
+            fonts_dir=str(_FONT.parent), logo_path=None, threads=2, heartbeat=None, run_id="art", max_seconds=75.0,
+            layout_engine=cards.resolve_layout_engine(None))
+        assert shown == [0, 1, 2] and duration == pytest.approx(narration + 4.0, abs=0.2)
+        (work / "out.mp4").write_bytes(data)
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(work / "out.mp4"), "-frames:v", "1", "-f", "rawvideo",
+                              "-pix_fmt", "rgb24", "-"], capture_output=True, check=True, timeout=60).stdout
+        frames[name] = raw
+    w = vid.SIZE[0]
+
+    def rgb(frame: bytes, x: int, y: int):
+        i = (y * w + x) * 3
+        return tuple(frame[i:i + 3])
+
+    assert all(abs(g - c) <= 6 for g, c in zip(rgb(frames["art"], *probe_xy), (200, 30, 30))), rgb(frames["art"], *probe_xy)
+    assert not all(abs(g - c) <= 6 for g, c in zip(rgb(frames["plain"], *probe_xy), (200, 30, 30)))  # no art there
+    for name, frame in frames.items():          # the top corner stays dark on either cover (the scrim over the art)
+        assert max(frame[(20 * w + 20) * 3:(20 * w + 20) * 3 + 3]) < 60, name

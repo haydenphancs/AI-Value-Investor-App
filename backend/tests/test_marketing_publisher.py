@@ -4103,3 +4103,59 @@ async def test_r1_the_line_is_left_out_rather_than_cut_by_the_alerts_cap(env, mo
     assert (await pub.reconcile_cycle())["escalated"] == 1
     text = env.row(primary)["metadata"]["alert_text"]
     assert text == _old_escalation("facebook", error=error) and len(text) == outlet_base.ERROR_TEXT_MAX - 10
+
+
+# ── Spotlight lane (migration 210, 2026-11-15): a second run on the same day ─────────────────────────────────
+# A spotlight post's key is `<run_date>:spotlight:<platform>:<format>`: its first 10 characters are still the run
+# date, so it expires on the same rule as a main post; the expiry alert names the lane (a main post's alert text is
+# unchanged); every per-run read (an extra's primary, a run's close) stays per RUN, never per day.
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_post_expires_by_its_keys_date_and_its_alert_names_the_lane(env):
+    today = mrs.run_date_et()
+    stale = today - timedelta(days=3)
+    main = env.seed(day=stale, key=f"{stale.isoformat()}:x:text")
+    spot = env.seed(day=stale, key=f"{stale.isoformat()}:spotlight:x:text")
+    fresh = env.seed(day=today, key=f"{today.isoformat()}:spotlight:x:text")
+    yesterday = env.seed(day=today - timedelta(days=1),
+                         key=f"{(today - timedelta(days=1)).isoformat()}:spotlight:x:text")
+    await pub._expire_step()
+    m, s = env.row(main)["metadata"], env.row(spot)["metadata"]
+    assert env.row(main)["status"] == env.row(spot)["status"] == "skipped"
+    assert m["alert_text"].startswith(f"⏰ X post expired UNPUBLISHED (run {stale.isoformat()}) — it was approved")
+    assert s["alert_text"].startswith(f"⏰ X post expired UNPUBLISHED (run {stale.isoformat()} · spotlight) — it was")
+    assert env.row(fresh)["status"] == env.row(yesterday)["status"] == "approved"   # its day or the next
+
+
+@pytest.mark.asyncio
+async def test_spotlight_an_extra_waits_only_for_its_own_runs_primary(env):
+    """Two runs on one day post to the same platform: the main run's extra video is held by the MAIN run's open
+    picture/text post only — never by the spotlight run's (the sibling read is per run_id, not per day)."""
+    day = mrs.run_date_et().isoformat()
+    main_run, spot_run = str(uuid.uuid4()), str(uuid.uuid4())
+    extra = env.seed(platform="linkedin", format="video", run_id=main_run, key=f"{day}:linkedin:video")
+    spot_primary = env.seed(platform="linkedin", status="pending_review", run_id=spot_run,
+                            key=f"{day}:spotlight:linkedin:text")
+    row = env.row(extra)
+    assert await pub._extra_waits(env.svc, row) is False               # the other run's open primary: not ours
+    main_primary = env.seed(platform="linkedin", status="pending_review", run_id=main_run, key=f"{day}:linkedin:text")
+    assert await pub._extra_waits(env.svc, row) is True                # its own run's open primary holds it
+    env.raw(main_primary)["status"] = "published"
+    assert await pub._extra_waits(env.svc, row) is False
+    assert env.row(spot_primary)["status"] == "pending_review"
+
+
+@pytest.mark.asyncio
+async def test_spotlight_a_finished_spotlight_run_closes_beside_its_days_main_run(env):
+    today = mrs.run_date_et()
+    d3 = today - timedelta(days=3)
+    main_run = _run(env, d3)
+    spot_run = _run(env, d3)
+    next(r for r in env.runs.rows if r["id"] == spot_run)["lane"] = "spotlight"
+    env.seed(status="published", day=d3, run_id=main_run)
+    env.seed(status="approved", day=d3, run_id=spot_run, key=f"{d3.isoformat()}:spotlight:x:text")
+    counters = await pub._expire_step()
+    assert counters["expired"] == 1 and counters["runs_closed"] == 2
+    status = {r["id"]: r["status"] for r in env.runs.rows}
+    assert (status[main_run], status[spot_run]) == ("published", "skipped")

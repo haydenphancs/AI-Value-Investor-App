@@ -48,12 +48,13 @@ was added to its module list. The synthetic self-tests below keep every import f
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Iterable, List, Sequence, Set, Tuple
 
 import pytest
 
@@ -630,3 +631,99 @@ def test_the_adapter_exemption_is_exactly_what_it_claims():
               "app.services.home_dashboard_service", "app.services.universe_data",
               "app.services.theme_insights_service")
     assert not [m for m in loaded if any(m == b or m.startswith(b + ".") for b in banned)]
+
+
+# ── news-v23 phase 3 (2026-11-20): every FMP read the adapter makes is named and licensed ─────────────────────────
+
+#: Every FMP client METHOD the adapter calls directly (`fmp.<method>(` / `ctx.fmp.<method>(`) → the /stable path that
+#: method reads. A new read is added HERE with its path in the same change, and the path must be one the FMP Order
+#: Form licenses (`fmp_entitlements.is_entitled`). news-v23 phase 3 added the market-value batch (the weekly theme
+#: post's "who's biggest" angle: market cap only, never a price).
+ADAPTER_FMP_METHODS = {
+    "get_company_profiles_batch": "profile",
+    "get_delisted_companies": "delisted-companies",
+    "get_earnings_calendar": "earnings-calendar",
+    "get_income_statement": "income-statement",
+    "get_insider_trades_since": "insider-trading/search",
+    "get_institutional_filing_dates": "institutional-ownership/dates",
+    # the 13F registry build's recording proxy (`_RecordingFMP`) reads the 13F extract itself, on its `_fmp` (fix round
+    # 2026-11-20: the scan used to see only an owner called `fmp`, so this direct read went unnamed)
+    "get_institutional_holdings": "institutional-ownership/extract",
+    "get_market_cap_batch": "market-capitalization-batch",
+    # the Congress Count's two chamber walks, read by name from `_CONGRESS_CHAMBERS` (`getattr(fmp, method)`)
+    "get_senate_latest": "senate-latest",
+    "get_house_latest": "house-latest",
+}
+
+
+#: The names the FMP client goes by in the adapter: `fmp` (``fmp.get_x``, ``ctx.fmp.get_x``) and `_fmp` (the 13F
+#: registry build's recording proxy, `_RecordingFMP._fmp` — fix round 2026-11-20: the scan saw only `fmp`, so a read
+#: written ``self._fmp.get_quote(...)`` passed it).
+_FMP_OWNER_NAMES = frozenset({"fmp", "_fmp"})
+
+
+def _is_fmp_owner(node: ast.AST) -> bool:
+    return (isinstance(node, ast.Name) and node.id in _FMP_OWNER_NAMES) or (
+        isinstance(node, ast.Attribute) and node.attr in _FMP_OWNER_NAMES)
+
+
+def _adapter_fmp_calls(src: str) -> Set[str]:
+    """The FMP client methods `src` calls on a name or attribute called `fmp` or `_fmp` (``fmp.get_x(...)``,
+    ``ctx.fmp.get_x(...)``, ``self._fmp.get_x(...)``) — and each `getattr(<fmp>, ...)` read, which the scan cannot name
+    (refused), as ``<getattr:SOURCE>`` with that call's own source text, so each by-name read is accounted for apart."""
+    found: Set[str] = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Attribute):
+            if _is_fmp_owner(node.value):
+                found.add(node.attr)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr" and node.args:
+            if _is_fmp_owner(node.args[0]):
+                found.add(f"<getattr:{ast.unparse(node)}>")
+    return found
+
+
+#: Every by-name read of the FMP client in the adapter, by its source text → why it is allowed (each must be named
+#: here, apart — a new `getattr(<fmp>, ...)` fails the test below until it is listed with its reason).
+ADAPTER_FMP_GETATTRS = {
+    # the Congress walk: reads only the methods its literal `_CONGRESS_CHAMBERS` table names (checked below)
+    "getattr(fmp, method)": "the Congress Count's chamber walks, by the `_CONGRESS_CHAMBERS` table",
+    # `_RecordingFMP.__getattr__`: the 13F registry build's pass-through to the real client (it hands `_builder.
+    # build_filing` the client's own methods: profiles batch, 13F extract and filing dates — the builder's reads,
+    # gated by the FMP entitlement manifest at call time); the proxy reads only `get_institutional_holdings` itself
+    "getattr(self._fmp, name)": "the 13F registry build's recording proxy (`_RecordingFMP.__getattr__`)",
+}
+
+
+def test_phase3_every_fmp_read_of_the_adapter_is_named_and_licensed():
+    from app.integrations import fmp as fmp_mod
+    from app.integrations import fmp_entitlements
+
+    src = (_BACKEND / ADAPTER_REL).read_text(encoding="utf-8")
+    calls = _adapter_fmp_calls(src)
+    # every by-name read is named, apart (fix round 2026-11-20: the Congress walk's and the 13F proxy's)
+    getattrs = {c for c in calls if c.startswith("<getattr:")}
+    assert getattrs == {f"<getattr:{g}>" for g in ADAPTER_FMP_GETATTRS}, sorted(getattrs)
+    for g in ADAPTER_FMP_GETATTRS:
+        assert src.count(g) == 1, g
+    # the Congress walk's `getattr(fmp, method)` reads only the methods its literal table names
+    (chambers,) = [ast.literal_eval(n.value) for n in ast.parse(src).body
+                   if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None
+                   and any(isinstance(t, ast.Name) and t.id == "_CONGRESS_CHAMBERS"
+                           for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+    calls = (calls - getattrs) | {m for _chamber, m in chambers}
+    assert calls == set(ADAPTER_FMP_METHODS), sorted(calls ^ set(ADAPTER_FMP_METHODS))
+    for method, path in ADAPTER_FMP_METHODS.items():
+        assert callable(getattr(fmp_mod.FMPClient, method, None)), method
+        assert fmp_entitlements.is_entitled(path), (method, path)
+        # the method really reads that path (its own source names it)
+        assert repr(path).strip("'") in inspect.getsource(getattr(fmp_mod.FMPClient, method)), (method, path)
+    # anti-vacuity: the scan sees a new read and a getattr read — on `fmp` and on the proxy's `_fmp` (fix round
+    # 2026-11-20; mutation-checked by hand: with `_fmp` dropped from _FMP_OWNER_NAMES the two `_fmp` lines turned red)
+    assert _adapter_fmp_calls("async def f(ctx):\n    await ctx.fmp.get_quote('X')\n") == {"get_quote"}
+    assert _adapter_fmp_calls("def f(fmp):\n    return getattr(fmp, 'get_quote')\n") == {
+        "<getattr:getattr(fmp, 'get_quote')>"}
+    assert _adapter_fmp_calls("class P:\n    async def f(self):\n        return await self._fmp.get_quote('X')\n") == {
+        "get_quote"}
+    assert _adapter_fmp_calls("class P:\n    def f(self, n):\n        return getattr(self._fmp, n)\n") == {
+        "<getattr:getattr(self._fmp, n)>"}
+    assert not fmp_entitlements.is_entitled("batch-quote")            # a price read is never one of them

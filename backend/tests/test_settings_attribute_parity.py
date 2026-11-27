@@ -188,3 +188,84 @@ def test_every_iap_setting_is_read_under_app():
         "the scan no longer sees settings it knows are read"
     unread = [n for n in iap if n not in read]
     assert unread == [], f"IAP_ settings that nothing under app/ reads: {unread}"
+
+
+# ── Per-post marketing ART (owner decisions 2026-11-15: "Google draws, Claude checks") ─────────────
+# Six web settings, every one fail-closed. The bounds are pinned from `FieldInfo.metadata` (pydantic v2
+# keeps ge/le there as annotated_types.Ge/Le — a FieldInfo has no `.le` attribute), so a loosened bound
+# is a red test, and an out-of-range value fails the deploy with the field named.
+
+
+def _bound(name: str, kind: str):
+    from app.config import Settings
+
+    return next(getattr(m, kind) for m in Settings.model_fields[name].metadata
+                if getattr(m, kind, None) is not None)
+
+
+def test_the_art_settings_default_to_off_and_to_the_owners_numbers():
+    from app.config import Settings
+
+    fields = Settings.model_fields
+    assert fields["MARKETING_ART_ENABLED"].default is False, "fail-closed: no art until the owner turns it on"
+    assert fields["MARKETING_ART_MONTHLY_BUDGET_USD"].default == 30.0
+    assert fields["MARKETING_ART_BUDGET_SECONDS"].default == 180
+    assert fields["MARKETING_ART_CLAUDE_MODEL"].default == "claude-opus-5-5"
+    assert fields["MARKETING_ART_IMAGE_MODEL"].default == "gemini-3-pro-image"
+    assert fields["MARKETING_ART_IMAGE_MICROS"].default == 134_000
+
+
+def test_the_art_settings_bounds_are_pinned():
+    assert (_bound("MARKETING_ART_MONTHLY_BUDGET_USD", "ge"), _bound("MARKETING_ART_MONTHLY_BUDGET_USD", "le")) \
+        == (0, 500)
+    # le 240: the template build + the art + two kick waits stay under the worker's script poll, and the
+    # voice stage inside its start margin (the timing pins in the marketing suites read this bound)
+    assert (_bound("MARKETING_ART_BUDGET_SECONDS", "ge"), _bound("MARKETING_ART_BUDGET_SECONDS", "le")) == (60, 240)
+    assert (_bound("MARKETING_ART_IMAGE_MICROS", "ge"), _bound("MARKETING_ART_IMAGE_MICROS", "le")) \
+        == (1_000, 1_000_000)
+    assert _bound("MARKETING_ART_MONTHLY_BUDGET_USD", "allow_inf_nan") is False
+
+
+@pytest.mark.parametrize("name,value", [
+    ("MARKETING_ART_MONTHLY_BUDGET_USD", "-1"), ("MARKETING_ART_MONTHLY_BUDGET_USD", "500.01"),
+    ("MARKETING_ART_MONTHLY_BUDGET_USD", "nan"), ("MARKETING_ART_MONTHLY_BUDGET_USD", "inf"),
+    ("MARKETING_ART_BUDGET_SECONDS", "59"), ("MARKETING_ART_BUDGET_SECONDS", "241"),
+    ("MARKETING_ART_BUDGET_SECONDS", "90.5"),
+    ("MARKETING_ART_IMAGE_MICROS", "999"), ("MARKETING_ART_IMAGE_MICROS", "1000001"),
+    ("MARKETING_ART_ENABLED", "maybe"),
+])
+def test_an_out_of_range_art_setting_fails_the_deploy(monkeypatch, name, value):
+    from pydantic import ValidationError
+
+    from app.config import Settings
+
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError) as info:
+        Settings()
+    assert name in str(info.value)
+
+
+@pytest.mark.parametrize("name,value,expected", [
+    ("MARKETING_ART_MONTHLY_BUDGET_USD", "0", 0.0), ("MARKETING_ART_MONTHLY_BUDGET_USD", "500", 500.0),
+    ("MARKETING_ART_BUDGET_SECONDS", "60", 60), ("MARKETING_ART_BUDGET_SECONDS", "240", 240),
+    ("MARKETING_ART_IMAGE_MICROS", "1000", 1_000), ("MARKETING_ART_ENABLED", "true", True),
+])
+def test_the_art_settings_accept_their_edges(monkeypatch, name, value, expected):
+    from app.config import Settings
+
+    monkeypatch.setenv(name, value)
+    assert getattr(Settings(), name) == expected
+
+
+def test_the_art_models_defaults_are_a_priced_claude_model_and_a_stable_image_model():
+    """The cap must be able to price the default brief/check model (digest_service's Claude table), and
+    the default drawing model is never a moving -preview / -latest id (marketing.md §7a)."""
+    from app.config import Settings
+    from app.services.marketing import digest_service
+
+    claude = Settings.model_fields["MARKETING_ART_CLAUDE_MODEL"].default
+    image = Settings.model_fields["MARKETING_ART_IMAGE_MODEL"].default
+    assert digest_service.claude_rates(claude) is not None, claude
+    assert claude.startswith("claude-") and not image.startswith("claude-")
+    for model in (claude, image):
+        assert not model.endswith(("-preview", "-latest")) and model == model.strip()

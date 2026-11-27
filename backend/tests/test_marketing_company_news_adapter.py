@@ -115,6 +115,7 @@ Pinned here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import json
 import logging
@@ -156,13 +157,22 @@ def filer(cik: str) -> str:
     return R.THIRTEEN_F_SUCCESSORS.get(cik, cik)
 
 
+#: news-v23: the REAL post bounds (2-4 earnings companies, 2-3 Congress companies), read at import — what every test
+#: starts and ends with, whatever `_per_company_bounds` (below) did.
+_REAL_BOUNDS = (R.EARNINGS_DAY_COMPANIES, R.CONGRESS_MONTH_COMPANIES)
+
+
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     A.clear_memo()
     A._registry_order.cache_clear()
     monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", False)
+    assert (R.EARNINGS_DAY_COMPANIES, R.CONGRESS_MONTH_COMPANIES) == _REAL_BOUNDS, "a test leaked the post bounds"
     yield
     A.clear_memo()
+    leaked = (R.EARNINGS_DAY_COMPANIES, R.CONGRESS_MONTH_COMPANIES) != _REAL_BOUNDS
+    R.EARNINGS_DAY_COMPANIES, R.CONGRESS_MONTH_COMPANIES = _REAL_BOUNDS
+    assert not leaked, "this test left the post bounds changed"
 
 
 #: The REAL members-elect window (owner decision 4), kept before the autouse fixture below replaces it.
@@ -176,6 +186,29 @@ def _names_outside_the_members_elect_window(monkeypatch):
     (render, corroborate, the Congress drop) — what any day outside the window builds — so the window is
     switched off; the members-elect tests restore the real one (`REAL_MEMBERS_ELECT_WINDOW`)."""
     monkeypatch.setattr(R, "members_elect_window", lambda day: False)
+
+
+#: Owner decisions 2026-11-20 ("3 - 5 companies at once"): the REAL Form 4 minimum (three companies a post), read at
+#: import — what `real_min_rows` restores.
+REAL_INSIDER_MIN_ROWS = R.INSIDER_MIN_ROWS
+
+
+@pytest.fixture(autouse=True)
+def _form4_row_gates_count_from_one_company(monkeypatch):
+    """The Form 4 tests here pin which ROWS survive each gate (amendments, titles, roles, the Congress drop, the
+    issuer read) on a week of one or two companies — written before the owner's minimum of three companies a post
+    (2026-11-20). Like the earnings / Congress per-company tests (`_per_company_bounds`), they run with the minimum
+    lowered to ONE (`R.INSIDER_MIN_ROWS`: the adapter and the records read it at call time). The minimum itself — a
+    week or a spotlight window of one or two companies is NO post, with its own skip reason — is pinned with the real
+    constant by the tests that request `real_min_rows` (test_min3_*)."""
+    monkeypatch.setattr(R, "INSIDER_MIN_ROWS", 1)
+
+
+@pytest.fixture
+def real_min_rows(monkeypatch):
+    """The real Form 4 minimum (three companies), for the tests that pin it."""
+    monkeypatch.setattr(R, "INSIDER_MIN_ROWS", REAL_INSIDER_MIN_ROWS)
+    assert R.INSIDER_MIN_ROWS == 3
 
 
 async def _settle_leads() -> None:
@@ -232,8 +265,20 @@ class FakeFMP:
                  extracts: Optional[Dict[Any, Any]] = None, income: Optional[Dict[str, Any]] = None,
                  insider_delay: float = 0.0, isin_error: bool = False, on_insider=None,
                  symbol_feed: Optional[Dict[str, Any]] = None,
-                 issuer_feed: Optional[Dict[str, Any]] = None) -> None:
+                 issuer_feed: Optional[Dict[str, Any]] = None, delisted: Any = None,
+                 market_caps: Any = None) -> None:
         self.insider = [] if insider is None else insider
+        # news-v23 phase 3 (the weekly theme post's "biggest" angle): FMP's market-capitalization batch — the rows
+        # (`{symbol, date, marketCap}` and any canary key) answered for the symbols asked, an exception raised, or
+        # None: no rows at all (every member without a value — the angle falls through)
+        self.market_caps = market_caps
+        self.market_cap_requests: List[List[str]] = []
+        # news-v23 (the 13F BUY-OUT CHECK): FMP's delisted-companies list, newest first — `delisted` is the list of
+        # pages (each a list of rows, or an exception raised for that page); by default one page whose only row is
+        # long before any quarter in these tests (nothing delisted, the span covered)
+        self.delisted = ([[{"symbol": "ZZOLD", "companyName": "Old Co", "exchange": "NYSE", "ipoDate": "1990-01-02",
+                            "delistedDate": "2001-01-02"}]] if delisted is None else delisted)
+        self.delisted_pages: List[int] = []
         # The per-ISSUER feed of the Form 4/A check (review round 9: ``companyCik``), as FMP
         # answers it: every row whose issuer CIK is the one asked for. ``issuer_feed`` maps a
         # normalised CIK to its whole answer (a list or an exception). Otherwise the answer is
@@ -314,6 +359,21 @@ class FakeFMP:
         if isinstance(self.profiles, BaseException):
             raise self.profiles
         return [json.loads(json.dumps(self.profiles[s])) for s in symbols if s in self.profiles]
+
+    async def get_market_cap_batch(self, symbols):
+        self.calls["market_caps"] += 1
+        self.market_cap_requests.append(list(symbols))
+        if isinstance(self.market_caps, BaseException):
+            raise self.market_caps
+        # every configured row, as FMP would answer — rows for symbols not asked included (the adapter ignores them)
+        return json.loads(json.dumps(self.market_caps or []))
+
+    async def get_delisted_companies(self, page=0, limit=100):
+        self.calls["delisted"] += 1
+        self.delisted_pages.append(page)
+        if page >= len(self.delisted):
+            return []
+        return self._answer(self.delisted[page])
 
     async def get_institutional_filing_dates(self, cik, *, strict=False):
         self.calls["dates"] += 1
@@ -508,10 +568,12 @@ def issuer_reads(fmp: FakeFMP) -> List[str]:
     return sorted(out)
 
 
-async def run(series, fmp=None, *, exclude=(), limit=5, left=60.0, run_date=RUN, **deps):
+async def run(series, fmp=None, *, exclude=(), limit=5, left=60.0, run_date=RUN, theme_history=(), theme_angles=None,
+              theme_classes=None, **deps):
     deps.setdefault("actions", SplitActions())      # hermetic: the production seam reads FMP and Supabase
     return await A.candidates(series, run_date=run_date, exclude=frozenset(exclude), limit=limit,
-                              deadline=time.monotonic() + left, deps=A.NewsDeps(fmp=fmp, **deps))
+                              deadline=time.monotonic() + left, deps=A.NewsDeps(fmp=fmp, **deps),
+                              theme_history=theme_history, theme_angles=theme_angles, theme_classes=theme_classes)
 
 
 def week_rows() -> List[Dict[str, Any]]:
@@ -618,15 +680,20 @@ async def test_an_unknown_ownership_or_a_missing_trade_date_is_never_guessed():
 
 
 @pytest.mark.asyncio
-async def test_at_most_five_rows_largest_first():
-    syms = ["AA", "BB", "CC", "DD", "EE", "FF", "GG"]
+async def test_at_most_five_rows_the_five_largest_of_a_busy_week():
+    """Owner decisions 2026-11-20 — the option he picked: "3 to 5 :: At least 3 companies, at most 5 (the 5 largest
+    purchases when more qualify)". Ten qualifying CEOs → ONE record of the five largest totals, largest first (the
+    build had kept eight; the final review of 2026-11-26 holds it to the owner's five, so the post's count, picture,
+    cover and captions all cover the same five). Mutation-checked by hand: `INSIDER_MAX_ROWS = 8` kept eight."""
+    syms = ["AA", "BB", "CC", "DD", "EE", "FF", "GG", "HH", "II", "JJ"]
     # One CEO per company (review round 10: one person on two issuers is ONE row — `same_person`).
     rows = [irow(sym=s, name=f"QX{s} RYAN", cik=f"000000{i:04d}", shares=10_000 * (i + 1), price=25.0)
             for i, s in enumerate(syms)]
     profiles = {s: prof(s, f"{s.title()} Industries Inc.") for s in syms}
     got = await run("ceo_buys", FakeFMP(insider=rows, profiles=profiles))
     rows_out = got.records[0].rows
-    assert [r.company.symbol for r in rows_out] == ["GG", "FF", "EE", "DD", "CC"]
+    assert [r.company.symbol for r in rows_out] == ["JJ", "II", "HH", "GG", "FF"]
+    assert R.INSIDER_MAX_ROWS == R.INSIDER_PICTURE_ROWS == 5
     assert all(r.person_name is None for r in rows_out)       # no profile CEO corroborates
 
 
@@ -947,8 +1014,10 @@ async def test_an_unexpected_error_is_internal_error_with_a_stack(monkeypatch, c
 
 
 def test_the_collectors_are_exactly_the_shipped_series():
+    """Every shipped series has a collector and no collector runs ahead of its series (news-v22, 2026-11-15: the
+    spotlight pair shipped with its templates — the strict pin of before is back)."""
     assert set(A.COLLECTORS) == set(selection.SHIPPED_SERIES)
-    assert set(A.COLLECTORS) <= set(R.NEWS_SERIES)
+    assert set(selection.SPOTLIGHT_SERIES) <= set(selection.SHIPPED_SERIES)
 
 
 def test_candidates_and_the_exception_enforce_their_contract():
@@ -1386,9 +1455,13 @@ def profit(**over):
 
 
 class FakeService:
-    def __init__(self, by_symbol, *, default=None, error=None):
+    def __init__(self, by_symbol, *, default=None, error=None, years=None):
         self.by_symbol, self.default, self.error = by_symbol, default, error
         self.calls: List[str] = []
+        # phase 4 (2026-11-20): `get_segment_years` — {symbol: tuple of years (newest first) or an exception}; a symbol
+        # not listed answers () (no older year)
+        self.years: Dict[str, Any] = {} if years is None else years
+        self.year_calls: List[str] = []
 
     async def _get(self, sym):
         self.calls.append(sym)
@@ -1401,6 +1474,13 @@ class FakeService:
 
     async def get_revenue_breakdown(self, sym):
         return await self._get(sym)
+
+    async def get_segment_years(self, sym):
+        self.year_calls.append(sym)
+        value = self.years.get(sym, ())
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
     async def get_profit_power(self, sym):
         return await self._get(sym)
@@ -1635,8 +1715,9 @@ async def test_a_posted_fiscal_year_is_skipped_before_any_profile_call(seed_aapl
 
 @pytest.mark.asyncio
 async def test_money_map_pool_order_and_attempt_cap(seed_aapl, monkeypatch):
-    """Owner decision 2: the seed first, then club members (cards and also-in-club), then the
-    Emerging Frontiers members minus blocked — and never-posted symbols before posted ones."""
+    """Owner decision 2: the seed first, then club members (cards and also-in-club) — and never-posted symbols before
+    posted ones. news-v23 (owner 2026-11-19, "make sure to use big or popular companies only"): the Emerging Frontiers
+    theme members are NOT in the pool — the themes table is never even read."""
     monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
     world = money_world()
     world["club"] = FakeClub(group=SimpleNamespace(
@@ -1649,8 +1730,33 @@ async def test_money_map_pool_order_and_attempt_cap(seed_aapl, monkeypatch):
                              "sort_order": 1, "is_active": True}],
     })
     got = await run_mm(world.pop("fmp"), exclude={"news:money_map:AAPL:2024"}, **world)
-    assert world["revenue"].calls == ["AVGO", "TSM", "IONQ"]      # AAPL (posted before) goes last
-    assert got.rejections == {"money_map_degraded": 3}
+    assert world["revenue"].calls == ["AVGO", "TSM", "AAPL"]      # AAPL (posted before) goes last; no theme member
+    assert got.rejections == {"money_map_degraded": 2}
+    assert "trending_themes" not in {t for t, _cols in world["sb"].selects}
+
+
+@pytest.mark.asyncio
+async def test_news_v23_the_money_map_pool_is_the_seed_and_the_club_only(seed_aapl, monkeypatch):
+    """Owner 2026-11-19 ("make sure to use big or popular companies only"): a company that is ONLY an Emerging Frontiers
+    theme member is never a Money Map candidate — whatever the themes table holds, and however many seeds and club
+    members are already posted (the walk then ends with nothing, never reaching a theme member). Mutation-checked by
+    hand (2026-11-20): the theme source put back into `merge_money_map_pool`'s call, IONQ was read (red)."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    world = money_world()
+    world["club"] = FakeClub(group=SimpleNamespace(
+        companies=[SimpleNamespace(slug="broadcom", detail_symbol="AVGO", card_kind="no_thirteen_f")],
+        also_in_club=[]))
+    world["sb"] = FakeSB({
+        "trillion_club_companies": [],
+        "trending_themes": [{"slug": "quantum", "tickers": ["IONQ", "QBTS"], "blocked_tickers": [],
+                             "sort_order": 1, "is_active": True}],
+    })
+    posted = {f"news:money_map:{sym}:2025" for sym in (*R.MONEY_MAP_SEED, "AVGO")}
+    got = await run_mm(world.pop("fmp"), exclude=posted, **world)
+    assert not {"IONQ", "QBTS"} & set(world["revenue"].calls)
+    assert got.records == ()
+    assert set(R.merge_money_map_pool(["AVGO"])) == set(R.MONEY_MAP_SEED) | {"AVGO"}
+    assert not hasattr(A, "_theme_symbols")
 
 
 @pytest.mark.asyncio
@@ -1662,7 +1768,8 @@ async def test_a_failed_pool_source_degrades_to_the_seed(seed_aapl, monkeypatch,
     caplog.set_level(logging.WARNING, logger=A.__name__)
     got = await run_mm(world.pop("fmp"), **world)
     assert len(got.records) == 1
-    assert "club members unavailable" in caplog.text and "theme members unavailable" in caplog.text
+    assert "club members unavailable" in caplog.text
+    assert "theme members unavailable" not in caplog.text            # news-v23: the themes are no Money Map source
 
 
 # ── fetch_logo ────────────────────────────────────────────────────────────────
@@ -2257,7 +2364,7 @@ async def test_an_empty_or_failed_amendment_read_is_never_memoized():
 
 @pytest.mark.asyncio
 async def test_the_amendment_check_reads_at_most_the_bound_and_fills_from_spares():
-    syms = [f"S{c}" for c in "ABCDEFGHIJ"]               # ten symbols, largest first
+    syms = [f"S{c}" for c in "ABCDEFGHIJKLMN"]           # fourteen symbols, largest first
     # One CEO per company (review round 10: one person on two issuers is ONE row — `same_person`).
     rows = [irow(sym=s, name=f"QX{s} RYAN", cik=f"000000{i:04d}", shares=100_000 - 1_000 * i)
             for i, s in enumerate(syms)]
@@ -2267,8 +2374,9 @@ async def test_the_amendment_check_reads_at_most_the_bound_and_fills_from_spares
     feed = {s: [r for r in rows + bad if r["symbol"] == s] for s in syms}
     fmp = FakeFMP(insider=rows, profiles=profiles, symbol_feed=feed)
     got = await run("ceo_buys", fmp)
-    # Wave 1: SA..SE (four amended, SE kept); wave 2: three spares (SF, SG, SH) — the bound.
-    assert len(fmp.issuer_calls) == A.INSIDER_AMENDMENT_MAX_SYMBOLS == 8
+    # Wave 1: SA..SE (four amended, SE kept); wave 2: three spares (SF, SG, SH) — the bound (five rows a record since
+    # the final review of 2026-11-26, so the bound is 5 + 3, as on main).
+    assert len(fmp.issuer_calls) == A.INSIDER_AMENDMENT_MAX_SYMBOLS == R.INSIDER_MAX_ROWS + 3 == 8
     assert [r.company.symbol for r in got.records[0].rows] == ["SE", "SF", "SG", "SH"]
     assert got.rejections == {"amended_filing": 4}
 
@@ -2887,6 +2995,21 @@ _ROUND_6_ANSWERS: Dict[str, str] = {
 }
 
 
+#: `InsiderPurchase` fields added AFTER round 6 — additive and defaulted (2026-11-15: the filing's own cost per
+#: share, owner decision "Captions + picture"). Round 6 never had them, so its byte-for-byte answer is compared
+#: without them (each must be present, never silently absent); their values are pinned by their own tests.
+_POST_ROUND_6_ROW_FIELDS = ("cost_per_share_min_usd", "cost_per_share_max_usd")
+
+
+def _round_6_shape(record: Dict[str, Any]) -> Dict[str, Any]:
+    out = json.loads(json.dumps(record))
+    for row in out["rows"]:
+        for name in _POST_ROUND_6_ROW_FIELDS:
+            assert name in row, name
+            del row[name]
+    return out
+
+
 @pytest.mark.parametrize("week", ["ceo_week", "ceo_unit_offering", "insider_week"])
 @pytest.mark.asyncio
 async def test_a_week_with_no_amendment_is_byte_identical_to_round_6(week):
@@ -2895,7 +3018,7 @@ async def test_a_week_with_no_amendment_is_byte_identical_to_round_6(week):
     got = await run(series, fmp)
     # Round 6 named its per-ticker reads by symbol; since round 9 the same companies are read
     # per ISSUER (by CIK) — named here by their symbols, so the pinned answer stays byte for byte.
-    answer = {"records": [R.record_to_dict(r) for r in got.records], "skip": got.skip_reason,
+    answer = {"records": [_round_6_shape(R.record_to_dict(r)) for r in got.records], "skip": got.skip_reason,
               "rejections": dict(got.rejections), "profiles": fmp.profile_requests,
               "symbol_calls": issuer_reads(fmp)}
     assert json.dumps(answer, sort_keys=True) == _ROUND_6_ANSWERS[week]
@@ -4807,8 +4930,10 @@ async def test_a_registry_exit_carries_its_previous_value():
 
 
 @pytest.mark.asyncio
-async def test_large_decreases_reach_a_record_full_of_new_holdings(monkeypatch):
-    """The ARK shape: many material new holdings and large decreases — each kind keeps its largest."""
+async def test_a_record_full_of_new_holdings_keeps_the_largest_changes_by_size(monkeypatch):
+    """The ARK shape: many material new holdings and smaller decreases — review 2026-11-20: the record holds the
+    filing's LARGEST changes by dollar size, whatever their kinds (the one ranked list), never each kind's largest
+    reserved (that drew a decrease smaller than every new holding left out)."""
     monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
     news = [f"N{c}" for c in "ABCDEFGHIJ"]
     changes = [dict(symbol=s, name=s, change="newly_reported", shares=1e6, value=100e6 + 1e6 * i)
@@ -4820,10 +4945,8 @@ async def test_large_decreases_reach_a_record_full_of_new_holdings(monkeypatch):
     club, sb, fmp = _club_filer(total=15e9, changes=changes, counts=counts, previous=[], profiles=profiles)
     got = await run("thirteen_f", fmp, club=club, sb=sb)
     (rec,) = got.records
-    # 8 slots, two kinds: each kind's top 3 reserved (new $109M/$108M/$107M; shares sold worth
-    # $100M/$80M/$60M), then two more by size: new $106M and $105M beat the fourth decrease's $40M.
-    assert _moves(rec) == [(s, "newly_reported") for s in ("NJ", "NI", "NH", "NG", "NF")] + [
-        ("DA", "decreased"), ("DB", "decreased"), ("DC", "decreased")]
+    # 8 slots by size: the new holdings of $109M … $102M; the largest decrease's shares were worth $100M (fewer)
+    assert _moves(rec) == [(s, "newly_reported") for s in ("NJ", "NI", "NH", "NG", "NF", "NE", "ND", "NC")]
 
 
 def _mv(sym, move, size):
@@ -4832,35 +4955,38 @@ def _mv(sym, move, size):
     return m
 
 
+def _claims_filing():
+    """Review 2026-11-20's example: decreases of $5B / $4B / $3B / $2B / $1B, increases of $100M / $90M, new holdings of
+    $80M / $70M, exits of $60M / $50M."""
+    return ([_mv(f"D{i}", "decreased", v) for i, v in enumerate((5e9, 4e9, 3e9, 2e9, 1e9), 1)]
+            + [_mv(f"I{i}", "increased", v) for i, v in enumerate((100e6, 90e6), 1)]
+            + [_mv(f"N{i}", "newly_reported", v) for i, v in enumerate((80e6, 70e6), 1)]
+            + [_mv(f"G{i}", "no_longer_reported", v) for i, v in enumerate((60e6, 50e6), 1)])
+
+
 @pytest.mark.parametrize("limit, picked", [
-    # 4 kinds × 4 moves; every kind's largest first, then every kind's second, …, then by size.
-    (4, ["N1", "X1", "I1", "D1"]),
-    (8, ["N1", "X1", "I1", "D1", "N2", "X2", "I2", "D2"]),
-    (10, ["N1", "X1", "I1", "D1", "N2", "X2", "I2", "D2", "N3", "X3"]),
-    (13, ["N1", "X1", "I1", "D1", "N2", "X2", "I2", "D2", "N3", "X3", "I3", "D3", "N4"]),
-    (2, ["N1", "X1"]),                                  # fewer slots than kinds: the largest tops
+    (A.THIRTEEN_F_MAX_PROFILED, ["D1", "D2", "D3", "D4", "D5", "I1", "I2", "N1", "N2", "G1"]),
+    (R.THIRTEEN_F_MAX_MOVES, ["D1", "D2", "D3", "D4", "D5", "I1", "I2", "N1"]),
+    (2, ["D1", "D2"]),
     (0, []),
 ])
-def test_select_moves_reserves_each_kinds_largest_then_fills_by_size(limit, picked):
-    sizes = {"newly_reported": 100.0, "no_longer_reported": 90.0, "increased": 80.0, "decreased": 70.0}
-    tag = {"newly_reported": "N", "no_longer_reported": "X", "increased": "I", "decreased": "D"}
-    moves = [_mv(f"{tag[k]}{i}", k, base - i) for k, base in sizes.items() for i in range(1, 5)]
-    got = A._select_moves(moves, limit)
+def test_the_13f_cut_is_by_dollar_size_alone_in_both_lanes(limit, picked):
+    """Review 2026-11-20 (confirmed): the roundup draws the ONE ranked list (largest dollar change first), so both its
+    cuts are by size alone — with each kind's top two reserved (the old `_select_moves`), this filing kept D1, D2, I1,
+    I2, N1, N2, G1, G2: the $3B, $2B and $1B decreases in no picture and no caption, a $70M new holding drawn as row
+    6. Returned in the record's order (`_move_order`). Mutation-checked by hand: restoring a per-kind reserve turns the
+    eight-slot row red."""
+    got = A._cut(_claims_filing(), limit)
     assert sorted(m["symbol"] for m in got) == sorted(picked)
-    sizes_out = [A._move_size(m) for m in got]
-    assert sizes_out == sorted(sizes_out, reverse=True)                 # returned largest first
+    assert got == sorted(got, key=A._move_order)
+    assert not hasattr(A, "_select_moves") and not hasattr(A, "THIRTEEN_F_KIND_RESERVE")
 
 
-def test_select_moves_fills_by_size_once_each_kind_is_reserved():
-    big_increase = _mv("INC", "increased", 2e9)
-    news = [_mv(f"N{i}", "newly_reported", 60e6 - i) for i in range(9)]
-    exit_ = _mv("EXIT", "no_longer_reported", 3e9)
-    got = [m["symbol"] for m in A._select_moves(news + [big_increase, exit_], 8)]
-    assert got == ["EXIT", "INC", "N0", "N1", "N2", "N3", "N4", "N5"]
-    assert A._select_moves([], 8) == []
-    # Ties are deterministic: kind order, then symbol.
+def test_the_13f_cut_breaks_ties_deterministically():
     tie = [_mv("B", "increased", 5.0), _mv("A", "decreased", 5.0), _mv("C", "newly_reported", 5.0)]
-    assert [m["symbol"] for m in A._select_moves(tie, 3)] == ["C", "B", "A"]
+    assert sorted(m["symbol"] for m in A._cut(tie, 3)) == ["A", "B", "C"]
+    assert [m["symbol"] for m in A._cut(tie, 1)] == [m["symbol"] for m in A._cut(list(reversed(tie)), 1)]
+    assert A._cut([], 8) == []
 
 
 @pytest.mark.asyncio
@@ -5045,8 +5171,56 @@ def congress_fmp(senate=None, house=None, **kw):
                      profiles=kw.pop("profiles", congress_profiles()), **kw)
 
 
+class _Rows:
+    """news-v23 (the restyle, owner 2026-11-19): a Congress Count and an earnings post are ONE record of several
+    companies (`R.CongressMonth` / `R.EarningsDay`). The per-company gate tests below read the answer ROW by row —
+    `.records` are the one record's counts / reports (empty without one), `.record` the record itself, every other
+    attribute the answer's — under `_per_company_bounds` (a post of ONE company, up to the call's `limit`), so a gate
+    is tested on its company alone; the real bounds (2-3, 2-4) and the bundling are pinned by their own tests
+    (`test_news_v23_*`)."""
+
+    def __init__(self, answer: Any) -> None:
+        self.answer = answer
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.answer, name)
+
+    @property
+    def record(self) -> Any:
+        return self.answer.records[0] if self.answer.records else None
+
+    @property
+    def records(self) -> tuple:
+        rec = self.record
+        if isinstance(rec, R.EarningsDay):
+            return rec.reports
+        if isinstance(rec, R.CongressMonth):
+            return rec.counts
+        return self.answer.records
+
+
+_BOUNDS_DEPTH = [0]
+
+
+@contextlib.contextmanager
+def _per_company_bounds(limit: int):
+    """A post of ONE company up to `limit` (the per-company tests' view), set by the OUTERMOST entry and restored to
+    `_REAL_BOUNDS` by the last exit — two concurrent calls (`asyncio.gather(crun(…), crun(…))`) interleave their
+    entries and exits, and a save-and-restore per entry leaked the test bounds into every later test."""
+    if _BOUNDS_DEPTH[0] == 0:
+        R.EARNINGS_DAY_COMPANIES = R.CONGRESS_MONTH_COMPANIES = (1, limit)
+    _BOUNDS_DEPTH[0] += 1
+    try:
+        yield
+    finally:
+        _BOUNDS_DEPTH[0] -= 1
+        if _BOUNDS_DEPTH[0] == 0:
+            R.EARNINGS_DAY_COMPANIES, R.CONGRESS_MONTH_COMPANIES = _REAL_BOUNDS
+
+
 async def crun(fmp, **kw):
-    return await run("congress_count", fmp, run_date=kw.pop("run_date", CONGRESS_RUN), **kw)
+    with _per_company_bounds(kw.get("limit", 5)):
+        return _Rows(await run("congress_count", fmp, run_date=kw.pop("run_date", CONGRESS_RUN), **kw))
 
 
 def _no_identity(text: str) -> None:
@@ -5066,7 +5240,8 @@ async def test_congress_counts_distinct_purchasers_across_both_chambers(caplog):
         ("AAPL", "Apple", 3), ("MSFT", "Microsoft", 2)]
     rec = got.records[0]
     assert isinstance(rec, R.CongressCount) and rec.month == "2026-11" and rec.fetched_on == CONGRESS_RUN
-    assert R.ledger_key(rec) == CONGRESS_KEY
+    assert isinstance(got.record, R.CongressMonth) and got.record.month == "2026-11"
+    assert R.ledger_key(got.record) == CONGRESS_KEY                     # news-v23: the month's ONE key, as before
     # An exchange and a stock option are counted as refused rows; a sale and the rows of other
     # months are not purchases of the month at all.
     assert got.rejections == {"exchange_type": 1, "option_asset": 1}
@@ -5074,8 +5249,7 @@ async def test_congress_counts_distinct_purchasers_across_both_chambers(caplog):
     assert fmp.congress_calls == [("senate", 2000), ("house", 2000), ("senate", 2000), ("house", 2000)]
     assert fmp.profile_requests == [["AAPL", "MSFT"]]                      # NVDA (1 member) never profiled
     # No identity anywhere: the fact sheet, the log, the memo.
-    for r in got.records:
-        _no_identity(json.dumps(R.fact_sheet(r, rejections=got.rejections, selection={})))
+    _no_identity(json.dumps(R.fact_sheet(got.record, rejections=got.rejections, selection={})))
     _no_identity(caplog.text)
     _no_identity(json.dumps([v for _exp, v in A._MEMO.values()], default=repr))
 
@@ -5418,14 +5592,26 @@ def test_the_recorded_feeds_are_ordered_and_scrub_to_nothing_identifying():
 
 
 # ── company_stakes ────────────────────────────────────────────────────────────
+#
+# news-v23 (the restyle, owner 2026-11-19: "filter for companies that public only. no private" + "add 1-3 more companies
+# for the NVIDIA (or the other trillion companies)"): ONE `R.CompanyStakes` per investor — its stakes in PUBLIC companies
+# (a kind that can be public, a listed U.S. symbol, a profile the common-stock gate accepts naming that company, and
+# ``isActivelyTrading`` exactly True), the investor with the most not-yet-posted public stakes first. A test stake row is
+# public by default (`stake`): its symbol is derived from its name (`_sym_of`) and `stakes_world` profiles it.
 
 STAKES_RUN = date(2026, 12, 29)          # the first stakes Tuesday (13F season ends 12-27)
 
 
+def _sym_of(name: str) -> str:
+    """A test investee's listed symbol: four letters derived from its name (stable, distinct per name)."""
+    digest = uuid.uuid5(uuid.NAMESPACE_URL, f"stake-symbol/{name}").bytes
+    return "".join(chr(65 + b % 26) for b in digest[:4]).replace("W", "X").replace("Q", "P")
+
+
 def stake(slug, name, **over):
     row = {"id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"{slug}/{name}/{over.get('as_of', '')}")),
-           "created_at": "2026-09-24T12:00:00+00:00", "company_slug": slug, "kind": "private",
-           "investee_name": name, "investee_cusip": None, "investee_us_symbol": None, "local_listing": None,
+           "created_at": "2026-09-24T12:00:00+00:00", "company_slug": slug, "kind": "us_listed_off_13f",
+           "investee_name": name, "investee_cusip": None, "investee_us_symbol": _sym_of(name), "local_listing": None,
            "ownership_pct": None, "ownership_basis": None, "disclosed_value_usd": 1e9, "value_basis": "invested",
            "as_of": "2026-06-30", "source_title": "NVIDIA 10-Q (quarter ended Jul 26, 2026)",
            "source_url": "https://www.sec.gov/Archives/edgar/ZQXSOURCEURL.htm", "source_confidence": "primary",
@@ -5437,19 +5623,30 @@ def stake(slug, name, **over):
     return row
 
 
+def private_stake(slug, name, **over):
+    """A stake in a company with no listing (the catalogue's Nscale, OpenAI …): never a post since news-v23."""
+    return stake(slug, name, **{"kind": "private", "investee_us_symbol": None, **over})
+
+
 def stakes_rows():
     return [
         stake("nvidia", "Intel", investee_us_symbol="INTC", kind="on_13f_note", disclosed_value_usd=5e9,
               as_of="2025-12-26"),
-        stake("nvidia", "Nscale", disclosed_value_usd=777399382.46, as_of="2026-03-27",
-              background="Nscale filed an S-1 in September 2026."),
-        stake("amazon", "OpenAI", disclosed_value_usd=50e9, as_of="2026-07-31",
+        stake("nvidia", "Synopsys", investee_us_symbol="SNPS", kind="on_13f_note", disclosed_value_usd=2e9,
+              as_of="2025-12-01", source_title="Synopsys 8-K (Dec 1, 2025)"),
+        stake("amazon", "Rivian Automotive", investee_us_symbol="RIVN", disclosed_value_usd=1e9, as_of="2026-04-23",
               source_title="Amazon 10-Q (quarter ended Jun 30, 2026)"),
-        stake("tsmc", "IMS Nanofabrication Global", value_basis="fair_value", disclosed_value_usd=432795000.0,
-              ownership_pct=10.0, as_of="2024-12-31", source_title="TSMC 2025 Annual Report",
-              local_listing="Austria"),
+        # private: never a post (news-v23)
+        private_stake("nvidia", "Nscale", disclosed_value_usd=777399382.46, as_of="2026-03-27",
+                      background="Nscale filed an S-1 in September 2026."),
+        private_stake("amazon", "OpenAI", disclosed_value_usd=50e9, as_of="2026-07-31",
+                      source_title="Amazon 10-Q (quarter ended Jun 30, 2026)"),
+        stake("tsmc", "IMS Nanofabrication Global", kind="non_us_listed", investee_us_symbol=None,
+              value_basis="fair_value", disclosed_value_usd=432795000.0, ownership_pct=10.0, as_of="2024-12-31",
+              source_title="TSMC 2025 Annual Report", local_listing="Austria"),
         # refused
-        stake("nvidia", "Private companies (not named)", value_basis="carrying_value", disclosed_value_usd=47.9e9),
+        private_stake("nvidia", "Private companies (not named)", value_basis="carrying_value",
+                      disclosed_value_usd=47.9e9),
         stake("nvidia", "Marvell Technology (convertible preferred)", investee_us_symbol="MRVL", as_of="2026-08-01"),
         stake("nvidia", "CoreWeave", investee_us_symbol="CRWV", disclosed_value_usd=None, value_basis=None,
               ownership_pct=10.66, as_of="2026-04-15"),
@@ -5460,12 +5657,17 @@ def stakes_rows():
     ]
 
 
+#: Symbols `stakes_world` never profiles (a listing FMP does not know).
+_NO_PROFILE = frozenset({"ZZZZ"})
+
+
 def stakes_world(rows=None, **sb_errors):
     companies = [SimpleNamespace(slug="nvidia", name="NVIDIA", card_kind="thirteen_f", detail_symbol="NVDA"),
                  SimpleNamespace(slug="amazon", name="Amazon", card_kind="thirteen_f", detail_symbol="AMZN"),
                  SimpleNamespace(slug="samsung", name="Samsung", card_kind="non_us", detail_symbol=None)]
     club = FakeClub(group=SimpleNamespace(companies=companies,
                                           also_in_club=[SimpleNamespace(slug="tsmc", name="TSMC")]))
+    rows = stakes_rows() if rows is None else rows
     sb = FakeSB({
         "trillion_club_companies": [
             {"slug": "nvidia", "ciks": ["0001045810"], "card_kind": "thirteen_f", "use_13f": True,
@@ -5475,22 +5677,43 @@ def stakes_world(rows=None, **sb_errors):
             {"slug": "samsung", "ciks": [], "card_kind": "non_us", "detail_symbol": None, "published": True},
             {"slug": "tsmc", "ciks": [], "card_kind": "non_us", "detail_symbol": "TSM", "published": True},
         ],
-        "trillion_club_stakes": stakes_rows() if rows is None else rows,
+        "trillion_club_stakes": rows,
     }, errors=sb_errors or None)
     profiles = {
         "NVDA": prof("NVDA", "NVIDIA Corporation", exchange="NASDAQ", price=91919.19),
         "AMZN": prof("AMZN", "Amazon.com, Inc.", exchange="NASDAQ"),
         "TSM": prof("TSM", "Taiwan Semiconductor Manufacturing Company Limited", isAdr=True, currency="USD"),
         "INTC": prof("INTC", "Intel Corporation", exchange="NASDAQ"),
+        "SNPS": prof("SNPS", "Synopsys, Inc.", exchange="NASDAQ"),
+        "RIVN": prof("RIVN", "Rivian Automotive, Inc.", exchange="NASDAQ"),
         "CRWV": prof("CRWV", "CoreWeave, Inc.", exchange="NASDAQ"),
         "GLW": prof("GLW", "Corning Incorporated"),
         "BABA": prof("BABA", "Alibaba Group Holding Limited", isAdr=True),
     }
+    # every other listed investee of the rows: a plain U.S. common-stock profile naming it, actively trading
+    for r in rows if isinstance(rows, list) else ():
+        sym = r.get("investee_us_symbol") if isinstance(r, dict) else None
+        if isinstance(sym, str) and R.canonical_symbol(sym) == sym and sym not in profiles and sym not in _NO_PROFILE:
+            profiles[sym] = prof(sym, str(r.get("investee_name")), exchange="NASDAQ")
     return club, sb, FakeFMP(profiles=profiles)
 
 
 async def srun(club, sb, fmp, **kw):
     return await run("company_stakes", fmp, club=club, sb=sb, run_date=kw.pop("run_date", STAKES_RUN), **kw)
+
+
+def _posts(got) -> List[List[str]]:
+    """Each record's stakes, by investee name, in draw order."""
+    return [[s.investee_name for s in rec.stakes] for rec in got.records]
+
+
+def _stake_names(got) -> List[str]:
+    """Every stake of every record, by investee name (records in order, rows in draw order)."""
+    return [n for post in _posts(got) for n in post]
+
+
+def _stake_rows(got) -> List[R.CompanyStake]:
+    return [s for rec in got.records for s in rec.stakes]
 
 
 @pytest.fixture
@@ -5499,30 +5722,91 @@ def club_on(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_stakes_are_named_figured_and_newest_first(club_on):
+async def test_stakes_are_public_named_figured_and_one_post_per_investor(club_on):
+    """news-v23 (owner 2026-11-19): every stake in a post is a PUBLIC company's — Nscale, OpenAI and IMS (private / not
+    U.S.-listed) are dropped `stake_not_public` before any profile, never named — and one post holds one investor's
+    stakes, the largest figure first, the investor with the most public stakes first."""
     club, sb, fmp = stakes_world()
     got = await srun(club, sb, fmp)
     assert got.skip_reason is None
-    assert [(r.investor.name, r.investee_name, r.value_usd, r.value_basis) for r in got.records] == [
-        ("Amazon", "OpenAI", 50e9, "invested"),
-        ("NVIDIA", "Nscale", 777399382.46, "invested"),
-        ("NVIDIA", "Intel", 5e9, "invested"),
-        ("TSMC", "IMS Nanofabrication Global", 432795000.0, "fair_value"),
+    assert [(rec.investor.name, [(s.investee_name, s.value_usd, s.value_basis) for s in rec.stakes])
+            for rec in got.records] == [
+        ("NVIDIA", [("Intel", 5e9, "invested"), ("Synopsys", 2e9, "invested")]),
+        ("Amazon", [("Rivian Automotive", 1e9, "invested")]),
     ]
-    openai, nscale, intel, ims = got.records
-    assert intel.investee == R.CompanyRef("INTC", "Intel") and intel.kind == "on_13f_note"
-    assert nscale.investee is None and openai.investee is None             # private: name only
-    assert nscale.background == "Nscale filed an S-1 in September 2026."
-    assert ims.ownership_pct == 10.0 and ims.local_listing == "Austria"
-    assert all(r.is_new is False for r in got.records)                     # catalogue stakes (decision 1)
-    assert R.ledger_key(intel) == f"news:company_stakes:{intel.stake_id}"
+    nvidia, amazon = got.records
+    assert [s.investee for s in nvidia.stakes] == [R.CompanyRef("INTC", "Intel"), R.CompanyRef("SNPS", "Synopsys")]
+    assert all(s.is_new is False for s in _stake_rows(got))                 # catalogue stakes (decision 1)
+    assert R.ledger_key(nvidia) == f"news:company_stakes:{nvidia.stakes[0].stake_id}+{nvidia.stakes[1].stake_id}"
+    assert R.ledger_key(amazon) == f"news:company_stakes:{amazon.stakes[0].stake_id}"
     assert got.rejections == {"stake_aggregate": 2, "stake_no_figure": 1, "investor_unlisted": 1,
-                              "stake_stale": 1, "stake_too_old": 1, "stake_invalid": 1}
-    # FMP-free for the data: one profile batch for the CompanyRefs, nothing else.
+                              "stake_stale": 1, "stake_too_old": 1, "stake_invalid": 1, "stake_not_public": 3}
+    # FMP-free for the data: one profile batch for the CompanyRefs, nothing else — and no private investee asked for
     assert fmp.calls == Counter({"profiles": 1})
     assert ("trillion_club_stakes", A._STAKE_COLUMNS) in sb.selects
     # migration 205: the stakes read (and nothing else) asks only for rows a person reviewed
     assert sb.ors == [("trillion_club_stakes", A._STAKE_POSTABLE_FILTER)]
+
+
+@pytest.mark.asyncio
+async def test_an_investor_whose_stakes_are_all_private_is_skipped(club_on, caplog):
+    """The owner's rule ("no private"), whole: an investor whose only figured stakes are private (Amazon's OpenAI and
+    Anthropic, NVIDIA's Nscale) gets no post — the series skips `stakes_none_public` and the chain falls through; no
+    profile is read, and no line names a private company."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    rows = [private_stake("amazon", "OpenAI", disclosed_value_usd=50e9, as_of="2026-07-31"),
+            private_stake("amazon", "Anthropic", disclosed_value_usd=18e9, as_of="2026-06-30"),
+            private_stake("nvidia", "Nscale", disclosed_value_usd=777e6, as_of="2026-03-27"),
+            stake("nvidia", "Mistral AI", kind="commitment", value_basis="committed_up_to", investee_us_symbol=None)]
+    club, sb, fmp = stakes_world(rows)
+    got = await srun(club, sb, fmp)
+    assert got.records == () and got.skip_reason == "stakes_none_public"
+    assert got.rejections == {"stake_not_public": 4} and fmp.calls == Counter()
+    assert not any(w in caplog.text for w in ("OpenAI", "Anthropic", "Nscale", "Mistral"))
+
+
+@pytest.mark.parametrize("over, rejection", [
+    ({"investee_us_symbol": "INTC"}, None),                                    # kept: a public company's
+    ({"investee_us_symbol": "INTC", "kind": "commitment", "value_basis": "committed_up_to"}, None),
+    ({"investee_us_symbol": "INTC", "investee_name": "Intellicheck"}, "stake_listing_unverified"),  # another company
+    ({"investee_us_symbol": "BABA", "investee_name": "Alibaba Group"}, "stake_listing_unverified"),  # an ADR
+    ({"investee_us_symbol": "NVDA", "investee_name": "NVIDIA"}, "stake_listing_unverified"),         # the investor
+    ({"investee_us_symbol": "ZZZZ"}, "stake_listing_unverified"),            # no profile: fail closed
+    ({"investee_us_symbol": "BAD!"}, "stake_not_public"),                    # no listed symbol
+    ({"investee_us_symbol": None}, "stake_not_public"),
+    ({"investee_us_symbol": "INTC", "kind": "private"}, "stake_not_public"),  # a kind that is never public
+    ({"investee_us_symbol": "INTC", "kind": "non_us_listed"}, "stake_not_public"),
+    ({"investee_us_symbol": "INTC", "_trading": False}, "stake_not_trading"),    # bought out / delisted
+    ({"investee_us_symbol": "INTC", "_trading": None}, "stake_not_trading"),     # absent: fail closed
+    ({"investee_us_symbol": "INTC", "_trading": "true"}, "stake_not_trading"),   # junk: fail closed
+], ids=["public", "commitment_to_public", "names_disagree", "adr", "the_investor", "no_profile", "bad_symbol",
+        "no_symbol", "kind_private", "kind_non_us", "not_trading", "trading_absent", "trading_junk"])
+@pytest.mark.asyncio
+async def test_a_stake_is_posted_only_when_its_company_is_public_and_actively_trading(club_on, caplog, over, rejection):
+    """PUBLIC ONLY, fail closed (owner 2026-11-19): a listed U.S. symbol, a kind that can be public, the common-stock
+    profile gate naming THIS company, and the profile's ``isActivelyTrading`` exactly True — the 13F buy-out check's
+    reading — else the stake is DROPPED with its reason (a WARNING for a company no longer trading), never shown by name
+    only. Mutation-checked by hand (2026-11-20): `_public_investee`'s trading check removed, the three not-trading rows
+    turned red — still dropped, but as `stake_listing_unverified` by the common-stock profile gate (a second layer:
+    fail closed twice), never named by the reason the owner reads."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    over = dict(over)
+    trading = over.pop("_trading", True)
+    row = stake("nvidia", "Intel", **{"as_of": "2026-06-30", **over})
+    club, sb, fmp = stakes_world([row])
+    if trading is not True:
+        fmp.profiles["INTC"] = {k: v for k, v in fmp.profiles["INTC"].items() if k != "isActivelyTrading"}
+        if trading is not None:
+            fmp.profiles["INTC"]["isActivelyTrading"] = trading
+    got = await srun(club, sb, fmp)
+    if rejection is None:
+        assert _stake_names(got) == ["Intel"] and got.rejections == {}
+        assert got.records[0].stakes[0].investee == R.CompanyRef("INTC", "Intel")
+        return
+    assert got.records == () and got.rejections == {rejection: 1} and got.skip_reason == "stakes_none_public"
+    if rejection == "stake_not_trading":
+        assert "dropped as stake_not_trading" in caplog.text and "public companies only" in caplog.text
+    assert "Intellicheck" not in caplog.text and "Alibaba" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -5532,33 +5816,137 @@ async def test_catalogue_stakes_switched_off_leave_only_new_rows(club_on, monkey
     got = await srun(club, sb, fmp)
     assert got.records == () and got.skip_reason == "stakes_none_new" and fmp.calls == Counter()
     rows = stakes_rows()
-    rows[1]["created_at"] = "2026-11-20T09:00:00+00:00"                    # Nscale: a NEW row
+    rows[0]["created_at"] = "2026-11-20T09:00:00+00:00"                    # Intel: a NEW row
     club, sb, fmp = stakes_world(rows)
     A.clear_memo()
     got = await srun(club, sb, fmp)
-    assert [(r.investee_name, r.is_new) for r in got.records] == [("Nscale", True)]
+    assert [[(s.investee_name, s.is_new) for s in rec.stakes] for rec in got.records] == [[("Intel", True)]]
 
 
 @pytest.mark.asyncio
-async def test_a_new_row_ranks_before_a_catalogue_row_of_the_same_day(club_on):
-    rows = [stake("nvidia", "Alpha Co", as_of="2026-06-30"),
-            stake("nvidia", "Beta Co", as_of="2026-06-30", created_at="2026-11-30T00:00:00Z"),
-            stake("nvidia", "Gamma Co", as_of="2026-07-01")]
+async def test_a_post_ranks_its_stakes_by_figure_and_the_investor_with_more_public_stakes_leads(club_on):
+    """In a post: the largest figure first, an equal figure the EARLIER as-of first (stakes_nvidia.jpg: Synopsys before
+    Coherent), then the stake id. Between posts: the investor with the most not-yet-posted public stakes first — even
+    behind newer stakes of another investor — and on a tie the walk's own order (the newest as-of; a new row before a
+    catalogue row of the same day)."""
+    rows = [stake("nvidia", "Alpha Co", as_of="2026-06-30", disclosed_value_usd=2e9),
+            stake("nvidia", "Beta Co", as_of="2026-05-30", disclosed_value_usd=2e9),
+            stake("nvidia", "Gamma Co", as_of="2026-07-01", disclosed_value_usd=5e9),
+            stake("amazon", "Delta Co", as_of="2026-11-01")]
     club, sb, fmp = stakes_world(rows)
     got = await srun(club, sb, fmp)
-    assert [r.investee_name for r in got.records] == ["Gamma Co", "Beta Co", "Alpha Co"]
+    assert _posts(got) == [["Gamma Co", "Beta Co", "Alpha Co"], ["Delta Co"]]
+    # a tie (one stake each): the newer stake's investor first …
+    rows = [stake("nvidia", "Alpha Co", as_of="2026-06-30"), stake("amazon", "Delta Co", as_of="2026-07-01")]
+    A.clear_memo()
+    club, sb, fmp = stakes_world(rows)
+    assert _posts(await srun(club, sb, fmp)) == [["Delta Co"], ["Alpha Co"]]
+    # … and on the same day a NEW row before a catalogue one
+    rows = [stake("amazon", "Delta Co", as_of="2026-06-30"),
+            stake("nvidia", "Alpha Co", as_of="2026-06-30", created_at="2026-11-30T00:00:00Z")]
+    A.clear_memo()
+    club, sb, fmp = stakes_world(rows)
+    assert _posts(await srun(club, sb, fmp)) == [["Alpha Co"], ["Delta Co"]]
+
+
+@pytest.mark.asyncio
+async def test_a_post_holds_at_most_four_stakes_and_the_rest_wait(club_on, caplog, monkeypatch):
+    """`R.STAKES_POST_STAKES` (1-4 — review 2026-11-20: RESTYLE_SPEC §2.5, "one investor per post, 1-4 PUBLIC
+    investees"; it was 8): an investor with more public stakes posts its four largest — every one drawn on the picture
+    — the rest wait for a later post (an INFO line), and the post's key names exactly the four. The profile stage takes
+    `STAKES_PROFILE_CANDIDATES` stakes in ONE batch."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    names = [f"Co {chr(65 + i)} Labs" for i in range(10)]
+    rows = [stake("nvidia", n, as_of="2026-06-30", disclosed_value_usd=1e9 + i * 1e6) for i, n in enumerate(names)]
+    club, sb, fmp = stakes_world(rows)
+    got = await srun(club, sb, fmp)
+    (rec,) = got.records
+    assert R.STAKES_POST_STAKES == (1, 4)
+    assert [s.investee_name for s in rec.stakes] == list(reversed(names))[:4]
+    assert "holds 10 public stakes — the post takes 4, the rest wait" in caplog.text
+    assert R.stake_ref_ids(R.ledger_key(rec)) == [s.stake_id for s in rec.stakes]
+    assert fmp.calls == Counter({"profiles": 1}) and A.STAKES_PROFILE_CANDIDATES >= 10
+    # the next run: the four posted stakes are `already_posted`, the next four largest make the post
+    A.clear_memo()
+    club, sb, fmp = stakes_world(rows)
+    again = await srun(club, sb, fmp, exclude={R.ledger_key(rec)})
+    assert [s.investee_name for s in again.records[0].stakes] == list(reversed(names))[4:8]
+    assert again.rejections["already_posted"] == 4
+    # past the profile stage's bound, the walk's later stakes wait (logged), still one batch
+    monkeypatch.setattr(A, "STAKES_PROFILE_CANDIDATES", 3)
+    A.clear_memo()
+    caplog.clear()
+    club, sb, fmp = stakes_world(rows)
+    got = await srun(club, sb, fmp)
+    assert len(got.records[0].stakes) == 3 and "3 of 10 stake(s) with a listed symbol reach the profile stage" in (
+        caplog.text)
+    assert fmp.calls == Counter({"profiles": 1})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("twin", ["same_symbol_other_kind", "other_spelling"])
+async def test_two_rows_of_one_investee_drop_the_smaller_never_the_investors_post(club_on, caplog, twin):
+    """Review 2026-11-20: the club table is unique only on (investor, investee name, kind), so an investor can hold two
+    postable rows of ONE listed company — an equity stake and a commitment in it, or two spellings of its name. Both
+    used to enter one `R.CompanyStakes`, which refuses "two rows of one company": the investor's WHOLE post was skipped
+    (`record_invalid`), every run. Now the investor keeps the first row of each issuer — the largest figure — and the
+    other is DROPPED (``share_class_overlap``, a WARNING naming both stake ids and the symbol, never a name), counted
+    before the investors are ranked (a duplicate never wins its investor the head of the walk). Mutation-checked by hand:
+    the dedupe removed from `_stakes_records`, the post was refused and this turned red."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    big = stake("nvidia", "Intel", investee_us_symbol="INTC", kind="on_13f_note", disclosed_value_usd=5e9,
+                as_of="2025-12-26")
+    small = (stake("nvidia", "Intel", investee_us_symbol="INTC", kind="commitment", value_basis="committed_up_to",
+                   disclosed_value_usd=1e9, as_of="2026-01-15", source_title="NVIDIA 10-Q (quarter ended Apr 27, 2026)")
+             if twin == "same_symbol_other_kind" else
+             stake("nvidia", "Intel Corporation", investee_us_symbol="INTC", disclosed_value_usd=1e9,
+                   as_of="2026-01-15", source_title="NVIDIA 10-Q (quarter ended Apr 27, 2026)"))
+    synopsys = stake("nvidia", "Synopsys", investee_us_symbol="SNPS", kind="on_13f_note", disclosed_value_usd=2e9,
+                     as_of="2025-12-01", source_title="Synopsys 8-K (Dec 1, 2025)")
+    rivian = stake("amazon", "Rivian Automotive", investee_us_symbol="RIVN", disclosed_value_usd=1e9,
+                   as_of="2026-04-23", source_title="Amazon 10-Q (quarter ended Jun 30, 2026)")
+    club, sb, fmp = stakes_world([big, small, synopsys, rivian])
+    got = await srun(club, sb, fmp)
+    # NVIDIA still leads (two public stakes after the dedupe, against Amazon's one) and posts the LARGER Intel stake
+    assert _posts(got)[0] == ["Intel", "Synopsys"] and _posts(got)[1] == ["Rivian Automotive"]
+    assert got.records[0].stakes[0].stake_id == big["id"]
+    assert got.rejections["share_class_overlap"] == 1 and "record_invalid" not in got.rejections
+    assert f"stake {small['id']} in INTC DROPPED as share_class_overlap" in caplog.text
+    assert big["id"] in caplog.text and "Intel Corporation" not in caplog.text
+    assert R.stake_ref_ids(R.ledger_key(got.records[0])) == [big["id"], synopsys["id"]]
 
 
 @pytest.mark.asyncio
 async def test_posted_stakes_are_dropped_before_any_profile_call(club_on):
+    """news-v23: a posted key names every stake its post held (`R.stake_ref_ids`); each one is `already_posted` — and
+    so is the stake of a one-stake key of a post before news-v23. A malformed key excludes nothing."""
     club, sb, fmp = stakes_world()
     first = await srun(club, sb, fmp)
     keys = {R.ledger_key(r) for r in first.records}
+    assert any("+" in k for k in keys)                                     # a several-stake key among them
     A.clear_memo()
     club, sb, fmp = stakes_world()
     got = await srun(club, sb, fmp, exclude=keys)
-    assert got.records == () and got.skip_reason == "stakes_none_unposted"
-    assert got.rejections["already_posted"] == 4 and fmp.calls == Counter()
+    assert got.records == () and got.skip_reason == "stakes_none_public"   # only the private stakes are left
+    assert got.rejections["already_posted"] == 3 and fmp.calls == Counter()
+    # the one-stake keys of posts before news-v23 read the same
+    A.clear_memo()
+    club, sb, fmp = stakes_world()
+    old_keys = {f"news:company_stakes:{s.stake_id}" for s in _stake_rows(first)}
+    got = await srun(club, sb, fmp, exclude=old_keys)
+    assert got.records == () and got.rejections["already_posted"] == 3
+    # a malformed key excludes nothing
+    A.clear_memo()
+    club, sb, fmp = stakes_world()
+    bad = {k + "+" for k in keys} | {k.upper() for k in keys}
+    got = await srun(club, sb, fmp, exclude=bad)
+    assert _stake_names(got) == _stake_names(first) and "already_posted" not in got.rejections
+    # every stake posted: none unposted
+    A.clear_memo()
+    rows = [r for r in stakes_rows() if r["investee_name"] in ("Intel", "Synopsys", "Rivian Automotive")]
+    club, sb, fmp = stakes_world(rows)
+    got = await srun(club, sb, fmp, exclude=keys)
+    assert got.records == () and got.skip_reason == "stakes_none_unposted" and fmp.calls == Counter()
 
 
 @pytest.mark.asyncio
@@ -5591,23 +5979,6 @@ async def test_an_unreachable_club_is_unavailable_for_stakes(club_on, where):
     assert err.value.reason == "club_unavailable"
 
 
-@pytest.mark.parametrize("over, investee", [
-    ({"investee_us_symbol": "INTC"}, "INTC"),
-    ({"investee_us_symbol": "INTC", "investee_name": "Intellicheck"}, None),   # the listing names another company
-    ({"investee_us_symbol": "BABA", "investee_name": "Alibaba Group"}, None),  # an ADR is not US common stock
-    ({"investee_us_symbol": "NVDA", "investee_name": "NVIDIA"}, None),         # the investor itself
-    ({"investee_us_symbol": "ZZZZ"}, None),                                    # no profile
-    ({"investee_us_symbol": "BAD!"}, None),
-])
-@pytest.mark.asyncio
-async def test_an_investee_is_a_company_ref_only_when_its_us_listing_checks_out(club_on, over, investee):
-    row = stake("nvidia", "Intel", **{"as_of": "2026-06-30", **over})
-    club, sb, fmp = stakes_world([row])
-    got = await srun(club, sb, fmp)
-    (rec,) = got.records
-    assert (rec.investee.symbol if rec.investee else None) == investee
-
-
 @pytest.mark.parametrize("over, field, expected", [
     ({"ownership_pct": 25.0}, "ownership_pct", 25.0),
     ({"ownership_pct": 25.0, "ownership_basis": "voting"}, "ownership_pct", None),   # a qualified pct
@@ -5622,7 +5993,7 @@ async def test_an_investee_is_a_company_ref_only_when_its_us_listing_checks_out(
 @pytest.mark.asyncio
 async def test_optional_stake_texts_travel_only_when_clean(club_on, over, field, expected):
     club, sb, fmp = stakes_world([stake("nvidia", "Nscale", **over)])
-    (rec,) = (await srun(club, sb, fmp)).records
+    (rec,) = _stake_rows(await srun(club, sb, fmp))
     assert getattr(rec, field) == expected
 
 
@@ -5771,7 +6142,7 @@ async def test_the_stakes_read_is_the_plans_postgrest_query_on_the_real_client(c
     monkeypatch.setattr(A, "sb_exec", answer)
     with postgrest.SyncPostgrestClient("http://127.0.0.1:9/rest/v1") as client:
         got = await srun(club, client, fmp)
-    assert [r.investee_name for r in got.records] == ["Nscale"]                           # anti-vacuity
+    assert _stake_names(got) == ["Nscale"]                           # anti-vacuity
     (read,) = [q for q in sent if q.path == "/trillion_club_stakes"]
     assert read.http_method == "GET"
     assert sorted(read.params.multi_items()) == sorted([
@@ -5820,7 +6191,7 @@ async def test_a_stake_reaches_a_post_only_when_a_person_reviewed_it(club_on, ov
     sb.honour_or = honour_or
     got = await srun(club, sb, fmp)
     if offered:
-        assert [r.investee_name for r in got.records] == ["Quorvane Robotics"] and got.rejections == {}
+        assert _stake_names(got) == ["Quorvane Robotics"] and got.rejections == {}
     else:
         assert got.records == () and got.rejections == {} and got.skip_reason == "stakes_none_qualified"
         assert fmp.calls == Counter()
@@ -5878,7 +6249,7 @@ async def test_a_phase_one_auto_row_is_left_out_before_any_gate_counts_it(club_o
     club, sb, fmp = stakes_world(rows)
     sb.honour_or = False
     got = await srun(club, sb, fmp)
-    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {}
+    assert _stake_names(got) == ["Nscale"] and got.rejections == {}
     (line,) = [r for r in caplog.records if "left out" in r.getMessage()]
     assert line.levelno == logging.INFO and "1 of 2 stake row(s) left out" in line.getMessage()
     assert "found automatically by the stake finder and not kept by the owner" in line.getMessage()
@@ -5887,7 +6258,7 @@ async def test_a_phase_one_auto_row_is_left_out_before_any_gate_counts_it(club_o
     caplog.clear()
     club, sb, fmp = stakes_world([{**rows[0], "owner_kept_at": _KEPT_AT}, rows[1]])
     got = await srun(club, sb, fmp)
-    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {"stake_no_figure": 1}
+    assert _stake_names(got) == ["Nscale"] and got.rejections == {"stake_no_figure": 1}
     assert "left out" not in caplog.text
 
 
@@ -5910,7 +6281,7 @@ async def test_a_left_out_auto_rows_investee_name_never_vouches_for_another_rows
     club, sb, fmp = stakes_world([seed, {**finder, "owner_kept_at": _KEPT_AT}])
     sb.honour_or = honour_or
     got = await srun(club, sb, fmp)
-    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {"stake_no_figure": 1}
+    assert _stake_names(got) == ["Nscale"] and got.rejections == {"stake_no_figure": 1}
 
 
 @pytest.mark.asyncio
@@ -5930,7 +6301,7 @@ async def test_a_full_stakes_page_is_truncated_whatever_the_origin_check_leaves_
     club, sb, fmp = stakes_world(rows[1:])
     sb.honour_or = False
     got = await srun(club, sb, fmp)
-    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {}
+    assert _stake_names(got) == ["Nscale"] and got.rejections == {}
 
 
 @pytest.mark.asyncio
@@ -5947,7 +6318,7 @@ async def test_left_out_rows_are_counted_one_line_per_kind_and_never_named(club_
     club, sb, fmp = stakes_world(rows)
     sb.honour_or = False
     got = await srun(club, sb, fmp)
-    assert [r.investee_name for r in got.records] == ["Nscale"] and got.rejections == {}
+    assert _stake_names(got) == ["Nscale"] and got.rejections == {}
     lines = [(r.levelno, r.getMessage()) for r in caplog.records if "left out" in r.getMessage()]
     assert [lvl for lvl, _ in lines] == [logging.INFO, logging.WARNING]
     assert "2 of 5 stake row(s) left out — found automatically" in lines[0][1]
@@ -5958,7 +6329,7 @@ async def test_left_out_rows_are_counted_one_line_per_kind_and_never_named(club_
     caplog.clear()
     club, sb, fmp = stakes_world(rows)
     got = await srun(club, sb, fmp)
-    assert [r.investee_name for r in got.records] == ["Nscale"]
+    assert _stake_names(got) == ["Nscale"]
     lines = [(r.levelno, r.getMessage()) for r in caplog.records if "left out" in r.getMessage()]
     # only the kept row of an unknown origin passes the database filter's second branch; the re-check still drops it
     assert lines == [(logging.WARNING, lines[0][1])] and "1 of 2 stake row(s)" in lines[0][1]
@@ -5987,14 +6358,15 @@ async def test_a_stake_source_naming_someone_off_every_list_is_refused(club_on, 
 @pytest.mark.asyncio
 async def test_a_stake_source_naming_catalogue_companies_passes_and_an_unknown_local_listing_is_dropped(club_on):
     """Another catalogue company in the title passes (OpenAI is an investee of the catalogue, NVIDIA a club member);
-    a local listing with a word on no list is DROPPED — card 3 is optional — never drawn, and the stake stays."""
+    a local listing with a word on no list is DROPPED (news-v23: a public stake's local listing is never drawn either
+    way) — never a reason to refuse the stake."""
     rows = [stake("nvidia", "Nscale", source_title="NVIDIA and OpenAI release (Sep 8, 2026)", as_of="2026-03-27",
-                  kind="non_us_listed", local_listing="Masayoshi Exchange"),
+                  local_listing="Masayoshi Exchange"),
             stake("amazon", "OpenAI", source_title="Amazon 10-Q (quarter ended Jun 30, 2026)", as_of="2026-07-31",
-                  kind="non_us_listed", local_listing="Japan")]
+                  local_listing="Japan")]
     club, sb, fmp = stakes_world(rows)
     got = await srun(club, sb, fmp)
-    assert [(r.investee_name, r.local_listing) for r in got.records] == [("OpenAI", "Japan"), ("Nscale", None)]
+    assert [(r.investee_name, r.local_listing) for r in _stake_rows(got)] == [("OpenAI", "Japan"), ("Nscale", None)]
     assert got.rejections == {}
 
 
@@ -6005,24 +6377,26 @@ async def test_stake_boundaries_that_pass(club_on):
             stake("nvidia", "Edge Three", disclosed_value_usd=1e12)]         # exactly the value ceiling
     club, sb, fmp = stakes_world(rows)
     got = await srun(club, sb, fmp)
-    assert sorted(r.investee_name for r in got.records) == ["Edge One", "Edge Three", "Edge Two"]
+    assert sorted(_stake_names(got)) == ["Edge One", "Edge Three", "Edge Two"] and len(got.records) == 1
 
 
 # ── RR3-STAKES-TEMPLATE-WALL (the round-3 review of 2026-10-20): a stake the TEMPLATE refuses never walls the walk ──
 #
 # The read passed stakes their template always refuses — a source title of 81-120 characters or holding a word over
 # 20, an investee-name word of 16-20 characters, a local listing of 33-40 characters, "committed up to" on a kind other
-# than a commitment, a `verified_on` after the run — and no template refusal of a stake was remembered. Stakes are
-# offered newest `as_of` first, five records a call: five such stakes at the head were offered and refused every day,
-# and every publishable stake behind them waited (the review's probes: six days, nothing posted). The read now refuses
-# each of them (a local listing is dropped), and every refusal only the template can make is reported back by the
-# script flow and remembered (`A.remember_template_refusal`): that stake is then offered after every other one.
+# than a commitment, a `verified_on` after the run — and no template refusal of a stake was remembered: five such
+# stakes at the head of the walk were offered and refused every day while every publishable stake behind them waited.
+# The read now refuses each of them (a local listing is dropped), and every refusal only the template can make is
+# reported back by the script flow and remembered (`A.remember_template_refusal`). news-v23 (one investor's stakes a
+# post): the script flow DROPS a refused stake from its post (`NT.drop_refused_rows`, each one reported), a post left
+# with none is refused whole (each stake reported), and a remembered stake never wins its investor the head of the walk
+# (`A._stakes_records` ranks investors by their UNREFUSED stakes).
 
 _WALL_TITLE = "NVIDIA Quarterly Report on Form 10-Q for the fiscal quarter ended Oct 26, 2026, Notes 8 and 9"
 _LONG_WORD_NAMES = ["Microelectronics Alpha", "Nanotechnologies Beta", "Immunotherapeutics Co",
                     "Biopharmaceutical Gamma", "Telecommunications Delta"]
 _FIVE_NAMES = ["Nscale", "Ayar Labs", "Lambda", "Crusoe", "Figure"]
-#: Behind the five: an older stake the template composes (Amazon's OpenAI stake).
+#: Behind the five: an older stake the template composes (Amazon's stake in a public company).
 _OPENAI_ROW = dict(disclosed_value_usd=50e9, as_of="2026-07-31", source_title="Amazon 10-Q (quarter ended Jun 30, 2026)")
 #: Exact-length texts at the template's bounds — lower-case filler after known words, so the positive list
 #: (ST-1-R) passes them: an 80-character title whose longest word is 20; a 32-character local listing.
@@ -6031,13 +6405,30 @@ _LOCAL_32 = "Taiwan abcdefghij abcdefghijklmn"
 
 
 def _would_be_stake(row: Dict[str, Any]) -> R.CompanyStake:
-    """The record the read would build from a stake row of `stakes_world` (NVIDIA's, investee by name only)."""
+    """The stake ROW the read would build from a row of `stakes_world` (NVIDIA's, its listing verified)."""
+    sym = row.get("investee_us_symbol")
     return R.CompanyStake(
         series="company_stakes", stake_id=row["id"], investor=R.CompanyRef("NVDA", "NVIDIA"),
-        investee_name=row["investee_name"], investee=None, kind=row["kind"], value_usd=row["disclosed_value_usd"],
+        investee_name=row["investee_name"],
+        investee=R.CompanyRef(sym, row["investee_name"]) if isinstance(sym, str) and R.canonical_symbol(sym) == sym
+        else None, kind=row["kind"], value_usd=row["disclosed_value_usd"],
         value_basis=row["value_basis"], ownership_pct=None, as_of=date.fromisoformat(row["as_of"]),
         verified_on=date.fromisoformat(row["verified_on"]), source_title=row["source_title"], background=None,
         listed_since=None, local_listing=row["local_listing"], is_new=False)
+
+
+def _would_be_post(*rows: Dict[str, Any]) -> Any:
+    """The one-investor post of `rows` (`_would_be_stake` each) — WITHOUT the record's own validation when a row could
+    not stand in one (the template's backstop is what is under test)."""
+    stakes_ = tuple(sorted((_would_be_stake(r) for r in rows), key=R.stake_rank_key))
+    try:
+        return R.CompanyStakes(series="company_stakes", investor=R.CompanyRef("NVDA", "NVIDIA"), stakes=stakes_)
+    except ValueError:
+        obj = object.__new__(R.CompanyStakes)
+        for name, value in (("series", "company_stakes"), ("investor", R.CompanyRef("NVDA", "NVIDIA")),
+                            ("stakes", stakes_)):
+            object.__setattr__(obj, name, value)
+        return obj
 
 
 def _forget_reads() -> None:
@@ -6047,10 +6438,12 @@ def _forget_reads() -> None:
 
 
 async def _stake_days(rows, days, posted, *, report=True):
-    """Each day as the script flow builds it (`_build_template_day`): the walk (five records), then the first record
-    the TEMPLATE composes is posted (its ledger key added to ``posted``); with ``report`` each record the template
-    refused is reported back (`A.remember_template_refusal`), as `_report_template_refusal` does. Returns each day's
-    (the records' investee names, the template's refusal codes, the posted investee or None, the rejections)."""
+    """Each day as the script flow builds it (`_build_template_day` → `_compose_candidate`): the walk, then each record
+    in order — the stakes its template refuses DROPPED (`NT.drop_refused_rows`, each reported back with ``report``), the
+    rest composed; the first that composes is posted (its ledger key added to ``posted``); a record refused whole is
+    reported back stake by stake (`A.remember_template_refusal`), as `_report_template_refusal` does. Returns each day's
+    (each record's stakes by investee name, the template's refusal codes, the posted stakes' names or None, the
+    rejections)."""
     out = []
     for day in days:
         _forget_reads()
@@ -6059,22 +6452,28 @@ async def _stake_days(rows, days, posted, *, report=True):
         chosen, refusals = None, []
         for rec in got.records:
             try:
-                NT.compose(rec, run_date=day, store_state="live", allow_x_url=False)
+                narrowed = NT.drop_refused_rows(rec, day)
+                if report:
+                    kept = {s.stake_id for s in narrowed.stakes}
+                    for st in rec.stakes:
+                        if st.stake_id not in kept:
+                            assert A.remember_template_refusal(st, ("template_row_refused",), run_date=day) is True
+                NT.compose(narrowed, run_date=day, store_state="live", allow_x_url=False)
             except NT.NewsTemplateRefused as e:
                 refusals.append(e.code)
                 if report:
                     assert A.remember_template_refusal(rec, (e.code,), run_date=day) is True
                 continue
-            chosen = rec
+            chosen = narrowed
             break
         if chosen is not None:
             posted.add(R.ledger_key(chosen))
-        out.append(([r.investee_name for r in got.records], refusals,
-                    chosen.investee_name if chosen is not None else None, dict(got.rejections)))
+        out.append((_posts(got), refusals, [s.investee_name for s in chosen.stakes] if chosen is not None else None,
+                    dict(got.rejections)))
     return out
 
 
-#: Five stakes, NEWER than the OpenAI stake, each refused by the template for one gate the read now applies too.
+#: Five stakes, NEWER than the Amazon stake, each refused by the template for one gate the read now applies too.
 _READ_WALLS = {
     # the review's two probes: a title shared by a batch of catalogue rows; investee names with a 16-18 letter word
     "source_title_too_long": [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}", source_title=_WALL_TITLE)
@@ -6093,28 +6492,29 @@ _READ_WALLS = {
 @pytest.mark.parametrize("shape", list(_READ_WALLS))
 @pytest.mark.asyncio
 async def test_five_stakes_the_template_cannot_compose_are_refused_at_the_read_and_never_wall_the_walk(club_on, shape):
-    """The review's walk (STAKES_RUN and the five days after it): five stakes the template refuses head the
-    newest-first walk, a publishable one behind them. Each is refused at the read (`stake_invalid`, before any
-    profile), so the publishable stake is offered — and posted — on the FIRST day; nothing is offered after it. Every
-    refused row, built as the record the read used to build, is refused by `NT.compose`: the read refuses only what
-    the template refuses. Mutation-checked (2026-10-20, in memory): each of the five read gates removed alone turns
-    its own row red (the five records come back and nothing is ever posted)."""
+    """The review's walk (STAKES_RUN and the five days after it): five stakes the template refuses head the walk, a
+    publishable one (another investor's) behind them. Each is refused at the read (`stake_invalid`, before any profile),
+    so the publishable stake is posted on the FIRST day; nothing is offered after it. Every refused row, as the post the
+    read would have built, is refused by `NT.compose`: the read refuses only what the template refuses. Mutation-checked
+    (2026-10-20, in memory): each of the five read gates removed alone turns its own row red."""
     walled = _READ_WALLS[shape]
     rows = walled + [stake("amazon", "OpenAI", **_OPENAI_ROW)]
     posted: set = set()
     days = [STAKES_RUN + timedelta(days=k) for k in range(6)]
     d1, *rest = await _stake_days(rows, days, posted)
-    assert d1 == (["OpenAI"], [], "OpenAI", {"stake_invalid": 5})
+    assert d1 == ([["OpenAI"]], [], ["OpenAI"], {"stake_invalid": 5})
     if shape == "verified_after_the_run":
         # dated after the run only on the first day: from the next, verified on (or before) the run day, they are
-        # ordinary stakes — offered newest first and posted one a day
-        assert [d[2] for d in rest] == ["Figure", "Crusoe", "Lambda", "Ayar Labs", "Nscale"]
-        assert all(d[1] == [] for d in rest)
+        # ordinary stakes — ONE post holds four (news-v23; review 2026-11-20: at most four), the earlier as-of first on
+        # an equal figure, and the fifth makes the next day's post
+        assert rest[0][2] == _FIVE_NAMES[:4] and rest[0][1] == []
+        assert rest[1] == ([_FIVE_NAMES[4:]], [], _FIVE_NAMES[4:], {"already_posted": 5})
+        assert all(d == ([], [], None, {"already_posted": 6}) for d in rest[2:]), rest
     else:
         assert all(d == ([], [], None, {"stake_invalid": 5, "already_posted": 1}) for d in rest), rest
     for row in walled:
         with pytest.raises(NT.NewsTemplateRefused):
-            NT.compose(_would_be_stake(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+            NT.compose(_would_be_post(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
 
 
 @pytest.mark.parametrize("over, kept", [
@@ -6123,7 +6523,7 @@ async def test_five_stakes_the_template_cannot_compose_are_refused_at_the_read_a
     ({"source_title": "NVIDIA 10-Q " + "q" * 20}, True),                    # a word of 20
     ({"source_title": "NVIDIA 10-Q " + "q" * 21}, False),                   # a word of 21
     ({"source_title": "NVIDIA 10-Q (equity-method-investments note)"}, False),   # a hyphenated word of 25
-    ({"investee_name": "Microelectronic Labs"}, True),                      # a 15-letter word sits under its plate
+    ({"investee_name": "Microelectronic Labs"}, True),                      # a 15-letter word
     ({"investee_name": "Microelectronics Labs"}, False),                    # 16
     ({"investee_name": "Sherwin-Williams Ventures"}, False),                # one word of 16 (a hyphen joins it)
     ({"kind": "commitment", "value_basis": "committed_up_to"}, True),
@@ -6135,53 +6535,51 @@ async def test_five_stakes_the_template_cannot_compose_are_refused_at_the_read_a
 @pytest.mark.asyncio
 async def test_the_reads_stake_gates_and_the_templates_agree_at_every_bound(club_on, over, kept):
     """Both directions, at each bound the read copies from the template: a stake the read keeps composes; a stake it
-    refuses (`stake_invalid`, before any profile) is one the template refuses as the record the read used to build."""
+    refuses (`stake_invalid`, before any profile) is one the template refuses as the post the read would have built."""
     row = stake("nvidia", over.get("investee_name", "Nscale"), as_of="2026-06-30",
                 **{k: v for k, v in over.items() if k != "investee_name"})
     club, sb, fmp = stakes_world([row])
     got = await srun(club, sb, fmp)
     if kept:
         (rec,) = got.records
-        assert got.rejections == {}
+        assert got.rejections == {} and len(rec.stakes) == 1
         NT.compose(rec, run_date=STAKES_RUN, store_state="live", allow_x_url=False)
     else:
         assert got.records == () and got.rejections == {"stake_invalid": 1} and fmp.calls == Counter()
         with pytest.raises(NT.NewsTemplateRefused):
-            NT.compose(_would_be_stake(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+            NT.compose(_would_be_post(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
 
 
 @pytest.mark.parametrize("local, kept", [
-    (_LOCAL_32, True),                       # 32 characters: card 3 draws it whole
+    (_LOCAL_32, True),                       # 32 characters: the slot rules pass it
     (_LOCAL_32 + "o", False),                # 33
     ("Taiwan " + "a" * 20, True),            # a word of 20
     ("Taiwan " + "a" * 21, False),           # 21
 ])
 @pytest.mark.asyncio
-async def test_a_local_listing_the_template_cannot_draw_is_dropped_never_the_stake(club_on, local, kept):
-    """A local listing is optional (card 3 then uses its generic body), so one the template cannot draw is DROPPED —
-    the stake stays and composes; with the listing kept, card 3 draws it. The listing the read drops is one the
-    template refuses."""
-    row = stake("nvidia", "Nscale", as_of="2026-06-30", kind="non_us_listed", local_listing=local)
+async def test_a_local_listing_the_template_cannot_take_is_dropped_never_the_stake(club_on, local, kept):
+    """A local listing is optional (news-v23: a public stake's is never drawn), so one the template cannot take is
+    DROPPED — the stake stays and composes. The listing the read drops is one the template refuses."""
+    row = stake("nvidia", "Nscale", as_of="2026-06-30", local_listing=local)
     club, sb, fmp = stakes_world([row])
     (rec,) = (await srun(club, sb, fmp)).records
-    assert rec.local_listing == (local if kept else None)
+    assert rec.stakes[0].local_listing == (local if kept else None)
     out = NT.compose(rec, run_date=STAKES_RUN, store_state="live", allow_x_url=False)
-    assert (local in json.dumps(out["cards"])) is kept
+    assert local not in json.dumps([out["cards"], out["image_spec"], out["opening_card"]])
     if not kept:
         with pytest.raises(NT.NewsTemplateRefused) as err:
-            NT.compose(_would_be_stake(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
+            NT.compose(_would_be_post(row), run_date=STAKES_RUN, store_state="live", allow_x_url=False)
         assert err.value.code == "slot_rejected"
 
 
 @pytest.mark.parametrize("profile_name, kept", [
-    ("Microelectronic Corporation", True),       # "Microelectronic": 15 letters under the investor's plate
-    ("Microelectronics Corporation", False),     # 16: the pair layout cannot draw it (the cover could: 20)
+    ("Microelectronic Corporation", True),       # "Microelectronic": 15 letters
+    ("Microelectronics Corporation", False),     # 16: refused (the template's investor-name rule)
 ])
 @pytest.mark.asyncio
-async def test_an_investor_whose_name_the_pair_cannot_draw_is_refused_after_its_profile(club_on, profile_name, kept):
-    """The investor's name sits under its plate in half the column too, and only its profile names it: a display
-    name with a word over `R.STAKE_PAIR_NAME_WORD_MAX_CHARS` refuses the stake (`company_name_unusable`) — one the
-    template would refuse."""
+async def test_an_investor_whose_name_the_post_cannot_draw_is_refused_after_its_profile(club_on, profile_name, kept):
+    """Only its profile names the investor: a display name with a word over `R.STAKE_PAIR_NAME_WORD_MAX_CHARS` refuses
+    its stakes (`company_name_unusable`) — a post the template would refuse."""
     club, sb, fmp = stakes_world([stake("nvidia", "Nscale", as_of="2026-06-30")])
     fmp.profiles["NVDA"] = prof("NVDA", profile_name, exchange="NASDAQ")
     got = await srun(club, sb, fmp)
@@ -6191,8 +6589,9 @@ async def test_an_investor_whose_name_the_pair_cannot_draw_is_refused_after_its_
         NT.compose(rec, run_date=STAKES_RUN, store_state="live", allow_x_url=False)
     else:
         assert got.records == () and got.rejections == {"company_name_unusable": 1}
-        would_be = dataclasses.replace(_would_be_stake(stake("nvidia", "Nscale", as_of="2026-06-30")),
-                                       investor=R.CompanyRef("NVDA", "Microelectronics"))
+        st = dataclasses.replace(_would_be_stake(stake("nvidia", "Nscale", as_of="2026-06-30")),
+                                 investor=R.CompanyRef("NVDA", "Microelectronics"))
+        would_be = R.CompanyStakes(series="company_stakes", investor=st.investor, stakes=(st,))
         with pytest.raises(NT.NewsTemplateRefused) as err:
             NT.compose(would_be, run_date=STAKES_RUN, store_state="live", allow_x_url=False)
         assert err.value.code == "slot_rejected"
@@ -6204,62 +6603,78 @@ _TEMPLATE_ONLY_TITLES = {"percent": "NVIDIA 10-Q (a 9% stake)", "hash": "NVIDIA 
 
 @pytest.mark.parametrize("title", list(_TEMPLATE_ONLY_TITLES))
 @pytest.mark.asyncio
-async def test_a_stake_its_template_refused_is_offered_after_every_other_one(club_on, title):
-    """Five stakes only the template refuses head the walk, a publishable one behind them, reported back as the script
-    flow does. The first day is lost (all five refused, the day falls through); from the next day they wait behind
-    every other stake, so the publishable one is posted; then, alone again, they are offered (never left out) and
-    refused again. Mutation-checked (2026-10-20, in memory): with `remember_template_refusal`'s stake branch a no-op
-    (or the order ignoring the memo) the same five are offered first every day and nothing is ever posted."""
+async def test_a_stake_its_template_refused_never_wins_its_investor_the_head_of_the_walk(club_on, title):
+    """news-v23: five stakes only the template refuses (one investor's, NVIDIA's) and one publishable stake of another
+    investor (Amazon's), reported back as the script flow does. Day 1: NVIDIA leads (five public stakes; its post takes
+    four — review 2026-11-20) — every one is DROPPED from its post, so the post is refused whole (the first stake's own
+    code) and the next investor's is posted the SAME day. From then on
+    NVIDIA's stakes are remembered: never offered first, still offered (never left out: the fifth, then the one refused
+    longest ago, take their turns) and refused again. Mutation-
+    checked by hand (2026-11-20): with `remember_template_refusal`'s stake branch a no-op this test (the memo read) and
+    the ranking test below (NVIDIA's refused three led Amazon's fresh stake) turned red."""
     walled = [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}", source_title=_TEMPLATE_ONLY_TITLES[title])
               for i, n in enumerate(_FIVE_NAMES)]
     rows = walled + [stake("amazon", "OpenAI", **_OPENAI_ROW)]
     posted: set = set()
     days = [STAKES_RUN + timedelta(days=k) for k in range(3)]
     d1, d2, d3 = await _stake_days(rows, days, posted)
-    newest_first = list(reversed(_FIVE_NAMES))
-    assert d1 == (newest_first, ["slot_rejected"] * 5, None, {})
-    assert d2[0] == ["OpenAI"] + newest_first[:4] and d2[1:3] == ([], "OpenAI")
-    assert d3 == (newest_first, ["slot_rejected"] * 5, None, {"already_posted": 1})
+    # every stake of NVIDIA's post dropped: the post is refused with the first stake's OWN code (`slot_rejected`: "%" /
+    # "#" are never drawn), never a bare "too few" — what the trail and the refusal memo should say
+    assert d1 == ([_FIVE_NAMES[:4], ["OpenAI"]], ["slot_rejected"], ["OpenAI"], {})
+    assert d2 == ([["Nscale", "Ayar Labs", "Lambda", "Figure"]], ["slot_rejected"], None, {"already_posted": 1})
+    assert d3 == ([_FIVE_NAMES[:4]], ["slot_rejected"], None, {"already_posted": 1})
     assert posted == {f"news:company_stakes:{rows[-1]['id']}"}
-    # each refusal is remembered for its stake id, read on the day it was refused
+    # each refusal is remembered for its stake id, read on the day it was last refused
     assert A._stake_template_refused_on(_would_be_stake(walled[0])) == days[2]
 
 
 @pytest.mark.asyncio
-async def test_remembered_stakes_are_offered_least_recently_refused_first(club_on):
-    """Among the stakes the template refused, the one refused longest ago comes first (then the usual order): those
-    that wait take turns."""
+async def test_remembered_stakes_never_rank_their_investor_first_and_wait_behind_fresh_ones(club_on):
+    """The investor ranking counts only UNREFUSED public stakes: NVIDIA's three stakes the template refused put it behind
+    Amazon's one fresh stake. Inside a post past its four (review 2026-11-20; it was eight), the fresh stakes take the
+    places first, then the refused ones, the one refused longest ago first — those that wait take turns."""
     rows = [stake("nvidia", n, as_of=f"2026-11-{10 + i:02d}") for i, n in enumerate(["Alpha Co", "Beta Co", "Gamma Co"])]
-    for row, day in ((rows[2], STAKES_RUN), (rows[0], STAKES_RUN - timedelta(days=7))):
+    for row, day in ((rows[2], STAKES_RUN), (rows[0], STAKES_RUN - timedelta(days=7)),
+                     (rows[1], STAKES_RUN - timedelta(days=3))):
         assert A.remember_template_refusal(_would_be_stake(row), ("slot_rejected",), run_date=day) is True
-    club, sb, fmp = stakes_world(rows)
+    club, sb, fmp = stakes_world(rows + [stake("amazon", "Delta Co", as_of="2026-01-05")])
     got = await srun(club, sb, fmp)
-    assert [r.investee_name for r in got.records] == ["Beta Co", "Alpha Co", "Gamma Co"]
+    assert _posts(got) == [["Delta Co"], ["Alpha Co", "Beta Co", "Gamma Co"]]
+    # five NVIDIA stakes, two of them refused: the post's four are the three fresh and the LONGER-refused one
+    A.clear_memo()
+    fresh = [stake("nvidia", f"Fresh {chr(65 + i)} Labs", as_of=f"2026-10-{10 + i:02d}") for i in range(3)]
+    old_ref, new_ref = stake("nvidia", "Held Old Labs", as_of="2026-11-01"), stake("nvidia", "Held New Labs",
+                                                                                   as_of="2026-11-02")
+    assert A.remember_template_refusal(_would_be_stake(old_ref), ("x",), run_date=STAKES_RUN - timedelta(days=9))
+    assert A.remember_template_refusal(_would_be_stake(new_ref), ("x",), run_date=STAKES_RUN - timedelta(days=1))
+    club, sb, fmp = stakes_world(fresh + [old_ref, new_ref])
+    (rec,) = (await srun(club, sb, fmp)).records
+    assert {s.investee_name for s in rec.stakes} == {r["investee_name"] for r in fresh} | {"Held Old Labs"}
 
 
 @pytest.mark.asyncio
-async def test_an_edit_to_a_refused_stakes_row_puts_it_back_in_its_place_a_re_verification_does_not(club_on):
+async def test_an_edit_to_a_refused_stakes_row_lifts_its_hold_a_re_verification_does_not(club_on):
     """A remembered refusal holds while the row still says what was refused: re-verifying the source (a new
-    `verified_on`) changes nothing the post says and keeps the stake waiting; an edit to what the post says (a
-    corrected title) puts it back in its newest-first place at once."""
-    old = stake("nvidia", "Older Co", as_of="2026-10-01")
+    `verified_on`) changes nothing the post says and keeps the stake's investor behind; an edit to what the post says (a
+    corrected title) lifts it at once (one fresh stake each: the newer stake's investor first)."""
+    old = stake("amazon", "Older Co", as_of="2026-10-01")
     new = stake("nvidia", "Newer Co", as_of="2026-11-20", source_title=_TEMPLATE_ONLY_TITLES["percent"])
     assert A.remember_template_refusal(_would_be_stake(new), ("slot_rejected",), run_date=STAKES_RUN) is True
     for row, order in (
-            (new, ["Older Co", "Newer Co"]),
-            ({**new, "verified_on": "2026-12-28"}, ["Older Co", "Newer Co"]),                 # re-verified: waits
-            ({**new, "source_title": "NVIDIA 10-Q (a nine percent stake)"}, ["Newer Co", "Older Co"])):  # fixed
+            (new, [["Older Co"], ["Newer Co"]]),
+            ({**new, "verified_on": "2026-12-28"}, [["Older Co"], ["Newer Co"]]),                 # re-verified: waits
+            ({**new, "source_title": "NVIDIA 10-Q (a nine percent stake)"}, [["Newer Co"], ["Older Co"]])):  # fixed
         _forget_reads()
         club, sb, fmp = stakes_world([old, row])
         got = await srun(club, sb, fmp, run_date=STAKES_RUN + timedelta(days=1))
-        assert [r.investee_name for r in got.records] == order
+        assert _posts(got) == order
 
 
 def test_remember_template_refusal_remembers_a_stake_by_its_id_and_its_rows_fingerprint():
-    """The hook the script flow calls: a `CompanyStake` is remembered under its stake id with its row's fingerprint
-    and the run day (a datetime is its day); `_stake_template_refused_on` answers for the same row, not for an edited
-    one, and ignores a malformed entry. A run date that is not a date, or a record that only looks like a stake,
-    writes nothing."""
+    """The hook the script flow calls: a `CompanyStake` (a stake its template dropped from a post) is remembered under
+    its stake id with its row's fingerprint and the run day (a datetime is its day); a `CompanyStakes` (a post refused
+    whole) stake by stake. `_stake_template_refused_on` answers for the same row, not for an edited one, and ignores a
+    malformed entry. A run date that is not a date, or a record that only looks like a stake, writes nothing."""
     row = stake("nvidia", "Nscale", as_of="2026-06-30")
     rec = _would_be_stake(row)
     assert A.remember_template_refusal(rec, ["slot_rejected", "stale_source"], run_date=STAKES_RUN) is True
@@ -6274,6 +6689,11 @@ def test_remember_template_refusal_remembers_a_stake_by_its_id_and_its_rows_fing
     A._memo_put(A._stake_refused_key(rec.stake_id), "junk", 60.0)
     assert A._stake_template_refused_on(rec) is None
     A.clear_memo()
+    # news-v23: a whole post refused — every stake it held is remembered
+    post = _would_be_post(row, stake("nvidia", "Lambda", as_of="2026-06-30"))
+    assert A.remember_template_refusal(post, ["too_few_rows"], run_date=STAKES_RUN) is True
+    assert all(A._stake_template_refused_on(st) == STAKES_RUN for st in post.stakes) and len(post.stakes) == 2
+    A.clear_memo()
     look_alike = SimpleNamespace(series="company_stakes", stake_id=rec.stake_id, investee_name="Nscale")
     assert A.remember_template_refusal(look_alike, ["slot_rejected"], run_date=STAKES_RUN) is False
     assert A.remember_template_refusal(rec, ["slot_rejected"], run_date="2026-12-29") is False
@@ -6282,8 +6702,10 @@ def test_remember_template_refusal_remembers_a_stake_by_its_id_and_its_rows_fing
 
 # ── earnings ──────────────────────────────────────────────────────────────────
 
-EARN_RUN = date(2027, 1, 14)             # Thursday, in the Q4 season; days 01-07 .. 01-13
-EARN_DAYS = [f"2027-01-{d:02d}" for d in range(7, 14)]
+EARN_RUN = date(2027, 1, 14)             # Thursday, in the Q4 season; days 01-06 .. 01-13
+#: news-v23 phase 3: a THURSDAY's window is eight days (`R.earnings_window_days`: Wednesday posts the weekly theme
+#: first, and Thursday's window takes every report day Wednesday's used to cover)
+EARN_DAYS = [f"2027-01-{d:02d}" for d in range(6, 14)]
 #: Batch 1 (2026-10-15): every report carries a revenue pair (none → `revenue_implausible`), so a row that
 #: does not name one gets this plausible quarter: $1.05B against a $1.0B estimate.
 DEFAULT_RA, DEFAULT_RE = 1.05e9, 1.0e9
@@ -6328,7 +6750,8 @@ def earnings_profiles():
 
 
 async def erun(fmp, **kw):
-    return await run("earnings", fmp, run_date=kw.pop("run_date", EARN_RUN), **kw)
+    with _per_company_bounds(kw.get("limit", 5)):
+        return _Rows(await run("earnings", fmp, run_date=kw.pop("run_date", EARN_RUN), **kw))
 
 
 @pytest.mark.asyncio
@@ -6346,12 +6769,13 @@ async def test_earnings_one_company_per_record_ranked_by_market_cap_then_gap():
     assert (aaa.revenue_actual, aaa.revenue_estimate) == (1.1e9, 1.0e9)
     assert (bbb.revenue_actual, bbb.revenue_estimate) == (DEFAULT_RA, DEFAULT_RE)
     assert all(r.period_end == date(2026, 12, 31) for r in got.records)      # placed by the statements
-    assert R.ledger_key(aaa) == "news:earnings:AAA:2027-01-12"
+    # news-v23: the day's ONE record carries every company's own key, in draw (size) order
+    assert R.ledger_key(got.record) == "news:earnings:BBB:2027-01-11+III:2027-01-07+AAA:2027-01-12"
     assert got.rejections == {"eps_estimate_too_small": 1, "eps_digit_shift": 1, "eps_gap_implausible": 1,
                               "symbol_grammar": 2, "warrant_unit_right": 1, "etf_or_fund": 1, "below_cap_floor": 1,
                               "non_common_listing": 1, "revenue_implausible": 1}
-    # ONE ET day per calendar call, the seven days before the run.
-    assert sorted(fmp.calendar_calls) == [(d, d) for d in EARN_DAYS]
+    # ONE ET day per calendar call, the eight days before the (Thursday) run.
+    assert sorted(fmp.calendar_calls) == [(d, d) for d in EARN_DAYS] and len(EARN_DAYS) == 8
     assert "OLD" not in fmp.profile_requests[0] and "CCC" not in fmp.profile_requests[0]
     # ONE quarterly-statement read per kept report, four quarters each.
     assert sorted(fmp.statement_calls) == [("AAA", 4), ("BBB", 4), ("III", 4)]
@@ -6385,16 +6809,16 @@ async def test_one_failed_day_fails_the_week_and_nothing_is_memoized(answer):
     fmp.calendar = earnings_calendar()
     calls = fmp.calls["calendar"]
     assert len((await erun(fmp)).records) == 3
-    assert fmp.calls["calendar"] - calls == 7                              # every day read again
+    assert fmp.calls["calendar"] - calls == 8                              # every day read again
 
 
 @pytest.mark.asyncio
 async def test_earnings_days_and_statements_are_memoized_and_concurrent_calls_share_them():
     fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles())
     a, b = await asyncio.gather(erun(fmp), erun(fmp))
-    assert a.records == b.records and fmp.calls["calendar"] == 7 and fmp.calls["statement"] == 3
+    assert a.records == b.records and fmp.calls["calendar"] == 8 and fmp.calls["statement"] == 3
     await erun(fmp)
-    assert fmp.calls["calendar"] == 7 and fmp.calls["statement"] == 3       # ("quarter_statements", sym)
+    assert fmp.calls["calendar"] == 8 and fmp.calls["statement"] == 3       # ("quarter_statements", sym)
     assert ("quarter_statements", "AAA") in A._MEMO
 
 
@@ -6504,13 +6928,13 @@ async def test_a_posted_report_is_dropped_before_its_profile():
     # since the re-review of 2026-10-19 (EME-1), of a day up to `EARNINGS_POSTED_LOOKBACK_DAYS` BEFORE it …
     assert A.EARNINGS_POSTED_LOOKBACK_DAYS == 14
     assert A._posted_in_window(frozenset({"news:earnings:AAA:2027-01-09"}), []) == set()   # no window, no key
-    for key in ("news:earnings:AAA:2027-01-09", "news:earnings:AAA:2027-01-06", "news:earnings:AAA:2026-12-24"):
+    for key in ("news:earnings:AAA:2027-01-09", "news:earnings:AAA:2027-01-06", "news:earnings:AAA:2026-12-23"):
         A.clear_memo()
         fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles())
         got = await erun(fmp, exclude={key})
         assert "AAA" not in [r.company.symbol for r in got.records] and got.rejections["already_posted"] == 1, key
     # … a key older than that, of a day after the window, another series' key or a malformed one does not
-    for key in ("news:earnings:AAA:2026-12-23", "news:earnings:AAA:2027-01-14", "news:ceo_buys:AAA:2027-01-12",
+    for key in ("news:earnings:AAA:2026-12-22", "news:earnings:AAA:2027-01-14", "news:ceo_buys:AAA:2027-01-12",
                 "news:earnings:AAA", "news:earnings::2027-01-12", "news:earnings:aaa:2027-01-12",
                 "news:earnings:AAA:2027-W02-1", "news:earnings:AAA:2027-02-30", "news:earnings:AAA:20270112"):
         A.clear_memo()
@@ -6641,7 +7065,9 @@ async def test_a_theme_lists_every_member_and_the_largest_segment_where_certain(
     assert facts["MRVL"] == (None, None, None)          # segments include intersegment sales
     assert facts["INTC"] == (None, None, None)          # a failed lookup: listed, no fact
     assert got.rejections == {"etf_or_fund": 1}         # SMH; ARM is blocked, never profiled
-    assert R.ledger_key(rec) == "news:theme_explainer:ai-chips:2026-11-02"
+    # news-v23 phase 3: the key names the theme, its ANGLE and the run date (never posted: "how they make money")
+    assert (rec.angle, rec.posted_on) == ("make_money", THEME_RUN)
+    assert R.ledger_key(rec) == "news:theme_explainer:ai-chips:make_money:2026-11-19"
     assert "INTC segment lookup failed" in caplog.text
     # Names and ticker lists only: never the image, subtitle, category or accent.
     (table, cols), = [s for s in world["sb"].selects if s[0] == "trending_themes"]
@@ -6652,7 +7078,6 @@ async def test_a_theme_lists_every_member_and_the_largest_segment_where_certain(
 @pytest.mark.parametrize("over, reason", [
     ({"tickers_as_of": "2026-09-09"}, "theme_stale"),             # 71 days
     ({"tickers_as_of": "2026-11-20"}, "theme_stale"),             # after the run
-    ({"tickers_as_of": None}, "theme_stale"),
     ({"tickers_as_of": "soon"}, "theme_stale"),
     ({"title": "Signal Hill Picks"}, "theme_title_unusable"),
     ({"title": "Breaking: AI"}, "theme_title_unusable"),
@@ -6677,8 +7102,12 @@ async def test_theme_gates_before_any_profile_call(over, reason):
 ])
 @pytest.mark.asyncio
 async def test_a_theme_with_too_few_facts_is_refused(breakdowns, reason):
-    got = await trun(theme_world(breakdowns=breakdowns))
+    # 2026-11-20 fix round: held to the guard it names — "how they make money" only (a worker offering just that
+    # angle). With every angle on, this world has no statements and no Congress feed, so the rotation's later angles
+    # are OUTAGES and the series rightly reports "unavailable" (never "nothing qualified" over a source that failed).
+    got = await trun(theme_world(breakdowns=breakdowns), theme_angles=("make_money",))
     assert got.records == () and got.rejections.get(reason) == 1
+    assert got.skip_reason == "theme_none_qualified"
 
 
 @pytest.mark.asyncio
@@ -6708,7 +7137,7 @@ async def test_a_posted_theme_is_skipped_before_its_profiles():
 
 
 @pytest.mark.asyncio
-async def test_a_large_theme_keeps_every_member_but_looks_up_only_the_first_twelve():
+async def test_a_large_theme_keeps_every_member_and_looks_up_every_one():
     syms = [f"S{c}{d}" for c in "AB" for d in "ABCDEFGHIJKL"]                  # 24
     profiles = {s: prof(s, f"Company {s}") for s in syms}
     # Batch 1: "Hardware", not a generic "Products" (folded into the rest, so it would never be a fact)
@@ -6718,8 +7147,11 @@ async def test_a_large_theme_keeps_every_member_but_looks_up_only_the_first_twel
     world["revenue"].default = good
     (rec,) = (await trun(world)).records
     assert len(rec.members) == 24
-    assert world["revenue"].calls == syms[:A.THEME_SEGMENT_LOOKUPS]
-    assert [m.top_segment for m in rec.members] == ["Hardware"] * 12 + [None] * 12
+    # phase 4 (2026-11-20): EVERY member is looked up (the owner's "Arm, Intel and Synopsys": Intel is Silicon Rush's
+    # 20th member, past the old first 16) — no market value here, so in the theme's own order
+    assert A.THEME_SEGMENT_LOOKUPS == R.THEME_MEMBERS[1] == 24 and world["revenue"].calls == syms
+    # ... and the record carries the picture's tiles' facts only (A.THEME_FACT_TILES), the rest named
+    assert [m.top_segment for m in rec.members] == ["Hardware"] * A.THEME_FACT_TILES + [None] * 12
 
 
 @pytest.mark.asyncio
@@ -6734,7 +7166,9 @@ async def test_at_most_two_themes_are_evaluated_per_call():
 async def test_two_share_classes_in_a_theme_are_one_member():
     world = theme_world([theme(tickers=["GOOG", "GOOGL", "NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC"])])
     (rec,) = (await trun(world)).records
-    assert [m.company.symbol for m in rec.members] == ["GOOG", "NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC"]
+    # phase 4: the members with a segment fact first (no market values here: the theme's order), then the rest — GOOG
+    # (no breakdown in this world) is listed once, after them
+    assert [m.company.symbol for m in rec.members] == ["NVDA", "AMD", "AVGO", "QCOM", "GOOG", "MRVL", "INTC"]
 
 
 @pytest.mark.parametrize("over, fact", [
@@ -7208,8 +7642,9 @@ async def test_out_of_budget_on_a_later_wave_keeps_the_records_held(caplog):
 
     caplog.set_level(logging.WARNING, logger=A.__name__)
     fmp = Clocked(calendar=cal, profiles=profiles, currency={"BBB": "EUR"})
-    got = await A.candidates("earnings", run_date=EARN_RUN, exclude=frozenset(), limit=2, deadline=60.0,
-                             deps=A.NewsDeps(fmp=fmp, monotonic=lambda: clock["now"]))
+    with _per_company_bounds(2):
+        got = _Rows(await A.candidates("earnings", run_date=EARN_RUN, exclude=frozenset(), limit=2, deadline=60.0,
+                                       deps=A.NewsDeps(fmp=fmp, monotonic=lambda: clock["now"])))
     # wave 1 = AAA (kept) + BBB (EUR, refused); wave 2 (CCC) finds the budget spent
     assert [r.company.symbol for r in got.records] == ["AAA"]
     assert [s for s, _l in fmp.statement_calls] == ["AAA", "BBB"] and got.rejections == {"non_usd_reporter": 1}
@@ -7285,9 +7720,15 @@ async def test_delta_is_kept_with_the_quarter_its_statement_places_it_in():
     assert (rec.company.symbol, rec.report_date, rec.period_end) == ("DAL", date(2026, 10, 9), date(2026, 9, 30))
     assert (rec.revenue_actual, rec.revenue_estimate) == (20.2e9, 17_651_850_000.0) and got.rejections == {}
     assert fmp.statement_calls == [("DAL", 4)]
-    out = T.compose(rec, run_date=_PERIOD_RUN, store_state="live", allow_x_url=False)
-    assert out["video_script"][0].startswith("These figures cover the quarter that ended September 30")
-    assert out["image_spec"]["subtitle"].startswith("Quarter ended Sep 30, 2026")
+    # news-v23 (one table of 2-4 companies): the post prints DAL's row — EPS and revenue against the estimates —
+    # under the report day; the quarter stays the record's data-quality check, never a drawn string.
+    other = dataclasses.replace(rec, company=R.CompanyRef(symbol="UAL", name="United Airlines"), eps_actual=2.6, eps_estimate=2.4)
+    out = T.compose(R.EarningsDay(series="earnings", reports=(rec, other)), run_date=_PERIOD_RUN,
+                    store_state="live", allow_x_url=False)
+    dal = out["image_spec"]["sections"][0]["rows"][0]
+    assert [line["cells"] for line in dal["table"]] == [["EPS", "$1.77", "$1.86", "+5.1%"],
+                                                        ["Revenue", "$17.7B", "$20.2B", "+14.4%"]]
+    assert out["image_spec"]["subtitle"] == "Reported Oct 9, 2026"
     # Delta's REAL EPS pair that day: a 2.8% gap — no clear surprise, refused before any profile.
     A.clear_memo()
     cal = {"2026-10-09": [erow("DAL", "2026-10-09", 1.72, 1.77, 20.2e9, 17_651_850_000.0)]}
@@ -7835,9 +8276,12 @@ async def test_a_club_class_held_last_quarter_is_never_newly_reported(monkeypatc
         {"symbol": "GOOGL", "name": "Alphabet Inc.", "change": "newly_reported", "shares": 300_000.0, "value": 50e6},
         {"symbol": "CRWV", "name": "CoreWeave", "change": "newly_reported", "shares": 1_000_000.0, "value": 150e6,
          "newly_listed": True},
+        # news-v23: a second eligible holding (a 13F post shows at least two)
+        {"symbol": "AAPL", "name": "Apple Inc.", "change": "newly_reported", "shares": 2_000_000.0, "value": 300e6},
         exit_row])
     got = await run("thirteen_f", FakeFMP(profiles=_alphabet_profiles()), club=club, sb=sb)
-    assert [(m.company.symbol, m.move) for m in got.records[0].moves] == [("CRWV", "newly_reported")]
+    assert [(m.company.symbol, m.move) for m in got.records[0].moves] == [("AAPL", "newly_reported"),
+                                                                           ("CRWV", "newly_reported")]
     assert got.rejections.get("share_class_overlap") == 1
 
 
@@ -7853,18 +8297,23 @@ async def test_a_club_exit_named_the_sec_way_beside_a_class_still_held_is_droppe
     club, sb = _alphabet_club_world(previous, [
         {"symbol": "NWS", "name": "NEWS CORP NEW", "change": "no_longer_reported", "prev_shares": 6_000_000.0},
         {"symbol": "CRWV", "name": "CoreWeave", "change": "newly_reported", "shares": 1_000_000.0, "value": 150e6,
-         "newly_listed": True}], holdings=holdings)
+         "newly_listed": True},
+        {"symbol": "AAPL", "name": "Apple Inc.", "change": "newly_reported", "shares": 2_000_000.0, "value": 300e6}],
+        holdings=holdings)
     profiles = {**thirteen_f_profiles(), "NWS": prof("NWS", "News Corporation", exchange="NASDAQ"),
                 "NWSA": prof("NWSA", "News Corporation", exchange="NASDAQ")}
     got = await run("thirteen_f", FakeFMP(profiles=profiles), club=club, sb=sb)
-    assert [(m.company.symbol, m.move) for m in got.records[0].moves] == [("CRWV", "newly_reported")]
+    assert [(m.company.symbol, m.move) for m in got.records[0].moves] == [("AAPL", "newly_reported"),
+                                                                           ("CRWV", "newly_reported")]
     assert got.rejections == {"share_class_overlap": 1}
     # Control: with NWSA gone from the current book, the exit is published.
     A.clear_memo()
     club, sb = _alphabet_club_world(previous, [
         {"symbol": "NWS", "name": "NEWS CORP NEW", "change": "no_longer_reported", "prev_shares": 6_000_000.0},
         {"symbol": "CRWV", "name": "CoreWeave", "change": "newly_reported", "shares": 1_000_000.0, "value": 150e6,
-         "newly_listed": True}], holdings=[])
+         "newly_listed": True},
+        {"symbol": "AAPL", "name": "Apple Inc.", "change": "newly_reported", "shares": 2_000_000.0, "value": 300e6}],
+        holdings=[])
     got = await run("thirteen_f", FakeFMP(profiles=profiles), club=club, sb=sb)
     assert ("NWS", "no_longer_reported") in [(m.company.symbol, m.move) for m in got.records[0].moves]
 
@@ -7952,7 +8401,11 @@ async def test_a_held_theme_survives_the_next_themes_failed_lookups(variant, cap
     world = dict(fmp=fmp, revenue=revenue, sb=FakeSB({"trending_themes": rows}))
     got = await trun(world, left=2.5 if variant == "lookups_slow" else 60.0)
     assert [r.slug for r in got.records] == ["ai-chips"]
-    assert "unavailable at theme space with 1 record(s) held" in caplog.text
+    # news-v23 phase 3: a failed angle source is that angle's turn lost (the next angle is tried); a profile batch or the
+    # budget running out still ends the walk with the held record
+    assert {"lookups_fail": "space angle make_money unavailable",
+            "lookups_slow": "budget exhausted at theme space angle make_money with 1 record(s) held",
+            "profiles_fail": "unavailable at theme space with 1 record(s) held"}[variant] in caplog.text
     # Nothing held (theme 2 alone): the series raises, as before.
     A.clear_memo()
     world = dict(fmp=(_SpaceProfilesDown if variant == "profiles_fail" else FakeFMP)(profiles=profiles),
@@ -8132,10 +8585,13 @@ async def test_a_stale_roster_day_falls_back_along_the_chain(monkeypatch, tmp_pa
         async def get_script(self, run_id):
             return None
 
-        async def recent_source_refs(self, run_date, limit):
+        async def recent_source_refs(self, run_date, limit, **kw):
             return []
 
-        async def insert_script(self, row):
+        async def lane_scripts_between(self, start_date, end_date):   # the cross-lane read (migration 210): none
+            return []
+
+        async def insert_script(self, row, **kw):
             raise AssertionError("no Form 4 template row may be written")
 
     lessons = []
@@ -8225,18 +8681,20 @@ async def test_a_club_filers_unchecked_options_rule_is_logged_once(monkeypatch, 
 async def test_a_queued_row_of_a_kept_person_is_never_read_again():
     """rr10 lens-1 #1: a spare whose person already holds a kept row is dropped BEFORE its issuer
     read (`same_person`) — the per-issuer reads are bounded (`INSIDER_AMENDMENT_MAX_SYMBOLS`)."""
+    QS = ["QA", "QB", "QC", "QD"]
     big = [irow(sym=s, name=f"QX{s} RYAN", cik=f"000000{i:04d}", shares=200_000 - 1_000 * i, price=25.0)
-           for i, s in enumerate(["QA", "QB", "QC", "QD"])]
+           for i, s in enumerate(QS)]
     rows = big + [irow(sym="PNNT", shares=100_000, price=9.0, **_PENN),
                   irow(sym="PFLT", shares=40_000, price=10.0, **_PENN)]
-    profiles = {**{s: prof(s, f"{s} Industries Inc.") for s in ("QA", "QB", "QC", "QD")}, **_pennant_profiles()}
-    # Wave 1 = QA..QD + PNNT; QA's read fails, so a wave 2 opens for the spare — PFLT, Penn's again.
+    profiles = {**{s: prof(s, f"{s} Industries Inc.") for s in QS}, **_pennant_profiles()}
+    # Wave 1 = QA..QD + PNNT (five: INSIDER_MAX_ROWS); QA's read fails, so a wave 2 opens for the spare — PFLT,
+    # Penn's again.
     fmp = FakeFMP(insider=rows, profiles=profiles,
                   issuer_feed={A.normalize_cik(issuer_cik("QA")): FMPUnavailableException("issuer read down")})
     got = await run("ceo_buys", fmp)
-    assert [r.company.symbol for r in got.records[0].rows] == ["QB", "QC", "QD", "PNNT"]
+    assert [r.company.symbol for r in got.records[0].rows] == [*QS[1:], "PNNT"]
     assert got.rejections == {"amendment_check_failed": 1, "same_person": 1}
-    assert issuer_reads(fmp) == ["PNNT", "QA", "QB", "QC", "QD"]          # PFLT never read
+    assert issuer_reads(fmp) == ["PNNT", *QS]                             # PFLT never read
 
 
 # ── Batch 1 (2026-10-15): the members-elect window (owner decision 4) ─────────
@@ -8336,7 +8794,9 @@ class NoSplitActions:
 
 #: Symbols for the extra positions (no W / U / R ending: never read as a warrant, unit or right).
 _SPLIT_SYMS = [f"Z{a}{b}" for a in "ABCD" for b in "ABCDEFGHIJKLMNOP"]
-_NO_MORE_OR_FEWER = ("more shares", "fewer shares")
+#: news-v23: the 13F list says "Increased to …" / "Reduced to …" and "increased" / "reduced" (the old words kept: a
+#: regression to them must still be caught)
+_NO_MORE_OR_FEWER = ("more shares", "fewer shares", "Increased to", "Reduced to", "increased", "reduced")
 
 
 def _split_registry_world(n_extra: int):
@@ -8392,7 +8852,7 @@ async def test_a_registry_filing_at_the_split_cap_keeps_its_more_and_fewer_moves
     assert "split_unchecked" not in got.rejections and "split_in_window" not in got.rejections
     assert ("AAPL", "increased") in [(m.company.symbol, m.move) for m in rec.moves]
     assert dict(rec.counts) == {"newly_reported": 1, "increased": 26, "decreased": 0, "no_longer_reported": 1}
-    assert "more shares" in _compose_text(rec)
+    assert "Increased to " in _compose_text(rec)                 # news-v23: the 13F list's status word
 
 
 def _club_split_books(n: int):
@@ -8642,7 +9102,9 @@ async def test_a_held_through_split_the_filter_never_flags_is_never_published_as
     assert "KO:split_not_restated" in caplog.text and "(split_in_window)" in caplog.text
     text = _compose_text(rec)
     assert not any(p in text for p in _NO_MORE_OR_FEWER)
-    assert "This post does not show share-count changes" in text    # F13-1's line says why
+    # news-v23 (the 13F list): the roundup never states its counts as the filing's — "2 of the holding changes in …"
+    # says the post shows part of the filing (F13-1's withheld sentence retired with the per-kind counts it qualified)
+    assert "2 of the holding changes in Berkshire Hathaway" in text
     # Control: the same filing with no split anywhere in the seam keeps KO's raw move — the re-check is what drops it.
     A.clear_memo()
     fmp, sb = _ko_world(shares, value)
@@ -9678,9 +10140,11 @@ class _HistoryCountingFMP(FakeFMP2b):
 
 
 @pytest.mark.asyncio
-async def test_a_two_basis_revenue_pair_is_held_for_its_eps_and_never_printed():
+async def test_a_two_basis_revenue_pair_is_held_and_printed_since_revenue_always():
     """GE Aerospace and Travelers (Q3 2025) are held, the larger first, each placed in its quarter by ONE statement
-    read and nothing more — and each composes an EPS-only post: no revenue word or figure in any string."""
+    read and nothing more. news-v23 (owner 2026-11-19, "Revenue always"): their post prints the revenue pair too —
+    the owner ACCEPTS the GE-type risk (a consensus on another basis than the reported figure); the table's note and
+    the narration's basis line say the estimate's basis can differ."""
     profiles, calendar, currency = {}, {}, {}
     for sym, (name, day, a, e, ra, re_, gaap, sector, industry, quarters) in _TWO_BASIS_2025.items():
         profiles[sym] = prof(sym, name, cap=200e9 if sym == "GE" else 60e9, sector=sector, industry=industry)
@@ -9693,13 +10157,12 @@ async def test_a_two_basis_revenue_pair_is_held_for_its_eps_and_never_printed():
         ("GE", date(2025, 9, 30), 12.221e9, 10.385e9), ("TRV", date(2025, 9, 30), 12.470e9, 11.688e9)]
     assert got.rejections == {} and fmp.calls["history"] == 0
     assert sorted(fmp.statement_calls) == [("GE", 4), ("TRV", 4)]
-    for rec, head in zip(got.records, ("GE Aerospace reported EPS of $1.66 vs an analyst estimate of $1.46.",
-                                       "Travelers reported EPS of $8.14 vs an analyst estimate of $6.39.")):
-        out = NT.compose(rec, run_date=_TWO_BASIS_RUN, store_state="live", allow_x_url=False)
-        blob = json.dumps(out).lower()
-        assert "revenue" not in blob and "billion" not in blob and "$12." not in blob, rec.company.symbol
-        assert [r["cells"][0] for r in out["image_spec"]["sections"][0]["rows"]] == ["EPS"]
-        assert out["captions"]["x"].startswith(head)
+    out = NT.compose(got.record, run_date=_TWO_BASIS_RUN, store_state="live", allow_x_url=False)
+    rows = out["image_spec"]["sections"][0]["rows"]
+    assert [[line["cells"][0] for line in row["table"]] for row in rows] == [["EPS", "Revenue"], ["EPS", "Revenue"]]
+    assert [row["table"][1]["cells"][1:3] for row in rows] == [["$10.4B", "$12.2B"], ["$11.7B", "$12.5B"]]
+    assert out["image_spec"]["notes"] == [NT.LEXICON["er.img.note"]]
+    assert any(NT.LEXICON["er.m.basis"] == line for line in out["video_script"])
 
 
 @pytest.mark.asyncio
@@ -9764,3 +10227,3359 @@ async def test_a_run_whose_posts_can_go_out_in_the_window_is_built_role_only(mon
     finally:
         monkeypatch.undo()
         R._congress_state.cache_clear()
+
+
+# ══ the spotlight lane (owner decisions 2026-11-15; workstream B2): the two single-company collectors ═══════════════
+#
+# insider_spotlight: ONE issuer's largest qualifying CEO / CFO / director and up to 4 more of it, over a window from the
+# previous spotlight RUN to the day before the newest filing the market-wide walk holds (B decision 5); every Form 4
+# gate of the roundups through the SHARED helpers (`_insider_gated_lines`, `_issuer_lines`, `_reporter_rows`) with two
+# windows (the 4/A / role / co-officer LOOK-BACK, never shorter than the roundups' week; the PURCHASE window a
+# person's row must hold whole); the per-issuer Form 4/A check per PERSON (`_spotlight_checked`); a 14-day issuer
+# cooldown by root symbol and display name (B decision 6); the revenue line for the audited pool only (B decision 8).
+# thirteen_f_spotlight: ONE filer's ONE holding through the roundup's walkers (B decision 7). The roundups' own answers
+# are pinned byte for byte above (`test_a_week_with_no_amendment_is_byte_identical_to_round_6`, every Form 4 shape).
+
+#: Thursday Nov 19, 2026 — a Tue/Thu/Sat spotlight day; the previous spotlight run was Tuesday the 17th.
+SPOT_RUN, SPOT_PREV = date(2026, 11, 19), date(2026, 11, 17)
+SPOT_SAT, SPOT_NEXT_TUE = date(2026, 11, 21), date(2026, 11, 24)
+assert (SPOT_RUN.weekday(), SPOT_PREV.weekday(), SPOT_SAT.weekday(), SPOT_NEXT_TUE.weekday()) == (3, 1, 5, 1)
+#: C0 (2026-11-16): the window starts the day after the last window an earlier insider spotlight CHECKED
+#: (`spotlight_checked_through`). Tuesday's spotlight ran at 10:00 with Monday's filings the newest, so it checked
+#: through Sunday the 15th — Thursday's window starts Monday the 16th. Thursday's checked through Tuesday the 17th
+#: (Wednesday's filings the newest at 10:00); Saturday's through Thursday the 19th.
+SPOT_CHECKED, SPOT_THU_CHECKED, SPOT_SAT_CHECKED = date(2026, 11, 15), date(2026, 11, 17), date(2026, 11, 19)
+
+_CTSO_CEO = dict(sym="CTSO", name="DOE JOHN", cik="0000001001", title="director, officer: Chief Executive Officer")
+_CTSO_DIR = dict(sym="CTSO", name="ROE RICHARD", cik="0000001002", title="director")
+_CTSO_CFO = dict(sym="CTSO", name="POE ANNA", cik="0000001003", title="officer: Chief Financial Officer")
+_CTSO_ISSUER = A.normalize_cik(issuer_cik("CTSO"))
+
+
+def _ctso(base, shares, price, filed, traded, **kw):
+    """One Contoso Form 4 line of ``base``'s person."""
+    return irow(**{**base, "shares": shares, "price": price, "filed": filed, "traded": traded, **kw})
+
+
+def _marker(filed: str) -> Dict[str, Any]:
+    """Another company's purchase filed on ``filed``: the walk's proof the feed passed the day before it."""
+    return irow(sym="KO", name="LEE ANNA", cik="0000000333", filed=filed, traded=filed)
+
+
+def spot_rows(*, marker: Optional[str] = "2026-11-19") -> List[Dict[str, Any]]:
+    """The design's worked example (Contoso, CTSO): the CEO's two lines filed Nov 18 (7,000 @ $142.10 + 7,000 @
+    $143.85 = $2,001,650), a director filed Nov 17 (2,900 @ $141.38 = $410,002), the CFO filed Nov 18 (1,750 @ $142.86
+    = $250,005) — and, unless ``marker`` is None, a run-day filing of another company."""
+    rows = [_ctso(_CTSO_CEO, 7_000, 142.10, "2026-11-18", "2026-11-16"),
+            _ctso(_CTSO_CEO, 7_000, 143.85, "2026-11-18", "2026-11-17"),
+            _ctso(_CTSO_DIR, 2_900, 141.38, "2026-11-17", "2026-11-16"),
+            _ctso(_CTSO_CFO, 1_750, 142.86, "2026-11-18", "2026-11-17")]
+    return rows + ([_marker(marker)] if marker else [])
+
+
+def spot_profiles(**over) -> Dict[str, Any]:
+    return {"CTSO": prof("CTSO", "Contoso Corporation", price=143.0, cap=50e9, ceo="Mr. John Doe", **over),
+            "KO": prof("KO", "The Coca-Cola Company", price=25.0, cap=300e9)}
+
+
+async def spot(fmp, *, run_date=SPOT_RUN, checked=SPOT_CHECKED, recent=(), exclude=(), limit=5, left=60.0, **deps):
+    deps.setdefault("actions", SplitActions())
+    return await A.candidates("insider_spotlight", run_date=run_date, exclude=frozenset(exclude), limit=limit,
+                              deadline=time.monotonic() + left, deps=A.NewsDeps(fmp=fmp, **deps),
+                              spotlight_checked_through=checked, spotlight_recent=tuple(recent))
+
+
+def _people(rec) -> List[tuple]:
+    """The people of the list's LEAD row (owner decisions 2026-11-20: the record is a list of companies; the tests here
+    run one issuer's row with the minimum lowered, `_form4_row_gates_count_from_one_company`)."""
+    return [(p.role, p.person_name, round(p.amount_usd, 2)) for p in rec.companies[0].people]
+
+
+def test_the_spotlight_constants_and_caps():
+    assert A.SPOTLIGHT_ROLES == ("ceo", "cfo", "director")
+    assert A.SPOTLIGHT_PEOPLE_PER_ISSUER == 1 + R.SPOTLIGHT_MAX_OTHERS == 5
+    # B decision 5: the cluster variant's own cap, at least every row a call can return times a full cluster
+    assert A.SPOTLIGHT_AMENDMENT_MAX_PEOPLE >= R.INSIDER_MAX_ROWS * (1 + R.SPOTLIGHT_MAX_OTHERS)
+    assert A.SPOTLIGHT_AMENDMENT_MAX_ISSUERS == A.INSIDER_AMENDMENT_MAX_SYMBOLS
+    assert set(A.COLLECTORS) >= set(selection.SPOTLIGHT_SERIES)
+    assert A.COLLECTORS["insider_spotlight"] is A._collect_insider_spotlight
+    assert A.COLLECTORS["thirteen_f_spotlight"] is A._collect_thirteen_f_spotlight
+
+
+@pytest.mark.asyncio
+async def test_insider_spotlight_builds_one_issuers_cluster_over_its_window():
+    """The worked example: window Mon Nov 16 (the day before the previous run) .. Wed Nov 18 (the day before the
+    run-day filing); the CEO leads, the director and the CFO follow by amount; every person carries the Form 4 lines'
+    OWN cost per share; one per-issuer read serves all three; the walk reads from the run date − 7 (the roundups'
+    memo key) — once."""
+    fmp = FakeFMP(insider=spot_rows(), profiles=spot_profiles())
+    got = await spot(fmp)
+    assert got.skip_reason is None and got.rejections == {}
+    (rec,) = got.records
+    assert isinstance(rec, R.InsiderSpotlight) and rec.series == "insider_spotlight"
+    assert (rec.window_start, rec.window_end) == (date(2026, 11, 16), date(2026, 11, 18))
+    assert R.ledger_key(rec) == "news:insider_spotlight:CTSO:2026-11-16"
+    assert (rec.lead.company.symbol, rec.lead.company.name) == ("CTSO", "Contoso")
+    assert _people(rec) == [("ceo", "John Doe", 2_001_650.0), ("director", "Richard Roe", 410_002.0),
+                            ("cfo", "Anna Poe", 250_005.0)]
+    lead = rec.lead
+    assert (lead.shares, lead.purchases, lead.filing_dates) == (14_000.0, 2, (date(2026, 11, 18),))
+    assert (lead.earliest_trade_date, lead.latest_trade_date) == (date(2026, 11, 16), date(2026, 11, 17))
+    assert (lead.cost_per_share_min_usd, lead.cost_per_share_max_usd) == (142.10, 143.85)
+    assert [(p.cost_per_share_min_usd, p.cost_per_share_max_usd) for p in rec.companies[0].others] == [(141.38, 141.38),
+                                                                                         (142.86, 142.86)]
+    assert len(rec.companies) == 1          # one issuer's row (the minimum lowered for this test); no revenue line
+    assert fmp.calls["insider"] == 1 and fmp.insider_args["since"] == "2026-11-12"
+    assert issuer_reads(fmp) == ["CTSO"] and fmp.issuer_calls[0]["since"] == "2026-11-12"
+    assert fmp.issuer_calls[0]["transaction_type"] is None                  # every code, as the roundups read it
+
+
+@pytest.mark.parametrize("checked, marker, window, walks", [
+    (SPOT_CHECKED, "2026-11-19", ("2026-11-16", "2026-11-18"), ["2026-11-12"]),
+    # no checked window within the cooldown: the run date − 7
+    (None, "2026-11-19", ("2026-11-12", "2026-11-18"), ["2026-11-12"]),
+    (date(2026, 11, 3), "2026-11-19", ("2026-11-12", "2026-11-18"), ["2026-11-12"]),
+    # the feed a day behind (its newest filing is Nov 18's): the window ends Nov 17 and the look-back (end − 6 = Nov
+    # 11) starts before the roundups' walk, so the walk is read again from it
+    (SPOT_CHECKED, None, ("2026-11-16", "2026-11-17"), ["2026-11-12", "2026-11-11"]),
+], ids=["checked_through_sunday", "nothing_checked", "checked_window_older_than_a_week", "feed_a_day_behind"])
+@pytest.mark.asyncio
+async def test_the_window_comes_from_the_last_checked_window_and_the_newest_filing(checked, marker, window, walks):
+    fmp = FakeFMP(insider=spot_rows(marker=marker), profiles=spot_profiles())
+    seen: List[str] = []
+    real = fmp.get_insider_trades_since
+
+    async def spy(since, **kw):
+        if kw.get("company_cik") is None:
+            seen.append(since)
+        return await real(since, **kw)
+
+    fmp.get_insider_trades_since = spy
+    got = await spot(fmp, checked=checked)
+    (rec,) = got.records
+    assert (rec.window_start.isoformat(), rec.window_end.isoformat()) == window
+    assert got.checked_window == (rec.window_start, rec.window_end)       # handed back for the trail (C0)
+    assert seen == walks
+    if marker is None:
+        # Nov 18's filings are the next window's: the director (filed Nov 17) leads alone
+        assert _people(rec) == [("director", "Richard Roe", 410_002.0)]
+        assert {c["since"] for c in fmp.issuer_calls} == {"2026-11-11"}
+
+
+@pytest.mark.asyncio
+async def test_a_saturday_window_ends_on_thursday_and_friday_rolls_into_tuesday():
+    """No Saturday filings: a Saturday run's newest filing is Friday's, so its window ends Thursday; Friday's filing
+    is the NEXT window's (Tuesday's starts the day after the Thursday Saturday checked through) — never lost, never
+    posted twice."""
+    rows = [_ctso(_CTSO_DIR, 2_900, 141.38, "2026-11-19", "2026-11-18"),        # Thursday
+            _ctso(_CTSO_CEO, 7_000, 142.10, "2026-11-20", "2026-11-19")]        # Friday
+    fmp = FakeFMP(insider=rows, profiles=spot_profiles())
+    got = await spot(fmp, run_date=SPOT_SAT, checked=SPOT_THU_CHECKED)
+    (rec,) = got.records
+    assert (rec.window_start, rec.window_end) == (date(2026, 11, 18), date(2026, 11, 19))
+    assert got.checked_window == (date(2026, 11, 18), date(2026, 11, 19))
+    assert _people(rec) == [("director", "Richard Roe", 410_002.0)]           # Friday's CEO line is not in it
+    A.clear_memo()
+    fmp = FakeFMP(insider=rows + [_marker("2026-11-24")], profiles=spot_profiles())
+    got = await spot(fmp, run_date=SPOT_NEXT_TUE, checked=got.checked_window[1])
+    (rec,) = got.records
+    assert (rec.window_start, rec.window_end) == (date(2026, 11, 20), date(2026, 11, 23))
+    assert _people(rec) == [("ceo", "John Doe", 994_700.0)]                   # Friday's, in Tuesday's window
+
+
+@pytest.mark.parametrize("rows", [
+    # the newest filing is Monday's: the window (from Monday) has not been passed
+    [_ctso(_CTSO_DIR, 2_900, 141.38, "2026-11-16", "2026-11-13")],
+    # every filing date is after the run date (junk) or unreadable: nothing proves the feed reached any day
+    [_ctso(_CTSO_DIR, 2_900, 141.38, "2026-11-20", "2026-11-18"),
+     _ctso(_CTSO_CFO, 1_750, 142.86, "2026-11-18", "2026-11-17", filingDate="soon")],
+], ids=["behind_by_a_day", "no_usable_filing_date"])
+@pytest.mark.asyncio
+async def test_a_feed_behind_the_window_is_insider_feed_behind_never_a_skip(rows, caplog):
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp = FakeFMP(insider=rows, profiles=spot_profiles())
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await spot(fmp)
+    assert err.value.reason == "insider_feed_behind" and err.value.series == "insider_spotlight"
+    assert "insider_feed_behind" in R.UNAVAILABLE_REASONS
+    assert fmp.calls["profiles"] == 0 and fmp.calls["insider_issuer"] == 0
+    assert "UNAVAILABLE series=insider_spotlight" in caplog.text and "reason=insider_feed_behind" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_no_new_day_on_a_current_feed_is_a_quiet_skip_never_an_outage(caplog):
+    """C0 (2026-11-16): the Tuesday after Presidents' Day (Tue Feb 17, 2026) at 10:00, no Tuesday filing yet — the
+    newest filing is Friday's (Monday is no business day), and Saturday's spotlight already checked through Thursday:
+    there is no new day to check. The feed is CURRENT (Friday is one business day back), so the answer is the quiet
+    skip ``insider_spotlight_no_new_window`` — nothing checked, no window handed back, no profile or per-issuer read —
+    never ``insider_feed_behind``."""
+    caplog.set_level(logging.INFO, logger=A.__name__)
+    rows = [irow(sym="CTSO", name="ROE RICHARD", cik="0000001002", title="director", shares=2_900, price=141.38,
+                 filed="2026-02-13", traded="2026-02-12"), _marker("2026-02-13")]
+    fmp = FakeFMP(insider=rows, profiles=spot_profiles())
+    got = await spot(fmp, run_date=date(2026, 2, 17), checked=date(2026, 2, 12))
+    assert got.records == () and got.skip_reason == "insider_spotlight_no_new_window"
+    assert got.checked_window is None
+    assert fmp.calls["profiles"] == 0 and fmp.calls["insider_issuer"] == 0
+    assert "insider_spotlight_no_new_window" in R.SKIP_REASONS
+    assert "no new day to check" in caplog.text and "UNAVAILABLE" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_stale_feed_with_no_new_day_is_still_insider_feed_behind():
+    """The twin: the same Tuesday, but the walk's newest filing is from the Tuesday BEFORE (three business days back):
+    the feed is behind — ``insider_feed_behind`` (an outage the digest alerts on), never a quiet skip."""
+    rows = [irow(sym="CTSO", name="ROE RICHARD", cik="0000001002", title="director", shares=2_900, price=141.38,
+                 filed="2026-02-10", traded="2026-02-09")]
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await spot(FakeFMP(insider=rows, profiles=spot_profiles()), run_date=date(2026, 2, 17),
+                   checked=date(2026, 2, 12))
+    assert err.value.reason == "insider_feed_behind"
+
+
+@pytest.mark.asyncio
+async def test_the_checked_window_rides_back_when_nothing_qualifies():
+    """A window checked with nothing qualifying is still CHECKED: the answer hands it back (the script flow records it,
+    so the next spotlight starts after it) — and every other series answers with none."""
+    rows = [irow(sym="CTSO", name="ROE RICHARD", cik="0000001002", title="director", shares=10, price=141.38,
+                 filed="2026-11-18", traded="2026-11-17"), _marker("2026-11-19")]      # below the dollar floor
+    got = await spot(FakeFMP(insider=rows, profiles=spot_profiles()))
+    assert got.records == () and got.skip_reason == "insider_spotlight_none_qualified"
+    assert got.checked_window == (date(2026, 11, 16), date(2026, 11, 18))
+    A.clear_memo()
+    other = await run("ceo_buys", FakeFMP(insider=week_rows(), profiles=week_profiles()))
+    assert other.checked_window is None
+
+
+def test_a_candidates_window_must_be_a_pair_of_dates():
+    for bad in ((date(2026, 11, 18), date(2026, 11, 16)), (date(2026, 11, 16),), ("2026-11-16", "2026-11-18"),
+                (datetime(2026, 11, 16), date(2026, 11, 18))):
+        with pytest.raises(ValueError, match="checked_window"):
+            A.Candidates(series="insider_spotlight", records=(), skip_reason="insider_spotlight_none_qualified",
+                         rejections={}, checked_window=bad)
+
+
+@pytest.mark.asyncio
+async def test_an_empty_walk_is_still_insider_feed_empty():
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await spot(FakeFMP(insider=[], profiles=spot_profiles()))
+    assert err.value.reason == "insider_feed_empty"
+
+
+def _sat_world(extra_walk=(), extra_issuer=(), *, ceo_filed="2026-11-19"):
+    """Saturday Nov 21 (Thursday's spotlight checked through Tuesday, SPOT_THU_CHECKED): window Wed Nov 18 .. Thu Nov
+    19, look-back from Fri Nov 13 (end − 6),
+    before the roundups' walk start (Nov 14) — so the walk is read from Nov 13. CTSO's CEO filed ``ceo_filed``; a
+    Friday filing of another company proves the feed passed Thursday."""
+    rows = [_ctso(_CTSO_CEO, 7_000, 142.10, ceo_filed, "2026-11-17"),
+            _ctso(_CTSO_DIR, 2_900, 141.38, "2026-11-19", "2026-11-18"),
+            _marker("2026-11-20"), *extra_walk]
+    walk = [r for r in rows if r.get("transactionType") == "P-Purchase"]
+    issuer = [r for r in rows if A.normalize_cik(r.get("companyCik")) == _CTSO_ISSUER] + list(extra_issuer)
+    return FakeFMP(insider=walk, profiles=spot_profiles(), issuer_feed={_CTSO_ISSUER: issuer})
+
+
+@pytest.mark.parametrize("where", ["walk", "issuer_read"])
+@pytest.mark.parametrize("filed, refused", [("2026-11-13", True), ("2026-11-12", False)],
+                         ids=["five_days_before_the_window", "before_the_look_back"])
+@pytest.mark.asyncio
+async def test_a_4a_of_the_issuer_filed_days_before_the_window_refuses_the_company(where, filed, refused):
+    """The company-level 4/A rule looks back as far as the roundups do (B decision 5: amend_since = min(window start,
+    window end − 6)): a 4/A of the issuer — another reporter, any code — filed Nov 13, five days before the 2-day
+    window, refuses every person of Contoso, in the market-wide walk or only in the per-issuer read. Filed Nov 12
+    (before the look-back) it does not. Mutation-checked by hand: with the look-back set to the window start, the
+    Nov 13 4/A stood (red)."""
+    amendment = irow(sym="CTSO", name="ZED ZOE", cik="0000001009", title="director", form="4/A", filed=filed,
+                     traded="2026-11-10", tx="P-Purchase" if where == "walk" else "J-Other",
+                     shares=500, price=140.0)
+    fmp = _sat_world(extra_walk=[amendment] if where == "walk" else [],
+                     extra_issuer=[amendment] if where == "issuer_read" else [])
+    got = await spot(fmp, run_date=SPOT_SAT, checked=SPOT_THU_CHECKED)
+    if refused:
+        assert got.records == () and got.skip_reason == "insider_spotlight_none_qualified"
+        assert got.rejections == {"amended_filing": 2}                          # one count per person (CEO, director)
+    else:
+        (rec,) = got.records
+        assert _people(rec) == [("ceo", "John Doe", 994_700.0), ("director", "Richard Roe", 410_002.0)]
+    assert {c["since"] for c in fmp.issuer_calls} <= {"2026-11-13"}
+
+
+@pytest.mark.asyncio
+async def test_an_earlier_purchase_of_the_person_is_another_windows_never_partial():
+    """The PURCHASE window is the spotlight's own two days (B decision 5): the CEO's purchase filed Nov 15 (inside the
+    look-back, before the window) is not a missing line of this row — the CEO leads with the window's line alone. A
+    purchase the window DOES hold but a gate dropped (an implausible price) still refuses the person
+    (``partial_person``), and only that person."""
+    earlier = _ctso(_CTSO_CEO, 3_000, 139.0, "2026-11-15", "2026-11-13")
+    got = await spot(_sat_world(extra_walk=[earlier]), run_date=SPOT_SAT, checked=SPOT_THU_CHECKED)
+    (rec,) = got.records
+    assert _people(rec) == [("ceo", "John Doe", 994_700.0), ("director", "Richard Roe", 410_002.0)]
+    assert rec.lead.filing_dates == (date(2026, 11, 19),) and "partial_person" not in got.rejections
+    A.clear_memo()
+    dropped = _ctso(_CTSO_CEO, 100, 5.0, "2026-11-19", "2026-11-18")        # implausible: $5 against $143
+    got = await spot(_sat_world(extra_walk=[dropped]), run_date=SPOT_SAT, checked=SPOT_THU_CHECKED)
+    (rec,) = got.records
+    assert _people(rec) == [("director", "Richard Roe", 410_002.0)]
+    assert got.rejections == {"price_implausible": 1, "partial_person": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_co_ceo_drops_the_ceo_lines_and_the_rest_of_the_cluster_stands():
+    co = _ctso(dict(sym="CTSO", name="BOND JAMES", cik="0000001004", title="officer: Co-CEO"), 1_000, 142.0,
+               "2026-11-18", "2026-11-17")
+    fmp = FakeFMP(insider=spot_rows() + [co], profiles=spot_profiles())
+    got = await spot(fmp)
+    (rec,) = got.records
+    assert _people(rec) == [("director", "Richard Roe", 410_002.0), ("cfo", "Anna Poe", 250_005.0)]
+    assert got.rejections == {"ambiguous_ceo": 2}            # the co-CEO and the CEO (every CEO line of the issuer)
+
+
+_CTSO_OTHER = dict(sym="CTSO", name="BOND JAMES", cik="0000001004", title="director")
+
+
+@pytest.mark.parametrize("person, text, reason", [
+    # the CEO's own F-coded row (the P walk never returns it) says "Former CEO"
+    (_CTSO_CEO, "officer: Former CEO", "role_uncertain"),
+    # ANOTHER person's row, only in the issuer read, is a co-CEO's: "the company's CEO" is one of two
+    (_CTSO_OTHER, "officer: Co-Chief Executive Officer", "ambiguous_ceo"),
+], ids=["former_ceo", "co_ceo_in_the_issuer_read"])
+@pytest.mark.asyncio
+async def test_the_issuer_read_refuses_one_person_and_the_cluster_keeps_the_rest(person, text, reason):
+    """The per-issuer read runs per PERSON (`_spotlight_checked`): what it shows refuses the CEO alone; the director
+    then leads and the CFO follows."""
+    rows = spot_rows()
+    f_row = _ctso(person, 2_000, 0.0, "2026-11-17", "2026-11-16", tx="F-InKind", title=text)
+    issuer = [r for r in rows if A.normalize_cik(r.get("companyCik")) == _CTSO_ISSUER] + [f_row]
+    fmp = FakeFMP(insider=rows, profiles=spot_profiles(), issuer_feed={_CTSO_ISSUER: issuer})
+    got = await spot(fmp)
+    (rec,) = got.records
+    assert _people(rec) == [("director", "Richard Roe", 410_002.0), ("cfo", "Anna Poe", 250_005.0)]
+    assert got.rejections == {reason: 1}
+    assert issuer_reads(fmp) == ["CTSO"]                        # one read for the three people
+
+
+@pytest.mark.asyncio
+async def test_a_member_of_congress_never_leads_and_never_joins_a_cluster(caplog):
+    caplog.set_level(logging.DEBUG)
+    member_lead = _ctso(dict(sym="CTSO", name="PELOSI NANCY", cik="0000000444", title="director"), 30_000, 142.0,
+                        "2026-11-18", "2026-11-17")
+    got = await spot(FakeFMP(insider=spot_rows() + [member_lead], profiles=spot_profiles()))
+    (rec,) = got.records
+    assert _people(rec)[0] == ("ceo", "John Doe", 2_001_650.0) and len(rec.companies[0].others) == 2
+    assert got.rejections == {"congress_name": 1}
+    A.clear_memo()
+    member_small = _ctso(dict(sym="CTSO", name="PELOSI NANCY", cik="0000000444", title="director"), 1_000, 142.0,
+                         "2026-11-18", "2026-11-17")
+    got = await spot(FakeFMP(insider=spot_rows() + [member_small], profiles=spot_profiles()))
+    (rec,) = got.records
+    assert [p.person_name for p in rec.companies[0].people] == ["John Doe", "Richard Roe", "Anna Poe"]
+    assert got.rejections == {"congress_name": 1}
+    assert "pelosi" not in caplog.text.lower() and "nancy" not in caplog.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_inside_the_members_elect_window_no_spotlight_person_is_built(monkeypatch):
+    """Owner decision 4: Thu Nov 19, 2026 is inside the window (Election Day Nov 3 .. Jan 3) — every person of the
+    cluster is role-only."""
+    monkeypatch.setattr(R, "members_elect_window", REAL_MEMBERS_ELECT_WINDOW)
+    got = await spot(FakeFMP(insider=spot_rows(), profiles=spot_profiles()))
+    (rec,) = got.records
+    assert [(p.role, p.person_name) for p in rec.companies[0].people] == [("ceo", None), ("director", None),
+                                                                         ("cfo", None)]
+
+
+@pytest.mark.asyncio
+async def test_one_listing_per_issuer_the_other_share_class_is_dropped():
+    rows = [irow(sym="BF-B", name="DOE JOHN", cik="0000001011", title="director", shares=26_000, price=30.0,
+                 filed="2026-11-18", traded="2026-11-17", companyCik=issuer_cik("BF")),
+            irow(sym="BF-A", name="ROE RICHARD", cik="0000001012", title="director", shares=14_000, price=30.0,
+                 filed="2026-11-18", traded="2026-11-17", companyCik=issuer_cik("BF")),
+            _marker("2026-11-19")]
+    profiles = {"BF-A": _brown_forman("BF-A"), "BF-B": _brown_forman("BF-B"), **spot_profiles()}
+    issuer_feed = {A.normalize_cik(issuer_cik("BF")): rows[:2]}
+    got = await spot(FakeFMP(insider=rows, profiles=profiles, issuer_feed=issuer_feed))
+    (rec,) = got.records
+    assert rec.lead.company.symbol == "BF-B" and rec.companies[0].others == ()
+    assert got.rejections == {"share_class_overlap": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_partial_person_drops_that_member_only():
+    bad = _ctso(_CTSO_DIR, 100, 5.0, "2026-11-17", "2026-11-16")               # the director's implausible line
+    got = await spot(FakeFMP(insider=spot_rows() + [bad], profiles=spot_profiles()))
+    (rec,) = got.records
+    assert _people(rec) == [("ceo", "John Doe", 2_001_650.0), ("cfo", "Anna Poe", 250_005.0)]
+    assert got.rejections == {"price_implausible": 1, "partial_person": 1}
+
+
+@pytest.mark.asyncio
+async def test_one_person_under_two_reporter_keys_is_never_two_people():
+    """The director's second line carries no reporting CIK (the extractor keys it by name): two reporter groups of ONE
+    person. Each holds a purchase of the person the other does not, so both are refused whole (``partial_person``) —
+    never shown as "a director … and another director", never re-summed."""
+    twin = _ctso(_CTSO_DIR, 1_000, 141.0, "2026-11-17", "2026-11-16", reportingCik=None)
+    got = await spot(FakeFMP(insider=spot_rows() + [twin], profiles=spot_profiles()))
+    (rec,) = got.records
+    assert _people(rec) == [("ceo", "John Doe", 2_001_650.0), ("cfo", "Anna Poe", 250_005.0)]
+    assert got.rejections == {"partial_person": 2}
+
+
+@pytest.mark.asyncio
+async def test_a_person_twice_in_one_issuer_is_kept_once_largest_first():
+    """`same_person` inside one issuer's group (the cluster variant of the roundups' one-row-per-person rule): "Arthur
+    H. Penn" and "Arthur J. Penn" under two CIKs read as one person to the templates (`_person_keys`, initials
+    aside) — the larger stays, the other is dropped, never "a director … and another director"."""
+    rows = spot_rows() + [
+        _ctso(dict(sym="CTSO", name="PENN ARTHUR H", cik="0000001021", title="director"), 2_000, 142.0, "2026-11-17",
+              "2026-11-16"),
+        _ctso(dict(sym="CTSO", name="PENN ARTHUR J", cik="0000001022", title="director"), 1_000, 142.0, "2026-11-17",
+              "2026-11-16")]
+    got = await spot(FakeFMP(insider=rows, profiles=spot_profiles()))
+    (rec,) = got.records
+    assert [p.person_name for p in rec.companies[0].people] == ["John Doe", "Richard Roe", "Arthur H. Penn",
+                                                                 "Anna Poe"]
+    assert got.rejections == {"same_person": 1}
+
+
+@pytest.mark.parametrize("exclude, recent, reason, profiled", [
+    # the root symbol, from the ledger: a window that started within 14 days — no profile call for it
+    (["news:insider_spotlight:CTSO:2026-11-05"], (), "spotlight_cooldown", False),
+    # the same issuer and window already posted
+    (["news:insider_spotlight:CTSO:2026-11-16"], (), "already_posted", False),
+    # the script flow's run-date-exact list: by symbol (before the profile), by display name (after it)
+    ([], (("CTSO", "Contoso"),), "spotlight_cooldown", False),
+    ([], (("", "Contoso"),), "spotlight_cooldown", True),
+    ([], (("", "CONTOSO"),), "spotlight_cooldown", True),
+], ids=["ledger_root_within_14_days", "same_window_posted", "recent_symbol", "recent_name", "recent_name_casefold"])
+@pytest.mark.asyncio
+async def test_an_issuer_spotlighted_within_14_days_is_refused(exclude, recent, reason, profiled):
+    fmp = FakeFMP(insider=spot_rows(), profiles=spot_profiles())
+    got = await spot(fmp, exclude=exclude, recent=recent)
+    assert got.records == () and got.skip_reason == "insider_spotlight_none_qualified"
+    assert got.rejections == {reason: 1}
+    assert any("CTSO" in req for req in fmp.profile_requests) is profiled
+    assert fmp.calls["insider_issuer"] == 0
+
+
+@pytest.mark.parametrize("exclude", [["news:insider_spotlight:CTSO:2026-11-04"], ["news:insider_spotlight:CTSOX:junk"],
+                                     ["news:insider_buys:2026-11-12"], ["news:insider_spotlight:KO:2026-11-16"]],
+                         ids=["window_15_days_old", "malformed_key", "a_roundup_key", "another_issuer"])
+@pytest.mark.asyncio
+async def test_the_cooldown_is_bounded_and_keyed_on_the_issuer(exclude):
+    got = await spot(FakeFMP(insider=spot_rows(), profiles=spot_profiles()), exclude=exclude)
+    assert [r.lead.company.symbol for r in got.records] == ["CTSO"] and got.rejections == {}
+
+
+@pytest.mark.asyncio
+async def test_a_share_class_twin_is_cooled_by_its_root_symbol():
+    rows = [irow(sym="BF-B", name="DOE JOHN", cik="0000001011", title="director", shares=26_000, price=30.0,
+                 filed="2026-11-18", traded="2026-11-17", companyCik=issuer_cik("BF")), _marker("2026-11-19")]
+    profiles = {"BF-B": _brown_forman("BF-B"), **spot_profiles()}
+    got = await spot(FakeFMP(insider=rows, profiles=profiles), recent=(("BF-A", ""),))
+    assert got.records == () and got.rejections == {"spotlight_cooldown": 1}
+    A.clear_memo()
+    got = await spot(FakeFMP(insider=rows, profiles=profiles), exclude=["news:insider_spotlight:BF-A:2026-11-10"])
+    assert got.records == () and got.rejections == {"spotlight_cooldown": 1}
+
+
+@pytest.mark.parametrize("symbol, root", [
+    ("BF-B", "BF"), ("BRK-A", "BRK"), ("GOOGL", "GOOG"), ("LBRDA", "LBRD"), ("WAFDP", "WAFD"), ("CTSO", "CTSO"),
+    ("A", "A"), ("CMPRF", "CMPRF"), ("NSRGY", "NSRGY"),
+])
+def test_the_issuer_root(symbol, root):
+    assert A._issuer_root(symbol) == root
+
+
+@pytest.mark.asyncio
+async def test_the_roundup_rows_carry_the_lines_own_cost_per_share():
+    """B decision 1 at the roundups too: GameStop's CEO bought at $25.00 and $25.50 (as filed) while the PROFILE says
+    $25.20 — the row carries the lines' figures, never the profile's (the leak test plants the profile price as a
+    canary)."""
+    got = await run("ceo_buys", FakeFMP(insider=week_rows(), profiles=week_profiles()))
+    gme = got.records[0].rows[0]
+    assert (gme.cost_per_share_min_usd, gme.cost_per_share_max_usd) == (25.0, 25.5)
+    fox = got.records[0].rows[1]
+    assert (fox.cost_per_share_min_usd, fox.cost_per_share_max_usd) == (30.0, 30.0)
+
+
+def _seed(monkeypatch, *syms):
+    monkeypatch.setattr(R, "MONEY_MAP_SEED", tuple(syms))
+
+
+_CTSO_BD = breakdown(symbol="CTSO", revenue_sources=[src("Cloud Services", 189e9), src("Devices", 110e9),
+                                                     src("Other", 51e9)])
+
+
+@pytest.mark.asyncio
+async def test_the_insider_list_reads_no_revenue_line(monkeypatch):
+    """Owner decisions 2026-11-20: the one-issuer post's revenue line (B decision 8) is retired with it — the insider
+    list makes no revenue read at all, even for a company in the audited pool."""
+    _seed(monkeypatch, "AAPL", "CTSO")
+    revenue = FakeService({"CTSO": _CTSO_BD})
+    got = await spot(FakeFMP(insider=spot_rows(), profiles=spot_profiles()), revenue=revenue)
+    (rec,) = got.records
+    assert _people(rec)[0] == ("ceo", "John Doe", 2_001_650.0) and revenue.calls == []
+    assert not hasattr(A, "_spotlight_segments") and not hasattr(A, "_with_segment")
+
+
+@pytest.mark.asyncio
+async def test_the_issuers_rank_by_their_leads_amount_and_the_limit_holds(real_min_rows):
+    """Owner decisions 2026-11-20 ("3 - 5 companies at once"): ONE list record of every issuer, ranked by its row's
+    TOTAL (Contoso's three people, $2,661,657, under FOX's one director's $3M); `limit` (the number of RECORDS) never
+    cuts the list — it is one record."""
+    rows = spot_rows() + [
+        irow(sym="FOX", name="SMITH JOHN", cik="0000000111", title="director", shares=100_000, price=30.0,
+             filed="2026-11-17", traded="2026-11-16"),
+        irow(sym="GME", name="COHEN RYAN", cik="0001767470", shares=10_000, price=25.0, filed="2026-11-18",
+             traded="2026-11-17")]
+    profiles = {**spot_profiles(), **week_profiles()}
+    got = await spot(FakeFMP(insider=rows, profiles=profiles))
+    (rec,) = got.records
+    assert [(c.company.symbol, round(c.total_usd)) for c in rec.companies] == [
+        ("FOX", 3_000_000), ("CTSO", 2_661_657), ("GME", 250_000)]
+    assert R.ledger_key(rec) == "news:insider_spotlight:FOX+CTSO+GME:2026-11-16"
+    A.clear_memo()
+    got = await spot(FakeFMP(insider=rows, profiles=profiles), limit=1)
+    assert [R.record_to_dict(r) for r in got.records] == [R.record_to_dict(rec)]
+
+
+@pytest.mark.parametrize("kw", [
+    {"checked": datetime(2026, 11, 17, 10)}, {"checked": SPOT_RUN}, {"checked": date(2026, 11, 20)},
+    {"checked": "2026-11-17"}, {"recent": (("CTSO",),)}, {"recent": (("ctso", "Contoso"),)},
+    {"recent": (("", ""),)}, {"recent": ((1, "x"),)}, {"recent": "CTSO"}, {"recent": (("", "x" * 81),)},
+    {"recent": tuple(("", f"Co {i}") for i in range(A.SPOTLIGHT_RECENT_MAX + 1))},
+])
+@pytest.mark.asyncio
+async def test_bad_spotlight_inputs_are_value_errors(kw):
+    with pytest.raises(ValueError):
+        await spot(FakeFMP(insider=spot_rows(), profiles=spot_profiles()), **kw)
+
+
+@pytest.mark.asyncio
+async def test_the_roundups_ignore_the_spotlight_inputs():
+    """ceo_buys with the spotlight inputs answers exactly as without them (they are the insider spotlight's only)."""
+    base = await run("ceo_buys", FakeFMP(insider=week_rows(), profiles=week_profiles()))
+    A.clear_memo()
+    got = await A.candidates("ceo_buys", run_date=RUN, exclude=frozenset(), limit=5, deadline=time.monotonic() + 60,
+                             deps=A.NewsDeps(fmp=FakeFMP(insider=week_rows(), profiles=week_profiles()),
+                                             actions=SplitActions()),
+                             spotlight_checked_through=date(2026, 11, 14), spotlight_recent=(("GME", "GameStop"),))
+    assert [R.record_to_dict(r) for r in got.records] == [R.record_to_dict(r) for r in base.records]
+    assert dict(got.rejections) == dict(base.rejections)
+
+
+@pytest.mark.asyncio
+async def test_the_spotlight_issuer_check_caps_hold(monkeypatch):
+    """The cluster variant checks at most `SPOTLIGHT_AMENDMENT_MAX_ISSUERS` issuers: with every check failing, the
+    walk stops there (one per-issuer read each) and the series answers nothing qualified."""
+    monkeypatch.setattr(A, "SPOTLIGHT_AMENDMENT_MAX_ISSUERS", 2)
+    monkeypatch.setattr(A, "SPOTLIGHT_AMENDMENT_MAX_PEOPLE", 2 * A.SPOTLIGHT_PEOPLE_PER_ISSUER)
+    syms = ["AAA", "BBB", "CCC", "DDD"]
+    rows = [irow(sym=s, name=f"DOE {s}", cik=f"000000{i:04d}", title="director", shares=10_000 * (5 - i), price=25.0,
+                 filed="2026-11-18", traded="2026-11-17") for i, s in enumerate(syms)] + [_marker("2026-11-19")]
+    profiles = {s: prof(s, f"{s.title()} Industries Inc.") for s in syms}
+    issuer_feed = {A.normalize_cik(issuer_cik(s)): FMPUnavailableException("down") for s in syms}
+    fmp = FakeFMP(insider=rows, profiles={**profiles, **spot_profiles()}, issuer_feed=issuer_feed)
+    got = await spot(fmp)
+    assert got.records == () and got.rejections == {"amendment_check_failed": 2}
+    assert issuer_reads(fmp) == ["AAA", "BBB"]
+
+
+# ── thirteen_f_spotlight ──────────────────────────────────────────────────────
+
+
+def _soros_world(aapl_q3=(1_200_000, 240e6), *, aapl_q2=(1_000_000, 200e6), others=True, whales=None):
+    """Soros' 2026-Q3 13F against Q2 (a registry filer, never a lead): AAPL as given, KO unchanged, and — with
+    ``others`` — CRWV newly reported ($50M) and OXY no longer reported ($100M the quarter before)."""
+    cik = SOROS
+    q3 = [xrow(cik, 3, "AAPL", "037833100", *aapl_q3), xrow(cik, 3, "KO", "191216100", 1_000_000, 70e6)]
+    q2 = [xrow(cik, 2, "AAPL", "037833100", *aapl_q2), xrow(cik, 2, "KO", "191216100", 1_000_000, 70e6)]
+    if others:
+        q3.append(xrow(cik, 3, "CRWV", "21873S108", 500_000, 50e6))
+        q2.append(xrow(cik, 2, "OXY", "674599105", 2_000_000, 100e6))
+    extracts = {(cik, 2026, 3): q3, (cik, 2026, 2): q2}
+    whales = whales or [whale(SOROS, "Soros Fund Management")]
+    for w in whales:
+        if w["cik"] != SOROS:
+            extracts.update(book(filer(w["cik"])))
+    return registry_world(whales, extracts=extracts)
+
+
+def _spot_holding_of(rec) -> tuple:
+    """The LEAD holding (the largest: its symbol keys the ledger) of a 13F spotlight."""
+    mv = rec.moves[0]
+    return (mv.company.symbol, mv.move, mv.shares, mv.prev_shares)
+
+
+@pytest.mark.asyncio
+async def test_the_13f_spotlight_picks_one_filers_largest_holding():
+    """Soros' book: AAPL +20% (under the spotlight's 25%), CRWV new ($50M), OXY exited ($100M the quarter before) —
+    the largest dollar size (`R.thirteen_f_move_flow`) is the pick: OXY."""
+    fmp, sb = _soros_world()
+    got = await run("thirteen_f_spotlight", fmp, sb=sb)
+    (rec,) = got.records
+    assert isinstance(rec, R.ThirteenFSpotlight) and rec.series == "thirteen_f_spotlight"
+    assert (rec.filer_name, rec.filer_cik, rec.period, rec.period_end, rec.filed_on, rec.amended_on) == (
+        "Soros Fund Management", SOROS, "2026-Q3", date(2026, 9, 30), date(2026, 11, 14), None)
+    assert _spot_holding_of(rec) == ("OXY", "no_longer_reported", None, 2_000_000.0)
+    # owner feedback 2026-11-19: the list — every eligible holding, the largest dollar size first (OXY's $100M exit,
+    # CRWV's $50M new holding); the ledger keys the LEAD
+    assert [(m.company.symbol, m.move) for m in rec.moves] == [("OXY", "no_longer_reported"),
+                                                               ("CRWV", "newly_reported")]
+    # the filing's own counts: CRWV new, AAPL more (under 25%: not shown), OXY gone — 3 changes, 2 shown: "2 of …"
+    assert rec.eligible_moves == 2 and rec.filing_moves == 3
+    assert not R.thirteen_f_spotlight_lists_every_change(rec)
+    assert R.ledger_key(rec) == f"news:thirteen_f_spotlight:{SOROS}:2026-Q3:OXY"
+    assert R.source_label(rec) == "SEC Form 13F"
+    assert got.rejections == {"spotlight_change_too_small": 1}
+
+
+@pytest.mark.asyncio
+async def test_the_13f_spotlight_is_off_season_with_no_call():
+    fmp, sb = _soros_world()
+    got = await run("thirteen_f_spotlight", fmp, sb=sb, run_date=date(2026, 10, 12))
+    assert got.records == () and got.skip_reason == "thirteen_f_off_season"
+    assert fmp.calls == Counter() and sb.calls == Counter()
+
+
+@pytest.mark.asyncio
+async def test_the_lead_filer_is_reserved_for_the_main_lane_and_never_read():
+    fmp, sb = _soros_world(whales=[whale(BERKSHIRE, "Berkshire Hathaway", "BRK-A"),
+                                   whale(SOROS, "Soros Fund Management")])
+    got = await run("thirteen_f_spotlight", fmp, sb=sb)
+    assert [r.filer_cik for r in got.records] == [SOROS]
+    assert fmp.dates_ciks == [SOROS] and all(k[0] != BERKSHIRE for k in fmp.extract_keys)
+    assert got.rejections["lead_filer_reserved"] == 1
+
+
+@pytest.mark.parametrize("posted", [
+    f"news:thirteen_f:{SOROS}:2026-Q3",                       # the main lane's roundup posted the filer
+    f"news:thirteen_f_spotlight:{SOROS}:2026-Q3:CRWV",       # a spotlight of ANOTHER holding of the filer
+], ids=["roundup_posted", "spotlight_posted"])
+@pytest.mark.asyncio
+async def test_one_13f_post_per_filer_per_quarter_the_spotlight_skips(posted):
+    fmp, sb = _soros_world()
+    got = await run("thirteen_f_spotlight", fmp, sb=sb, exclude=[posted])
+    assert got.records == () and got.skip_reason == "thirteen_f_spotlight_none_qualified"
+    assert got.rejections == {"already_posted": 1} and fmp.dates_ciks == []
+
+
+@pytest.mark.parametrize("posted, skipped", [
+    (f"news:thirteen_f_spotlight:{SOROS}:2026-Q3:OXY", True),
+    (f"news:thirteen_f_spotlight:{SOROS}:2026-Q2:OXY", False),       # another quarter
+    (f"news:thirteen_f_spotlight:{SCION}:2026-Q3:OXY", False),       # another filer
+    ("news:thirteen_f_spotlight:junk", False),
+], ids=["same_quarter", "another_quarter", "another_filer", "malformed"])
+@pytest.mark.asyncio
+async def test_the_main_roundup_skips_a_filer_the_spotlight_posted(posted, skipped):
+    fmp, sb = _soros_world()
+    got = await run("thirteen_f", fmp, sb=sb, exclude=[posted])
+    assert ([r.filer_cik for r in got.records] == []) is skipped
+    assert (got.rejections.get("already_posted") == 1) is skipped
+
+
+def test_the_widened_exclude_maps_spotlight_keys_and_leaves_the_rest():
+    base = frozenset({f"news:thirteen_f:{BERKSHIRE}:2026-Q3", "news:money_map:AAPL:2025", "junk"})
+    assert A._widened_13f_exclude(base) == base                        # no spotlight key: unchanged
+    wide = A._widened_13f_exclude(base | {f"news:thirteen_f_spotlight:{SOROS}:2026-Q3:OXY"})
+    assert wide - base == {f"news:thirteen_f_spotlight:{SOROS}:2026-Q3:OXY", f"news:thirteen_f:{SOROS}:2026-Q3"}
+
+
+@pytest.mark.parametrize("aapl_q3, kept", [
+    ((1_250_000, 250e6), True), ((1_249_999, 249_999_800.0), False),         # +25% exactly / just under
+    ((750_000, 150e6), True), ((750_001, 150_000_200.0), False),             # −25% exactly / just under
+], ids=["up_25", "up_under_25", "down_25", "down_under_25"])
+@pytest.mark.asyncio
+async def test_a_more_or_fewer_holding_needs_a_25_percent_change(aapl_q3, kept):
+    """B decision 7 / `R.THIRTEEN_F_SPOTLIGHT_MIN_CHANGE`, exact at the boundary: AAPL's row is on the list at a 25%
+    change and off it just under (news-v23: beside CRWV's new holding and OXY's closed-out one — a list holds two to
+    eight holdings, never one)."""
+    fmp, sb = _soros_world(aapl_q3)
+    got = await run("thirteen_f_spotlight", fmp, sb=sb)
+    (rec,) = got.records
+    aapl = [(m.move, m.shares, m.prev_shares) for m in rec.moves if m.company.symbol == "AAPL"]
+    if kept:
+        assert aapl == [("increased" if aapl_q3[0] > 1_000_000 else "decreased", float(aapl_q3[0]), 1_000_000.0)]
+        assert got.rejections == {}
+    else:
+        assert aapl == [] and got.rejections == {"spotlight_change_too_small": 1}
+    assert {m.company.symbol for m in rec.moves} >= {"CRWV", "OXY"}
+
+
+@pytest.mark.asyncio
+async def test_a_one_move_filing_is_no_13f_post_in_either_lane():
+    """news-v23 (owner 2026-11-19, "the range from 2 to 6 are okay"): NO single-holding 13F post anywhere — a filing
+    with one eligible holding yields nothing in the roundup and nothing in the spotlight (``too_few_holdings``; the
+    walk, then the chain, moves on). Before, the spotlight posted it alone."""
+    fmp, sb = _soros_world((1_500_000, 300e6), others=False)
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert got.records == () and got.rejections.get("too_few_holdings") == 1
+    A.clear_memo()
+    fmp, sb = _soros_world((1_500_000, 300e6), others=False)
+    got = await run("thirteen_f_spotlight", fmp, sb=sb)
+    assert got.records == () and got.rejections.get("too_few_holdings") == 1
+    assert got.skip_reason == "thirteen_f_spotlight_none_qualified"
+
+
+@pytest.mark.asyncio
+async def test_a_split_restated_holding_is_never_the_spotlight():
+    """The content review's major #3: a 2:1 split the BUILD restated (1.0M → 2.0M previous shares, now 1.8M: −10%)
+    stays in the roundup ("reported fewer shares" is true) — but "down from 2 million the quarter before" would print
+    a count the previous 13F never reported, so the spotlight refuses it (``split_restated``, carried out of band) and
+    picks among the rest."""
+    split = SplitActions(splits={"AAPL": [split_row("2026-08-14", 2, 1)]})
+    fmp, sb = _soros_world((1_800_000, 180e6))
+    got = await run("thirteen_f", fmp, sb=sb, actions=split)
+    aapl = next(m for m in got.records[0].moves if m.company.symbol == "AAPL")
+    assert (aapl.move, aapl.shares, aapl.prev_shares) == ("decreased", 1_800_000.0, 2_000_000.0)    # restated
+    A.clear_memo()
+    split = SplitActions(splits={"AAPL": [split_row("2026-08-14", 2, 1)]})
+    fmp, sb = _soros_world((1_800_000, 180e6))
+    got = await run("thirteen_f_spotlight", fmp, sb=sb, actions=split)
+    (rec,) = got.records
+    assert _spot_holding_of(rec) == ("OXY", "no_longer_reported", None, 2_000_000.0)
+    assert got.rejections == {"split_restated": 1}
+    assert "R" not in {f.name[0] for f in dataclasses_fields(rec)}               # no restated flag on the record
+
+
+@pytest.mark.asyncio
+async def test_withheld_counts_leave_only_the_new_and_exited_holdings(caplog):
+    """A filing whose more / fewer moves were withheld (a failed split lookup: both counts left out) offers only its
+    newly reported and exited holdings — AAPL's +50% is never a candidate."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp, sb = _soros_world((1_500_000, 300e6))
+    got = await run("thirteen_f_spotlight", fmp, sb=sb, actions=SplitActions(fail={"AAPL"}))
+    (rec,) = got.records
+    assert _spot_holding_of(rec) == ("OXY", "no_longer_reported", None, 2_000_000.0)
+    assert got.rejections == {"split_in_window": 1}
+
+
+def _spot_filing(moves, *, counts=None, amended_on=None):
+    """A `ThirteenFFiling` the walkers could have built (Soros, 2026-Q3)."""
+    counts = counts if counts is not None else (("newly_reported", 1), ("increased", 1), ("decreased", 0),
+                                                ("no_longer_reported", 1))
+    return R.ThirteenFFiling(series="thirteen_f", filer_name="Soros Fund Management", filer_cik=SOROS, filer_symbol=None,
+                             period="2026-Q3", period_end=date(2026, 9, 30), filed_on=date(2026, 11, 14),
+                             amended_on=amended_on, total_value_usd=1e9, position_count=10, moves=tuple(moves),
+                             counts=tuple(counts))
+
+
+def _spot_mv(sym, move, shares=None, prev=None, value=None, prev_value=None):
+    return R.ThirteenFMove(company=R.CompanyRef(symbol=sym, name=f"{sym.title()} Co"), move=move, shares=shares,
+                           prev_shares=prev, value_usd=value, listed_on=None, prev_value_usd=prev_value)
+
+
+_BIG_MORE = _spot_mv("AAPL", "increased", 1_500_000.0, 1_000_000.0, 300e6)        # flow $100M
+_SMALL_NEW = _spot_mv("CRWV", "newly_reported", 500_000.0, None, 50e6)            # flow $50M
+_EXIT = _spot_mv("OXY", "no_longer_reported", None, 2_000_000.0, None, 80e6)      # flow $80M
+
+
+def _ctx13s(**split):
+    ctx = A._Ctx("thirteen_f_spotlight", RUN, frozenset(), 5, time.monotonic() + 60, A.NewsDeps())
+    ctx.split_checked.update(split.get("checked", {}))
+    ctx.split_restated_any.update(split.get("any", set()))
+    return ctx
+
+
+@pytest.mark.parametrize("checked, any_restated, pick, reason", [
+    ({(SOROS, "2026-Q3"): frozenset()}, set(), "AAPL", None),                            # vouched: the largest
+    ({}, set(), "OXY", "split_unchecked"),                                               # never re-checked
+    ({(SOROS, "2026-Q3"): frozenset({"AAPL"})}, set(), "OXY", "split_restated"),          # restated by the build
+    ({(SOROS, "2026-Q3"): frozenset({"AAPL"})}, {(SOROS, "2026-Q2")}, "OXY", "split_restated"),
+    ({(SOROS, "2026-Q3"): frozenset({"KO"})}, {(SOROS, "2026-Q3")}, "OXY", "split_restated"),   # a club filing
+], ids=["vouched", "unchecked", "restated_symbol", "restated_symbol_other_quarter_any", "club_any_restated"])
+def test_the_holding_pick_and_its_split_gates(checked, any_restated, pick, reason):
+    ctx = _ctx13s(checked=checked, any=any_restated)
+    got = A._spotlight_holding(ctx, _spot_filing([_SMALL_NEW, _BIG_MORE, _EXIT]))
+    assert got.moves[0].company.symbol == pick
+    assert dict(ctx.rejections) == ({reason: 1} if reason else {})
+
+
+def test_withheld_counts_never_carry_a_more_or_fewer_move():
+    """With both counts withheld the record itself refuses a more / fewer move (`ThirteenFFiling`: a move shown needs
+    its count) — the walkers drop those moves first (`_more_fewer_dropped`) — so the spotlight's own `vouched` check is
+    the backstop for the one shape a record allows: counts kept but the re-check never recorded (above, `unchecked`)."""
+    with pytest.raises(ValueError, match="increased count below"):
+        _spot_filing([_SMALL_NEW, _BIG_MORE, _EXIT], counts=(("newly_reported", 1), ("no_longer_reported", 1)))
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    rec = _spot_filing([_SMALL_NEW, _EXIT], counts=(("newly_reported", 1), ("no_longer_reported", 1)))
+    assert A._spotlight_holding(ctx, rec).moves[0].company.symbol == "OXY" and dict(ctx.rejections) == {}
+
+
+def test_the_largest_flow_wins_and_ties_break_by_kind_then_symbol():
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    tied_new = _spot_mv("ZZZ", "newly_reported", 500_000.0, None, 80e6)                 # $80M, as the exit
+    assert A._spotlight_holding(ctx, _spot_filing([tied_new, _EXIT])).moves[0].company.symbol == "ZZZ"     # new before exit
+    assert A._spotlight_holding(ctx, _spot_filing([_SMALL_NEW, _EXIT])).moves[0].company.symbol == "OXY"
+    unknown = _spot_mv("QQQ", "no_longer_reported", None, 1.0, None, None)            # no size: last
+    assert A._spotlight_holding(ctx, _spot_filing([unknown, _SMALL_NEW])).moves[0].company.symbol == "CRWV"
+
+
+# ── owner feedback 2026-11-19: the 13F spotlight LIST — the largest five eligible holdings of the filing ────────────
+
+
+def _flow_mv(sym, move, flow, i=0):
+    """A move of dollar size `flow` (`R.thirteen_f_move_flow`): more / fewer by a third of 3M shares, a new holding of
+    its value, an exit of its previous value."""
+    if move == "increased":
+        return _spot_mv(sym, move, 3_000_000.0, 2_000_000.0, flow * 3)
+    if move == "decreased":
+        return _spot_mv(sym, move, 2_000_000.0, 3_000_000.0, flow * 2)
+    if move == "newly_reported":
+        return _spot_mv(sym, move, 1_000_000.0 + i, None, flow)
+    return _spot_mv(sym, move, None, 1_000_000.0 + i, None, flow)
+
+
+_EIGHT = [_flow_mv("AAA", "decreased", 80e6), _flow_mv("BBB", "newly_reported", 70e6),
+          _flow_mv("CCC", "increased", 60e6), _flow_mv("DDD", "no_longer_reported", 50e6),
+          _flow_mv("EEE", "decreased", 40e6), _flow_mv("FFF", "newly_reported", 30e6, 1),
+          _flow_mv("GGG", "increased", 20e6), _flow_mv("HHH", "no_longer_reported", 10e6, 1)]
+_EIGHT_COUNTS = (("newly_reported", 2), ("increased", 2), ("decreased", 2), ("no_longer_reported", 2))
+
+
+def test_the_spotlight_list_is_every_eligible_holding_by_flow_in_the_records_order():
+    """news-v23: the record holds up to `R.THIRTEEN_F_SPOTLIGHT_MAX_MOVES` (8) eligible holdings, largest flow first —
+    the picture draws six and says "+2 more changes in the caption"; the ledger keys the lead."""
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    rec = A._spotlight_holding(ctx, _spot_filing(list(reversed(_EIGHT)), counts=_EIGHT_COUNTS))
+    assert [m.company.symbol for m in rec.moves] == ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF", "GGG", "HHH"]
+    assert (rec.eligible_moves, rec.filing_moves) == (8, 8) and dict(ctx.rejections) == {}
+    assert R.ledger_key(rec) == f"news:thirteen_f_spotlight:{SOROS}:2026-Q3:AAA"              # the lead's symbol
+    assert R.thirteen_f_spotlight_lists_every_change(rec)                                      # 8 of 8
+
+
+def test_the_spotlight_list_breaks_a_tie_of_size_by_kind_then_symbol():
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    tied = [_flow_mv("ZZZ", "decreased", 50e6), _flow_mv("AAA", "decreased", 50e6), _flow_mv("MMM", "increased", 50e6),
+            _flow_mv("QQQ", "no_longer_reported", 50e6), _flow_mv("YYY", "newly_reported", 50e6)]
+    rec = A._spotlight_holding(ctx, _spot_filing(tied, counts=(("newly_reported", 1), ("increased", 1),
+                                                                 ("decreased", 2), ("no_longer_reported", 1))))
+    assert [m.company.symbol for m in rec.moves] == ["YYY", "QQQ", "MMM", "AAA", "ZZZ"]
+    assert R.thirteen_f_spotlight_lists_every_change(rec)                                      # 5 of 5
+
+
+def test_one_gate_drops_one_move_and_the_list_keeps_the_rest():
+    """A split the build restated drops THAT holding only (``split_restated``); a change under 25% drops its own
+    (``spotlight_change_too_small``); the rest stay, in order."""
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset({"AAA"})})
+    small = _spot_mv("SML", "increased", 1_200_000.0, 1_000_000.0, 600e6)                   # +20%, $100M
+    rec = A._spotlight_holding(ctx, _spot_filing([*_EIGHT[:4], small], counts=(
+        ("newly_reported", 1), ("increased", 2), ("decreased", 1), ("no_longer_reported", 1))))
+    assert [m.company.symbol for m in rec.moves] == ["BBB", "CCC", "DDD"]
+    assert dict(ctx.rejections) == {"split_restated": 1, "spotlight_change_too_small": 1}
+    assert (rec.eligible_moves, rec.filing_moves) == (3, 5)
+
+
+def test_an_unvouched_filing_lists_only_its_new_and_exited_holdings():
+    ctx = _ctx13s()                                                                            # never re-checked
+    rec = A._spotlight_holding(ctx, _spot_filing(_EIGHT[:5], counts=(("newly_reported", 1), ("increased", 1),
+                                                                     ("decreased", 2), ("no_longer_reported", 1))))
+    assert [m.company.symbol for m in rec.moves] == ["BBB", "DDD"]
+    assert dict(ctx.rejections) == {"split_unchecked": 3}
+
+
+def test_withheld_counts_leave_the_filings_change_count_unknown():
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    rec = A._spotlight_holding(ctx, _spot_filing([_EIGHT[1], _EIGHT[3]], counts=(("newly_reported", 1),
+                                                                                 ("no_longer_reported", 1))))
+    assert [m.company.symbol for m in rec.moves] == ["BBB", "DDD"] and rec.filing_moves is None
+    assert not R.thirteen_f_spotlight_lists_every_change(rec)
+
+
+def test_one_eligible_holding_is_no_post_and_none_is_nothing():
+    """news-v23 (owner 2026-11-19): NO single-holding 13F post — one eligible holding is ``too_few_holdings``, none is
+    nothing (each record reason counted)."""
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    small = _spot_mv("SML", "increased", 1_200_000.0, 1_000_000.0, 600e6)
+    assert A._spotlight_holding(ctx, _spot_filing([_EIGHT[0], small], counts=(
+        ("newly_reported", 0), ("increased", 1), ("decreased", 1), ("no_longer_reported", 0)))) is None
+    assert ctx.rejections.get("too_few_holdings") == 1
+    # none: two holdings, each under the 25% change (a filing record itself holds two to eight — never one)
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    small2 = _spot_mv("SMM", "decreased", 900_000.0, 1_000_000.0, 450e6)
+    assert A._spotlight_holding(ctx, _spot_filing([small, small2], counts=(
+        ("newly_reported", 0), ("increased", 1), ("decreased", 1), ("no_longer_reported", 0)))) is None
+    assert ctx.rejections.get("spotlight_change_too_small") == 2
+
+
+def test_one_issuer_is_one_row_the_larger_listing_kept():
+    """Share-class twins the roundup's CUSIP check could not tie (two listings of one issuer: `R.issuer_root`) are one
+    row — the larger kept, the other ``share_class_overlap`` — and so are two holdings under one display name."""
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    goog = _flow_mv("GOOG", "newly_reported", 70e6)
+    googl = _flow_mv("GOOGL", "newly_reported", 60e6, 1)
+    twin_name = R.ThirteenFMove(company=R.CompanyRef(symbol="XYZ", name="Ccc Co"), move="decreased",
+                                shares=2_000_000.0, prev_shares=3_000_000.0, value_usd=20e6, listed_on=None)
+    rec = A._spotlight_holding(ctx, _spot_filing([_EIGHT[0], goog, googl, _EIGHT[2], twin_name], counts=(
+        ("newly_reported", 2), ("increased", 1), ("decreased", 2), ("no_longer_reported", 0))))
+    assert [m.company.symbol for m in rec.moves] == ["AAA", "GOOG", "CCC"]
+    assert dict(ctx.rejections) == {"share_class_overlap": 2}
+
+
+def test_a_list_the_rules_refuse_whole_is_no_post_never_its_lead_alone(monkeypatch, caplog):
+    """news-v23 (owner 2026-11-19): a list the record refuses whole is ``record_invalid`` with a WARNING — never tried
+    with its lead alone (that was the single-holding post, which no longer exists)."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+
+    def picky(**kw):
+        raise ValueError("ThirteenFSpotlight.moves: refused for the test")
+
+    monkeypatch.setattr(A.R, "ThirteenFSpotlight", picky)
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    rec = A._spotlight_holding(ctx, _spot_filing(_EIGHT[:3], counts=(("newly_reported", 1), ("increased", 1),
+                                                                     ("decreased", 1), ("no_longer_reported", 0))))
+    assert rec is None and dict(ctx.rejections) == {"record_invalid": 1}
+    assert "refused for the test" in caplog.text and "alone" not in caplog.text
+
+
+def test_an_amended_filing_carries_the_amended_label():
+    ctx = _ctx13s(checked={(SOROS, "2026-Q3"): frozenset()})
+    rec = A._spotlight_holding(ctx, _spot_filing([_EXIT, _EIGHT[1]], amended_on=date(2026, 11, 17),
+                                            counts=(("newly_reported", 1), ("no_longer_reported", 1))))
+    assert rec.amended_on == date(2026, 11, 17) and R.source_label(rec) == R.THIRTEEN_F_AMENDED_LABEL
+
+
+@pytest.mark.asyncio
+async def test_a_club_filer_yields_its_largest_holding(monkeypatch):
+    """The club path (stored builds, no FMP call for the filing): NVIDIA's stored 2026-Q3 — CRWV new ($150M) is the
+    largest; AAPL's +20% and SOUN's −2% are no spotlight."""
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    club, sb = club_world()
+    got = await run("thirteen_f_spotlight", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb)
+    (rec,) = got.records
+    assert rec.filer_cik == NVIDIA_CIK and rec.moves[0].company.symbol == "CRWV" and rec.moves[0].move == "newly_reported"
+    assert rec.moves[0].listed_on == date(2026, 7, 15)
+    assert got.rejections.get("spotlight_change_too_small", 0) <= 1
+
+
+@pytest.mark.asyncio
+async def test_the_registry_walk_is_split_out_of_band_and_never_changes_the_roundup():
+    """`_split_window_problem` records what it verified on the call context only: the roundup's answer with the
+    record-keeping is the answer it gave before (the book's default: CRWV, OXY, AAPL)."""
+    fmp, sb = registry_world([whale(BERKSHIRE, "Berkshire Hathaway", "BRK-A")])
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert [(m.company.symbol, m.move) for m in got.records[0].moves] == [
+        ("CRWV", "newly_reported"), ("OXY", "no_longer_reported"), ("AAPL", "increased")]
+
+
+# ── review of the 13F list (2026-11-19): "every change" is the filing's only when its counts can vouch for it ──────
+#
+# `filing_moves` sums the four counted kinds; the list states its counts AS the filing's only when that equals the
+# rows. A count that leaves a change out must therefore make it unknown (`ctx.counts_partial` → None): an option /
+# note row on either book (the builder diffs share rows only; `_option_moves_dropped` even LOWERS a count), a
+# `corporate_action` row (a share count the diff could not separate from a split), and — a club filer, whose stored
+# builds keep no option row — any excluded row on either stored build.
+
+RXRX_CUSIP = "75629V104"
+
+
+def _soros_extracts(*, q3_extra=(), q2_extra=(), ko=None):
+    """Soros' Q3 / Q2 books with AAPL +50% ($100M of shares), CRWV newly reported ($50M) and OXY exited ($100M): three
+    counted changes, all spotlight-eligible — plus ``q3_extra`` / ``q2_extra`` rows; ``ko`` = (Q2, Q3) (shares, value)
+    of KO (default: unchanged)."""
+    (k2, k3) = ko if ko is not None else ((1_000_000, 70e6), (1_000_000, 70e6))
+    q3 = [xrow(SOROS, 3, "AAPL", "037833100", 1_500_000, 300e6), xrow(SOROS, 3, "KO", "191216100", *k3),
+          xrow(SOROS, 3, "CRWV", "21873S108", 500_000, 50e6), *q3_extra]
+    q2 = [xrow(SOROS, 2, "AAPL", "037833100", 1_000_000, 200e6), xrow(SOROS, 2, "KO", "191216100", *k2),
+          xrow(SOROS, 2, "OXY", "674599105", 2_000_000, 100e6), *q2_extra]
+    return {(SOROS, 2026, 3): q3, (SOROS, 2026, 2): q2}
+
+
+async def _soros_spotlight(extracts, **kw):
+    fmp, sb = registry_world([whale(SOROS, "Soros Fund Management")], extracts=extracts)
+    fmp.profiles["RXRX"] = prof("RXRX", "Recursion Pharmaceuticals, Inc.", exchange="NASDAQ")
+    fmp.profiles["SPY"] = prof("SPY", "SPDR S&P 500 ETF Trust", isEtf=True, exchange="AMEX")
+    return await run("thirteen_f_spotlight", fmp, sb=sb, **kw)
+
+
+@pytest.mark.asyncio
+async def test_a_clean_registry_filing_whose_rows_are_every_change_says_so():
+    """Control: no option row, no corporate action — the three counted changes are the three rows shown, so the list
+    may state its counts as the filing's."""
+    got = await _soros_spotlight(_soros_extracts())
+    (rec,) = got.records
+    assert sorted(m.company.symbol for m in rec.moves) == ["AAPL", "CRWV", "OXY"]
+    assert rec.filing_moves == 3 and R.thirteen_f_spotlight_lists_every_change(rec)
+
+
+@pytest.mark.parametrize("q3_extra, q2_extra, rejected", [
+    # RXRX newly reported in SHARES while the previous book held RXRX CALLS: the move is dropped
+    # (`move_has_options`) and its count lowered 1 → 0, so the counts sum to the three rows shown — but the filing
+    # also reports RXRX shares
+    ([xrow(SOROS, 3, "RXRX", RXRX_CUSIP, 5_000_000, 60e6)],
+     [xrow(SOROS, 2, "RXRX", RXRX_CUSIP, 100_000, 2e6, putCallShare="Call")], {"move_has_options": 1}),
+    # a PUT on another issuer and no share move at all: an option position the builder never diffs
+    ([xrow(SOROS, 3, "SPY", "78462F103", 10_000, 6e6, putCallShare="Put")], [], {}),
+    # a NOTE (PRN) row on the previous book only
+    ([], [xrow(SOROS, 2, "RXRX", "75629VAB1", 1_000, 5e6, sharesType="PRN")], {}),
+], ids=["option_dropped_new_move", "put_on_another_issuer", "note_on_previous_book"])
+@pytest.mark.asyncio
+async def test_option_or_note_rows_leave_the_filings_change_count_unknown(q3_extra, q2_extra, rejected):
+    got = await _soros_spotlight(_soros_extracts(q3_extra=q3_extra, q2_extra=q2_extra))
+    (rec,) = got.records
+    assert sorted(m.company.symbol for m in rec.moves) == ["AAPL", "CRWV", "OXY"]
+    assert rec.filing_moves is None and not R.thirteen_f_spotlight_lists_every_change(rec)
+    assert dict(got.rejections) == rejected
+
+
+@pytest.mark.asyncio
+async def test_a_corporate_action_row_leaves_the_filings_change_count_unknown():
+    """KO split 2:1 in the quarter while the filer's count went 1.0M → 2.6M (+30% beyond the split): the diff cannot
+    separate the split from the flow and books it `corporate_action` — a share count that changed, counted in none of
+    the four kinds, so "the filing's 3 holding changes" would be false."""
+    split = SplitActions(splits={"KO": [split_row("2026-08-14", 2, 1)]})
+    got = await _soros_spotlight(_soros_extracts(ko=((1_000_000, 70e6), (2_600_000, 91e6))), actions=split)
+    (rec,) = got.records
+    assert sorted(m.company.symbol for m in rec.moves) == ["AAPL", "CRWV", "OXY"]
+    assert rec.filing_moves is None and not R.thirteen_f_spotlight_lists_every_change(rec)
+    A.clear_memo()
+    # the roundup is unchanged by it (the main lane never reads `counts_partial`)
+    split = SplitActions(splits={"KO": [split_row("2026-08-14", 2, 1)]})
+    fmp, sb = registry_world([whale(SOROS, "Soros Fund Management")],
+                             extracts=_soros_extracts(ko=((1_000_000, 70e6), (2_600_000, 91e6))))
+    roundup = await run("thirteen_f", fmp, sb=sb, actions=split)
+    assert dict(roundup.records[0].counts) == {"newly_reported": 1, "increased": 1, "decreased": 0,
+                                               "no_longer_reported": 1}
+
+
+def _club_every_world(*, corporate_action=0, current_excluded=0, previous_excluded=0):
+    """NVIDIA's stored 2026-Q3: CRWV newly reported and RXRX no longer reported — the only two changes its counts
+    report; both stored builds' `excluded_rows` as given (None: the column missing)."""
+    ch = lambda **kw: SimpleNamespace(**{"newly_listed": False, "shares": None, "prev_shares": None,  # noqa: E731
+                                         "value": None, **kw})
+    changes = [ch(symbol="CRWV", name="CoreWeave", change="newly_reported", shares=1_000_000.0, value=150e6,
+                  newly_listed=True),
+               ch(symbol="RXRX", name="Recursion", change="no_longer_reported", prev_shares=7_000_000.0)]
+    counts = SimpleNamespace(newly_reported=1, increased=0, decreased=0, no_longer_reported=1, unchanged=3,
+                             corporate_action=corporate_action)
+    club, sb = club_world(changes=changes, company_over={"change_counts": counts})
+    previous, current = sb.tables["trillion_club_filings"]
+    for row, value in ((previous, previous_excluded), (current, current_excluded)):
+        if value is not None:
+            row["excluded_rows"] = value
+    return club, sb
+
+
+@pytest.mark.parametrize("kw, every", [
+    ({}, True),
+    ({"corporate_action": 1}, False),
+    ({"corporate_action": None}, False),             # unreadable
+    ({"current_excluded": 2}, False),                # an option / note row (or another exclusion) this quarter
+    ({"previous_excluded": 1}, False),               # ... or the quarter before
+    ({"previous_excluded": None}, False),            # the column missing: cannot vouch
+], ids=["clean", "corporate_action", "corporate_action_unreadable", "current_excluded", "previous_excluded",
+        "previous_excluded_missing"])
+@pytest.mark.asyncio
+async def test_a_club_filing_states_every_change_only_when_its_stored_builds_can_vouch(monkeypatch, kw, every):
+    monkeypatch.setattr(A.settings, "TRILLION_CLUB_ENABLED", True)
+    club, sb = _club_every_world(**kw)
+    got = await run("thirteen_f_spotlight", FakeFMP(profiles=thirteen_f_profiles()), club=club, sb=sb)
+    (rec,) = got.records
+    assert [(m.company.symbol, m.move) for m in rec.moves] == [("CRWV", "newly_reported"),
+                                                               ("RXRX", "no_longer_reported")]
+    assert R.thirteen_f_spotlight_lists_every_change(rec) is every
+    assert rec.filing_moves == (2 if every else None)
+
+
+# The spotlight's record is cut by dollar size alone, AFTER its own gates (review 2026-11-19): the roundup's cut kept
+# each kind's largest (`_select_moves`, two of each kind when four are present) and the spotlight's 25% floor ran
+# after it, so a filing whose largest changes were all reductions listed $10-50M holdings in place of $0.6-0.8B ones,
+# and a 10-25% trim held a slot it was then dropped from. Review 2026-11-20: the roundup's cut is by size alone too.
+
+def _price_steady(sym: str, cusip: str, q2: float, q3: float, price: float):
+    """A holding at one price a share both quarters (no split suspect): ``q2`` / ``q3`` share counts (0 = absent)."""
+    rows = {}
+    if q2:
+        rows[2] = xrow(SOROS, 2, sym, cusip, q2, q2 * price)
+    if q3:
+        rows[3] = xrow(SOROS, 3, sym, cusip, q3, q3 * price)
+    return rows
+
+
+def _dominated_book():
+    """Two 15% trims worth $1.2B / $1.1B of shares, six 50% reductions of $1.0B → $0.5B, and two each of small new
+    holdings ($50M, $40M), exits ($30M, $20M) and 50% increases ($10M, $9M) — every one at a steady price."""
+    specs = []
+    for i, flow in enumerate((1.2e9, 1.1e9)):                        # −15%: flow = 0.15M × price
+        specs.append((f"TR{'AB'[i]}", 1_000_000, 850_000, flow / 150_000))
+    for i, flow in enumerate((1.0e9, 0.9e9, 0.8e9, 0.7e9, 0.6e9, 0.5e9)):   # −50%: flow = 1M × price
+        specs.append((f"DQ{'ABCDEF'[i]}", 2_000_000, 1_000_000, flow / 1_000_000))
+    for i, value in enumerate((50e6, 40e6)):
+        specs.append((f"NW{'AB'[i]}", 0, 1_000_000, value / 1_000_000))
+    for i, value in enumerate((30e6, 20e6)):
+        specs.append((f"XT{'AB'[i]}", 1_000_000, 0, value / 1_000_000))
+    for i, flow in enumerate((10e6, 9e6)):                            # +50%: flow = 0.5M × price
+        specs.append((f"IN{'AB'[i]}", 1_000_000, 1_500_000, flow / 500_000))
+    q3, q2 = [], []
+    for j, (sym, prev, cur, price) in enumerate(specs):
+        cusip = f"{100000 + j * 1111:06d}10{j % 10}"
+        rows = _price_steady(sym, cusip, prev, cur, price)
+        if 3 in rows:
+            q3.append(rows[3])
+        if 2 in rows:
+            q2.append(rows[2])
+    profiles = {sym: prof(sym, f"{sym.title()} Holdings Corp") for sym, *_ in specs}
+    return {(SOROS, 2026, 3): q3, (SOROS, 2026, 2): q2}, profiles
+
+
+@pytest.mark.asyncio
+async def test_the_spotlight_lists_the_filings_largest_eligible_changes_whatever_their_kinds():
+    extracts, profiles = _dominated_book()
+    fmp, sb = registry_world([whale(SOROS, "Soros Fund Management")], extracts=extracts)
+    fmp.profiles = profiles
+    got = await run("thirteen_f_spotlight", fmp, sb=sb)
+    (rec,) = got.records
+    # the largest ELIGIBLE changes (news-v23: up to eight in the record, six on the picture): the 15% trims are under
+    # the spotlight's 25% floor, refused before the cut
+    assert [(m.company.symbol, m.move) for m in rec.moves][:5] == [(f"DQ{c}", "decreased") for c in "ABCDE"]
+    assert len(rec.moves) == 8 and all(m.company.symbol[:2] != "TR" for m in rec.moves)
+    assert got.rejections["spotlight_change_too_small"] == 2 and "split_unchecked" not in got.rejections
+    assert rec.eligible_moves == 8                              # the record's eight largest eligible moves
+    assert not R.thirteen_f_spotlight_lists_every_change(rec)
+    assert R.ledger_key(rec) == f"news:thirteen_f_spotlight:{SOROS}:2026-Q3:DQA"
+    A.clear_memo()
+    # review 2026-11-20 (confirmed): the roundup's cut is by size alone too — its record holds the filing's eight
+    # largest changes (the trims kept: its floor is 10%), never each kind's top two ($10-50M rows in place of $0.5-1.0B
+    # reductions), and its picture draws the six largest of them, its "+2 more" the next two
+    fmp, sb = registry_world([whale(SOROS, "Soros Fund Management")], extracts=extracts)
+    fmp.profiles = profiles
+    roundup = await run("thirteen_f", fmp, sb=sb)
+    (big,) = roundup.records
+    assert {m.company.symbol for m in big.moves} == {"TRA", "TRB", "DQA", "DQB", "DQC", "DQD", "DQE", "DQF"}
+    assert Counter(m.move for m in big.moves) == {"decreased": 8}
+    from app.services.marketing import news_templates as NTPL
+    out = NTPL.compose(big, run_date=RUN, store_state="live", allow_x_url=False)
+    drawn = [r["chip"] for r in out["image_spec"]["sections"][0]["rows"]]
+    assert drawn == ["TRA", "TRB", "DQA", "DQB", "DQC", "DQD"], drawn
+    assert out["image_spec"]["sections"][0]["more"] == "+2 more changes in the caption"
+    assert not {"NWA", "NWB", "XTA", "XTB", "INA", "INB"} & set(json.dumps(out))
+
+
+# ── news-v23: the 13F BUY-OUT CHECK and the two-holding floor (owner 2026-11-19, "Closed out + buy-out check") ────
+#
+# A holding the latest 13F no longer lists is "Closed out" only while its company still trades: a company bought out,
+# merged or delisted during or after the quarter is DROPPED before the record's final cut (so the next eligible move
+# takes its place) — never called closed out. Two licensed sources ("3 Company Information"), both fail closed: the
+# profile's `isActivelyTrading` must be exactly True, and FMP's delisted-companies list must hold no row of the symbol
+# dated on or after the quarter's first day (Jul 1, 2026 for 2026-Q3). Soros' book: AAPL +50% ($100M of flow), CRWV
+# new ($50M), OXY closed out ($100M the quarter before).
+
+
+def _delisted_row(sym, day):
+    return {"symbol": sym, "companyName": f"{sym} Co", "exchange": "NYSE", "ipoDate": "2000-01-03",
+            "delistedDate": day}
+
+
+def _soros_moves(got):
+    return [(m.company.symbol, m.move) for m in got.records[0].moves] if got.records else []
+
+
+@pytest.mark.parametrize("series", ["thirteen_f", "thirteen_f_spotlight"])
+@pytest.mark.asyncio
+async def test_a_closed_out_holding_whose_company_still_trades_stays(series):
+    fmp, sb = _soros_world((1_500_000, 300e6))
+    got = await run(series, fmp, sb=sb)
+    assert ("OXY", "no_longer_reported") in _soros_moves(got)
+    assert fmp.calls["delisted"] == 1 and fmp.delisted_pages == [0]          # one page reaches past Jul 1
+    assert not {k for k in got.rejections if k.startswith("closed_out")}
+
+
+@pytest.mark.parametrize("series", ["thirteen_f", "thirteen_f_spotlight"])
+@pytest.mark.parametrize("day", ["2026-07-01", "2026-09-29", "2026-11-12", "2027-01-15"],
+                         ids=["quarter_start", "in_quarter", "after_quarter", "scheduled"])
+@pytest.mark.asyncio
+async def test_a_closed_out_holding_bought_out_during_or_after_the_quarter_is_dropped(series, day, caplog):
+    """FMP's delisted list dates OXY on or after the quarter's first day (a merger closed in the quarter, after it, or
+    one scheduled): OXY is dropped (``closed_out_delisted``, WARNING with the filer and the symbol) — the post keeps
+    AAPL and CRWV; the day before the quarter (a row of an older delisting under the same symbol) never drops it."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp, sb = _soros_world((1_500_000, 300e6))
+    fmp.delisted = [[_delisted_row("OXY", day), _delisted_row("ZZOLD", "2001-01-02")]]
+    got = await run(series, fmp, sb=sb)
+    assert ("OXY", "no_longer_reported") not in _soros_moves(got)
+    assert {sym for sym, _k in _soros_moves(got)} == {"AAPL", "CRWV"}
+    assert got.rejections.get("closed_out_delisted") == 1
+    assert f"cik={SOROS}" in caplog.text and "closed-out OXY" in caplog.text and "(closed_out_delisted)" in caplog.text
+    A.clear_memo()
+    fmp, sb = _soros_world((1_500_000, 300e6))
+    fmp.delisted = [[_delisted_row("OXY", "2026-06-30"), _delisted_row("ZZOLD", "2001-01-02")]]
+    assert ("OXY", "no_longer_reported") in _soros_moves(await run(series, fmp, sb=sb))
+
+
+@pytest.mark.parametrize("trading, reason", [(None, "closed_out_not_trading"), (False, "inactive"),
+                                             ("true", "inactive"), (1, "inactive")],
+                         ids=["absent", "false", "string", "int"])
+@pytest.mark.asyncio
+async def test_a_closed_out_holding_whose_profile_does_not_say_it_trades_is_dropped(trading, reason, caplog):
+    """The profile's flag must be exactly True: an ABSENT flag — which the shared profile gate lets through for every
+    other row — is "cannot vouch" for a closed-out holding (``closed_out_not_trading``, WARNING naming it); False or
+    junk is refused earlier by that gate (``inactive``). Either way the row is dropped, fail closed."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp, sb = _soros_world((1_500_000, 300e6))
+    if trading is None:
+        fmp.profiles["OXY"].pop("isActivelyTrading")
+    else:
+        fmp.profiles["OXY"]["isActivelyTrading"] = trading
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert _soros_moves(got) == [("CRWV", "newly_reported"), ("AAPL", "increased")]
+    assert got.rejections.get(reason) == 1
+    if reason == "closed_out_not_trading":
+        assert "(closed_out_not_trading)" in caplog.text and "closed-out OXY" in caplog.text
+    assert fmp.calls["delisted"] == 0                      # nothing closed out is left to check: no list read
+
+
+@pytest.mark.parametrize("pages", [
+    [FMPUnavailableException("delisted-companies down")],
+    [[]],                                                                     # an empty page 0
+    [[_delisted_row("ZZNEW", "2026-11-01")]],                                 # a short page that never reaches Jul 1
+    [{"error": "not a list"}],
+    [[{"symbol": "ZZ", "delistedDate": None}] * 100],                         # no readable date
+    [[_delisted_row(f"Z{i:03d}", "2026-10-01") for i in range(100)]] * A.CLOSED_OUT_DELISTED_MAX_PAGES,   # the cap
+], ids=["outage", "empty", "short", "not_a_list", "undated", "cap"])
+@pytest.mark.asyncio
+async def test_when_the_buy_out_check_cannot_run_every_closed_out_holding_is_dropped(pages, caplog):
+    """FAIL CLOSED: a delisted-companies list that cannot vouch back to the quarter's first day — an outage, an empty
+    or short list, a malformed or undated page, the page cap — drops every closed-out holding of the filing
+    (``closed_out_unchecked``, WARNING naming the filer and the symbol); the other holdings stay."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp, sb = _soros_world((1_500_000, 300e6))
+    fmp.delisted = pages
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert _soros_moves(got) == [("CRWV", "newly_reported"), ("AAPL", "increased")]
+    assert got.rejections.get("closed_out_unchecked") == 1
+    assert "could not be read back" in caplog.text and f"cik={SOROS}" in caplog.text
+    assert "(closed_out_unchecked)" in caplog.text
+    # a list that ENDS (a short page) before the quarter is never paged past its end
+    if isinstance(pages[0], list) and len(pages[0]) == 1:
+        assert fmp.delisted_pages == [0]
+
+
+@pytest.mark.asyncio
+async def test_the_delisted_list_is_read_once_and_paged_only_as_far_as_the_quarter():
+    """The list is memoized (both 13F series share it) and read newest first only until a page reaches past the
+    quarter's first day: two pages here, then the roundup and the spotlight read nothing more."""
+    newer = [_delisted_row(f"Z{i:03d}", "2026-10-01") for i in range(100)]
+    fmp, sb = _soros_world((1_500_000, 300e6))
+    fmp.delisted = [newer, [_delisted_row("ZZOLD", "2026-05-01")]]
+    await run("thirteen_f", fmp, sb=sb)
+    assert fmp.delisted_pages == [0, 1]
+    got = await run("thirteen_f_spotlight", fmp, sb=sb)     # the memo answers the other series: no new read
+    assert fmp.delisted_pages == [0, 1] and ("OXY", "no_longer_reported") in _soros_moves(got)
+
+
+@pytest.mark.asyncio
+async def test_a_filing_left_with_one_holding_after_the_buy_out_check_is_no_post():
+    """The two-holding floor counts AFTER every gate: Soros with AAPL under the roundup's floor (+5%) keeps CRWV and
+    OXY; OXY delisted in the quarter leaves CRWV alone — no record (``too_few_holdings``), never a one-row list."""
+    fmp, sb = _soros_world((1_050_000, 210e6))
+    fmp.delisted = [[_delisted_row("OXY", "2026-08-20"), _delisted_row("ZZOLD", "2001-01-02")]]
+    got = await run("thirteen_f", fmp, sb=sb)
+    assert got.records == () and got.rejections.get("too_few_holdings") == 1
+    assert got.rejections.get("closed_out_delisted") == 1 and got.skip_reason == "thirteen_f_none_qualified"
+
+
+# ── company_facts (workstream C's art brief) ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_company_facts_are_the_profiles_name_free_sector_and_industry():
+    fmp = FakeFMP(profiles={"CTSO": prof("CTSO", "Contoso Corporation", industry="Software - Infrastructure")})
+    got = await A.company_facts("CTSO", deps=A.NewsDeps(fmp=fmp))
+    assert got == {"sector": "Technology", "industry": "Software - Infrastructure"}
+    assert fmp.calls["profiles"] == 1
+    # the memo a collector filled answers with no call
+    again = await A.company_facts("CTSO", deps=A.NewsDeps(fmp=fmp))
+    assert again == got and fmp.calls["profiles"] == 1
+
+
+@pytest.mark.parametrize("profile, want", [
+    ({"sector": "Technology", "industry": "https://zqx.example/x"}, {"sector": "Technology"}),
+    ({"sector": "", "industry": None}, None),
+    ({"sector": 7, "industry": ["x"]}, None),
+    ({"sector": "  Consumer   Cyclical ", "industry": "Banks—Regional"},
+     {"sector": "Consumer Cyclical", "industry": "Banks—Regional"}),
+    ({"sector": "x" * 61}, None),
+])
+@pytest.mark.asyncio
+async def test_company_facts_keep_only_plain_names(profile, want):
+    base = prof("CTSO", "Contoso Corporation")
+    base.pop("sector", None)
+    fmp = FakeFMP(profiles={"CTSO": {**base, **profile}})
+    assert await A.company_facts("CTSO", deps=A.NewsDeps(fmp=fmp)) == want
+
+
+@pytest.mark.parametrize("symbol", ["ctso", "CTSO.W", "", None, 7, "CTSOW"])
+@pytest.mark.asyncio
+async def test_company_facts_refuse_a_bad_symbol_without_a_call(symbol, caplog):
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp = FakeFMP(profiles={})
+    assert await A.company_facts(symbol, deps=A.NewsDeps(fmp=fmp)) is None
+    assert fmp.calls["profiles"] == 0 and "company_facts" in caplog.text
+
+
+@pytest.mark.parametrize("answer", [FMPUnavailableException("down"), {}], ids=["read_failed", "no_profile"])
+@pytest.mark.asyncio
+async def test_company_facts_never_raise(answer, caplog):
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    fmp = FakeFMP(profiles=answer)
+    assert await A.company_facts("CTSO", deps=A.NewsDeps(fmp=fmp)) is None
+    assert "CTSO" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_company_facts_time_out_to_none():
+    class Slow(FakeFMP):
+        async def get_company_profiles_batch(self, symbols):
+            await asyncio.sleep(5)
+            return []
+
+    assert await A.company_facts("CTSO", timeout=0.05, deps=A.NewsDeps(fmp=Slow())) is None
+    await _settle_leads()
+
+
+# ── the insider spotlight's defensive paths (hardening, 2026-11-15) ────────────
+
+
+def _person(role, name, amount, filed=date(2026, 11, 18), *, sym="CTSO", company="Contoso"):
+    return R.InsiderPurchase(company=R.CompanyRef(symbol=sym, name=company), role=role, person_name=name,
+                             amount_usd=amount, shares=amount / 100.0, purchases=1,
+                             earliest_trade_date=filed - timedelta(days=1), latest_trade_date=filed - timedelta(days=1),
+                             filing_dates=(filed,), holding="direct", amended=False,
+                             cost_per_share_min_usd=100.0, cost_per_share_max_usd=100.0)
+
+
+def test_a_cluster_the_row_refuses_is_tried_with_its_lead_alone(caplog):
+    """Defensive (the gates before it make it rare): two CEOs in one group — the company ROW refuses the cluster, so
+    the lead is offered ALONE (fewer others is never a false "at least N"); a lead the row refuses even alone (no filed
+    cost per share) is ``record_invalid``. Owner decisions 2026-11-20: the window check moved to the LIST."""
+    caplog.set_level(logging.WARNING, logger=A.__name__)
+    ctx = A._Ctx("insider_spotlight", SPOT_RUN, frozenset(), 5, time.monotonic() + 60, A.NewsDeps())
+    people = [_person("ceo", "John Doe", 2e6), _person("ceo", "Jane Roe", 1e6)]
+    row = A._spotlight_company(ctx, people)
+    assert row.lead.person_name == "John Doe" and row.others == () and dict(ctx.rejections) == {}
+    assert "tried with its lead alone" in caplog.text
+    no_cost = [dataclasses.replace(_person("ceo", "John Doe", 2e6), cost_per_share_min_usd=None,
+                                   cost_per_share_max_usd=None)]
+    assert A._spotlight_company(ctx, no_cost) is None
+    assert dict(ctx.rejections) == {"record_invalid": 1}
+
+
+def test_one_person_once_across_the_insider_list(real_min_rows):
+    """`_spotlight_list`: a named person already in an earlier (larger) row is dropped from a later one (`same_person`:
+    one buyer at two affiliated issuers), the next person of that issuer then leads; rows sorted by TOTAL, at most
+    `R.INSIDER_MAX_ROWS`."""
+    ctx = A._Ctx("insider_spotlight", SPOT_RUN, frozenset(), 5, time.monotonic() + 60, A.NewsDeps())
+    a = [_person("ceo", "John Doe", 2e6, sym="AAA", company="Alpha")]
+    b = [_person("director", "John Doe", 1.5e6, sym="BBB", company="Beta"),
+         _person("cfo", "Ann Lee", 3e5, sym="BBB", company="Beta")]
+    c = [_person("director", None, 9e5, sym="CCC", company="Gamma")]
+    rows = A._spotlight_list(ctx, [(None, a), (None, b), (None, c)])
+    assert [(r.company.symbol, r.lead.person_name) for r in rows] == [("AAA", "John Doe"), ("CCC", None),
+                                                                      ("BBB", "Ann Lee")]
+    assert dict(ctx.rejections) == {"same_person": 1}
+    many = [(None, [_person("director", None, 1e6 - i, sym=f"S{c}", company=f"Co {c}")]) for i, c in
+            enumerate("ABCDEFGHIJ")]
+    assert len(A._spotlight_list(ctx, many)) == R.INSIDER_MAX_ROWS == 5           # the five largest (owner's cap)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_per_issuer_read_drops_that_issuer_and_the_next_one_stands():
+    """`amendment_check_failed` for every person of an issuer (its read failed) drops the issuer, logged; the next
+    issuer in rank order is checked and kept — the call's other records never depend on it."""
+    rows = spot_rows() + [irow(sym="FOX", name="SMITH JOHN", cik="0000000111", title="director", shares=100_000,
+                               price=30.0, filed="2026-11-17", traded="2026-11-16")]
+    feed = {_CTSO_ISSUER: FMPUnavailableException("issuer read down")}
+    got = await spot(FakeFMP(insider=rows, profiles={**spot_profiles(), **week_profiles()}, issuer_feed=feed))
+    assert [c.company.symbol for c in got.records[0].companies] == ["FOX"]
+    assert got.rejections == {"amendment_check_failed": 3}                     # CTSO's three people
+
+
+# ── news-v23: one post of several companies (the restyle, owner 2026-11-19) ──────────────────────────────────────
+#
+# "combine 2 to 4 companies at once" (earnings) and "2-3 companies at once" (Congress): the adapter answers ONE record
+# — `R.EarningsDay` / `R.CongressMonth` — of the companies that passed every per-company gate, the largest (the most
+# members) first; fewer than two is no post, with its own skip reason. The tests above read those records row by row
+# under `_per_company_bounds`; these pin the REAL bounds.
+
+
+def _v23_ctx(series, run_date):
+    return A._Ctx(series, run_date, frozenset(), 5, time.monotonic() + 60, A.NewsDeps(fmp=None))
+
+
+def _v23_report(sym, name, a=1.5, e=1.0):
+    return R.EarningsReport(series="earnings", company=R.CompanyRef(symbol=sym, name=name),
+                            report_date=date(2027, 1, 12), period_end=date(2026, 12, 31), eps_actual=a,
+                            eps_estimate=e, revenue_actual=1.05e9, revenue_estimate=1.0e9)
+
+
+def _v23_count(sym, name, members):
+    return R.CongressCount(series="congress_count", company=R.CompanyRef(symbol=sym, name=name), month="2026-11",
+                           members=members, fetched_on=CONGRESS_RUN)
+
+
+def _v23_calendar(n):
+    """``n`` clean reports on 2027-01-12, caps $9B, $8B, … (the larger first), each a clear 50% surprise."""
+    syms = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"][:n]
+    cal = {"2027-01-12": [erow(s, "2027-01-12", 1.5, 1.0) for s in syms]}
+    profiles = {s: prof(s, f"{s.title()} Industries Inc.", cap=(9 - i) * 1e9) for i, s in enumerate(syms)}
+    return cal, profiles
+
+
+@pytest.mark.asyncio
+async def test_news_v23_an_earnings_call_is_one_post_of_two_to_four_companies():
+    fmp = FakeFMP2b(calendar=earnings_calendar(), profiles=earnings_profiles())
+    got = await run("earnings", fmp, run_date=EARN_RUN)
+    (rec,) = got.records
+    assert isinstance(rec, R.EarningsDay) and got.skip_reason is None
+    assert [r.company.symbol for r in rec.reports] == ["BBB", "III", "AAA"]          # the largest first
+    assert R.ledger_key(rec) == "news:earnings:BBB:2027-01-11+III:2027-01-07+AAA:2027-01-12"
+    # Six clean companies: the post holds the four largest; the reads stop once four are held.
+    A.clear_memo()
+    cal, profiles = _v23_calendar(6)
+    fmp = FakeFMP2b(calendar=cal, profiles=profiles)
+    got = await run("earnings", fmp, run_date=EARN_RUN)
+    (rec,) = got.records
+    assert [r.company.symbol for r in rec.reports] == ["AAA", "BBB", "CCC", "DDD"]
+    assert R.EARNINGS_DAY_COMPANIES == (2, 4) and len(fmp.statement_calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_news_v23_one_qualifying_earnings_company_is_no_post():
+    cal, profiles = _v23_calendar(1)
+    fmp = FakeFMP2b(calendar=cal, profiles=profiles)
+    got = await run("earnings", fmp, run_date=EARN_RUN)
+    assert got.records == () and got.skip_reason == "earnings_too_few_companies"
+    assert "earnings_too_few_companies" in R.SKIP_REASONS
+    # none at all: the existing reason, never the new one
+    A.clear_memo()
+    fmp = FakeFMP2b(calendar={"2027-01-12": []}, profiles={})
+    got = await run("earnings", fmp, run_date=EARN_RUN)
+    assert got.records == () and got.skip_reason == "earnings_none_qualified"
+
+
+@pytest.mark.asyncio
+async def test_news_v23_a_posted_several_company_key_marks_every_company_posted():
+    """Each company a posted several-company key names is `already_posted` for its window — and a malformed key is
+    skipped whole (never raises, never half-read)."""
+    cal, profiles = _v23_calendar(4)
+    posted = "news:earnings:AAA:2027-01-12+BBB:2027-01-12"
+    fmp = FakeFMP2b(calendar=cal, profiles=profiles)
+    got = await run("earnings", fmp, run_date=EARN_RUN, exclude={posted})
+    (rec,) = got.records
+    assert [r.company.symbol for r in rec.reports] == ["CCC", "DDD"]
+    assert got.rejections["already_posted"] == 2
+    # Three of the four posted (two keys): one left → no post.
+    A.clear_memo()
+    fmp = FakeFMP2b(calendar=cal, profiles=profiles)
+    got = await run("earnings", fmp, run_date=EARN_RUN, exclude={posted, "news:earnings:CCC:2027-01-12"})
+    assert got.records == () and got.skip_reason == "earnings_too_few_companies"
+    assert got.rejections["already_posted"] == 3
+    # A malformed key (a junk item) marks NONE of its companies.
+    assert A._posted_in_window(frozenset({"news:earnings:AAA:2027-01-12+junk"}), [date(2027, 1, 12)]) == set()
+    assert A._posted_in_window(frozenset({posted}), [date(2027, 1, 12)]) == {"AAA", "BBB"}
+
+
+def test_news_v23_one_issuer_is_drawn_once_in_an_earnings_post():
+    ctx = _v23_ctx("earnings", EARN_RUN)
+    got = A._earnings_day(ctx, [_v23_report("AAA", "Alpha Holdings"), _v23_report("AAB", "alpha holdings"),
+                                _v23_report("CCC", "Gamma Corp")])
+    (rec,) = got.records
+    assert [r.company.symbol for r in rec.reports] == ["AAA", "CCC"]                # same display name: left out
+    assert got.rejections == {"share_class_overlap": 1}
+    ctx = _v23_ctx("earnings", EARN_RUN)
+    got = A._earnings_day(ctx, [_v23_report("BRK-A", "Berkshire Hathaway A"),
+                                _v23_report("BRK-B", "Berkshire Hathaway B")])
+    assert got.records == () and got.skip_reason == "earnings_too_few_companies"   # same issuer root: one left
+    # five held reports: the first four
+    ctx = _v23_ctx("earnings", EARN_RUN)
+    got = A._earnings_day(ctx, [_v23_report(s, f"{s} Corp") for s in ("AAA", "BBB", "CCC", "DDD", "EEE")])
+    assert [r.company.symbol for r in got.records[0].reports] == ["AAA", "BBB", "CCC", "DDD"]
+
+
+@pytest.mark.asyncio
+async def test_news_v23_a_congress_month_is_one_post_of_two_or_three_companies():
+    senate = [crow("senate", s, "2026-11-20", f"s{i}") for s in ("AAPL", "MSFT", "NVDA", "AMZN") for i in range(1, 3)]
+    senate += [crow("senate", "AAPL", "2026-11-21", "s3"), crow("senate", "AAPL", "2026-11-21", "s4"),
+               crow("senate", "MSFT", "2026-11-21", "s3")]
+    profiles = {**congress_profiles(), "AMZN": prof("AMZN", "Amazon.com, Inc.", exchange="NASDAQ", cap=2e12)}
+    fmp = congress_fmp(senate=cfeed("senate", senate), house=cfeed("house", []), profiles=profiles)
+    got = await run("congress_count", fmp, run_date=CONGRESS_RUN)
+    (rec,) = got.records
+    assert isinstance(rec, R.CongressMonth) and rec.month == "2026-11" and got.skip_reason is None
+    # the most members first, then the symbol; the fourth company (2 members, symbol last) is left out
+    assert [(c.company.symbol, c.members) for c in rec.counts] == [("AAPL", 4), ("MSFT", 3), ("AMZN", 2)]
+    assert R.CONGRESS_MONTH_COMPANIES == (2, 3) and R.ledger_key(rec) == CONGRESS_KEY
+
+
+@pytest.mark.asyncio
+async def test_news_v23_one_qualifying_congress_company_is_no_post():
+    senate = [crow("senate", "AAPL", "2026-11-20", "s1"), crow("senate", "AAPL", "2026-11-21", "s2"),
+              crow("senate", "MSFT", "2026-11-20", "s1")]                       # MSFT: one member — never counted
+    fmp = congress_fmp(senate=cfeed("senate", senate), house=cfeed("house", []))
+    got = await run("congress_count", fmp, run_date=CONGRESS_RUN)
+    assert got.records == () and got.skip_reason == "congress_too_few_companies"
+    assert "congress_too_few_companies" in R.SKIP_REASONS
+    ctx = _v23_ctx("congress_count", CONGRESS_RUN)
+    got = A._congress_month_record(ctx, "2026-11", [])
+    assert got.records == () and got.skip_reason == "congress_none_qualified"
+    ctx = _v23_ctx("congress_count", CONGRESS_RUN)
+    got = A._congress_month_record(ctx, "2026-11", [_v23_count("BRK-A", "Berkshire Hathaway", 3),
+                                                     _v23_count("BRK-B", "Berkshire Hathaway B", 2),
+                                                     _v23_count("AAPL", "Apple", 2)])
+    assert [c.company.symbol for c in got.records[0].counts] == ["BRK-A", "AAPL"]
+    assert got.rejections == {"share_class_overlap": 1}
+
+
+# ══ news-v23 phase 3 (2026-11-20): the WEEKLY theme post — rotation, angles, the list's date, market values ══════
+
+from app.services.marketing import news_templates as _NT  # noqa: E402
+
+
+def _themes(n=3, **over):
+    """`n` active themes t0..t{n-1}, sort orders 0..n-1, each the default eight-ticker member list."""
+    return [theme(slug=f"t{i}", title=f"Theme {i}", sort_order=i, **over) for i in range(n)]
+
+
+def _caps(syms=("NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC"), day="2026-11-18", **over):
+    base = {"NVDA": 4.4e12, "AMD": 3.1e11, "AVGO": 1.6e12, "QCOM": 1.8e11, "MRVL": 7.7e10, "INTC": 1.2e11}
+    base.update(over)
+    return [{"symbol": s, "date": day, "marketCap": base[s]} for s in syms]
+
+
+def test_phase3_the_angle_tables_agree():
+    """ONE list of built angles: the record's (`R.THEME_BUILT_ANGLES`), the adapter's collectors and the templates'
+    builders — an angle plugs in to all three or none."""
+    assert tuple(A.THEME_ANGLE_COLLECTORS) == R.THEME_BUILT_ANGLES == tuple(_NT._THEME_ANGLE_BUILDERS)
+    assert set(R.THEME_BUILT_ANGLES) <= set(R.THEME_ANGLES)
+
+
+@pytest.mark.parametrize("history, order", [
+    ((), ["t0", "t1"]),                                                                     # never posted: sort order
+    (("news:theme_explainer:t0:make_money:2026-10-01",), ["t1", "t2"]),                     # t0 posted → last
+    (("news:theme_explainer:t0:make_money:2026-10-01", "news:theme_explainer:t1:biggest:2026-09-24",
+      "news:theme_explainer:t2:make_money:2026-10-08"), ["t1", "t0"]),                       # the OLDEST post first
+    # an old key (before the angles) counts as that theme's post on its date
+    (("news:theme_explainer:t0:2026-10-01", "news:theme_explainer:t1:2026-09-01"), ["t2", "t1"]),
+])
+@pytest.mark.asyncio
+async def test_phase3_the_rotation_is_never_posted_first_then_the_oldest_post(history, order):
+    world = theme_world(_themes())
+    world["fmp"].income = {s: annual(s) for s in _SIX}      # 2026-11-20: a theme past "biggest" posts growth + profit
+    got = await trun(world, theme_history=history)
+    assert [r.slug for r in got.records] == order
+
+
+@pytest.mark.asyncio
+async def test_phase3_ties_break_by_sort_order_then_slug():
+    rows = [theme(slug="zeta", title="Zeta", sort_order=1), theme(slug="alpha", title="Alpha", sort_order=1),
+            theme(slug="beta", title="Beta", sort_order=None)]
+    got = await trun(theme_world(rows))
+    assert [r.slug for r in got.records] == ["alpha", "zeta"]          # beta: no sort order, last
+
+
+@pytest.mark.parametrize("days, posted", [(27, False), (28, True), (60, True)])
+@pytest.mark.asyncio
+async def test_phase3_never_the_same_theme_within_four_weeks(days, posted):
+    """Owner 2026-11-19: "if they are the same, after at least 4 weeks already, so it's fine" — a theme last posted
+    fewer than 28 days before the run is `already_posted` before any read, whatever the angle. Mutation-checked by hand
+    (2026-11-20): with `<` changed to `<=`, the 28-day case turned red."""
+    last = THEME_RUN - timedelta(days=days)
+    world = theme_world([theme()])
+    got = await trun(world, theme_history=(f"news:theme_explainer:ai-chips:make_money:{last.isoformat()}",))
+    assert bool(got.records) is posted
+    if not posted:
+        assert got.rejections == {"already_posted": 1} and world["fmp"].calls == Counter()
+
+
+@pytest.mark.parametrize("last, angle", [
+    ("news:theme_explainer:ai-chips:make_money:2026-10-01", "biggest"),
+    ("news:theme_explainer:ai-chips:2026-10-01", "biggest"),                               # an old key: make_money
+    ("news:theme_explainer:ai-chips:biggest:2026-10-01", "growth_profit"),     # every angle is built (2026-11-20)
+    ("news:theme_explainer:ai-chips:growth_profit:2026-10-01", "insiders"),
+    ("news:theme_explainer:ai-chips:insiders:2026-10-01", "congress"),
+    ("news:theme_explainer:ai-chips:congress:2026-10-01", "make_money"),                    # the rotation wraps
+])
+@pytest.mark.asyncio
+async def test_phase3_a_theme_takes_the_angle_after_its_last_posted_one(last, angle):
+    world = angles_world(issuer={s: [ins_line(s, "S-Sale")] for s in _SIX},
+                         senate=_senate_purchases({s: 2 for s in _SIX}))
+    got = await trun(world, exclude=(last,))                                 # the exclude refs count as history too
+    (rec,) = got.records
+    assert rec.angle == angle and R.ledger_key(rec) == f"news:theme_explainer:ai-chips:{angle}:2026-11-19"
+    assert "theme_angle_not_built" not in got.rejections
+    # only the angle's own sources are read (phase 4: "how they make money" also reads the ONE market-value batch
+    # "biggest" reads — its tile order)
+    sources = {"revenue": world["revenue"].calls != [], "market_caps": world["fmp"].calls["market_caps"] > 0,
+               "income": world["fmp"].calls["income"] > 0, "insider_issuer": world["fmp"].calls["insider_issuer"] > 0,
+               "congress": world["fmp"].calls["congress"] > 0}
+    own = {"make_money": {"revenue", "market_caps"}, "biggest": {"market_caps"}, "growth_profit": {"income"},
+           "insiders": {"insider_issuer"}, "congress": {"congress"}}
+    assert {src for src, read in sources.items() if read} == own[angle]
+
+
+@pytest.mark.asyncio
+async def test_phase3_an_angle_with_too_few_companies_falls_through_to_the_next_angle():
+    """Owner 2026-11-19: "≥ 4 companies with data, else the next angle". Three facts (QCOM degraded) → make_money is
+    `theme_facts_thin`, the theme posts "biggest"; no market values either → `theme_values_thin`, the unbuilt angles
+    skipped without a read, and the theme gives nothing (the series skips)."""
+    bds = {**theme_breakdowns(), "QCOM": breakdown(degraded=["segmentation_unavailable"])}
+    world = theme_world(breakdowns=bds)
+    world["fmp"].market_caps = _caps()
+    (rec,) = (await trun(world)).records
+    assert rec.angle == "biggest"
+    assert [m.company.symbol for m in rec.members] == ["NVDA", "AVGO", "AMD", "QCOM", "INTC", "MRVL"]
+    # 2026-11-20: every angle thin — three facts, no market values, three companies' statements, three with trades,
+    # three Congress companies — the theme gives nothing after ONE whole rotation (THEME_MAX_ANGLE_ATTEMPTS = 5) and the
+    # series skips (never an outage)
+    A.clear_memo()
+    world = angles_world(breakdowns=bds, caps=False, income={s: annual(s) for s in ("NVDA", "AMD", "AVGO")},
+                         issuer={s: [ins_line(s, "S-Sale")] for s in ("NVDA", "AMD", "AVGO")},
+                         senate=_senate_purchases({s: 2 for s in ("NVDA", "AMD", "AVGO")}))
+    got = await trun(world)
+    assert got.records == () and got.skip_reason == "theme_none_qualified"
+    assert {k: got.rejections.get(k) for k in ("theme_facts_thin", "theme_values_thin", "theme_growth_thin",
+                                               "theme_insiders_thin", "theme_congress_thin")} == {
+        "theme_facts_thin": 1, "theme_values_thin": 1, "theme_growth_thin": 1, "theme_insiders_thin": 1,
+        "theme_congress_thin": 1}
+
+
+@pytest.mark.asyncio
+async def test_phase3_a_worker_without_the_capability_is_offered_make_money_only():
+    """`theme_angles` (the run's holder: "how they make money" only without WORKER_CAPABILITY_THEME_ANGLES): the
+    "biggest" angle is `theme_angle_unsupported` with NO read, and a theme whose make_money is thin gives nothing."""
+    world = theme_world([theme()])
+    world["fmp"].market_caps = _caps()
+    got = await trun(world, theme_history=("news:theme_explainer:ai-chips:make_money:2026-10-01",),
+                     theme_angles=("make_money",))
+    (rec,) = got.records
+    # every angle after "make_money" — biggest, growth_profit, insiders, congress — skipped without a read; the ONE
+    # market-value read is make_money's own (phase 4: its tile order), never a "biggest" post
+    assert rec.angle == "make_money" and got.rejections.get("theme_angle_unsupported") == 4
+    assert world["fmp"].calls["market_caps"] == 1 and world["fmp"].calls["income"] == 0
+    assert [m.company.symbol for m in rec.members][:4] == ["NVDA", "AVGO", "AMD", "QCOM"]     # by market value
+
+
+@pytest.mark.asyncio
+async def test_phase3_the_angle_attempts_are_bounded_per_call():
+    """At most THEME_MAX_ANGLE_ATTEMPTS angle evaluations that READ per call (THEME_MAX_EVALUATED themes): two themes
+    each thin at every angle → 5 evaluations (t0's whole rotation), t1's never made. 2026-11-20: five (was three), so
+    one theme's whole rotation fits a call."""
+    bds = {s: breakdown(degraded=["x"]) for s in ("NVDA", "AMD", "AVGO", "QCOM", "MRVL")}
+    world = angles_world(rows=_themes(2), breakdowns=bds, caps=False, income={},
+                         issuer={s: [ins_line(s, "S-Sale")] for s in ("NVDA",)},
+                         senate=_senate_purchases({"NVDA": 2}))
+    world["fmp"].income = {s: annual(s) for s in ("NVDA",)}
+    got = await trun(world)
+    assert got.records == () and A.THEME_MAX_ANGLE_ATTEMPTS == 5
+    thin = ("theme_facts_thin", "theme_values_thin", "theme_growth_thin", "theme_insiders_thin", "theme_congress_thin")
+    assert sum(got.rejections.get(k, 0) for k in thin) == 5 and all(got.rejections.get(k) == 1 for k in thin)
+    assert world["fmp"].calls["market_caps"] == 1                       # t0's biggest; t1's never reached
+    assert world["revenue"].calls.count("NVDA") == 1
+
+
+@pytest.mark.parametrize("row", [
+    {"tickers_as_of": None, "updated_at": "2026-07-04T12:00:00+00:00"},          # production: last written 139 days ago
+    {"tickers_as_of": None, "updated_at": "2026-11-20T12:00:00+00:00"},          # a write after the run
+    {"tickers_as_of": None, "updated_at": "yesterday"},
+    {"tickers_as_of": None, "updated_at": None},
+    {"tickers_as_of": None},                                                      # no `updated_at` at all
+])
+@pytest.mark.asyncio
+async def test_owner_a_theme_with_no_review_date_is_the_apps_live_list_and_counts_as_current(row):
+    """OWNER DECISION 2026-11-20 ("Trust the app's lists (Recommended)": "Your app already shows these exact lists to
+    users, so when a theme has no review date, posts treat its list as current … Each company still passes its own
+    checks (still trading, has data)."). PRODUCTION FACT: `tickers_as_of` is NULL on all 8 active themes and 7 rows were
+    last written 2026-07-04. Such a list is NEVER refused `theme_stale`, whatever its `updated_at` says (the column is
+    not even read): the record carries the RUN day, flagged `tickers_as_of_from_row` so nothing prints it.
+    Mutation-checked by hand (2026-11-20): with the NULL branch aging the list from `updated_at` again, the first case
+    turned red (`theme_stale`)."""
+    world = theme_world([theme(**row)])
+    got = await trun(world)
+    (rec,) = got.records
+    assert "theme_stale" not in got.rejections
+    assert rec.tickers_as_of == THEME_RUN and rec.tickers_as_of_from_row is True
+    (_table, cols), = [x for x in world["sb"].selects if x[0] == "trending_themes"]
+    assert "updated_at" not in cols.split(",") and "tickers_as_of" in cols.split(",")
+    # each company still passes its own checks: the ETF in the list is still refused, the blocked ARM never profiled
+    assert got.rejections == {"etf_or_fund": 1} and "ARM" not in world["fmp"].profile_requests[0]
+
+
+@pytest.mark.parametrize("row", [
+    {"tickers_as_of": "2026-09-09", "updated_at": "2026-11-18T12:00:00+00:00"},  # reviewed 71 days ago: stale
+    {"tickers_as_of": "2026-11-20", "updated_at": "2026-11-18T12:00:00+00:00"},  # a review dated after the run
+    {"tickers_as_of": "2027-01-05"},                                              # far in the future
+    {"tickers_as_of": "soon", "updated_at": "2026-11-18T12:00:00+00:00"},        # present but unreadable
+    {"tickers_as_of": ""},                                                        # present but empty
+    {"tickers_as_of": 20261102},                                                  # present, wrong type
+])
+@pytest.mark.asyncio
+async def test_owner_a_reviewed_list_keeps_the_70_day_rule_and_fails_closed(row):
+    """A PRESENT `tickers_as_of` (a list someone reviewed) keeps THEME_STALE_DAYS (70) exactly as before; a present
+    value that does not read as a day is a broken row (`theme_stale`), never treated as missing — and `updated_at` never
+    rescues it. Refused before any profile call. Mutation-checked by hand (2026-11-20): with a present unreadable
+    value treated like NULL, the "soon" / "" / int cases turned red."""
+    world = theme_world([theme(**row)])
+    got = await trun(world)
+    assert got.records == () and got.rejections == {"theme_stale": 1} and world["fmp"].calls == Counter()
+
+
+@pytest.mark.parametrize("as_of, ok", [("2026-09-10", True), ("2026-09-09", False), ("2026-11-19", True)])
+@pytest.mark.asyncio
+async def test_owner_the_reviewed_list_boundary_is_70_days_inclusive(as_of, ok):
+    got = await trun(theme_world([theme(tickers_as_of=as_of)]))
+    assert R.THEME_STALE_DAYS == 70 and (THEME_RUN - date.fromisoformat(as_of)).days in (70, 71, 0)
+    if ok:
+        (rec,) = got.records
+        assert rec.tickers_as_of == date.fromisoformat(as_of) and rec.tickers_as_of_from_row is False
+    else:
+        assert got.records == () and got.rejections == {"theme_stale": 1}
+
+
+def test_phase3_a_theme_fact_may_be_four_fiscal_years_old_the_spotlights_stays_two():
+    """Owner 2026-11-19 ("for AI CHIPS, i don't see ARM, Intel and SNPS? add for me"): Intel's newest breakdown is fiscal
+    2022 — a theme member's fact may be up to R.THEME_TAGGED_FACT_MAX_AGE_YEARS old (the template tags it "FY2022"); the
+    insider spotlight's own segment fact keeps its two years."""
+    run = date(2026, 11, 19)
+    old = breakdown(fiscal_year="2022")
+    assert A._segment_fact(old, run) is None
+    assert A._segment_fact(old, run, max_age_years=R.THEME_TAGGED_FACT_MAX_AGE_YEARS) == ("iPhone", 200e9 / 350e9, "2022")
+    assert A._segment_fact(breakdown(fiscal_year="2021"), run, max_age_years=R.THEME_TAGGED_FACT_MAX_AGE_YEARS) is None
+
+
+@pytest.mark.asyncio
+async def test_phase3_a_theme_members_old_fact_reaches_the_record():
+    bds = {**theme_breakdowns(), "AMD": breakdown(symbol="AMD", fiscal_year="2022", reported_revenue=23.6e9,
+                                                  revenue_sources=[src("Data Center", 6e9), src("Client", 6.2e9),
+                                                                   src("Gaming", 6.8e9), src("Embedded", 4.6e9)])}
+    (rec,) = (await trun(theme_world(breakdowns=bds))).records
+    facts = {m.company.symbol: m.fiscal_year for m in rec.members}
+    assert facts["AMD"] == "2022"
+
+
+@pytest.mark.asyncio
+async def test_phase3_the_biggest_angle_ranks_by_one_batch_of_dated_market_values():
+    """Angle 2: ONE market-capitalization batch for the members (memoised), only `symbol` / `date` / `marketCap` read,
+    the members ranked largest first (ties: the symbol), every value of ONE day within the week before the run."""
+    world = theme_world()
+    world["fmp"].market_caps = _caps(QCOM=1.6e12)                    # a tie with AVGO: the symbol breaks it
+    hist = ("news:theme_explainer:ai-chips:make_money:2026-10-01",)
+    (rec,) = (await trun(world, theme_history=hist)).records
+    assert rec.angle == "biggest" and rec.values_as_of == date(2026, 11, 18)
+    assert [m.company.symbol for m in rec.members] == ["NVDA", "AVGO", "QCOM", "AMD", "INTC", "MRVL"]
+    assert world["fmp"].market_cap_requests == [sorted(["NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC"])]
+    await trun(world, theme_history=hist)                             # the memo answers the second build
+    assert world["fmp"].calls["market_caps"] == 1
+
+
+@pytest.mark.parametrize("rows, left_out", [
+    # a missing value, zero, negative, inf, a string, a bool, over the cap: each member left out, never ranked
+    (_caps()[:5] + [{"symbol": "INTC", "date": "2026-11-18", "marketCap": None}], {"INTC"}),
+    (_caps(INTC=0.0), {"INTC"}), (_caps(INTC=-5e9), {"INTC"}), (_caps(INTC=float("inf")), {"INTC"}),
+    (_caps(INTC="1.2e11"), {"INTC"}), (_caps(INTC=True), {"INTC"}), (_caps(INTC=60e12), {"INTC"}),
+    # two rows of one member that disagree; a row of another day than the post's (most rows' day)
+    (_caps() + [{"symbol": "INTC", "date": "2026-11-18", "marketCap": 9e10}], {"INTC"}),
+    (_caps()[:5] + [{"symbol": "INTC", "date": "2026-11-17", "marketCap": 1.2e11}], {"INTC"}),
+    # a member with no row; a row for a symbol not asked (ignored); junk rows
+    (_caps()[:5], {"INTC"}), (_caps() + [{"symbol": "ZZZZ", "date": "2026-11-18", "marketCap": 9e12}], set()),
+    (_caps() + ["junk", {"date": "2026-11-18", "marketCap": 1e9}, {"symbol": 7}], set()),
+])
+@pytest.mark.asyncio
+async def test_phase3_a_bad_market_value_row_leaves_its_member_out(rows, left_out):
+    world = theme_world()
+    world["fmp"].market_caps = rows
+    got = await trun(world, theme_history=("news:theme_explainer:ai-chips:make_money:2026-10-01",))
+    (rec,) = got.records
+    assert {m.company.symbol for m in rec.members} == {"NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC"} - left_out
+    assert got.rejections.get("market_value_unusable", 0) == len(left_out)
+    assert "ZZZZ" not in {m.company.symbol for m in rec.members} and rec.theme_size == 8
+
+
+@pytest.mark.asyncio
+async def test_phase3_a_non_usd_listing_or_a_stale_day_gives_no_market_value():
+    profiles = theme_profiles()
+    profiles["INTC"] = prof("INTC", "Intel Corporation", exchange="NASDAQ", currency="EUR")
+    world = theme_world(profiles=profiles)
+    world["fmp"].market_caps = _caps()
+    hist = ("news:theme_explainer:ai-chips:make_money:2026-10-01",)
+    (rec,) = (await trun(world, theme_history=hist)).records
+    assert "INTC" not in {m.company.symbol for m in rec.members}
+    A.clear_memo()
+    world = theme_world()
+    world["fmp"].market_caps = _caps(day="2026-11-11")               # 8 days before the run: a stale feed
+    got = await trun(world, theme_history=hist)
+    # no value is used: "biggest" is thin, and the rotation wraps to "how they make money"
+    assert got.rejections.get("theme_values_thin") == 1 and [r.angle for r in got.records] == ["make_money"]
+
+
+@pytest.mark.asyncio
+async def test_phase3_a_failed_market_value_read_is_that_angles_turn_lost():
+    world = theme_world()
+    world["fmp"].market_caps = FMPUnavailableException("batch down")
+    got = await trun(world, theme_history=("news:theme_explainer:ai-chips:make_money:2026-10-01",))
+    assert [r.angle for r in got.records] == ["make_money"]          # the next angle (rotation wraps) posted
+
+
+@pytest.mark.parametrize("kw", [dict(theme_history="news:x"), dict(theme_history=[1]),
+                                dict(theme_history=["x"] * (A.THEME_HISTORY_MAX + 1)),
+                                dict(theme_angles=("charts",)), dict(theme_angles="make_money")])
+@pytest.mark.asyncio
+async def test_phase3_bad_theme_inputs_are_a_callers_bug(kw):
+    with pytest.raises(ValueError):
+        await trun(theme_world(), **kw)
+
+
+# ══ news-v23 phase 3, the theme's last three angles (2026-11-20): growth + profit, the insider scorecard, Congress ════
+
+#: The default theme's six listed members (ARM blocked, SMH an ETF): NVDA, AMD, AVGO, QCOM, MRVL, INTC.
+_SIX = ("NVDA", "AMD", "AVGO", "QCOM", "MRVL", "INTC")
+_IN_WINDOW = "2026-11-02"                     # a filing day inside THEME_RUN's 90-day window (Aug 21 .. Nov 18)
+
+
+def annual(sym, rev=120e9, prior=100e9, net=12e9, *, fy="2025", end="2025-12-31", prior_end="2024-12-31",
+           currency="USD", **over):
+    """Two ANNUAL income statement rows (newest first), as FMP answers them; `over` edits the newest."""
+    newest = {"symbol": sym, "date": end, "fiscalYear": fy, "period": "FY", "reportedCurrency": currency,
+              "revenue": rev, "netIncome": net, "eps": 1.0}
+    newest.update(over)
+    older = {"symbol": sym, "date": prior_end, "fiscalYear": str(int(fy) - 1), "period": "FY",
+             "reportedCurrency": currency, "revenue": prior, "netIncome": 1e9, "eps": 0.5}
+    return [newest, older]
+
+
+def ins_line(sym, tx="P-Purchase", shares=1_000, price=100.0, filed=_IN_WINDOW, traded=None, **kw):
+    """One Form 4 line of `sym`'s issuer (irow's shape), P or S, common stock."""
+    kw.setdefault("acquisitionOrDisposition", "A" if tx.startswith("P") else "D")
+    return irow(sym=sym, tx=tx, shares=shares, price=price, filed=filed, traded=traded or filed, **kw)
+
+
+def angles_world(*, income=None, issuer=None, senate=None, house=None, rows=None, profiles=None, caps=True,
+                 breakdowns=None, oldest="2026-09-01"):
+    """The default theme with every angle's data: breakdowns (make_money), market values (biggest), annual statements
+    (growth + profit), each issuer's Form 4 read (the insider scorecard) and both chambers' feeds (Congress; `oldest`:
+    the feeds' last row, before the disclosure month — a covered walk)."""
+    fmp = FakeFMP2b(profiles=theme_profiles() if profiles is None else profiles,
+                    income={s: annual(s) for s in _SIX} if income is None else income,
+                    issuer_feed={A.normalize_cik(issuer_cik(s)): rows_ for s, rows_ in (issuer or {}).items()},
+                    senate=cfeed("senate", senate or [], oldest=oldest), house=cfeed("house", house or [], oldest=oldest),
+                    market_caps=_caps() if caps else None)
+    revenue = FakeService(theme_breakdowns() if breakdowns is None else breakdowns,
+                          default=breakdown(degraded=["segmentation_unavailable"]))
+    sb = FakeSB({"trending_themes": [theme()] if rows is None else rows})
+    return dict(fmp=fmp, revenue=revenue, sb=sb)
+
+
+async def arun(world, angle_before=None, **kw):
+    """One theme build whose last posted angle is `angle_before` (so the NEXT angle is tried first)."""
+    hist = (f"news:theme_explainer:ai-chips:{angle_before}:2026-10-01",) if angle_before else ()
+    return await trun(world, theme_history=hist, **kw)
+
+
+def _senate_purchases(counts, day="2026-10-20"):
+    """`counts` {symbol: distinct members} as senate purchase rows of October 2026 (THEME_RUN's disclosure month)."""
+    return [crow("senate", sym, day, f"m{sym}{i}") for sym, n in counts.items() for i in range(n)]
+
+
+# ── angle 3: growth + profit ───────────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_phase3_growth_profit_reads_two_annual_years_and_keeps_the_themes_order():
+    """Angle 3: ONE licensed income-statement call per member (memoised), the latest fiscal year's revenue against the
+    year before's and its net income — the members in the THEME's order (no ranking), every figure the statement's."""
+    world = angles_world(income={**{s: annual(s) for s in _SIX},
+                                 "NVDA": annual("NVDA", 130e9, 61e9, 73e9, fy="2026", end="2026-01-25",
+                                                prior_end="2025-01-26"),
+                                 "MRVL": annual("MRVL", 5.8e9, 5.5e9, -0.9e9, fy="2026", end="2026-02-01",
+                                                prior_end="2025-02-01")})
+    got = await arun(world, "biggest")
+    (rec,) = got.records
+    assert rec.angle == "growth_profit" and R.ledger_key(rec) == "news:theme_explainer:ai-chips:growth_profit:2026-11-19"
+    assert [m.company.symbol for m in rec.members] == list(_SIX)
+    nvda = rec.members[0]
+    assert (nvda.fiscal_year, nvda.revenue_usd, nvda.prior_revenue_usd, nvda.net_income_usd) == ("2026", 130e9, 61e9,
+                                                                                                   73e9)
+    assert R.theme_profit_per_100(rec.members[4]) < 0                    # a loss is kept, as filed
+    assert world["fmp"].calls["income"] == 6 and rec.theme_size == 8
+    assert world["fmp"].calls["market_caps"] == 0 and world["revenue"].calls == []     # no other angle's read
+    await arun(world, "biggest")                                         # the memo answers a second build
+    assert world["fmp"].calls["income"] == 6
+
+
+_RUN = THEME_RUN
+
+
+@pytest.mark.parametrize("rows, why", [
+    ([], "fewer than two"),
+    (annual("X")[:1], "fewer than two"),
+    ([{"date": "soon", "revenue": 1}, {"date": None}], "fewer than two"),
+    (annual("X") + [dict(annual("X")[0], revenue=1.0)], "disagree"),                    # two rows of one year
+    (annual("X", end="2025-07-15", prior_end="2024-07-15", fy="2025"), "days before the run"),   # 492 days: stale
+    (annual("X", end="2026-11-20", prior_end="2025-11-20", fy="2027"), "days before the run"),   # after the run
+    (annual("X", prior_end="2025-06-30"), "apart"),                       # a half year, not a year
+    (annual("X", prior_end="2023-12-31"), "apart"),                       # two years apart (a missing year)
+    (annual("X", prior_end="2024-12-01"), "apart"),                       # 395 days
+    ([dict(annual("X")[0], fiscalYear="20X5"), annual("X")[1]], "consecutive"),
+    ([annual("X")[0], dict(annual("X")[1], fiscalYear="2023")], "consecutive"),
+    (annual("X", fy="2019", end="2025-12-31", prior_end="2024-12-31"), "near the run"),     # a mislabelled year
+    ([annual("X")[0], dict(annual("X")[1], reportedCurrency="EUR")], "currencies"),
+    (annual("X", currency=""), "currencies"),
+    (annual("X", rev=0.0), "revenue"), (annual("X", rev=-5.0), "revenue"), (annual("X", rev="120e9"), "revenue"),
+    (annual("X", rev=True), "revenue"), (annual("X", rev=float("nan")), "revenue"),
+    (annual("X", prior=0.0), "revenue"), (annual("X", prior=None), "revenue"),
+    (annual("X", net=None), "net income"), (annual("X", net=float("inf")), "net income"),
+    (annual("X", rev=601e9, prior=100e9), "plausibility"),               # +501%
+    (annual("X", rev=120e9, net=121e9), "above revenue"),
+    (annual("X", rev=1e9, prior=1e9, net=-10.5e9), "implausible loss"),
+    (annual("X", rev=1e12, prior=1e12, net=4e7), "under a cent"),         # $0.004 per $100: never a "$0.00"
+])
+def test_phase3_a_growth_fact_is_refused_whenever_the_claim_could_be_wrong(rows, why):
+    got = A._theme_growth_fact(rows, _RUN)
+    assert isinstance(got, str) and why in got, got
+
+
+def test_phase3_a_growth_fact_reads_unsorted_rows_and_the_bounds_exactly():
+    rows = list(reversed(annual("X", 120e9, 100e9, 12e9) + [dict(annual("X")[1], date="2023-12-31", fiscalYear="2023",
+                                                                    revenue=1.0)]))
+    assert A._theme_growth_fact(rows, _RUN) == ("2025", 120e9, 100e9, 12e9)          # the two NEWEST years
+    assert A._theme_growth_fact(annual("X", rev=600e9, prior=100e9), _RUN)[0] == "2025"     # +500% exactly: kept
+    assert A._theme_growth_fact(annual("X", rev=1e9, net=-10e9), _RUN)[3] == -10e9           # a loss of 10x: kept
+    assert A._theme_growth_fact(annual("X", rev=1e9, net=0.0), _RUN)[3] == 0.0               # exactly zero: kept
+    # a 53-week year (371 days) and a 52-week one (364) are a year; the latest year may end 485 days before the run
+    assert not isinstance(A._theme_growth_fact(annual("X", end="2026-01-31", prior_end="2025-01-25", fy="2026"), _RUN),
+                          str)
+    assert not isinstance(A._theme_growth_fact(annual("X", end="2025-07-22", prior_end="2024-07-22"), _RUN), str)
+
+
+@pytest.mark.asyncio
+async def test_phase3_growth_profit_leaves_out_a_member_it_cannot_be_sure_of_and_reads_no_one_twice(caplog):
+    income = {s: annual(s) for s in _SIX}
+    income["AMD"] = FMPUnavailableException("statements down")              # a failed read: left out, never zero
+    income["QCOM"] = annual("QCOM", rev=900e9, prior=100e9)                  # +800%: implausible, left out
+    world = angles_world(income=income)
+    got = await arun(world, "biggest")
+    (rec,) = got.records
+    assert [m.company.symbol for m in rec.members] == ["NVDA", "AVGO", "MRVL", "INTC"]
+    assert got.rejections.get("statements_unreadable") == 1 and got.rejections.get("growth_unusable") == 1
+    assert "AMD annual statements unreadable" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_phase3_growth_profit_thin_or_down_is_that_angles_turn_lost():
+    # three members with a certain fact → `theme_growth_thin`, the next angle (the insider scorecard) is tried
+    income = {s: annual(s) for s in ("NVDA", "AMD", "AVGO")}
+    world = angles_world(income=income, issuer={s: [ins_line(s, "S-Sale")] for s in _SIX})
+    got = await arun(world, "biggest")
+    assert got.rejections.get("theme_growth_thin") == 1 and [r.angle for r in got.records] == ["insiders"]
+    # every read failing is the source being down: the angle is lost (the next one tried), never "thin"
+    A.clear_memo()
+    world = angles_world(income={s: FMPUnavailableException("down") for s in _SIX},
+                         issuer={s: [ins_line(s, "S-Sale")] for s in _SIX})
+    got = await arun(world, "biggest")
+    assert "theme_growth_thin" not in got.rejections and [r.angle for r in got.records] == ["insiders"]
+
+
+@pytest.mark.asyncio
+async def test_phase3_growth_profit_holds_at_most_fourteen_companies_and_reads_at_most_sixteen():
+    syms = [f"T{c}" for c in "ABCDEFGHIJKLMNOPQRS"]                          # 19 members
+    profiles = {s: prof(s, f"Company {s}", exchange="NASDAQ") for s in syms}
+    world = angles_world(rows=[theme(tickers=syms, blocked_tickers=[])], profiles=profiles,
+                         income={s: annual(s) for s in syms}, caps=False)
+    (rec,) = (await arun(world, "biggest")).records
+    assert len(rec.members) == R.THEME_GROWTH_MAX_MEMBERS == 14
+    assert [m.company.symbol for m in rec.members] == syms[:14] and rec.theme_size == 19
+    assert world["fmp"].calls["income"] == A.THEME_STATEMENT_LOOKUPS == 16
+
+
+@pytest.mark.asyncio
+async def test_phase3_a_name_the_table_cannot_draw_is_left_out_before_any_read():
+    """A member whose display name needs more than the table's lines at the floor (`R.theme_table_name_fits`) is left
+    out (``company_name_unusable``) BEFORE its statements are read — the template never refuses the record, so a theme
+    is never stuck on an angle it cannot draw. Mutation-checked by hand (2026-11-20): with the filter removed the record
+    lists the member and the template refuses it (`slot_rejected`)."""
+    profiles = theme_profiles()
+    long_name = "Wmwmwmwm Wmwmwmwm Wmwmwmwm"                     # three lines of the growth table, one of Congress
+    assert not R.theme_table_name_fits("growth_profit", long_name) and R.theme_table_name_fits("congress", long_name)
+    profiles["INTC"] = prof("INTC", long_name, exchange="NASDAQ")
+    world = angles_world(profiles=profiles)
+    got = await arun(world, "biggest")
+    (rec,) = got.records
+    assert "INTC" not in [m.company.symbol for m in rec.members] and got.rejections.get("company_name_unusable") == 1
+    assert world["fmp"].calls["income"] == 5
+
+
+# ── angle 4: the insider scorecard ─────────────────────────────────────────────────────────────────────────────
+
+_WS, _WE = THEME_RUN - timedelta(days=90), THEME_RUN - timedelta(days=1)
+_CIK = issuer_cik("NVDA")
+
+
+@pytest.mark.parametrize("rows, want", [
+    ([], (0.0, 0.0)),
+    ([ins_line("NVDA", shares=1000, price=100.0), ins_line("NVDA", "S-Sale", shares=500, price=110.0)],
+     (100_000.0, 55_000.0)),
+    # an S-Sale+OE line is still a code-S sale of the stock
+    ([ins_line("NVDA", "S-Sale+OE", shares=10, price=10.0)], (0.0, 100.0)),
+    # not counted: an award, an exercise, a gift, tax withholding; an option / warrant / preferred line; a Form 5
+    ([ins_line("NVDA", "A-Award", shares=9e6), ins_line("NVDA", "M-Exempt", shares=9e6),
+      ins_line("NVDA", "G-Gift", shares=9e6), ins_line("NVDA", "F-InKind", shares=9e6)], (0.0, 0.0)),
+    ([ins_line("NVDA", sec="Stock Option (Right to Buy)"), ins_line("NVDA", "S-Sale", sec="Warrants"),
+      ins_line("NVDA", sec="Series A Preferred Stock")], (0.0, 0.0)),
+    ([ins_line("NVDA", form="5")], (0.0, 0.0)),
+    # filed before the window opened, or on the run day: another window's
+    ([ins_line("NVDA", filed="2026-08-20"), ins_line("NVDA", filed="2026-11-19")], (0.0, 0.0)),
+    ([ins_line("NVDA", filed="2026-08-21"), ins_line("NVDA", filed="2026-11-18")], (200_000.0, 0.0)),
+    # the same line on two filings counts once (the earliest); identical lines on ONE filing are separate fills
+    ([ins_line("NVDA", filed="2026-11-02"), ins_line("NVDA", filed="2026-11-05", traded="2026-11-02")],
+     (100_000.0, 0.0)),
+    ([ins_line("NVDA"), ins_line("NVDA")], (200_000.0, 0.0)),
+    # the EARLIEST filing's fills are the ones kept: two fills there, the line repeated once on a later filing → two
+    ([ins_line("NVDA"), ins_line("NVDA"), ins_line("NVDA", filed="2026-11-09", traded="2026-11-02")],
+     (200_000.0, 0.0)),
+    # unsorted rows read the same
+    ([ins_line("NVDA", "S-Sale", filed="2026-09-01"), ins_line("NVDA", filed="2026-11-10"),
+      ins_line("NVDA", filed="2026-10-01")], (200_000.0, 100_000.0)),
+])
+def test_phase3_insider_totals_are_open_market_common_stock_dollars_as_filed(rows, want):
+    assert A._theme_insider_totals(rows, cik=_CIK, window_start=_WS, window_end=_WE) == pytest.approx(want)
+
+
+@pytest.mark.parametrize("rows, why", [
+    # ANY amendment of the issuer filed since the window opened — any code, any security (an option 4/A too)
+    ([ins_line("NVDA"), ins_line("NVDA", "M-Exempt", form="4/A", sec="Stock Option")], "amended_filing"),
+    ([ins_line("NVDA", form="4/A")], "amended_filing"),
+    ([ins_line("NVDA", form=" 4/a ", filed="2026-11-19")], "amended_filing"),          # filed on the run day too
+    # a row of another issuer: the read was not filtered
+    ([ins_line("NVDA"), ins_line("AMD")], "insider_feed_unusable"),
+    # a P / S common line whose dollars cannot be computed: never a guessed total
+    ([ins_line("NVDA", price=0.0)], "insider_feed_unusable"),
+    ([ins_line("NVDA", price=None)], "insider_feed_unusable"),
+    ([ins_line("NVDA", shares=-5)], "insider_feed_unusable"),
+    ([ins_line("NVDA", shares="1000")], "insider_feed_unusable"),
+    ([ins_line("NVDA", shares=1e9, price=1e4)], "insider_feed_unusable"),               # past the garbage bound
+    ([ins_line("NVDA", sec="")], "insider_feed_unusable"),                               # not known to be stock
+    ([ins_line("NVDA", filingDate=None)], "insider_feed_unusable"),
+    ([ins_line("NVDA", acquisitionOrDisposition="D")], "insider_feed_unusable"),         # a purchase disposed of
+    ([ins_line("NVDA", shares=0.004, price=100.0)], "insider_feed_unusable"),           # $0.40: never a "$0"
+])
+def test_phase3_insider_totals_fail_closed_for_the_whole_company(rows, why):
+    assert A._theme_insider_totals(rows, cik=_CIK, window_start=_WS, window_end=_WE) == why
+
+
+def test_phase3_an_amendment_before_the_window_is_another_windows():
+    rows = [ins_line("NVDA"), ins_line("NVDA", form="4/A", filed="2026-08-20")]
+    assert A._theme_insider_totals(rows, cik=_CIK, window_start=_WS, window_end=_WE) == pytest.approx((100_000.0, 0.0))
+
+
+@pytest.mark.asyncio
+async def test_phase3_the_insider_scorecard_lists_the_companies_with_trades_purchases_first(caplog):
+    issuer = {"NVDA": [ins_line("NVDA", "S-Sale", shares=100_000)],                   # $10M of sales
+              "AMD": [ins_line("AMD", shares=2_000), ins_line("AMD", "S-Sale", shares=500)],
+              "AVGO": [ins_line("AVGO", shares=5_000)],                                  # $500K of purchases
+              "QCOM": [ins_line("QCOM", "S-Sale", shares=30_000)],
+              "MRVL": [ins_line("MRVL", "A-Award", shares=9e6)],                         # checked, nothing listed
+              "INTC": [ins_line("INTC", form="4/A")]}                                     # amended: not checked
+    world = angles_world(issuer=issuer)
+    got = await arun(world, "growth_profit")
+    (rec,) = got.records
+    assert rec.angle == "insiders" and rec.window_start == date(2026, 8, 21) and rec.window_end == date(2026, 11, 18)
+    assert [m.company.symbol for m in rec.members] == ["AVGO", "AMD", "NVDA", "QCOM"]
+    assert rec.companies_checked == 5 and got.rejections.get("amended_filing") == 1
+    assert world["fmp"].issuer_calls[0] | {} == {"since": "2026-08-21", "transaction_type": None,
+                                                  "page_size": A.THEME_INSIDER_PAGE_SIZE,
+                                                  "max_pages": A.THEME_INSIDER_MAX_PAGES,
+                                                  "company_cik": world["fmp"].issuer_calls[0]["company_cik"]}
+    assert (A.THEME_INSIDER_PAGE_SIZE, A.THEME_INSIDER_MAX_PAGES, A.THEME_INSIDER_LOOKUPS) == (1000, 3, 16)
+    assert world["fmp"].calls["insider_issuer"] == 6
+    # company totals only: no person, role or name of anyone reaches the record or its fact sheet
+    sheet = json.dumps(R.fact_sheet(rec, rejections=got.rejections, selection={}))
+    assert "COHEN" not in sheet.upper() and "Chief Executive" not in sheet
+    await arun(world, "growth_profit")                                    # the memo answers the second build
+    assert world["fmp"].calls["insider_issuer"] == 6
+
+
+@pytest.mark.asyncio
+async def test_phase3_an_unreadable_issuer_is_left_out_never_a_zero():
+    from app.integrations.fmp import FMPPartialPageException
+
+    issuer = {s: [ins_line(s, "S-Sale")] for s in _SIX}
+    issuer["AMD"] = FMPPartialPageException("past 3 pages", endpoint="insider-trading/search", pages_total=3, pages_failed=0)    # the window ran past the page bound
+    issuer["AVGO"] = FMPUnavailableException("down")
+    profiles = theme_profiles()
+    profiles["QCOM"] = {**profiles["QCOM"], "cik": None}                  # no issuer CIK: cannot be read by issuer
+    world = angles_world(issuer=issuer, profiles=profiles)
+    got = await arun(world, "growth_profit", theme_angles=("insiders",))
+    # three left out — never counted as "no trades" — leave three listed: the scorecard is thin, nothing posted
+    assert got.records == () and got.rejections.get("insider_feed_unusable") == 3
+    assert got.rejections.get("theme_insiders_thin") == 1
+    assert world["fmp"].calls["insider_issuer"] == 5                      # QCOM never read (no CIK)
+
+
+@pytest.mark.asyncio
+async def test_phase3_the_insider_scorecard_is_thin_under_four_companies_with_trades():
+    issuer = {s: [ins_line(s, "S-Sale")] for s in ("NVDA", "AMD", "AVGO")}
+    world = angles_world(issuer=issuer, senate=_senate_purchases({s: 2 for s in _SIX}))
+    got = await arun(world, "growth_profit")
+    assert got.rejections.get("theme_insiders_thin") == 1 and [r.angle for r in got.records] == ["congress"]
+
+
+@pytest.mark.asyncio
+async def test_phase3_the_filing_angles_need_class_c_on_and_read_nothing_without_it():
+    """The insider scorecard and Congress state FILINGS (class C): with MARKETING_CONTENT_CLASSES lacking "C" they are
+    skipped (``theme_angle_class_off``) with NO read and the rotation goes on to "how they make money". Mutation-checked by
+    hand (2026-11-20): with the class check removed, the insider read was made and the angle posted."""
+    world = angles_world(issuer={s: [ins_line(s, "S-Sale")] for s in _SIX},
+                         senate=_senate_purchases({s: 2 for s in _SIX}))
+    got = await arun(world, "growth_profit", theme_classes=("A", "F"))
+    (rec,) = got.records
+    assert rec.angle == "make_money" and got.rejections.get("theme_angle_class_off") == 2
+    assert world["fmp"].calls["insider_issuer"] == 0 and world["fmp"].calls["congress"] == 0
+    A.clear_memo()
+    got = await arun(angles_world(issuer={s: [ins_line(s, "S-Sale")] for s in _SIX}), "growth_profit",
+                     theme_classes=("A", "C", "F"))
+    assert [r.angle for r in got.records] == ["insiders"]
+
+
+@pytest.mark.parametrize("bad", ["C", b"C", {"C": 1}, [1]])
+@pytest.mark.asyncio
+async def test_phase3_bad_theme_classes_are_a_callers_bug(bad):
+    with pytest.raises(ValueError):
+        await trun(theme_world(), theme_classes=bad)
+
+
+# ── angle 5: Congress ──────────────────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_phase3_the_congress_angle_counts_two_or_more_distinct_members_the_most_first():
+    senate = _senate_purchases({"NVDA": 3, "AMD": 2, "AVGO": 4, "QCOM": 2, "MRVL": 1, "TSLA": 5})
+    world = angles_world(senate=senate)
+    got = await arun(world, "insiders")
+    (rec,) = got.records
+    assert rec.angle == "congress" and rec.month == "2026-10"
+    # the most members first, then the NAME (AMD "Advanced Micro Devices" before QCOM "QUALCOMM"); MRVL (one member)
+    # never; TSLA is not in the theme
+    assert [(m.company.symbol, m.congress_members) for m in rec.members] == [
+        ("AVGO", 4), ("NVDA", 3), ("AMD", 2), ("QCOM", 2)]
+    # never a member's name, party, state or chamber anywhere in the record
+    sheet = json.dumps(R.fact_sheet(rec, rejections=got.rejections, selection={}))
+    assert "ZQX" not in sheet and "senate" not in sheet.lower()
+
+
+@pytest.mark.asyncio
+async def test_phase3_the_congress_angle_shares_the_congress_counts_one_walk_of_the_feeds():
+    """The theme's Congress angle and the congress_count series read the SAME memoised month walk (``("congress",
+    month)``): whichever runs first walks both chambers, the other reads none — and the two can never disagree."""
+    senate = _senate_purchases({"NVDA": 3, "AMD": 2, "AVGO": 4, "QCOM": 2})
+    world = angles_world(senate=senate)
+    await arun(world, "insiders")
+    walked = world["fmp"].calls["congress"]
+    assert walked >= 2
+    got = await run("congress_count", world["fmp"], run_date=THEME_RUN)
+    assert world["fmp"].calls["congress"] == walked
+    assert [(c.company.symbol, c.members) for c in got.records[0].counts] == [("AVGO", 4), ("NVDA", 3), ("AMD", 2)]
+
+
+@pytest.mark.asyncio
+async def test_phase3_the_congress_angle_is_not_due_thin_or_clashing_and_moves_on():
+    # within CONGRESS_DUE_DAYS of the month's end: not due, no walk
+    world = angles_world(senate=_senate_purchases({s: 2 for s in _SIX}))
+    got = await arun(world, "insiders", run_date=date(2026, 11, 6))
+    assert got.rejections.get("theme_congress_not_due") == 1 and world["fmp"].calls["congress"] == 0
+    # three companies with two members: thin, the rotation wraps to "how they make money"
+    A.clear_memo()
+    world = angles_world(senate=_senate_purchases({"NVDA": 2, "AMD": 2, "AVGO": 2}))
+    got = await arun(world, "insiders")
+    assert got.rejections.get("theme_congress_thin") == 1 and [r.angle for r in got.records] == ["make_money"]
+    # an in-month purchase under no symbol naming the company: its count could be low, so it is left out
+    A.clear_memo()
+    senate = _senate_purchases({s: 2 for s in ("NVDA", "AMD", "AVGO", "QCOM", "MRVL")}) + [
+        crow("senate", "", "2026-10-21", "mx", desc="Broadcom Inc. common stock")]
+    got = await arun(angles_world(senate=senate), "insiders")
+    (rec,) = got.records
+    assert "AVGO" not in [m.company.symbol for m in rec.members] and got.rejections.get("unmapped_purchase") == 1
+
+
+# ── the whole rotation, end to end ────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_phase3_one_theme_walks_all_five_angles_in_the_owners_order_and_each_post_composes():
+    """End to end for ONE theme: five builds, each four weeks after the last, each fed the previous post's ledger key —
+    "how they make money" → "who's biggest" → "growth + profit" → "insider scorecard" → "Congress" → back to the first;
+    each record composes into a post its own picture layout draws (the templates' builders, validate_package clean)."""
+    from app.services.marketing.script_service import template_picture_outlets
+
+    pictured = template_picture_outlets(True, False, ("bluesky", "facebook", "linkedin", "threads"))
+    issuer = {s: [ins_line(s, "S-Sale", filed="2026-12-01"), ins_line(s, filed="2026-12-02")] for s in _SIX}
+    history: List[str] = []
+    seen = []
+    day = date(2026, 12, 16)                       # a Wednesday; each later build four weeks on
+    for _ in range(6):
+        A.clear_memo()
+        senate = _senate_purchases({s: 2 + i for i, s in enumerate(_SIX)},
+                                   day=f"{(day.replace(day=1) - timedelta(days=1)):%Y-%m}-10")
+        month_start = (day.replace(day=1) - timedelta(days=1)).replace(day=1)
+        world = angles_world(issuer={s: [dict(r, filingDate=f"{(day - timedelta(days=20)).isoformat()} 16:05:11",
+                                              transactionDate=(day - timedelta(days=20)).isoformat())
+                                         for r in rows_] for s, rows_ in issuer.items()},
+                             senate=senate, rows=[theme(tickers_as_of=(day - timedelta(days=5)).isoformat())],
+                             oldest=(month_start - timedelta(days=20)).isoformat())
+        world["fmp"].market_caps = _caps(day=(day - timedelta(days=1)).isoformat())
+        world["fmp"].income = {s: annual(s, fy=str(day.year - 1), end=f"{day.year - 1}-12-31",
+                                         prior_end=f"{day.year - 2}-12-31") for s in _SIX}
+        got = await trun(world, theme_history=tuple(history), run_date=day, theme_classes=("A", "C", "F"))
+        (rec,) = got.records
+        seen.append(rec.angle)
+        out = _NT.compose(rec, run_date=day, store_state="live", allow_x_url=False, picture_outlets=pictured)
+        assert out["image_spec"]["layout"] == _NT.THEME_LAYOUT_OF_ANGLE[rec.angle]
+        assert _NT.validate_package(out, record=rec) == []
+        history.append(R.ledger_key(rec))
+        day += timedelta(days=28)
+    assert seen == ["make_money", "biggest", "growth_profit", "insiders", "congress", "make_money"]
+
+
+# ══ news-v23 phase 3, fix round (2026-11-20): who counts as CHECKED, joint filers, the listing gate, the list's date,
+#    each angle's own time ════════════════════════════════════════════════════════════════════════════════════════
+
+def _pictured():
+    from app.services.marketing.script_service import template_picture_outlets
+
+    return template_picture_outlets(True, False, ("bluesky", "facebook", "linkedin", "threads"))
+
+
+def _public_text(out) -> str:
+    """Every caption field and narration line of a composed package, one string."""
+    lines = [v for line in out["video_script"] for v in ([line] if isinstance(line, str) else line)]
+    return "\n".join([*out["captions"].values(), *lines, out["image_post"] if isinstance(out.get("image_post"), str)
+                      else json.dumps(out.get("image_post"))])
+
+
+class _Http404Client:
+    """The real `FMPClient.get_insider_trades_since` over a transport that answers HTTP 404 on page 0 (FMP's
+    "endpoint not on this plan" answer): the client returns ``[]`` with a WARNING, never an exception."""
+
+    async def _make_request(self, path, params=None):
+        req = httpx.Request("GET", "https://zqx.example/stable/insider-trading/search")
+        raise httpx.HTTPStatusError("404", request=req, response=httpx.Response(404, request=req))
+
+
+@pytest.mark.asyncio
+async def test_fix_an_empty_or_refused_issuer_read_is_never_counted_as_checked(caplog):
+    """A per-issuer Form 4 read that holds NO row of its issuer — a foreign issuer's ([] — it files no Form 4) or one
+    FMP refused with a page-0 404 (the client answers [] with a WARNING) — is not a check: the company is left out of
+    `companies_checked` (``insider_feed_unusable``), so the post never says "No purchase or sale … was disclosed at the
+    other {k} companies checked" or "No insider at the {c} companies checked …" about it; such a read is never
+    memoised (a second build reads it again). Mutation-checked by hand (2026-11-20): with the issuer-row rule removed,
+    or the read memoised without `keep=bool`, this test turned red."""
+    from app.integrations import fmp as fmp_mod
+
+    issuer = {s: [ins_line(s, "S-Sale", shares=10_000 * (i + 1))] for i, s in enumerate(("NVDA", "AMD", "AVGO", "QCOM"))}
+    issuer["MRVL"] = []                                                    # a foreign issuer: no Form 4 ever
+    world = angles_world(issuer=issuer)
+    fmp = world["fmp"]
+    intc = A.normalize_cik(issuer_cik("INTC"))
+    orig = fmp.get_insider_trades_since
+
+    async def read(since, **kw):
+        if A.normalize_cik(kw.get("company_cik")) == intc:                 # INTC: the real client over a 404
+            fmp.issuer_calls.append({"company_cik": kw.get("company_cik")})
+            return await fmp_mod.FMPClient.get_insider_trades_since(_Http404Client(), since, **kw)
+        return await orig(since, **kw)
+
+    fmp.get_insider_trades_since = read
+    got = await arun(world, "growth_profit", theme_angles=("insiders",))
+    (rec,) = got.records
+    assert [m.company.symbol for m in rec.members] == ["QCOM", "AVGO", "AMD", "NVDA"]
+    assert rec.companies_checked == 4 and got.rejections.get("insider_feed_unusable") == 2
+    assert "held no row of its issuer" in caplog.text and "HTTP 404 on page 0" in caplog.text
+    out = _NT.compose(rec, run_date=THEME_RUN, store_state="live", allow_x_url=False, picture_outlets=_pictured())
+    assert _NT.validate_package(out, record=rec) == []
+    text = _public_text(out)
+    assert "companies checked" not in text.replace("4 companies checked", "")        # only the 4 read whole
+    assert "No insider at the 4 companies checked disclosed a purchase of the stock." in text
+    assert "was disclosed at the other" not in text
+    assert "4 of its 8 companies are not included." in text
+    assert out["image_spec"]["subtitle"].startswith("4 of its 8 companies")
+    # the two empty reads are read again by a second build (never memoised); the four whole ones are not
+    before = len(fmp.issuer_calls)
+    await arun(world, "growth_profit", theme_angles=("insiders",))
+    assert len(fmp.issuer_calls) - before == 2
+
+
+@pytest.mark.asyncio
+async def test_fix_every_issuer_read_empty_is_an_outage_never_thin():
+    """A plan or transport that answers every per-issuer read with [] (a page-0 403/404 everywhere) is the source being
+    down: ``insider_feed_unavailable`` — the angle's turn lost as an outage, never "thin" over reads that saw nothing.
+    Mutation-checked by hand (2026-11-20): with that check removed, this test turned red."""
+    world = angles_world(issuer={s: [] for s in _SIX})
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await arun(world, "growth_profit", theme_angles=("insiders",))
+    assert err.value.reason == "insider_feed_unavailable" and "held a row of its issuer" in err.value.detail
+
+
+@pytest.mark.parametrize("over, reason", [
+    ({"isAdr": True}, "adr"),                                              # TSM / ARM / NVO style
+    ({"currency": "EUR"}, "not_usd"),
+    ({"companyName": "QUALCOMM Depositary Shares"}, "non_common_listing"),
+])
+@pytest.mark.asyncio
+async def test_fix_a_foreign_or_non_common_listing_is_never_read_or_checked(over, reason):
+    """Before any read, the insider scorecard keeps only US common listings (`purpose="common"`, the Congress Count's
+    and the Form 4 posts' gate): an ADR's or a foreign issuer's insiders may file no Form 4, so it is never counted as
+    "checked, nothing disclosed". Mutation-checked by hand (2026-11-20): with the gate's purpose set back to
+    "listing", all three cases turned red."""
+    profiles = theme_profiles()
+    profiles["QCOM"] = {**profiles["QCOM"], **over}
+    issuer = {s: [ins_line(s, "S-Sale")] for s in _SIX}
+    world = angles_world(issuer=issuer, profiles=profiles)
+    got = await arun(world, "growth_profit", theme_angles=("insiders",))
+    (rec,) = got.records
+    assert "QCOM" not in [m.company.symbol for m in rec.members] and rec.companies_checked == 5
+    assert got.rejections.get(reason) == 1
+    qcom = A.normalize_cik(issuer_cik("QCOM"))
+    assert qcom not in {A.normalize_cik(c["company_cik"]) for c in world["fmp"].issuer_calls}
+
+
+@pytest.mark.asyncio
+async def test_fix_the_congress_angle_refuses_what_the_congress_count_refuses():
+    """Theme members are "listing" refs (an ADR kept, for the other angles); the Congress angle applies the Congress
+    Count's own listing gate (`purpose="common"`), so an ADR with 2+ members is on NEITHER post — the two posts list the
+    same companies from the same aggregate. Mutation-checked by hand (2026-11-20): with the gate's purpose set back to
+    "listing", this test turned red."""
+    profiles = theme_profiles()
+    profiles["QCOM"] = {**profiles["QCOM"], "isAdr": True}
+    senate = _senate_purchases({"NVDA": 3, "AMD": 2, "AVGO": 4, "QCOM": 5, "MRVL": 2})
+    world = angles_world(senate=senate, profiles=profiles)
+    got = await arun(world, "insiders")
+    (rec,) = got.records
+    assert rec.angle == "congress" and got.rejections.get("adr") == 1
+    assert [(m.company.symbol, m.congress_members) for m in rec.members] == [
+        ("AVGO", 4), ("NVDA", 3), ("AMD", 2), ("MRVL", 2)]
+    cc = await run("congress_count", world["fmp"], run_date=THEME_RUN)
+    assert "QCOM" not in [c.company.symbol for c in cc.records[0].counts] and cc.rejections.get("adr") == 1
+
+
+def _joint(sym="NVDA", tx="S-Sale", shares=500_000, price=100.0, owned=5_000_000, form="4", filed=_IN_WINDOW,
+           filers=(("0000000101", "ZQX FUND LP"), ("0000000102", "ZQX FUND GP LLC"), ("0000000103", "ZQX ADVISER LLC"))):
+    """One Form 4 line as FMP lists a JOINT filing: the same line under each reporting owner."""
+    return [ins_line(sym, tx, shares=shares, price=price, filed=filed, traded=_IN_WINDOW, cik=cik, name=name,
+                     owned=owned, form=form) for cik, name in filers]
+
+
+@pytest.mark.parametrize("rows, want", [
+    # a fund, its general partner and its adviser report ONE $50M sale: $50M, never $150M
+    (_joint(), (0.0, 50_000_000.0)),
+    # the same for a purchase, and the joint copies listed in another order
+    (list(reversed(_joint(tx="P-Purchase"))), (50_000_000.0, 0.0)),
+    # two DIFFERENT people's trades of the same size and price (their own balances differ): both count
+    ([ins_line("NVDA", "S-Sale", shares=1_000, cik="0000000201", name="ZQX A", owned=9_000),
+      ins_line("NVDA", "S-Sale", shares=1_000, cik="0000000202", name="ZQX B", owned=4_000)], (0.0, 200_000.0)),
+    # one reporter's identical fills on one filing stay separate fills, balance or none
+    ([ins_line("NVDA", "S-Sale", owned=None), ins_line("NVDA", "S-Sale", owned=None)], (0.0, 200_000.0)),
+])
+def test_fix_joint_filers_count_one_line_once(rows, want):
+    """Joint filers (fix round 2026-11-20): FMP lists one Form 4 line under each reporting owner, so the per-reporter
+    dedupe summed every copy. `_insider_common.distinct_trades` (the holders and report paths' rule) now merges them.
+    Mutation-checked by hand (2026-11-20): without it the two joint cases turned red."""
+    assert A._theme_insider_totals(rows, cik=_CIK, window_start=_WS, window_end=_WE) == pytest.approx(want)
+
+
+def test_fix_a_joint_copy_that_cannot_be_matched_and_a_co_filers_amendment_fail_closed():
+    # the same line under two reporters with no balance on one: a joint copy or a second trade — never a guessed total
+    rows = [ins_line("NVDA", "S-Sale", cik="0000000101", name="ZQX FUND LP", owned=None),
+            ins_line("NVDA", "S-Sale", cik="0000000102", name="ZQX FUND GP LLC")]
+    assert A._theme_insider_totals(rows, cik=_CIK, window_start=_WS, window_end=_WE) == "insider_feed_unusable"
+    # a 4/A filed by the SECOND co-filer alone, its line identical to the first co-filer's original: the amendment is
+    # read over every raw row BEFORE the joint copies merge (`distinct_trades` has no form type and would drop it).
+    # Mutation-checked by hand (2026-11-20): with `distinct_trades` run over the raw rows first — or the unmatched-copy
+    # check removed — this test turned red.
+    orig, second = _joint(filers=(("0000000101", "ZQX FUND LP"),)), _joint(filers=(("0000000102", "ZQX FUND GP LLC"),),
+                                                                           form="4/A", filed="2026-11-05")
+    assert A._theme_insider_totals(orig + second, cik=_CIK, window_start=_WS,
+                                   window_end=_WE) == "amended_filing"
+
+
+@pytest.mark.asyncio
+async def test_fix_a_list_with_no_review_date_never_says_members_as_of():
+    """`tickers_as_of` NULL (every production row): owner decision 2026-11-20 ("Trust the app's lists") — the live list
+    counts as current, the record carries the RUN day with `tickers_as_of_from_row`, and no angle's alt text says
+    "Members as of <a day>" (the source line alone, `alt.source.bare`) — never the run day, never the row's
+    `updated_at`. A list with its own date keeps the line. Mutation-checked by hand (2026-11-20): with
+    `_theme_members_as_of` always answering `th.asof`, this test turned red."""
+    world = angles_world(rows=[theme(tickers_as_of=None, updated_at="2026-11-03T15:00:00Z")],
+                         issuer={s: [ins_line(s, "S-Sale")] for s in _SIX},
+                         senate=_senate_purchases({s: 2 for s in _SIX}))
+    seen = []
+    for before in (None, "make_money", "biggest", "growth_profit", "insiders"):
+        A.clear_memo()
+        got = await arun(world, before)
+        (rec,) = got.records
+        assert rec.tickers_as_of == THEME_RUN and rec.tickers_as_of_from_row is True
+        out = _NT.compose(rec, run_date=THEME_RUN, store_state="live", allow_x_url=False, picture_outlets=_pictured())
+        assert _NT.validate_package(out, record=rec) == []
+        alt = json.dumps(out["image_post"])
+        assert "Members as of" not in alt and "Nov 3" not in alt and "Source: " in alt
+        # the record round-trips through its fact sheet with the flag (revalidate recomposes from it)
+        sheet = R.fact_sheet(rec, rejections={}, selection={})
+        assert R.record_from_fact_sheet(sheet) == rec and _NT.revalidate(out, fact_sheet=sheet, run_date=THEME_RUN) == []
+        seen.append(rec.angle)
+    assert seen == list(R.THEME_ANGLES)
+    A.clear_memo()
+    got = await trun(theme_world([theme(tickers_as_of="2026-11-02")]))
+    (rec,) = got.records
+    assert rec.tickers_as_of_from_row is False
+    out = _NT.compose(rec, run_date=THEME_RUN, store_state="live", allow_x_url=False, picture_outlets=_pictured())
+    assert "Members as of Nov 2, 2026" in json.dumps(out["image_post"])
+    # an older fact sheet (before the flag) reads back as a list with its own date
+    body = R.fact_sheet(rec, rejections={}, selection={})
+    body["record"].pop("tickers_as_of_from_row")
+    assert R.record_from_fact_sheet(body).tickers_as_of_from_row is False
+
+
+@pytest.mark.asyncio
+async def test_fix_a_slow_angle_loses_its_own_turn_never_the_series(monkeypatch, caplog):
+    """Each angle runs under its OWN share of the time (THEME_ANGLE_BUDGET_SECONDS): a theme whose next angles are the
+    insider scorecard and Congress, both slow (each read 3 s), on a 5 s series budget — each loses ITS turn when its
+    share runs out and "how they make money" still posts. Before: one step per angle with all the time left — the
+    insider walk spent the whole budget and the series ended `budget_exhausted` with no post (and the next Wednesday
+    repeated it). Mutation-checked by hand (2026-11-20): with the per-angle deadline removed (the series' deadline for
+    every angle), this test turned red."""
+    monkeypatch.setitem(A.THEME_ANGLE_BUDGET_SECONDS, "insiders", 1.2)
+    monkeypatch.setitem(A.THEME_ANGLE_BUDGET_SECONDS, "congress", 1.2)
+    world = angles_world(issuer={s: [ins_line(s, "S-Sale")] for s in _SIX},
+                         senate=_senate_purchases({s: 2 for s in _SIX}))
+    fmp = world["fmp"]
+    orig_read, orig_senate = fmp.get_insider_trades_since, fmp.get_senate_latest
+
+    async def slow_read(since, **kw):
+        if kw.get("company_cik") is not None:
+            await asyncio.sleep(3.0)
+        return await orig_read(since, **kw)
+
+    async def slow_senate(limit=1000):
+        await asyncio.sleep(3.0)
+        return await orig_senate(limit)
+
+    fmp.get_insider_trades_since, fmp.get_senate_latest = slow_read, slow_senate
+    started = time.monotonic()
+    got = await arun(world, "growth_profit", left=5.0)
+    (rec,) = got.records
+    assert rec.angle == "make_money" and time.monotonic() - started < 4.5
+    assert caplog.text.count("ran out of its own") == 2
+    await _settle_leads()
+    # the series' OWN deadline still ends the walk: every angle slow and no record → budget_exhausted, raised
+    A.clear_memo()
+    for angle in A.THEME_ANGLE_BUDGET_SECONDS:
+        monkeypatch.setitem(A.THEME_ANGLE_BUDGET_SECONDS, angle, 60.0)
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await arun(world, "growth_profit", left=2.0)
+    assert err.value.reason == "budget_exhausted"
+    await _settle_leads()
+
+
+# ══ phase 4 (2026-11-20): "how they make money" reads EVERY member in market-value order, draws the members with a fact
+#    LARGEST MARKET VALUE FIRST, and walks a GROSS newest stack back to the newest year that is not — the owner's "for AI
+#    CHIPS, i don't see ARM, Intel and SNPS? add for me" (theme_ai_chips_more.jpg) ═══════════════════════════════════
+
+import math  # noqa: E402
+from typing import Tuple  # noqa: E402
+
+from app.services import revenue_breakdown_service as _RBS  # noqa: E402
+
+#: The PRODUCTION Silicon Rush member list, in its order (read-only query of `trending_themes`, 2026-11-20 — public app
+#: data; `tickers_as_of` NULL there). Company names are the real ones; every FIGURE below is a SAMPLE.
+SILICON_RUSH = ("NVDA", "TSM", "AVGO", "ASML", "AMD", "MU", "ARM", "MRVL", "QCOM", "AMAT", "LRCX", "KLAC", "SNPS",
+                "CDNS", "ALAB", "CRDO", "MPWR", "COHR", "LITE", "INTC", "GFS")
+_SR_NAMES = {"NVDA": "NVIDIA Corporation", "TSM": "Taiwan Semiconductor Manufacturing Company Limited",
+             "AVGO": "Broadcom Inc.", "ASML": "ASML Holding N.V.", "AMD": "Advanced Micro Devices, Inc.",
+             "MU": "Micron Technology, Inc.", "ARM": "Arm Holdings plc American Depositary Shares",
+             "MRVL": "Marvell Technology, Inc.", "QCOM": "QUALCOMM Incorporated", "AMAT": "Applied Materials, Inc.",
+             "LRCX": "Lam Research Corporation", "KLAC": "KLA Corporation", "SNPS": "Synopsys, Inc.",
+             "CDNS": "Cadence Design Systems, Inc.", "ALAB": "Astera Labs, Inc.",
+             "CRDO": "Credo Technology Group Holding Ltd", "MPWR": "Monolithic Power Systems, Inc.",
+             "COHR": "Coherent Corp.", "LITE": "Lumentum Holdings Inc.", "INTC": "Intel Corporation",
+             "GFS": "GlobalFoundries Inc."}
+#: SAMPLE market values (USD) in a REALISTIC order — the size ranking of late 2026, rounded; never real data, never in
+#: code. Synopsys is the 14th largest of the 21, Arm the 11th, Intel the 8th.
+_SR_CAPS = {"NVDA": 4.40e12, "AVGO": 1.60e12, "TSM": 1.50e12, "ASML": 4.0e11, "AMD": 3.9e11, "MU": 2.5e11,
+            "AMAT": 2.1e11, "INTC": 2.0e11, "QCOM": 1.8e11, "LRCX": 1.7e11, "ARM": 1.6e11, "KLAC": 1.5e11,
+            "CDNS": 9.0e10, "SNPS": 8.5e10, "MRVL": 8.0e10, "MPWR": 4.5e10, "ALAB": 3.0e10, "CRDO": 2.5e10,
+            "COHR": 2.4e10, "LITE": 2.0e10, "GFS": 1.9e10}
+P4_RUN = date(2026, 11, 25)                         # a Wednesday (the theme's day)
+_P4_ADR = {"TSM", "ASML", "ARM"}
+
+
+def _sr_profiles(caps=None):
+    caps = _SR_CAPS if caps is None else caps
+    return {s: prof(s, _SR_NAMES[s], exchange="NYSE" if s in ("TSM", "KLAC", "COHR") else "NASDAQ",
+                    cap=caps.get(s, 0.0), isAdr=s in _P4_ADR) for s in SILICON_RUSH}
+
+
+def _sr_caps_rows(day="2026-11-24", caps=None):
+    return [{"symbol": s, "date": day, "marketCap": v} for s, v in (_SR_CAPS if caps is None else caps).items()]
+
+
+def _seg_bd(sym, fy, lines, revenue=None, **over):
+    """A clean (net) newest breakdown: `lines` [(name, value)], revenue their sum unless given."""
+    return breakdown(symbol=sym, fiscal_year=fy, reported_revenue=revenue if revenue is not None else
+                     math.fsum(v for _n, v in lines), revenue_sources=[src(n, v) for n, v in lines], **over)
+
+
+#: INTC as FMP files it (the segment names of tests/test_revenue_breakdown_reconciliation.py's INTC rows): fiscal
+#: 2023-2025 GROSS (Intel Foundry's sales to Intel's own product groups, an "Intersegment Eliminations" row), fiscal
+#: 2022 net. SAMPLE figures.
+_INTC_SEG_RAW = [
+    {"symbol": "INTC", "fiscalYear": 2025, "date": "2025-12-27", "data": {
+        "Client Computing Group": 32.2e9, "Data Center and AI": 16.9e9, "Intel Foundry": 17.8e9, "All Other": 3.6e9,
+        "Intersegment Eliminations": -17.6e9}},
+    {"symbol": "INTC", "fiscalYear": 2024, "date": "2024-12-28", "data": {
+        "Client Computing Group": 30.3e9, "Data Center and AI": 12.8e9, "Intel Foundry": 17.5e9, "All Other": 3.8e9,
+        "Intersegment Eliminations": -11.3e9}},
+    {"symbol": "INTC", "fiscalYear": 2023, "date": "2023-12-30", "data": {
+        "Client Computing Group": 29.3e9, "Data Center and AI": 15.5e9, "Intel Foundry": 18.9e9, "All Other": 3.7e9,
+        "Intersegment Eliminations": -13.2e9}},
+    {"symbol": "INTC", "fiscalYear": 2022, "date": "2022-12-31", "data": {
+        "Client Computing Group": 34.7e9, "Data Center and AI": 19.2e9, "Network and Edge": 8.4e9, "Mobileye": 0.8e9}},
+]
+_INTC_INCOME_RAW = [{"symbol": "INTC", "fiscalYear": str(y), "date": f"{y}-12-31", "revenue": r}
+                    for y, r in ((2025, 52.9e9), (2024, 53.1e9), (2023, 54.2e9), (2022, 63.1e9), (2021, 79.0e9))]
+
+
+def _intc_years():
+    """INTC's older years through the REAL reconciliation (`revenue_breakdown_service.segment_years`)."""
+    return _RBS.segment_years("INTC", _INTC_SEG_RAW, _INTC_INCOME_RAW)
+
+
+def _intc_newest():
+    """INTC's newest breakdown as the card's service builds it: fiscal 2025, gross (eliminations 17.6B)."""
+    newest = _intc_years()[0]
+    return breakdown(symbol="INTC", fiscal_year="2025", reported_revenue=52.9e9,
+                     revenue_sources=list(newest.revenue_sources),
+                     intersegment_eliminations=newest.intersegment_eliminations)
+
+
+def _sr_breakdowns(*, with_big_facts=False):
+    """SAMPLE newest breakdowns of the 21. TSM and ASML: a single "Total Revenue" bar (the fixture's assumption — no
+    product segmentation for these 20-F filers), QCOM: code-only lines ("QCT" / "QTL" / "QSI" fold into the rest) — no
+    fact for the three. `with_big_facts`: they DO have one (the other side of the market-value rule)."""
+    bds = {
+        "NVDA": _seg_bd("NVDA", "2026", [("Data Center", 115e9), ("Gaming", 11e9), ("Other", 4e9)]),
+        "TSM": _seg_bd("TSM", "2025", [("Total Revenue", 90e9)]),
+        "AVGO": _seg_bd("AVGO", "2025", [("Semiconductor solutions", 30e9), ("Infrastructure software", 21e9)]),
+        "ASML": _seg_bd("ASML", "2025", [("Total Revenue", 32e9)]),
+        "AMD": _seg_bd("AMD", "2025", [("Data Center", 12.6e9), ("Client", 7e9), ("Gaming", 2.6e9),
+                                       ("Embedded", 3.6e9)]),
+        "MU": _seg_bd("MU", "2025", [("Compute and Networking", 16e9), ("Mobile", 9e9), ("Storage", 7e9),
+                                     ("Embedded", 5e9)]),
+        "ARM": _seg_bd("ARM", "2026", [("Royalty", 2.3e9), ("License and other", 1.9e9)]),
+        "MRVL": _seg_bd("MRVL", "2026", [("Data center", 4.3e9), ("Enterprise networking", 0.9e9),
+                                         ("Carrier infrastructure", 0.6e9)]),
+        "QCOM": _seg_bd("QCOM", "2025", [("QCT", 33e9), ("QTL", 5.6e9), ("QSI", 0.3e9)]),
+        "AMAT": _seg_bd("AMAT", "2025", [("Semiconductor Systems", 20.8e9), ("Applied Global Services", 6.2e9),
+                                         ("Display", 0.9e9)]),
+        "LRCX": _seg_bd("LRCX", "2025", [("Systems", 11.6e9), ("Customer support", 6.8e9)]),
+        "KLAC": _seg_bd("KLAC", "2025", [("Semiconductor Process Control", 10.2e9),
+                                         ("Specialty Semiconductor Process", 0.6e9), ("PCB and Component", 0.4e9)]),
+        "SNPS": _seg_bd("SNPS", "2025", [("Electronic Design Automation Software", 5.7e9), ("Design IP", 1.35e9)]),
+        "CDNS": _seg_bd("CDNS", "2025", [("Core EDA", 3.4e9), ("Hardware and IP", 1.0e9),
+                                         ("System Design and Analysis", 0.5e9)]),
+        "ALAB": _seg_bd("ALAB", "2025", [("Connectivity", 0.7e9), ("Other", 0.1e9)]),
+        "CRDO": _seg_bd("CRDO", "2026", [("Product sales", 0.8e9), ("IP license", 0.05e9)]),
+        "MPWR": _seg_bd("MPWR", "2025", [("Enterprise Data", 1.0e9), ("Automotive", 0.6e9), ("Storage", 0.5e9),
+                                         ("Industrial", 0.5e9)]),
+        "COHR": _seg_bd("COHR", "2025", [("Datacenter and Communications", 3.6e9), ("Industrial", 2.2e9)]),
+        "LITE": _seg_bd("LITE", "2025", [("Cloud and Networking", 1.4e9), ("Industrial Tech", 0.25e9)]),
+        "INTC": _intc_newest(),
+        "GFS": _seg_bd("GFS", "2025", [("Smart Mobile Devices", 2.7e9), ("Communications Infrastructure", 1.4e9),
+                                       ("Automotive", 1.0e9), ("Home and Industrial", 1.5e9)]),
+    }
+    if with_big_facts:
+        bds["TSM"] = _seg_bd("TSM", "2025", [("High Performance Computing", 52e9), ("Smartphone", 38e9)])
+        bds["ASML"] = _seg_bd("ASML", "2025", [("Systems", 24e9), ("Installed Base", 8e9)])
+        bds["QCOM"] = _seg_bd("QCOM", "2025", [("Handsets", 24.9e9), ("IoT", 5.4e9), ("Automotive", 2.9e9)])
+    return bds
+
+
+def _sr_world(*, breakdowns=None, caps_rows=None, years=None, profiles=None):
+    revenue = FakeService(_sr_breakdowns() if breakdowns is None else breakdowns,
+                          default=breakdown(degraded=["segmentation_unavailable"]),
+                          years={"INTC": _intc_years()} if years is None else years)
+    row = theme(slug="silicon-rush", title="Silicon Rush", tickers=list(SILICON_RUSH), blocked_tickers=[],
+                tickers_as_of=None, updated_at="2026-11-18T15:00:00+00:00")
+    fmp = FakeFMP(profiles=_sr_profiles() if profiles is None else profiles,
+                  market_caps=_sr_caps_rows() if caps_rows is None else caps_rows)
+    return dict(fmp=fmp, revenue=revenue, sb=FakeSB({"trending_themes": [row]}))
+
+
+def _sr_compose(rec):
+    out = _NT.compose(rec, run_date=P4_RUN, store_state="live", allow_x_url=False, picture_outlets=_pictured())
+    assert _NT.validate_package(out, record=rec) == []
+    return out, {t["logo"]: t.get("line") for t in out["image_spec"]["tiles"]}
+
+
+@pytest.mark.asyncio
+async def test_p4_the_production_silicon_rush_list_draws_arm_synopsys_and_intel_fy2022():
+    """The owner's ask on the REAL Silicon Rush list (21 members, its own order; SAMPLE figures): every member is read
+    (Intel is its 20th — never read before), Intel's gross newest stack walks back to fiscal 2022, and the picture's 12
+    tiles are the members with a fact, largest market value first — Arm, Intel ("Client Computing, FY2022") and
+    Synopsys ("EDA Software") among them, as in theme_ai_chips_more.jpg."""
+    world = _sr_world()
+    got = await trun(world, run_date=P4_RUN, theme_angles=("make_money",))
+    (rec,) = got.records
+    assert rec.angle == "make_money" and len(rec.members) == 21 and rec.theme_size == 21
+    # every member read, the largest (profile market value) first
+    assert world["revenue"].calls == sorted(SILICON_RUSH, key=lambda s: -_SR_CAPS[s])
+    assert world["revenue"].year_calls == ["INTC"]                       # the one gross stack: one older-years read
+    assert world["fmp"].calls["market_caps"] == 1
+    intc = next(m for m in rec.members if m.company.symbol == "INTC")
+    assert (intc.top_segment, intc.fiscal_year, intc.latest_fiscal_year) == ("Client Computing Group", "2022", "2025")
+    assert intc.top_segment_share == pytest.approx(34.7e9 / 63.1e9)
+    out, tiles = _sr_compose(rec)
+    assert list(tiles) == ["NVDA", "AVGO", "AMD", "MU", "AMAT", "INTC", "LRCX", "ARM", "KLAC", "CDNS", "SNPS", "MRVL"]
+    assert tiles["INTC"] == "Client Computing, FY2022 · 55% of revenue"
+    assert tiles["SNPS"] == "EDA Software · 81% of revenue"
+    assert tiles["ARM"] == "Royalty · 55% of revenue"
+    assert out["image_spec"]["more"] == "+9 more"
+    assert out["image_spec"]["subtitle"].endswith("fiscal 2025 or 2026")        # the tagged FY2022 never sets it
+    # only the 12 tiles carry their fact (A.THEME_FACT_TILES): 18 facts in the long captions overflowed Instagram,
+    # YouTube and Threads — with 12, every outlet keeps the post (none dropped, X / Bluesky as before)
+    assert sum(m.top_segment is not None for m in rec.members) == A.THEME_FACT_TILES == len(tiles)
+    assert out["dropped_outlets"] == {}
+    # the members without a fact (TSM, ASML, QCOM, and the smallest six past the tiles) stay in the post, named
+    long_caption = out["captions"]["facebook"]
+    for name in ("TSMC", "ASML Holding", "Qualcomm", "Monolithic Power Systems"):
+        assert name in long_caption, name
+    for name in ("Astera Labs", "Coherent", "Lumentum Holdings", "GlobalFoundries"):
+        assert name in long_caption, name
+    assert "Monolithic Power Systems:" not in long_caption           # named, never with a fact the post does not carry
+    # the old rule's view of the same data (the first 16 in list order): Intel never read, so never drawn
+    assert SILICON_RUSH.index("INTC") >= 16
+
+
+@pytest.mark.asyncio
+async def test_p4_the_tiles_are_the_largest_members_with_a_fact_so_synopsys_needs_room():
+    """The rule is market value, not a promise of three names: when every larger member has a fact (TSM, ASML and QCOM
+    too), the 12 tiles are the 12 largest — Synopsys (14th largest) and Marvell go to "+N more" and keep their caption
+    paragraph; Intel (8th) and Arm (11th) stay. Recorded in the release notes as the owner's call."""
+    world = _sr_world(breakdowns=_sr_breakdowns(with_big_facts=True))
+    (rec,) = (await trun(world, run_date=P4_RUN, theme_angles=("make_money",))).records
+    out, tiles = _sr_compose(rec)
+    assert list(tiles) == ["NVDA", "AVGO", "TSM", "ASML", "AMD", "MU", "AMAT", "INTC", "QCOM", "LRCX", "ARM", "KLAC"]
+    assert "SNPS" not in tiles and "Synopsys" in out["captions"]["facebook"]
+    assert "Synopsys:" not in out["captions"]["facebook"]                     # named: its fact is not carried
+    # at most TikTok (600 characters for the cover's 17 left-out companies, eight with a fact — the pre-existing limit
+    # phase 3 recorded; the old first-16 rule dropped it on this data too); Instagram, YouTube and Threads keep it
+    assert set(out["dropped_outlets"]) <= {"tiktok"}
+
+
+@pytest.mark.asyncio
+async def test_p4_market_value_order_with_missing_values_ties_and_a_failed_batch(caplog):
+    """The record's order: the members WITH a fact by the batch's market value, the largest first (a tie: the symbol);
+    those with no usable value (no row, a non-USD listing, another day's row) after them in the theme's own order; then
+    the members without a fact in the theme's own order. The batch failing never costs the angle: the facts keep the
+    theme's order (WARNING) — and the post still holds no market value (`ThemeExplainer` refuses one off "biggest")."""
+    caps = dict(_SR_CAPS, AMD=_SR_CAPS["AVGO"])                                        # AMD ties AVGO
+    rows = [r for r in _sr_caps_rows(caps=caps) if r["symbol"] not in ("MU", "ARM")]    # no row for MU, ARM
+    rows = [dict(r, date="2026-11-20") if r["symbol"] == "KLAC" else r for r in rows]   # KLAC: another day's value
+    profiles = _sr_profiles()
+    profiles["LRCX"] = dict(profiles["LRCX"], currency="EUR")                          # LRCX: not a USD listing
+    # twelve members with a fact (the six smallest give none), so every fact is carried
+    bds = {s: bd for s, bd in _sr_breakdowns().items() if s not in ("ALAB", "CRDO", "MPWR", "COHR", "LITE", "GFS")}
+    world = _sr_world(caps_rows=rows, profiles=profiles, breakdowns=bds)
+    (rec,) = (await trun(world, run_date=P4_RUN, theme_angles=("make_money",))).records
+    order = [m.company.symbol for m in rec.members]
+    with_fact = [m.company.symbol for m in rec.members if m.top_segment is not None]
+    assert with_fact == ["NVDA", "AMD", "AVGO", "AMAT", "INTC", "CDNS", "SNPS", "MRVL",   # valued, largest first
+                         "MU", "ARM", "LRCX", "KLAC"]              # no usable value: the theme's own order
+    assert order == with_fact + ["TSM", "ASML", "QCOM", "ALAB", "CRDO", "MPWR", "COHR", "LITE", "GFS"]
+    # the pure order: a tie of values breaks by the symbol (AMD before AVGO)
+    assert A._theme_tile_order(SimpleNamespace(refs=tuple(R.CompanyRef(symbol=s, name=s) for s in ("AVGO", "AMD"))),
+                               {"AVGO": 1, "AMD": 1}, {"AVGO": 5e9, "AMD": 5e9})[0].symbol == "AMD"
+    assert all(m.market_value_usd is None for m in rec.members)
+    # the batch down: the angle still posts, the facts in the theme's order
+    A.clear_memo()
+    caplog.clear()
+    world = _sr_world()
+    world["fmp"].market_caps = FMPUnavailableException("batch down")
+    (rec,) = (await trun(world, run_date=P4_RUN, theme_angles=("make_money",))).records
+    assert [m.company.symbol for m in rec.members if m.top_segment is not None] == [
+        s for s in SILICON_RUSH if s not in ("TSM", "ASML", "QCOM")][:A.THEME_FACT_TILES]
+    assert "no market values for the tile order" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_p4_a_gross_newest_stack_reads_its_older_years_once_and_a_failed_read_is_no_fact(caplog):
+    """Only a GROSS newest stack makes the older-years read (`get_segment_years`), once per symbol (memoised for the
+    day's later builds); the read failing — or the service having no such method — is that member's missing fact
+    (WARNING), never a share computed from the gross stack, and the post still goes out."""
+    world = _sr_world()
+    await trun(world, run_date=P4_RUN, theme_angles=("make_money",))
+    assert world["revenue"].year_calls == ["INTC"]
+    await trun(world, run_date=P4_RUN, theme_angles=("make_money",))
+    assert world["revenue"].year_calls == ["INTC"]                          # memoised
+    for broken in (FMPUnavailableException("segmentation down"), RuntimeError("boom")):
+        A.clear_memo()
+        caplog.clear()
+        world = _sr_world(years={"INTC": broken})
+        (rec,) = (await trun(world, run_date=P4_RUN, theme_angles=("make_money",))).records
+        intc = next(m for m in rec.members if m.company.symbol == "INTC")
+        assert (intc.top_segment, intc.top_segment_share, intc.latest_fiscal_year) == (None, None, None)
+        assert "INTC's newest segment stack (fiscal 2025) includes intersegment sales and its older years could " \
+               "not be read" in caplog.text
+    # a service without the method (an older deploy's): the same — no fact, no crash
+    A.clear_memo()
+
+    class _NoYears(FakeService):
+        get_segment_years = None
+
+    world = _sr_world()
+    world["revenue"] = _NoYears(_sr_breakdowns(), default=breakdown(degraded=["segmentation_unavailable"]))
+    (rec,) = (await trun(world, run_date=P4_RUN, theme_angles=("make_money",))).records
+    assert next(m for m in rec.members if m.company.symbol == "INTC").top_segment is None
+
+
+def _yr(fy, lines=(("Client Computing Group", 34.7e9), ("Data Center and AI", 28.4e9)), *, gross=False,
+        sym="INTC", revenue=None, **over):
+    total = math.fsum(v for _n, v in lines)
+    rev = revenue if revenue is not None else (total * 0.8 if gross else total)
+    return SimpleNamespace(symbol=sym, fiscal_year=fy, revenue_sources=[src(n, v) for n, v in lines],
+                           reported_revenue=rev, intersegment_eliminations=(total - rev) if gross else None,
+                           degraded=over.pop("degraded", []), **over)
+
+
+_GROSS_2025 = _yr("2025", gross=True)
+
+
+@pytest.mark.parametrize("years, want", [
+    # gross 2025-2023, net 2022 (the bound at a 2026 run): fiscal 2022's fact, tagged with the newest year
+    ((_yr("2025", gross=True), _yr("2024", gross=True), _yr("2023", gross=True), _yr("2022")), "2022"),
+    # the newest net year decides at once
+    ((_yr("2025", gross=True), _yr("2024")), "2024"),
+    # gross every year down to the bound — a net year past it is never reached
+    ((_yr("2025", gross=True), _yr("2024", gross=True), _yr("2023", gross=True), _yr("2022", gross=True),
+      _yr("2021")), None),
+    # gross every year the history holds
+    ((_yr("2025", gross=True), _yr("2024", gross=True)), None),
+    # a year missing on the way is never skipped
+    ((_yr("2025", gross=True), _yr("2023")), None),
+    # the newest net year gives no fact (a tie for the top) — the walk never goes past it to an older year
+    ((_yr("2025", gross=True), _yr("2024", (("A Line", 20e9), ("B Line", 20e9))), _yr("2023")), None),
+    # ... nor past a degraded year (no income statement of that year, two records that disagree)
+    ((_yr("2025", gross=True), _yr("2024", degraded=["income_unpaired"]), _yr("2023")), None),
+    ((_yr("2025", gross=True), _yr("2024", degraded=["year_conflict"]), _yr("2023")), None),
+    # one fiscal year twice; another company's year; an unreadable year
+    ((_yr("2025", gross=True), _yr("2024"), _yr("2024")), None),
+    ((_yr("2025", gross=True), _yr("2024", sym="AMD")), None),
+    ((_yr("2025", gross=True), _yr("FY24")), None),
+    # the two reads disagree: the history's newest is newer than the card's, or its 2025 is not gross
+    ((_yr("2026"), _yr("2025", gross=True), _yr("2024")), None),
+    ((_yr("2025"), _yr("2024")), None),
+    # nothing read / not a sequence
+    ((), None), (None, None),
+])
+def test_p4_the_walk_back_takes_the_newest_net_year_within_the_bound_or_nothing(years, want):
+    """Note on the bound: the walk's range stops at it AND `_segment_fact` refuses a year past it — two checks, so
+    breaking one alone stays green (mutation-checked: breaking both turns the "a net year past it" row red)."""
+    got = A._walked_back_fact("INTC", _GROSS_2025, years, P4_RUN)
+    if want is None:
+        assert got is None
+    else:
+        seg, share, fy, latest = got
+        assert (seg, fy, latest) == ("Client Computing Group", want, "2025") and 0 < share <= 1
+
+
+def test_p4_the_walk_back_starts_only_from_a_gross_newest_stack():
+    history = (_yr("2025", gross=True), _yr("2024"))
+    assert A._walked_back_fact("INTC", _yr("2025"), history, P4_RUN) is None                       # net: no walk
+    assert A._walked_back_fact("INTC", _yr("2025", gross=True, degraded=["x"]), history, P4_RUN) is None
+    assert A._walked_back_fact("INTC", _yr("2025", gross=True), history, P4_RUN)[2] == "2024"
+    assert not A._stack_is_gross(_yr("2025")) and A._stack_is_gross(_GROSS_2025)
+    assert not A._stack_is_gross(SimpleNamespace(**{**vars(_GROSS_2025), "fiscal_year": None}))
+    # a newest year dated after the run's is a broken feed: never walked
+    assert A._walked_back_fact("INTC", _yr("2027", gross=True), (_yr("2027", gross=True), _yr("2026")), P4_RUN) is None
+    # the bound is the run's: at a 2027 run, 2022 is past it
+    four = (_yr("2025", gross=True), _yr("2024", gross=True), _yr("2023", gross=True), _yr("2022"))
+    assert A._walked_back_fact("INTC", _GROSS_2025, four, P4_RUN)[2] == "2022"
+    assert A._walked_back_fact("INTC", _GROSS_2025, four, date(2027, 1, 6)) is None
+
+
+def test_p4_segment_years_reconciles_every_year_like_the_card():
+    """The service's pure year walk (`segment_years`): newest first, one entry per fiscal year, each through the card's
+    own reconciliation — INTC's 2023-2025 "gross" (eliminations > 0), 2022 "exact"; a year with no income statement,
+    two records of one year that disagree (segments or revenue) — degraded, never guessed; two identical records — one
+    year; a record without a readable fiscal year — skipped."""
+    years = _RBS.segment_years("INTC", _INTC_SEG_RAW, _INTC_INCOME_RAW)
+    assert [(y.fiscal_year, y.outcome) for y in years] == [("2025", "gross"), ("2024", "gross"), ("2023", "gross"),
+                                                           ("2022", "exact")]
+    assert all(y.intersegment_eliminations > 0 for y in years[:3]) and years[3].intersegment_eliminations is None
+    assert years[0].intersegment_eliminations == pytest.approx(70.5e9 - 52.9e9)
+    assert A._segment_fact(years[0], P4_RUN, max_age_years=4) is None             # a share is never stated from it
+    seg = list(_INTC_SEG_RAW) + [dict(_INTC_SEG_RAW[3])]                           # an identical copy of 2022
+    assert len(_RBS.segment_years("INTC", seg, _INTC_INCOME_RAW)) == 4
+    seg = list(_INTC_SEG_RAW) + [dict(_INTC_SEG_RAW[3], data={"Client Computing Group": 1e9, "Other": 2e9})]
+    assert _RBS.segment_years("INTC", seg, _INTC_INCOME_RAW)[3].degraded == ("year_conflict",)
+    income = _INTC_INCOME_RAW + [dict(_INTC_INCOME_RAW[1], revenue=1.0)]          # 2024 twice, disagreeing
+    assert _RBS.segment_years("INTC", _INTC_SEG_RAW, income)[1].degraded == ("year_conflict",)
+    unpaired = _RBS.segment_years("INTC", _INTC_SEG_RAW, _INTC_INCOME_RAW[:2])
+    assert [y.degraded for y in unpaired] == [(), (), ("income_unpaired",), ("income_unpaired",)]
+    junk = [{"symbol": "INTC", "date": "", "data": {"X": 1e9}}, "not a row", None] + _INTC_SEG_RAW[:1]
+    assert [y.fiscal_year for y in _RBS.segment_years("INTC", junk, _INTC_INCOME_RAW)] == ["2025"]
+    assert _RBS.segment_years("INTC", [], _INTC_INCOME_RAW) == ()
+    # a thin year (segments under half of revenue) carries no sources: no fact, and it stops a walk
+    thin = _RBS.segment_years("INTC", [{"symbol": "INTC", "fiscalYear": 2022, "data": {"Mobileye": 0.8e9}}],
+                              _INTC_INCOME_RAW)
+    assert thin[0].outcome == "thin" and thin[0].revenue_sources == ()
+
+
+class _YearsFMP:
+    """The two licensed feeds `get_segment_years` reads; any other read is a bug (AttributeError)."""
+
+    def __init__(self, seg=None, income=None):
+        self.seg = _INTC_SEG_RAW if seg is None else seg
+        self.income = _INTC_INCOME_RAW if income is None else income
+        self.calls: List[Tuple[str, Any]] = []
+
+    async def get_revenue_product_segmentation(self, ticker, period="annual", structure="flat"):
+        self.calls.append(("segmentation", (ticker, period)))
+        if isinstance(self.seg, BaseException):
+            raise self.seg
+        return json.loads(json.dumps(self.seg)) if isinstance(self.seg, list) else self.seg
+
+    async def get_income_statement(self, ticker, period="annual", limit=10):
+        self.calls.append(("income", (ticker, period, limit)))
+        if isinstance(self.income, BaseException):
+            raise self.income
+        return json.loads(json.dumps(self.income)) if isinstance(self.income, list) else self.income
+
+
+def _years_service(fmp):
+    svc = _RBS.RevenueBreakdownService.__new__(_RBS.RevenueBreakdownService)
+    svc.fmp, svc.supabase = fmp, None
+    return svc
+
+
+@pytest.mark.asyncio
+async def test_p4_get_segment_years_reads_the_cards_two_licensed_feeds_and_caches_only_answers(monkeypatch):
+    """`RevenueBreakdownService.get_segment_years`: the card's own two feeds (product segmentation, annual; the income
+    statement's last SEGMENT_YEARS_INCOME_ROWS years) — both paths licensed — kept in the in-memory tier; a failed or
+    malformed leg RAISES and caches nothing; an empty answer is kept only the degraded TTL. No Supabase tier."""
+    from app.integrations import fmp_entitlements
+
+    assert fmp_entitlements.is_entitled("revenue-product-segmentation")
+    assert fmp_entitlements.is_entitled("income-statement")
+    monkeypatch.setattr(_RBS, "_cache", {})
+    monkeypatch.setattr(_RBS, "_inflight", {})
+    fmp = _YearsFMP()
+    svc = _years_service(fmp)
+    years = await svc.get_segment_years("intc")
+    assert [y.fiscal_year for y in years] == ["2025", "2024", "2023", "2022"]
+    assert fmp.calls == [("segmentation", ("INTC", "annual")), ("income", ("INTC", "annual", 5))]
+    assert _RBS.SEGMENT_YEARS_INCOME_ROWS == 5
+    assert await svc.get_segment_years("INTC") == years and len(fmp.calls) == 2          # the in-memory tier
+    for seg, income, err in ((FMPUnavailableException("seg down"), None, FMPUnavailableException),
+                             (None, RuntimeError("income down"), RuntimeError),
+                             ({"Error Message": "x"}, None, FMPUnavailableException),
+                             (None, {"Error Message": "x"}, FMPUnavailableException)):
+        monkeypatch.setattr(_RBS, "_cache", {})
+        bad = _years_service(_YearsFMP(seg=seg, income=income))
+        with pytest.raises(err):
+            await bad.get_segment_years("INTC")
+        assert _RBS._cache == {} and _RBS._inflight == {}
+    monkeypatch.setattr(_RBS, "_cache", {})
+    empty = _years_service(_YearsFMP(seg=[]))
+    assert await empty.get_segment_years("INTC") == ()
+    stamp, value = _RBS._cache["rev_segment_years:INTC"]
+    assert value == () and time.time() - stamp >= _RBS._CACHE_TTL - _RBS._DEGRADED_CACHE_TTL - 1
+    with pytest.raises(ValueError):
+        await svc.get_segment_years("not a ticker!")
+
+
+class _SlowService(FakeService):
+    """Each breakdown read takes `delay` seconds; `started` records the order the reads BEGIN in."""
+
+    def __init__(self, *a, delay=0.0, **kw):
+        super().__init__(*a, **kw)
+        self.delay, self.started = delay, []
+
+    async def get_revenue_breakdown(self, sym):
+        self.started.append(sym)
+        await asyncio.sleep(self.delay)
+        return await super().get_revenue_breakdown(sym)
+
+
+@pytest.mark.asyncio
+async def test_p4_a_share_cut_short_leaves_only_the_smallest_unread_and_none_read_is_the_angles_turn_lost(
+        monkeypatch, caplog):
+    """The budget's worst path. The reads start in MARKET-VALUE order (the theme's own profile batch: the batch that
+    orders the tiles runs beside them) through THEME_SEGMENT_CONCURRENCY slots; when the angle's own share runs out the
+    reads still going are cancelled and only THOSE members — the smallest — are listed without a fact (WARNING), the
+    answers in hand kept. No read answered at all → ``budget_exhausted``: that angle's turn lost (an outage)."""
+    monkeypatch.setattr(A, "THEME_SEGMENT_CONCURRENCY", 2)
+    monkeypatch.setitem(A.THEME_ANGLE_BUDGET_SECONDS, "make_money", 1.2)
+    syms = ("NVDA", "TSM", "AVGO", "ASML", "AMD", "MU", "ARM", "MRVL")
+    caps = {s: _SR_CAPS[s] for s in syms}
+    bds = _sr_breakdowns(with_big_facts=True)
+    revenue = _SlowService({s: bds[s] for s in syms}, delay=0.35)
+    row = theme(slug="silicon-rush", title="Silicon Rush", tickers=list(syms), blocked_tickers=[])
+    profiles = {s: p for s, p in _sr_profiles().items() if s in syms}
+    world = dict(fmp=FakeFMP(profiles=profiles, market_caps=_sr_caps_rows(caps=caps)), revenue=revenue,
+                 sb=FakeSB({"trending_themes": [row]}))
+    started = time.monotonic()
+    (rec,) = (await trun(world, run_date=P4_RUN, theme_angles=("make_money",))).records
+    assert time.monotonic() - started < 2.0
+    by_cap = sorted(syms, key=lambda s: -caps[s])
+    assert revenue.started[:6] == by_cap[:6]                       # the largest first
+    with_fact = [m.company.symbol for m in rec.members if m.top_segment is not None]
+    assert with_fact == by_cap[:6]                                  # 3 rounds of 2 answered in 1.2 s
+    assert "not answered within the angle's" in caplog.text
+    await _settle_leads()
+    # nothing answered within the share: the angle's turn lost — with no other angle on offer, an outage
+    A.clear_memo()
+    revenue.delay = 2.0
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await trun(world, run_date=P4_RUN, theme_angles=("make_money",))
+    assert err.value.reason == "budget_exhausted"
+    await _settle_leads()
+
+
+def _real_revenue_service(monkeypatch, bds: Dict[str, Any], *, slow: Tuple[str, ...] = (), delay: float = 0.0):
+    """The REAL `RevenueBreakdownService.get_revenue_breakdown` — its in-memory tier, its `_inflight` future and its
+    cancellation handler — with the Supabase tier answering a miss, the FMP build stubbed (`slow` symbols take `delay`
+    s; an exception in `bds` raised) and nothing persisted. `svc.builds` lists every build started, `svc.leaders` the
+    name of the task that ran each (the adapter's own leader is named "marketing_news:<key>")."""
+    monkeypatch.setattr(_RBS, "_cache", {})
+    monkeypatch.setattr(_RBS, "_inflight", {})
+    svc = _years_service(None)
+    svc.builds, svc.leaders = [], []
+
+    async def build(ticker):
+        svc.builds.append(ticker)
+        svc.leaders.append(asyncio.current_task().get_name())
+        if ticker in slow:
+            await asyncio.sleep(delay)
+        value = bds[ticker]
+        if isinstance(value, BaseException):
+            raise value
+        return _RBS._RevenueBuild(response=value, next_earnings=None)
+
+    async def not_a_fund(_ticker, _build):
+        return False
+
+    monkeypatch.setattr(svc, "_check_supabase_cache", lambda _t: None)
+    monkeypatch.setattr(svc, "_build_revenue_breakdown_full", build)
+    monkeypatch.setattr(svc, "_is_fund_build", not_a_fund)
+    monkeypatch.setattr(svc, "_upsert_supabase_cache_safe", lambda *_a, **_k: None)
+    return svc
+
+
+async def _a_user_opens_the_card(svc, sym: str, after: float):
+    """A user's revenue card (or a paid report's collector) asking the shared service for `sym` `after` s in — it
+    JOINS the build already in flight."""
+    await asyncio.sleep(after)
+    return await svc.get_revenue_breakdown(sym)
+
+
+@pytest.mark.asyncio
+async def test_final_the_angles_deadline_cancels_only_its_own_wait_never_the_shared_breakdown_build(monkeypatch):
+    """Final review 2026-11-20: "how they make money" awaited `get_revenue_breakdown` DIRECTLY, so when its share of
+    the time ran out the cancelled read WAS the revenue service's in-flight leader — and the service fails its shared
+    future with RuntimeError("in-flight fetch was cancelled"): a user who had opened that ticker's revenue card (or a
+    20-credit report collecting it) during the build got an error card and a Sentry event. Each read now runs as the
+    adapter's own leader (`_shared`): the angle gives up on its own wait only, the build finishes, the user gets the
+    breakdown — one build, shared — and the member the angle could not wait for is still listed without a fact.
+    Mutation-checked by hand (2026-11-20): with the read awaited directly again, the user's call raised RuntimeError."""
+    bds = theme_breakdowns()
+    svc = _real_revenue_service(monkeypatch, bds, slow=("QCOM",), delay=2.0)
+    started = time.monotonic()
+    ctx = A._Ctx("theme_explainer", THEME_RUN, frozenset(), 5, started + 1.2, A.NewsDeps(revenue=svc))
+    refs = [SimpleNamespace(symbol=s) for s in ("NVDA", "AMD", "AVGO", "QCOM")]
+    user = asyncio.ensure_future(_a_user_opens_the_card(svc, "QCOM", 0.3))
+    facts = await A._theme_facts(ctx, refs)
+    assert time.monotonic() - started < 1.8                               # the angle never waited for the build
+    assert set(facts) == {"NVDA", "AMD", "AVGO"}                          # QCOM unread when the share ran out
+    assert await user is bds["QCOM"]                                      # the joiner got the real breakdown
+    assert svc.builds.count("QCOM") == 1                                  # ONE build, shared ...
+    assert svc.leaders[svc.builds.index("QCOM")].startswith("marketing_news:")     # ... led by the adapter
+    await _settle_leads()
+    assert A._memo_get(("theme_breakdown", "QCOM")) is bds["QCOM"]        # and the next angle read finds it
+
+
+# (owner decisions 2026-11-20: the insider spotlight's revenue line — `_spotlight_segments`, whose step deadline a test
+# here pinned — is retired with the one-issuer post; the theme's own step-deadline test above still covers `_breakdown`.)
+
+
+@pytest.mark.asyncio
+async def test_final_a_degraded_breakdown_is_never_memoised_for_the_themes_half_hour():
+    """The theme memo kept WHATEVER the service answered for THEME_BREAKDOWN_TTL_SECONDS (30 min) — a degraded build
+    (a 429 the service's gather swallowed) included, which the service itself keeps only 60 s so the next read retries
+    the feed. A second theme read in the half hour then listed that member without a fact: a cached failure read as an
+    answer. Only a complete build is memoised now (`_breakdown_memoisable`); the next read asks again and gets the
+    fact. Mutation-checked by hand (2026-11-20): with every build memoised again, the second read kept no fact."""
+    good = theme_breakdowns()["AMD"]
+    answers = [breakdown(symbol="AMD", degraded=["income_statement_unavailable"]), good]
+
+    class Flaky(FakeService):
+        async def get_revenue_breakdown(self, sym):
+            self.calls.append(sym)
+            return answers.pop(0)
+
+    revenue = Flaky({})
+    refs = [SimpleNamespace(symbol="AMD")]
+
+    def ctx():
+        return A._Ctx("theme_explainer", THEME_RUN, frozenset(), 5, time.monotonic() + 30, A.NewsDeps(revenue=revenue))
+
+    assert await A._theme_facts(ctx(), refs) == {}                         # degraded: no fact
+    assert A._memo_get(("theme_breakdown", "AMD")) is A._MISS            # ... and not memoised
+    facts = await A._theme_facts(ctx(), refs)
+    assert facts["AMD"][0] == "Data Center" and revenue.calls == ["AMD", "AMD"]
+    assert A._memo_get(("theme_breakdown", "AMD")) is good                # a complete build IS memoised
+    assert await A._theme_facts(ctx(), refs) == facts and revenue.calls == ["AMD", "AMD"]   # ... and reused
+    assert not A._breakdown_memoisable(breakdown(reported_revenue=None))  # no reported revenue: never memoised
+    await _settle_leads()
+
+
+def test_p4_the_record_carries_the_pictures_tiles_facts_only():
+    """A.THEME_FACT_TILES is the picture's tile count (the adapter may not import the template's module)."""
+    from app.services.marketing import template_onscreen
+
+    assert A.THEME_FACT_TILES == template_onscreen.MAX_TILES == _NT.THEME_PICTURE_TILES
+
+
+def test_p4_every_member_fits_the_angles_share_at_the_worst_round():
+    """Pinned: every member a theme record can hold is read (THEME_SEGMENT_LOOKUPS == R.THEME_MEMBERS[1]) in two waves
+    of THEME_SEGMENT_CONCURRENCY, and the older-years reads of the gross stacks are a third round — inside the angle's
+    share at the worst measured round (THEME_WORST_ROUND_SECONDS); the market-value batch rides the first round."""
+    waves = -(-A.THEME_SEGMENT_LOOKUPS // A.THEME_SEGMENT_CONCURRENCY)
+    assert A.THEME_SEGMENT_LOOKUPS == R.THEME_MEMBERS[1] and waves == 2
+    assert A.THEME_ANGLE_BUDGET_SECONDS["make_money"] >= (waves + 1) * A.THEME_WORST_ROUND_SECONDS
+    assert len(SILICON_RUSH) <= A.THEME_SEGMENT_LOOKUPS
+    assert A.THEME_SEGMENT_YEARS_CONCURRENCY >= 1
+
+
+#: The EIGHT production theme lists (read-only query of `trending_themes`, 2026-11-20 — public app data), each in its
+#: own order.
+PRODUCTION_THEMES = {
+    "silicon-rush": SILICON_RUSH,
+    "modern-battlefield": ("LMT", "RTX", "NOC", "GD", "LHX", "PLTR", "HII", "AVAV", "KTOS", "LDOS", "ESLT", "TXT", "CW",
+                           "MRCY", "KRMN", "BAH"),
+    "the-new-oil": ("MP", "USAR", "ALB", "SQM", "LAC", "PLL", "SGML", "FCX", "SCCO", "TECK", "HBM", "ERO", "CCJ", "UUUU",
+                    "UEC", "NXE", "DNN", "CRML", "RIO"),
+    "robot-workforce": ("ISRG", "NVDA", "TSLA", "ROK", "TER", "SYM", "CGNX", "ZBRA", "FANUY", "YASKY", "EMR", "NOVT",
+                        "PH", "SERV", "RR", "ABBNY"),
+    "hacking-health": ("LLY", "NVO", "VRTX", "REGN", "AMGN", "MRNA", "CRSP", "NTLA", "BEAM", "VKTX", "GPCR", "AZN",
+                       "NVS", "MRK", "ABBV", "JNJ", "PFE", "ILMN"),
+    "cyber-wars": ("CRWD", "PANW", "ZS", "FTNT", "NET", "S", "OKTA", "NTSK", "CHKP", "SAIL", "RBRK", "TENB", "QLYS", "RPD",
+                   "VRNS"),
+    "powering-machine": ("CEG", "VST", "TLN", "GEV", "NEE", "VRT", "ETN", "PWR", "CCJ", "OKLO", "SMR", "POWL", "BWXT",
+                         "LEU", "D", "NNE"),
+    "final-frontier": ("SPCX", "RKLB", "ASTS", "LUNR", "FLY", "VOYG", "RDW", "KRMN", "IRDM", "PL", "BKSY", "KTOS", "LMT",
+                       "NOC", "LHX", "GSAT", "VSAT"),
+}
+
+
+@pytest.mark.parametrize("slug", sorted(PRODUCTION_THEMES))
+@pytest.mark.asyncio
+async def test_p4_every_production_list_is_read_whole_largest_first_and_draws_its_largest_members(slug):
+    """On each of the eight PRODUCTION member lists (SAMPLE values: every member a clean two-line breakdown, market
+    values falling with a fixed shuffle of the list, every third member without a fact): every member is read, in
+    market-value order, inside two waves; every member stays in the record; at most THEME_FACT_TILES carry a fact —
+    the largest members with one — and the picture's tiles are exactly those, largest first."""
+    syms = PRODUCTION_THEMES[slug]
+    assert len(syms) <= A.THEME_SEGMENT_LOOKUPS and -(-len(syms) // A.THEME_SEGMENT_CONCURRENCY) <= 2
+    shuffled = sorted(syms, key=lambda s: (sum(map(ord, s)) * 7919) % 1009)
+    caps = {s: 1e12 / (i + 1) for i, s in enumerate(shuffled)}
+    bare = set(syms[2::3])                                                   # every third member: no fact
+    bds = {s: (breakdown(degraded=["segmentation_unavailable"]) if s in bare
+               else _seg_bd(s, "2025", [("Main Line", 7e9), ("Second Line", 3e9)])) for s in syms}
+    world = dict(fmp=FakeFMP(profiles={s: prof(s, f"Company {s}", exchange="NASDAQ", cap=caps[s]) for s in syms},
+                             market_caps=_sr_caps_rows(caps=caps)),
+                 revenue=FakeService(bds), sb=FakeSB({"trending_themes": [
+                     theme(slug=slug, title="Theme Title", tickers=list(syms), blocked_tickers=[])]}))
+    (rec,) = (await trun(world, run_date=P4_RUN, theme_angles=("make_money",))).records
+    assert world["revenue"].calls == sorted(syms, key=lambda s: -caps[s])          # every member, largest first
+    assert sorted(m.company.symbol for m in rec.members) == sorted(syms)            # every member kept
+    want = sorted((s for s in syms if s not in bare), key=lambda s: -caps[s])[:A.THEME_FACT_TILES]
+    assert [m.company.symbol for m in rec.members if m.top_segment is not None] == want
+    out, tiles = _sr_compose(rec)
+    assert list(tiles)[:len(want)] == want and all(tiles[s] for s in want)
+
+
+# ── owner decisions 2026-11-20 ("3 - 5 companies at once"): the real Form 4 minimum ──────────────────────────────────
+# "for insider trade, i think we discussed that there is no single company already, each post or each image/video will
+# have more than 2,3, ideally are 3 - 5 companies at once." / "i pick option 1: 3-5, but if it's a quite week - if we
+# don't have enough data, then use different topic like posting the theme". These run with the REAL minimum
+# (`real_min_rows`); mutation-checked by hand (2026-11-20): the adapter's `len(...) < R.INSIDER_MIN_ROWS` test turned
+# into `< 1` (both collectors) turned every test here red.
+
+
+def _low_ceo(**kw) -> Dict[str, Any]:
+    """A third company for `week_rows()`: Lowe's CEO, $600K, filed in the week (role-only: no profile CEO)."""
+    return irow(**{**dict(sym="LOW", name="ELLISON MARVIN", cik="0000000444", shares=20_000, price=30.0,
+                          filed="2026-11-12", traded="2026-11-11"), **kw})
+
+
+def _low_profile() -> Dict[str, Any]:
+    return {"LOW": prof("LOW", "Lowe's Companies, Inc.", price=30.0, cap=150e9)}
+
+
+@pytest.mark.parametrize("series, extra, few", [
+    ("ceo_buys", {}, "ceo_too_few_companies"),
+    ("insider_buys", {"title": "director"}, "insider_too_few_companies"),
+])
+@pytest.mark.asyncio
+async def test_min3_a_week_of_fewer_than_three_companies_is_no_post(real_min_rows, series, extra, few):
+    rows = [irow(**extra), irow(sym="FOX", name="SMITH JOHN JR", cik="0000000111", shares=40_000, price=30.0,
+                                filed="2026-11-10", traded="2026-11-09", **extra)]
+    got = await run(series, FakeFMP(insider=rows, profiles=week_profiles()))
+    assert got.records == () and got.skip_reason == few                       # two companies
+    assert few in R.SKIP_REASONS and few not in R.UNAVAILABLE_REASONS          # a content skip: the chain falls through
+    A.clear_memo()
+    got = await run(series, FakeFMP(insider=rows[:1], profiles=week_profiles()))
+    assert got.records == () and got.skip_reason == few                       # one company
+    A.clear_memo()
+    noise = [irow(sym="ABCDW", name="DOE JANE", cik="0000000222", shares=100_000, price=10.0, **extra)]
+    got = await run(series, FakeFMP(insider=noise, profiles=week_profiles()))
+    assert got.records == () and got.skip_reason == f"{series.split('_')[0]}_none_qualified"   # none: never "too few"
+    A.clear_memo()
+    got = await run(series, FakeFMP(insider=rows + [_low_ceo(**extra)], profiles={**week_profiles(), **_low_profile()}))
+    (rec,) = got.records                                                      # three: one post of all three
+    assert [r.company.symbol for r in rec.rows] == ["GME", "FOX", "LOW"]
+
+
+@pytest.mark.asyncio
+async def test_min3_a_spotlight_window_of_fewer_than_three_companies_is_no_post(real_min_rows):
+    """The insider LIST: Contoso's three people are ONE company — never a post; with FOX and GME it is a 3-company
+    list, keyed by EVERY company once (in row order)."""
+    got = await spot(FakeFMP(insider=spot_rows(), profiles=spot_profiles()))
+    assert got.records == () and got.skip_reason == "insider_spotlight_too_few_companies"
+    # review of 2026-11-26: a window whose list fell below three is NOT recorded as checked — its companies stay in reach
+    # of the next spotlight (`test_review_1126_two_spotlights_add_a_short_window_up_to_a_list`)
+    assert got.checked_window is None
+    A.clear_memo()
+    rows = spot_rows() + [
+        irow(sym="FOX", name="SMITH JOHN", cik="0000000111", title="director", shares=100_000, price=30.0,
+             filed="2026-11-17", traded="2026-11-16")]
+    got = await spot(FakeFMP(insider=rows, profiles={**spot_profiles(), **week_profiles()}))
+    assert got.records == () and got.skip_reason == "insider_spotlight_too_few_companies"   # two companies
+    A.clear_memo()
+    rows.append(irow(sym="GME", name="COHEN RYAN", cik="0001767470", shares=10_000, price=25.0, filed="2026-11-18",
+                     traded="2026-11-17"))
+    got = await spot(FakeFMP(insider=rows, profiles={**spot_profiles(), **week_profiles()}))
+    (rec,) = got.records
+    assert [c.company.symbol for c in rec.companies] == ["FOX", "CTSO", "GME"]
+    assert R.ledger_key(rec) == "news:insider_spotlight:FOX+CTSO+GME:2026-11-16"
+
+
+@pytest.mark.asyncio
+async def test_review_1126_two_spotlights_add_a_short_window_up_to_a_list(real_min_rows):
+    """Review of 2026-11-26 (correctness): Thursday's window (Nov 16-18) holds two companies (Contoso, FOX) — no post,
+    and NO window recorded. Saturday's spotlight is then told the last checked day is still Sunday the 15th, so its
+    window reaches back over Thursday's days (Nov 16-19) and GME, filed on the 19th, makes the three a list. Had
+    Thursday's window been recorded (checked through the 18th), Saturday's window would hold GME alone — no post, and
+    Contoso's and FOX's filings never seen again. Mutation-checked: recording the window again turns the first
+    assertion red."""
+    fox = irow(sym="FOX", name="SMITH JOHN", cik="0000000111", title="director", shares=100_000, price=30.0,
+               filed="2026-11-17", traded="2026-11-16")
+    gme = irow(sym="GME", name="COHEN RYAN", cik="0001767470", shares=10_000, price=25.0, filed="2026-11-19",
+               traded="2026-11-18")
+    profiles = {**spot_profiles(), **week_profiles()}
+    thu = await spot(FakeFMP(insider=spot_rows() + [fox], profiles=profiles))
+    assert thu.records == () and thu.skip_reason == "insider_spotlight_too_few_companies" and thu.checked_window is None
+    A.clear_memo()
+    sat_rows = spot_rows(marker="2026-11-20") + [fox, gme]
+    sat = await spot(FakeFMP(insider=sat_rows, profiles=profiles), run_date=SPOT_SAT, checked=SPOT_CHECKED)
+    (rec,) = sat.records
+    assert [c.company.symbol for c in rec.companies] == ["FOX", "CTSO", "GME"]
+    assert (rec.window_start, rec.window_end) == (date(2026, 11, 16), date(2026, 11, 19)) == sat.checked_window
+    assert R.ledger_key(rec) == "news:insider_spotlight:FOX+CTSO+GME:2026-11-16"
+    A.clear_memo()
+    # the old behaviour: Thursday's window recorded — Saturday sees only GME's day
+    lost = await spot(FakeFMP(insider=sat_rows, profiles=profiles), run_date=SPOT_SAT, checked=date(2026, 11, 18))
+    assert lost.records == () and lost.skip_reason == "insider_spotlight_too_few_companies"
+
+
+@pytest.mark.parametrize("ref, reason", [
+    ("news:insider_spotlight:FOX+CTSO+GME:2026-11-16", "already_posted"),      # this window: each company posted once
+    ("news:insider_spotlight:FOX+CTSO+GME:2026-11-12", "spotlight_cooldown"),  # an earlier window inside the cooldown
+])
+@pytest.mark.asyncio
+async def test_min3_every_company_of_a_posted_list_is_excluded_once(real_min_rows, ref, reason):
+    """A posted list's key names EVERY company it drew (owner decisions 2026-11-20): each is excluded — before any
+    profile call — so no company of a posted list is posted again in its window or its cooldown."""
+    rows = spot_rows() + [
+        irow(sym="FOX", name="SMITH JOHN", cik="0000000111", title="director", shares=100_000, price=30.0,
+             filed="2026-11-17", traded="2026-11-16"),
+        irow(sym="GME", name="COHEN RYAN", cik="0001767470", shares=10_000, price=25.0, filed="2026-11-18",
+             traded="2026-11-17")]
+    fmp = FakeFMP(insider=rows, profiles={**spot_profiles(), **week_profiles()})
+    got = await spot(fmp, exclude=[ref])
+    assert got.records == () and got.rejections == {reason: 3}
+    assert not any(sym in req for req in fmp.profile_requests for sym in ("FOX", "CTSO", "GME"))
+
+
+# ── final double-check of 2026-11-26: the insider LIST passes the roundups' Congress gates ───────────────────────────
+# The weekly roundups pin the Congress block-list and roster refusals
+# (`test_an_unusable_congress_block_list_refuses_the_form_4_series`,
+# `test_a_roster_not_fresh_for_the_run_date_refuses_the_form_4_series`,
+# `test_a_roster_from_before_the_sitting_congress_refuses_the_form_4_series`). The spotlight's insider list runs the
+# same gate (`_insider_series_open`, the first call of `_collect_insider_spotlight`) and the same whole-person Congress
+# drop; these pin both with the REAL minimum of three companies. Mutation-checked by hand (2026-11-26): deleting the
+# spotlight's `_insider_series_open(ctx)` call turned every refusal case here red while the roundups' tests stayed
+# green; dropping the walk's Congress filter turned the member tests red. The adapter was restored byte for byte.
+
+#: A member of Congress (on the shipped block-list) buying $6M of Home Depot as a director inside the list's window:
+#: the window's LARGEST purchase, so a member the gate missed would LEAD the list.
+_DC_MEMBER = dict(sym="HD", name="PELOSI NANCY", cik="0000000444", title="director", shares=20_000, price=300.0,
+                  filed="2026-11-18", traded="2026-11-17")
+
+
+def _dc_list_rows(*, member: bool = True, gme: bool = True, shift_days: int = 0) -> List[Dict[str, Any]]:
+    """The three-company insider list of `test_the_issuers_rank_by_their_leads_amount_and_the_limit_holds` (FOX's
+    director $3M, Contoso's three people, GME's CEO $250K) plus, unless ``member`` is False, `_DC_MEMBER` — every
+    filing and trade date moved ``shift_days`` later (a multiple of 7 keeps every weekday)."""
+    rows = spot_rows() + [
+        irow(sym="FOX", name="SMITH JOHN", cik="0000000111", title="director", shares=100_000, price=30.0,
+             filed="2026-11-17", traded="2026-11-16")]
+    if gme:
+        rows.append(irow(sym="GME", name="COHEN RYAN", cik="0001767470", shares=10_000, price=25.0,
+                         filed="2026-11-18", traded="2026-11-17"))
+    if member:
+        rows.append(irow(**_DC_MEMBER))
+
+    def moved(text: str) -> str:
+        return (date.fromisoformat(text[:10]) + timedelta(days=shift_days)).isoformat() + text[10:]
+
+    return [{**r, "filingDate": moved(r["filingDate"]), "transactionDate": moved(r["transactionDate"])} for r in rows]
+
+
+def _dc_profiles() -> Dict[str, Any]:
+    return {**spot_profiles(), **week_profiles(), "HD": prof("HD", "The Home Depot, Inc.", price=300.0, cap=300e9)}
+
+
+def _assert_list_without_the_member(got, fmp) -> None:
+    (rec,) = got.records
+    assert isinstance(rec, R.InsiderSpotlight)
+    assert [c.company.symbol for c in rec.companies] == ["FOX", "CTSO", "GME"]       # never HD, never led by it
+    assert got.rejections == {"congress_name": 1}
+    assert fmp.calls["insider"] >= 1 and all("HD" not in req for req in fmp.profile_requests)
+
+
+@pytest.mark.asyncio
+async def test_dc1126_an_unusable_congress_block_list_refuses_the_insider_list(monkeypatch, real_min_rows):
+    """Role-only would still point at a member the block-list can no longer recognise — the insider list is refused
+    (`internal_error`, the detail naming the block-list) before any FMP read, exactly as the roundups are."""
+    fmp = FakeFMP(insider=_dc_list_rows(), profiles=_dc_profiles())
+    _assert_list_without_the_member(await spot(fmp), fmp)           # anti-vacuity: a whole block-list posts the list
+    A.clear_memo()
+    monkeypatch.setattr(R, "person_names_allowed", lambda: False)
+    fmp = FakeFMP(insider=_dc_list_rows(), profiles=_dc_profiles())
+    with pytest.raises(A.MarketingNewsUnavailable) as err:
+        await spot(fmp)
+    assert err.value.series == "insider_spotlight" and err.value.reason == "internal_error"
+    assert "block-list" in err.value.detail
+    assert fmp.calls == Counter(), "refused before any FMP call"
+
+
+# The age rows are measured from SPOT_RUN (Thu Nov 19, 2026), three days after the roundups' RUN: every row keeps the
+# roundup test's meaning (41 / 199 / 400 / 401 days), with congress_start pinned to the 119th's, never `_KEEP`.
+@pytest.mark.parametrize("fetched_on, congress_start, named, error", [
+    ("2026-10-09", "2025-01-03", True, False),    # 41 days, holding the 119th (the shipped roster)
+    ("2026-05-04", "2025-01-03", True, True),     # 199 days: still named, ERROR (refresh it)
+    ("2025-10-15", "2025-01-03", True, True),     # 400 days: the last day it is fresh
+    ("2025-10-14", "2025-01-03", False, True),    # 401 days: the list is refused
+    ("2019-01-01", "2017-01-03", False, True),
+    (None, _KEEP, False, True),                   # no fetched_on: its age is unknown
+    ("not-a-date", _KEEP, False, True),
+    ("2026-10-09", None, False, True),            # no congress_start — which Congress?
+    ("2026-10-09", "2023-01-03", False, True),    # holds the 118th while the 119th sits
+], ids=["fresh", "warn", "at_the_limit", "past_the_limit", "years_old", "missing", "unreadable",
+        "no_congress_start", "earlier_congress"])
+@pytest.mark.asyncio
+async def test_dc1126_a_roster_not_fresh_for_the_run_date_refuses_the_insider_list(
+        monkeypatch, tmp_path, caplog, real_min_rows, fetched_on, congress_start, named, error):
+    """A roster that is undated, older than `ROSTER_MAX_AGE_DAYS` (from the RUN date) or not holding the sitting
+    Congress cannot know every member: the insider list is REFUSED (`internal_error`, a detail naming the roster, an
+    ERROR, no FMP call), never run role-only. A fresh roster posts the list, the member it knows dropped."""
+    R._congress_state.cache_clear()
+    monkeypatch.setattr(R, "CONGRESS_ROSTER_PATH", _roster_aged(tmp_path, fetched_on, congress_start))
+    try:
+        caplog.set_level(logging.ERROR)
+        fmp = FakeFMP(insider=_dc_list_rows(), profiles=_dc_profiles())
+        if named:
+            _assert_list_without_the_member(await spot(fmp), fmp)
+        else:
+            with pytest.raises(A.MarketingNewsUnavailable) as err:
+                await spot(fmp)
+            assert err.value.series == "insider_spotlight" and err.value.reason == "internal_error"
+            assert "congress roster" in err.value.detail and "sitting Congress" in err.value.detail
+            assert fmp.calls == Counter(), "refused before any FMP call"
+            assert any(r.levelno == logging.ERROR and r.name == A.__name__ and "congress roster" in r.getMessage()
+                       and "insider_spotlight" in r.getMessage() for r in caplog.records)
+        assert any(r.levelno == logging.ERROR and r.name == R.__name__ and "congress roster" in r.getMessage()
+                   for r in caplog.records) is error
+    finally:
+        monkeypatch.undo()
+        R._congress_state.cache_clear()
+
+
+@pytest.mark.parametrize("fetched_on, congress_start, run_date, named", [
+    # the shipped roster (fetched 2026-10-09, the 119th Congress)
+    ("2026-10-09", "2025-01-03", date(2026, 12, 31), True),
+    ("2026-10-09", "2025-01-03", date(2027, 1, 3), False),      # the 120th is sworn in: no grace
+    ("2026-10-09", "2025-01-03", date(2027, 1, 7), False),      # the first Thursday spotlight of the 120th
+    ("2026-10-09", "2025-01-03", date(2027, 1, 21), False),
+    # a January 4 refresh still holding the 119th (the script refuses to write it)
+    ("2027-01-04", "2025-01-03", date(2027, 1, 21), False),
+    # a roster holding the 120th Congress, refreshed the day it was sworn in
+    ("2027-01-03", "2027-01-03", date(2027, 1, 7), True),
+    ("2027-01-03", "2027-01-03", date(2027, 1, 21), True),
+], ids=["dec31", "sworn_in", "first_thursday", "later", "jan4_refresh", "120th_first_thursday", "120th_later"])
+@pytest.mark.asyncio
+async def test_dc1126_a_roster_from_before_the_sitting_congress_refuses_the_insider_list(
+        monkeypatch, tmp_path, caplog, real_min_rows, fetched_on, congress_start, run_date, named):
+    """From the odd-year January 3 a roster holding the previous Congress cannot know the new members: the insider list
+    is refused from that day (no grace) until the roster holds the sitting Congress; a roster that does posts the list,
+    its member dropped. Rows and the last checked day move with the run date (`_dc_list_rows`)."""
+    shift = (run_date - SPOT_RUN).days
+    R._congress_state.cache_clear()
+    monkeypatch.setattr(R, "CONGRESS_ROSTER_PATH", _roster_aged(tmp_path, fetched_on, congress_start))
+    try:
+        caplog.set_level(logging.ERROR, logger=R.__name__)
+        fmp = FakeFMP(insider=_dc_list_rows(shift_days=shift), profiles=_dc_profiles())
+        if named:
+            assert shift % 7 == 0
+            got = await spot(fmp, run_date=run_date, checked=SPOT_CHECKED + timedelta(days=shift))
+            _assert_list_without_the_member(got, fmp)
+        else:
+            with pytest.raises(A.MarketingNewsUnavailable) as err:
+                await spot(fmp, run_date=run_date, checked=SPOT_CHECKED + timedelta(days=shift))
+            assert err.value.series == "insider_spotlight" and err.value.reason == "internal_error"
+            assert "congress roster" in err.value.detail
+            assert fmp.calls == Counter(), "refused before any FMP call"
+        assert any(r.levelno == logging.ERROR and "congress roster" in r.getMessage()
+                   for r in caplog.records) is (not named)
+    finally:
+        monkeypatch.undo()
+        R._congress_state.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_dc1126_a_member_of_congress_never_counts_toward_the_insider_list(caplog, real_min_rows):
+    """The whole-person Congress drop runs on the list path too: a company whose only buyer is a member is not a
+    company of the list — FOX and Contoso with Home Depot's member are TWO companies, no post (never a list of three
+    with the member's company in it, role-only or named) — and the member's company is never profiled or logged by
+    name."""
+    caplog.set_level(logging.DEBUG)
+    assert R.is_congress_name("PELOSI NANCY")      # anti-vacuity: the roster is loaded
+    fmp = FakeFMP(insider=_dc_list_rows(gme=False), profiles=_dc_profiles())
+    got = await spot(fmp)
+    assert got.records == () and got.skip_reason == "insider_spotlight_too_few_companies"
+    assert got.rejections == {"congress_name": 1}
+    assert all("HD" not in req for req in fmp.profile_requests)
+    text = caplog.text.lower()
+    assert "pelosi" not in text and "nancy" not in text
+    A.clear_memo()
+    # anti-vacuity: the same Home Depot purchase by a director who is NOT a member makes the three a list, led by it
+    not_a_member = irow(**{**_DC_MEMBER, "name": "DOE JANE", "cik": "0000000445"})
+    fmp = FakeFMP(insider=_dc_list_rows(member=False, gme=False) + [not_a_member], profiles=_dc_profiles())
+    got = await spot(fmp)
+    (rec,) = got.records
+    assert [c.company.symbol for c in rec.companies] == ["HD", "FOX", "CTSO"] and got.rejections == {}

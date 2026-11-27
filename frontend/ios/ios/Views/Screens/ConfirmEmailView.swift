@@ -39,11 +39,12 @@ struct ConfirmEmailView: View {
     /// True right after a sign-up, when an email has just gone out: the resend cooldown starts
     /// at once, since the provider ignores a second send within about a minute anyway.
     let codeJustSent: Bool
-    /// The sign-up response's own sentence ("…Already have an account? Sign in or reset your
-    /// password."), present only when this screen follows a sign-up. The server words it the
-    /// same for a new, a pending and an already-confirmed address, so showing it reveals nothing
-    /// — and it is the only hint an existing user gets that no code is coming (IOS-CONF-2). Never
-    /// branched on here: any client-side difference by case would undo that.
+    /// The sign-up response's own sentence (the backend's `SIGN_UP_PENDING_MESSAGE`), present
+    /// only when this screen follows a sign-up. NOT shown since 2026-11-26: it now only says
+    /// "Check your email to confirm your address.", which the title already says, because an
+    /// address that already has an account is refused on the sign-up form itself (409
+    /// AUTH_EMAIL_ALREADY_REGISTERED) and never reaches this screen. Kept so a future server
+    /// sentence can be shown without new plumbing. Never branched on.
     let signUpMessage: String?
     /// "Forgot password?" — the presenter opens its reset flow for `email`.
     let onForgotPassword: () -> Void
@@ -54,6 +55,8 @@ struct ConfirmEmailView: View {
     /// change of the provider's code length never strands a build that hard-coded one.
     static let codeLengths = 6...10
     static let resendCooldown: TimeInterval = 60
+    /// The most a 429 can hold "Send a new code": the longest window any credential limiter uses.
+    static let rateLimitWaitCapSeconds = 3600
     /// Deliberately hedged. The backend never says whether the address still needs confirming
     /// (that answer would tell anyone which addresses have accounts), and the provider silently
     /// skips a send it considers too soon — so "we sent you a new code" can be false.
@@ -63,8 +66,8 @@ struct ConfirmEmailView: View {
     /// After a confirm whose answer never arrived, AUTH_CODE_INVALID may mean "spent by the try
     /// you never heard back from" — the one path where no server copy says "confirmed".
     static let maybeConfirmedNote = "Your last try may have gone through. If it did, your email is already confirmed: use Sign in below."
-    /// The neutral sign-in link. It serves a user who confirmed with an older app's link AND an
-    /// existing account holder who tapped Create Account by mistake (IOS-CONF-2).
+    /// The neutral sign-in link. It serves a user who confirmed with an older app's link, or one
+    /// whose address got confirmed some other way (Forgot password) while this screen was open.
     static let signInLinkTitle = "Already confirmed, or have an account? Sign in"
     /// An unstructured 404 on the confirm route: this build is talking to a server without it.
     static let routeMissingMessage = "We can't confirm with a code right now. Please try again later."
@@ -177,13 +180,6 @@ struct ConfirmEmailView: View {
                 .foregroundColor(AppColors.textPrimary)
                 .lineLimit(2)
                 .truncationMode(.middle)
-
-            if let signUpNote = Self.displayable(signUpMessage) {
-                Text(signUpNote)
-                    .font(AppTypography.bodySmall)
-                    .foregroundColor(AppColors.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
 
             Text("It can take a minute to arrive. Check your spam folder too.")
                 .font(AppTypography.bodySmall)
@@ -325,12 +321,18 @@ struct ConfirmEmailView: View {
 
     private func resendLabel(wait: Int) -> String {
         if activity == .resending { return "Sending…" }
+        // Above 90 s the hold is a 429's whole window, and the limiter slides, so the real wait
+        // can be shorter: an upper bound, said as one.
+        if wait > 90 { return "Send a new code (up to \(Int((Double(wait) / 60).rounded(.up))) min)" }
         if wait > 0 { return "Send a new code in \(wait)s" }
         return "Send a new code"
     }
 
     private func resendAccessibilityLabel(wait: Int) -> String {
-        wait > 0 ? "Send a new code, available in \(wait) seconds" : "Send a new code"
+        if wait > 90 {
+            return "Send a new code, available in at most \(Int((Double(wait) / 60).rounded(.up))) minutes"
+        }
+        return wait > 0 ? "Send a new code, available in \(wait) seconds" : "Send a new code"
     }
 
     /// The code's digits as ASCII, everything else dropped — the server's own rule
@@ -352,6 +354,7 @@ struct ConfirmEmailView: View {
     }
 
     /// A server sentence fit to show: trimmed, nil when empty, cut at `signUpMessageLimit`.
+    /// Unused while the header shows no server sentence (see `signUpMessage`); kept with it.
     static func displayable(_ message: String?) -> String? {
         guard let trimmed = message?.trimmingCharacters(in: .whitespacesAndNewlines),
               !trimmed.isEmpty else { return nil }
@@ -432,7 +435,15 @@ struct ConfirmEmailView: View {
             } catch {
                 guard !Task.isCancelled else { return }
                 report(error, during: "resend")
-                errorMessage = Self.message(for: AppError.from(error))
+                let appError = AppError.from(error)
+                // A 429 holds the button for the window the server named (3 sends per address
+                // per 15 minutes since 2026-11-26), so it cannot be tapped into the same
+                // refusal again. Capped, so a malformed Retry-After cannot lock it for good.
+                if case .rateLimited(let seconds) = appError {
+                    let wait = min(max(seconds, Int(Self.resendCooldown)), Self.rateLimitWaitCapSeconds)
+                    resendAvailableAt = Date().addingTimeInterval(TimeInterval(wait))
+                }
+                errorMessage = Self.message(for: appError)
             }
         }
     }
@@ -577,7 +588,7 @@ struct ConfirmEmailView: View {
         email: "someone@example.com",
         password: "Sample-passw0rd",
         codeJustSent: true,
-        signUpMessage: "Check your email to confirm your address. Already have an account? Sign in or reset your password.",
+        signUpMessage: "Check your email to confirm your address.",
         onForgotPassword: {},
         onUseDifferentEmail: {}
     )

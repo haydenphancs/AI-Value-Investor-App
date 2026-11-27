@@ -23,7 +23,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -330,6 +330,42 @@ def test_the_untracked_rule_is_anchored_like_the_gitignore(tmp_path):
     assert copied == scanned
 
 
+#: The folders a git worktree under .claude/worktrees/ links back to the main checkout as SYMLINKS (final review,
+#: 2026-11-20): `backend/marketing/out` holds the approved FINAL_REFERENCE mocks, gitignored and kept nowhere else.
+_WORKTREE_LINKS = ("backend/venv", "backend/marketing/out", "backend/data/money_moves_audio")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs the git binary")
+def test_a_worktrees_symlinked_folders_are_ignored_so_add_all_never_commits_them(tmp_path):
+    """Final review 2026-11-20: a trailing-slash pattern (`venv/`, `backend/marketing/out/`) matches only a directory,
+    never a symlink — so in a worktree the three links read `??` (untracked, not ignored) and `git add -A` committed
+    them; merging that commit into the main checkout replaced the real ignored folders with self-pointing links,
+    deleting the mocks, the clips and the venv (reproduced on git 2.43). A scratch repository with this repo's
+    .gitignore, each path a SYMLINK: git must call every one ignored. Mutation-checked by hand (2026-11-20): with the
+    three slash-less lines removed from .gitignore, this test went red."""
+    repo = tmp_path / "repo"
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (target / "kept.txt").write_text("x\n")
+    repo.mkdir()
+    shutil.copyfile(_PKG.parents[1] / ".gitignore", repo / ".gitignore")
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(tmp_path), "GIT_CONFIG_GLOBAL": os.devnull}
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=env, timeout=60)
+    for rel in _WORKTREE_LINKS:
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).symlink_to(target, target_is_directory=True)
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all", "--ignored"],
+                            check=True, capture_output=True, text=True, env=env, timeout=60).stdout.splitlines()
+    for rel in _WORKTREE_LINKS:
+        assert f"!! {rel}" in status, (rel, status)                     # ignored — never `?? <link>`
+        assert f"?? {rel}" not in status
+    # anti-vacuity: an unrelated new file next to them is still untracked (the ignore list is not blanket)
+    (repo / "backend" / "marketing" / "new_module.py").write_text("x = 1\n")
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "--untracked-files=all"],
+                            check=True, capture_output=True, text=True, env=env, timeout=60).stdout.splitlines()
+    assert "?? backend/marketing/new_module.py" in status
+
+
 def test_a_nested_models_package_importing_app_is_flagged(tmp_path):
     root = tmp_path / "marketing"
     (root / "voice" / "models").mkdir(parents=True)
@@ -518,8 +554,19 @@ def _no_real_voice(monkeypatch):
     monkeypatch.setattr(rd, "produce_video", _fake_produce_video)
 
 
+#: The answer a FastAPI app gives a route it does not serve (an older web and `/lanes/spotlight/claim`).
+_ROUTE_NOT_FOUND = {"detail": "Not Found"}
+
+
 class FakeBackend:
-    """Answers the internal API and the Storage signed-upload PUT; records every call."""
+    """Answers the internal API and the Storage signed-upload PUT; records every call.
+
+    Two claim routes (migration 210): `/runs/claim` (the main lane) answers `claim_reason`;
+    `/lanes/spotlight/claim` answers `spotlight_reason` — `not_scheduled` by default, like the real web while
+    MARKETING_SPOTLIGHT_ENABLED is off — with no run unless it claims; then it hands over `self.run` stamped with
+    `spotlight_lane` (None: the row carries no lane at all). `spotlight_status_codes` are answered first, one per
+    call (404 with FastAPI's own body: an older web that does not serve the route). `claims` records every claim
+    in order as (route tail, body)."""
 
     _SCRIPT = {"hook": "h", "video_script": ["a line."], "cards": [], "carousel_slides": [],
                "disclaimer_card": "Educational only. Caydex", "outlets": ["x"]}
@@ -527,7 +574,8 @@ class FakeBackend:
     def __init__(self, *, claim_reason="claimed", claim_status_codes=None, complete_status=200,
                  script_states=None, script_http_status=None,
                  script_error_code="MARKETING_SCRIPT_NOT_READY", posts_status=200,
-                 posts_error_code="MARKETING_REQUEST_INVALID"):
+                 posts_error_code="MARKETING_REQUEST_INVALID", spotlight_reason="not_scheduled",
+                 spotlight_status_codes=None, spotlight_lane="spotlight", main_lane="main"):
         # The day's-script kick-and-poll answers, in order; the last one repeats.
         self.script_states: List[Dict[str, Any]] = list(script_states or [
             {"status": "generating", "source_ref": "journey:mr_market", "template_id": "checklist"},
@@ -552,14 +600,37 @@ class FakeBackend:
         self.posts_bodies: List[Dict[str, Any]] = []
         self.posts_status = posts_status
         self.posts_error_code = posts_error_code
+        self.spotlight_reason = spotlight_reason
+        self.spotlight_status_codes = list(spotlight_status_codes or [])
+        self.spotlight_lane = spotlight_lane
+        #: the lane the MAIN claim's run carries (None: no lane key, like a web older than migration 210)
+        self.main_lane = main_lane
+        self.claims: List[tuple] = []
         self.run = {"id": "run-1", "run_date": "2026-09-17", "status": "in_progress", "stage": "planned",
                     "content_class": "A", "attempts": 1, "dry_run": True, "timings": {}, "metadata": {}}
+
+    def _spotlight_claim(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.claims.append(("lanes/spotlight/claim", body))
+        if self.spotlight_status_codes:
+            status = self.spotlight_status_codes.pop(0)
+            return httpx.Response(status, json=_ROUTE_NOT_FOUND if status == 404 else
+                                  {"error_code": "X", "message": "boom"})
+        claimed = self.spotlight_reason == "claimed"
+        if not claimed:
+            return httpx.Response(200, json={"claimed": False, "reason": self.spotlight_reason, "run": None})
+        self.run["metadata"] = {**self.run.get("metadata", {}), "claim_nonce": body.get("claim_nonce")}
+        self.run.pop("lane", None)
+        if self.spotlight_lane is not None:
+            self.run["lane"] = self.spotlight_lane
+        return httpx.Response(200, json={"claimed": True, "reason": "claimed", "run": self.run})
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         self.calls.append((request.method, path))
         if request.method == "POST" and path.endswith("/runs/claim"):
             self.claim_bodies.append(json.loads(request.content))
+            self.claims.append(("runs/claim", self.claim_bodies[-1]))
         if request.url.host == "sb.example":
             assert request.method == "PUT"
             assert request.headers.get("x-upsert") == "false"
@@ -569,12 +640,17 @@ class FakeBackend:
             self.uploaded[path] = body
             return httpx.Response(200, json={"Key": path})
         assert request.headers.get("x-marketing-worker-token") == "tok"
+        if request.method == "POST" and path.endswith("/lanes/spotlight/claim"):
+            return self._spotlight_claim(request)
         if path.endswith("/runs/claim"):
             if self.claim_status_codes:
                 return httpx.Response(self.claim_status_codes.pop(0), json={"error_code": "X", "message": "boom"})
             nonce = self.claim_bodies[-1].get("claim_nonce")
             if self.claim_reason == "claimed":
                 self.run["metadata"] = {**self.run.get("metadata", {}), "claim_nonce": nonce}
+                self.run.pop("lane", None)
+                if self.main_lane is not None:
+                    self.run["lane"] = self.main_lane
             return httpx.Response(200, json={"claimed": self.claim_reason == "claimed",
                                              "reason": self.claim_reason, "run": self.run})
         # Like the real router (`require_caller_claim`): every call after the claim presents it.
@@ -660,6 +736,11 @@ def env(monkeypatch):
     monkeypatch.setenv("MARKETING_FONTS_DIR", str(_PKG / "assets" / "fonts"))
     monkeypatch.delenv("SUPABASE_PUBLISHABLE_KEY", raising=False)
     monkeypatch.delenv("MARKETING_RENDER_THREADS", raising=False)
+    # The lane variables (2026-11-15) at their defaults, whatever the developer's shell exports: the README tells the
+    # owner to set MARKETING_RUN_LANE for a manual run, and an exported one turned 27 lane tests red. The tests that
+    # need one set it themselves.
+    for name in ("MARKETING_RUN_LANE", "MARKETING_SPOTLIGHT_HOUR_ET", "MARKETING_RUN_HOUR_ET"):
+        monkeypatch.delenv(name, raising=False)
 
 
 def _wire(m, monkeypatch, backend: FakeBackend):
@@ -722,15 +803,24 @@ def test_happy_path_on_a_text_only_day_records_posts_without_any_media(m, monkey
     assert manifest["ffmpeg"].startswith("ffmpeg")
 
 
+def _claim_tails(be: "FakeBackend") -> List[str]:
+    return [p.split("/internal/marketing/", 1)[1] for meth, p in be.calls if p.endswith("/claim")]
+
+
 def test_not_claimed_exits_zero_without_touching_anything_else(m, monkeypatch, env):
+    """Main not claimed → the tick asks the spotlight lane (not_scheduled, the web's answer while the lane is off)
+    and exits 0 having made exactly those two claims and nothing else."""
     for reason in ("already_done", "in_progress", "media_ready"):
         be = FakeBackend(claim_reason=reason)
         _wire(m, monkeypatch, be)
         assert m.main() == 0
-        assert [meth for meth, _ in be.calls] == ["POST"], reason
+        assert [meth for meth, _ in be.calls] == ["POST", "POST"], reason
+        assert _claim_tails(be) == ["runs/claim", "lanes/spotlight/claim"], reason
 
 
 def test_before_the_window_only_tries_to_resume_yesterday_and_never_creates(m, monkeypatch, env):
+    """09:00 ET is before BOTH lanes' hours (10 and 16): the tick asks only for yesterday's resumes, main
+    then spotlight, and creates nothing."""
     monkeypatch.delenv("MARKETING_FORCE")
     monkeypatch.delenv("MARKETING_RUN_DATE")
     monkeypatch.setenv("MARKETING_RUN_HOUR_ET", "16")
@@ -741,22 +831,39 @@ def test_before_the_window_only_tries_to_resume_yesterday_and_never_creates(m, m
             return datetime(2026, 9, 17, 9, 0, tzinfo=ET)
 
     monkeypatch.setattr(m, "datetime", FrozenDT)
-    be = FakeBackend(claim_reason="no_run")
+    be = FakeBackend(claim_reason="no_run", spotlight_reason="no_run")
     be.run = None  # type: ignore[assignment]
     _wire(m, monkeypatch, be)
     assert m.main() == 0
-    assert [meth for meth, _ in be.calls] == ["POST"]
-    (body,) = be.claim_bodies
-    assert body["resume_only"] is True and body["run_date"] == "2026-09-16"
-    assert len(body["claim_nonce"]) == 32
+    assert [meth for meth, _ in be.calls] == ["POST", "POST"]
+    assert [tail for tail, _b in be.claims] == ["runs/claim", "lanes/spotlight/claim"]
+    for _tail, body in be.claims:
+        assert body["resume_only"] is True and body["run_date"] == "2026-09-16"
+        assert len(body["claim_nonce"]) == 32
 
 
-def test_every_claim_carries_a_per_process_nonce(m, monkeypatch, env):
+def test_every_claim_carries_a_fresh_nonce(m, monkeypatch, env):
+    """One nonce per CANDIDATE claim (it replaced the per-process nonce): the lane claims of one tick never share
+    a claim pair. The in-request retry still reuses its claim's body (test_a_lost_claim_response_… in the e2e)."""
     be = FakeBackend()
     _wire(m, monkeypatch, be)
     assert m.main() == 0
     (body,) = be.claim_bodies
     assert body["resume_only"] is False and len(body["claim_nonce"]) == 32
+    be = FakeBackend(claim_reason="media_ready")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    nonces = [b["claim_nonce"] for _t, b in be.claims]
+    assert len(nonces) == 2 and len(set(nonces)) == 2 and all(len(n) == 32 for n in nonces)
+
+
+def test_a_retried_claim_resends_its_own_nonce(m, monkeypatch, env):
+    """A 503 on the claim is retried with the SAME body — the nonce is per claim, not per HTTP attempt — so a
+    claim whose response was lost is recognised as ours."""
+    be = FakeBackend(claim_status_codes=[503, 502])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert len(be.claim_bodies) == 3 and len({json.dumps(b, sort_keys=True) for b in be.claim_bodies}) == 1
 
 
 def test_httpx_request_lines_with_the_signed_token_are_not_logged(m, monkeypatch, env, caplog):
@@ -784,10 +891,13 @@ def test_transient_5xx_on_claim_is_retried_then_succeeds(m, monkeypatch, env):
 
 
 def test_persistent_5xx_gives_up_with_exit_1(m, monkeypatch, env):
+    """The main claim gives up after _HTTP_ATTEMPTS; the spotlight lane is still asked (lanes are independent),
+    and the tick exits 1 because a claim failed."""
     be = FakeBackend(claim_status_codes=[503, 503, 503, 503])
     _wire(m, monkeypatch, be)
     assert m.main() == 1
-    assert len(be.calls) == 3  # _HTTP_ATTEMPTS, then stop
+    assert _claim_tails(be) == ["runs/claim"] * 3 + ["lanes/spotlight/claim"]   # _HTTP_ATTEMPTS, then stop
+    assert len(be.calls) == 4
 
 
 @pytest.mark.parametrize("status", [409, 422])
@@ -814,7 +924,8 @@ def test_a_4xx_on_claim_is_not_retried(m, monkeypatch, env, status):
     be = FakeBackend(claim_status_codes=[status] * (m._HTTP_ATTEMPTS + 1))
     _wire(m, monkeypatch, be)
     assert m.main() == 1
-    assert len(be.calls) == 1, be.calls
+    assert _claim_tails(be) == ["runs/claim", "lanes/spotlight/claim"], be.calls   # one main claim, no retry
+    assert len(be.calls) == 2, be.calls
 
 
 def test_a_4xx_on_the_script_kick_is_not_retried(m, monkeypatch, env):
@@ -914,6 +1025,387 @@ def test_railway_watch_patterns_are_repo_rooted():
     patterns = re.findall(r'"([^"]+)"', m_.group(1))
     assert patterns and all(p.startswith("/backend/") for p in patterns), patterns
     assert "cronSchedule" in body and "healthcheckPath" not in body
+
+
+# ── the run lanes (migration 210, 2026-11-15): one pipeline per tick, per-lane claims ──────────────
+
+
+def test_the_lanes_and_their_claim_routes_mirror_the_web(m):
+    """LANES is RUN_LANES (duplicated on purpose, like RUN_STAGES), and each lane claims through a POST route the
+    REAL router serves AND exempts from the caller-claim header — the spotlight lane through its own literal route,
+    never a body field an older web would ignore."""
+    from app.api.v1.endpoints import marketing_internal as mi
+    from app.schemas.marketing import RUN_LANES
+
+    assert m.LANES == RUN_LANES and (m.LANE_MAIN, m.LANE_SPOTLIGHT) == ("main", "spotlight")
+    assert tuple(m.CLAIM_PATHS) == m.LANES
+    assert m.CLAIM_PATHS["main"] == "/runs/claim"
+    assert set(m.CLAIM_PATHS.values()) == set(mi._CLAIM_ROUTE_PATHS)
+    served = {(meth, route.path) for route in mi.router.routes for meth in getattr(route, "methods", ())}
+    for path in m.CLAIM_PATHS.values():
+        assert ("POST", mi.router.prefix + path) in served, (path, sorted(served))
+
+
+def _plan(m, hour: int, **kw):
+    now = datetime(2026, 9, 17, hour, 15, tzinfo=ET)
+    args = {"day": now.date(), "run_hour": 16, "spotlight_hour": 10, **kw}
+    return [(lane, d.isoformat(), resume) for lane, d, resume in m.tick_plan(now, **args)]
+
+
+_D, _Y = "2026-09-17", "2026-09-16"
+
+
+@pytest.mark.parametrize("hour, expected", [
+    # before both hours: yesterday's resumes only, main first
+    (0, [("main", _Y, True), ("spotlight", _Y, True)]),
+    (8, [("main", _Y, True), ("spotlight", _Y, True)]),
+    (9, [("main", _Y, True), ("spotlight", _Y, True)]),
+    # from the spotlight hour: main still resumes yesterday (it expires at 16), and it comes FIRST
+    (10, [("main", _Y, True), ("spotlight", _D, False)]),
+    (15, [("main", _Y, True), ("spotlight", _D, False)]),
+    # from the main hour to midnight: today's two runs, main before spotlight
+    (16, [("main", _D, False), ("spotlight", _D, False)]),
+    (23, [("main", _D, False), ("spotlight", _D, False)]),
+])
+def test_the_tick_plan_tries_yesterdays_resumes_first_then_todays_lanes(m, hour, expected):
+    assert _plan(m, hour) == expected
+
+
+def test_the_tick_plan_honours_force_one_lane_an_unusable_hour_and_the_run_date(m):
+    assert _plan(m, 8, force=True) == [("main", _D, False), ("spotlight", _D, False)]
+    assert _plan(m, 10, only_lane="main") == [("main", _Y, True)]
+    assert _plan(m, 16, only_lane="main") == [("main", _D, False)]
+    assert _plan(m, 8, only_lane="spotlight") == [("spotlight", _Y, True)]
+    assert _plan(m, 8, only_lane="spotlight", force=True) == [("spotlight", _D, False)]
+    # an unusable spotlight hour (None) leaves the lane out, whatever the clock or force says
+    assert _plan(m, 12, spotlight_hour=None) == [("main", _Y, True)]
+    assert _plan(m, 12, spotlight_hour=None, force=True) == [("main", _D, False)]
+    assert _plan(m, 12, spotlight_hour=None, only_lane="spotlight") == []
+    # MARKETING_RUN_DATE: the day comes from the caller, never from the clock
+    now = datetime(2026, 9, 17, 12, 15, tzinfo=ET)
+    assert m.tick_plan(now, day=datetime(2026, 9, 1).date(), run_hour=16, spotlight_hour=10) == [
+        ("main", datetime(2026, 8, 31).date(), True), ("spotlight", datetime(2026, 9, 1).date(), False)]
+    with pytest.raises(ValueError):
+        _plan(m, 12, only_lane="both")
+    with pytest.raises(ValueError):                 # a bad MAIN hour still fails loudly, as it always did
+        _plan(m, 12, run_hour=24)
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, ""), ("", ""), ("   ", ""), ("main", "main"), (" Spotlight ", "spotlight"), ("MAIN", "main"),
+    ("both", None), ("main,spotlight", None), ("mainx", None), ("spot", None), ("0", None),
+])
+def test_the_run_lane_switch_reads_one_lane_or_every_lane_and_refuses_the_rest(m, raw, expected):
+    assert m.parse_run_lane(raw) == expected
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("10", 10), (" 9 ", 9), ("0", 0), ("00", 0), ("15", 15),
+    ("16", None), ("23", None),            # not before the main hour (16): the web would close the lane too
+    ("24", None), ("99", None), ("-1", None), ("+5", None), ("10.0", None), ("1e1", None), ("", None),
+    ("abc", None), ("１０", None), ("100", None), (None, None), (10, None),
+])
+def test_the_spotlight_hour_must_be_a_whole_hour_before_the_main_one(m, caplog, raw, expected):
+    with caplog.at_level(logging.ERROR, logger=m.logger.name):
+        assert m.spotlight_hour_et(raw, run_hour=16) == expected
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    if expected is None:
+        (err,) = errors
+        assert "MARKETING_SPOTLIGHT_HOUR_ET" in err.getMessage() and "skipped this tick" in err.getMessage()
+        assert len(err.getMessage()) < 400
+    else:
+        assert errors == []
+
+
+def _at(m, monkeypatch, hour: int, minute: int = 15) -> None:
+    """An unforced tick at `hour:minute` ET on 2026-09-17 (the fake run's date), with no MARKETING_RUN_DATE."""
+    monkeypatch.delenv("MARKETING_FORCE", raising=False)
+    monkeypatch.delenv("MARKETING_RUN_DATE", raising=False)
+
+    class FrozenDT(m.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 9, 17, hour, minute, tzinfo=ET)
+
+    monkeypatch.setattr(m, "datetime", FrozenDT)
+
+
+def _manifest(be: "FakeBackend") -> Dict[str, Any]:
+    (body,) = [b for p, b in be.uploaded.items() if "/manifest-" in p]
+    return json.loads(body[body.find(b"{"):body.rfind(b"}") + 1])
+
+
+def test_at_the_spotlight_hour_the_tick_resumes_nothing_then_runs_todays_spotlight(m, monkeypatch, env, caplog):
+    """10:15 ET: yesterday's MAIN run has nothing to resume (no_run), so today's spotlight run is claimed through
+    its own route and run to media_ready — with ITS claim on every later call, and a manifest that names the lane."""
+    _at(m, monkeypatch, 10)
+    be = FakeBackend(claim_reason="no_run", spotlight_reason="claimed")
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.INFO, logger=m.logger.name):
+        assert m.main() == 0
+    assert [(t, b["run_date"], b["resume_only"]) for t, b in be.claims] == [
+        ("runs/claim", _Y, True), ("lanes/spotlight/claim", _D, False)]
+    assert be.run["status"] == "media_ready" and be.run["lane"] == "spotlight"
+    nonce = be.claims[1][1]["claim_nonce"]
+    assert be.claim_headers and set(be.claim_headers) == {f"1.{nonce}"}
+    assert be.claims[0][1]["claim_nonce"] != nonce
+    assert _manifest(be)["lane"] == "spotlight"
+    claimed = [r.getMessage() for r in caplog.records if "CLAIMED" in r.getMessage()]
+    assert len(claimed) == 1 and "lane=spotlight" in claimed[0]
+
+
+def test_a_resume_of_yesterday_comes_first_and_is_the_ticks_only_pipeline(m, monkeypatch, env):
+    """10:15 ET with yesterday's MAIN run left failed: it is resumed, and today's spotlight run waits for the next
+    tick — one pipeline per tick keeps the tick inside WORKER_DEADLINE_SECONDS."""
+    _at(m, monkeypatch, 10)
+    be = FakeBackend(spotlight_reason="claimed")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert [(t, b["resume_only"]) for t, b in be.claims] == [("runs/claim", True)]
+    assert be.run["status"] == "media_ready" and be.run["lane"] == "main"
+    assert "lane" not in _manifest(be)
+
+
+def test_at_the_main_hour_todays_main_run_is_the_ticks_pipeline(m, monkeypatch, env):
+    _at(m, monkeypatch, 16)
+    be = FakeBackend(spotlight_reason="claimed")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert [(t, b["run_date"], b["resume_only"]) for t, b in be.claims] == [("runs/claim", _D, False)]
+    assert be.run["status"] == "media_ready"
+
+
+def test_a_spotlight_retry_after_the_main_hour_runs_when_main_is_done(m, monkeypatch, env):
+    """17:15 ET: today's main run is media_ready; the spotlight run (say, deferred at 15:15) is still claimable
+    until midnight and is this tick's pipeline."""
+    _at(m, monkeypatch, 17)
+    be = FakeBackend(claim_reason="media_ready", spotlight_reason="claimed")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert [(t, b["resume_only"]) for t, b in be.claims] == [("runs/claim", False), ("lanes/spotlight/claim", False)]
+    assert be.run["status"] == "media_ready" and be.run["lane"] == "spotlight"
+
+
+def test_both_claim_bodies_are_the_main_lanes_body_and_only_the_route_names_the_lane(m, monkeypatch, env):
+    """The main claim is byte-for-byte the body it always was — no `lane` field on either route (an older web
+    would drop one and claim MAIN); the two bodies differ only in their nonce."""
+    be = FakeBackend(claim_reason="already_done")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    (main_tail, main_body), (lane_tail, lane_body) = be.claims
+    assert (main_tail, lane_tail) == ("runs/claim", "lanes/spotlight/claim")
+    keys = {"run_date", "worker_version", "dry_run", "resume_only", "capabilities", "claim_nonce"}
+    assert set(main_body) == set(lane_body) == keys
+    assert {k: v for k, v in main_body.items() if k != "claim_nonce"} == \
+        {k: v for k, v in lane_body.items() if k != "claim_nonce"}
+
+
+@pytest.mark.parametrize("status", [404, 405])
+def test_an_older_web_without_the_spotlight_route_is_a_warning_and_the_lane_is_skipped(m, monkeypatch, env, caplog,
+                                                                                      status):
+    """Worker before web (the deploy order): the lane route answers 404 (FastAPI's own body, no error code) —
+    WARNING, the lane is skipped, exit 0. Not an error, and never retried."""
+    be = FakeBackend(claim_reason="already_done", spotlight_status_codes=[status])
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.INFO, logger=m.logger.name):
+        assert m.main() == 0
+    assert _claim_tails(be) == ["runs/claim", "lanes/spotlight/claim"]
+    (warn,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "does not serve the spotlight lane" in warn.getMessage()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_an_older_web_leaves_the_main_lane_exactly_as_it_was(m, monkeypatch, env):
+    """Main claimed on a web that echoes no lane (older than migration 210): the run reads as main and runs."""
+    be = FakeBackend(main_lane=None, spotlight_status_codes=[404])
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert "lane" not in be.run and be.run["status"] == "media_ready"
+    assert _claim_tails(be) == ["runs/claim"]
+
+
+def test_a_404_on_the_main_route_is_an_error_not_a_skipped_lane(m, monkeypatch, env, caplog):
+    be = FakeBackend(claim_status_codes=[404])
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.INFO, logger=m.logger.name):
+        assert m.main() == 1
+    assert _claim_tails(be) == ["runs/claim", "lanes/spotlight/claim"]
+    assert any(r.levelno == logging.ERROR and "lane=main" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("codes", [[422], [503, 503, 503]])
+def test_a_failing_spotlight_claim_is_an_error_and_exit_1(m, monkeypatch, env, caplog, codes):
+    be = FakeBackend(claim_reason="media_ready", spotlight_status_codes=codes)
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.INFO, logger=m.logger.name):
+        assert m.main() == 1
+    assert _claim_tails(be) == ["runs/claim"] + ["lanes/spotlight/claim"] * len(codes)
+    assert any(r.levelno == logging.ERROR and "lane=spotlight" in r.getMessage() for r in caplog.records)
+
+
+def test_a_failed_main_claim_does_not_stop_the_spotlight_pipeline_but_still_fails_the_tick(m, monkeypatch, env):
+    """Lanes are independent: a main claim refused 422 is logged, the spotlight run still runs — and the tick exits 1
+    so the cron shows the failed claim."""
+    be = FakeBackend(claim_status_codes=[422], spotlight_reason="claimed")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert be.run["status"] == "media_ready" and be.run["lane"] == "spotlight"
+
+
+@pytest.mark.parametrize("main_reason, spotlight_lane, main_lane", [
+    ("media_ready", "main", "main"),       # the spotlight route handed over a MAIN run
+    ("media_ready", None, "main"),         # …or a run with no lane at all
+    ("media_ready", "sideline", "main"),   # …or a lane this worker does not know
+    ("claimed", "spotlight", "spotlight"),  # the MAIN route handed over a spotlight run
+])
+def test_a_claimed_run_of_another_lane_is_never_run(m, monkeypatch, env, caplog, main_reason, spotlight_lane,
+                                                    main_lane):
+    """The run handed over must be of the lane asked for: else ERROR, exit 1, and NOTHING after the claim — no
+    preflight, no stage, no failure write (the row is not provably ours to close)."""
+    be = FakeBackend(claim_reason=main_reason, spotlight_reason="claimed", spotlight_lane=spotlight_lane,
+                     main_lane=main_lane)
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.ERROR, logger=m.logger.name):
+        assert m.main() == 1
+    assert [c for c in be.calls if not c[1].endswith("/claim")] == []
+    assert be.patches == [] and be.registered == []
+    assert any("running nothing" in r.getMessage() for r in caplog.records)
+
+
+def test_a_claim_without_a_run_row_runs_nothing(m, monkeypatch, env):
+    be = FakeBackend(claim_reason="media_ready", spotlight_reason="claimed")
+    be.run.pop("id")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1
+    assert [c for c in be.calls if not c[1].endswith("/claim")] == [] and be.patches == []
+
+
+def test_a_deferred_pipeline_ends_the_tick_without_another_claim(m, monkeypatch, env):
+    be = FakeBackend(script_states=[{"status": "generating"}, {"status": "deferred", "retry_after_seconds": 5}],
+                     spotlight_reason="claimed")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert _claim_tails(be) == ["runs/claim"] and be.run["status"] == "failed"
+
+
+@pytest.mark.parametrize("lane, tails", [
+    ("main", ["runs/claim"]),
+    (" spotlight ", ["lanes/spotlight/claim"]),
+])
+def test_the_run_lane_switch_restricts_a_forced_tick_to_one_lane(m, monkeypatch, env, lane, tails):
+    monkeypatch.setenv("MARKETING_RUN_LANE", lane)
+    be = FakeBackend(claim_reason="already_done", spotlight_reason="already_done")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0
+    assert _claim_tails(be) == tails
+    assert all(b["resume_only"] is False and b["run_date"] == _D for _t, b in be.claims)
+
+
+@pytest.mark.parametrize("bad", ["both", "spot", "main,spotlight"])
+def test_an_unknown_run_lane_is_exit_1_before_any_call(m, monkeypatch, env, caplog, bad):
+    monkeypatch.setenv("MARKETING_RUN_LANE", bad)
+    be = FakeBackend()
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.ERROR, logger=m.logger.name):
+        assert m.main() == 1
+    assert be.calls == []
+    assert any("MARKETING_RUN_LANE" in r.getMessage() and "nothing claimed" in r.getMessage()
+               for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad", ["abc", "24", "16", "", "9.5"])
+def test_an_unusable_spotlight_hour_skips_only_the_spotlight_lane(m, monkeypatch, env, caplog, bad):
+    """Fail closed: the spotlight lane is skipped this tick at ERROR; the main lane is claimed as always (here not
+    claimed, so the tick ends after the ONE main claim, exit 0)."""
+    monkeypatch.setenv("MARKETING_SPOTLIGHT_HOUR_ET", bad)
+    be = FakeBackend(claim_reason="media_ready", spotlight_reason="claimed")
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.ERROR, logger=m.logger.name):
+        assert m.main() == 0
+    assert _claim_tails(be) == ["runs/claim"]
+    assert any("MARKETING_SPOTLIGHT_HOUR_ET" in r.getMessage() for r in caplog.records)
+    # and with the main run claimable, it runs exactly as before
+    be = FakeBackend(spotlight_reason="claimed")
+    _wire(m, monkeypatch, be)
+    assert m.main() == 0 and be.run["status"] == "media_ready" and be.run["lane"] == "main"
+
+
+def test_the_spotlight_lane_alone_with_an_unusable_hour_claims_nothing_and_fails(m, monkeypatch, env):
+    monkeypatch.setenv("MARKETING_RUN_LANE", "spotlight")
+    monkeypatch.setenv("MARKETING_SPOTLIGHT_HOUR_ET", "nine")
+    be = FakeBackend()
+    _wire(m, monkeypatch, be)
+    assert m.main() == 1 and be.calls == []
+
+
+def test_the_main_lane_alone_never_reads_the_spotlight_hour(m, monkeypatch, env, caplog):
+    monkeypatch.setenv("MARKETING_RUN_LANE", "main")
+    monkeypatch.setenv("MARKETING_SPOTLIGHT_HOUR_ET", "nine")
+    be = FakeBackend()
+    _wire(m, monkeypatch, be)
+    with caplog.at_level(logging.ERROR, logger=m.logger.name):
+        assert m.main() == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+def test_a_spotlight_hour_set_on_the_worker_moves_the_spotlight_window(m, monkeypatch, env):
+    """MARKETING_SPOTLIGHT_HOUR_ET=12: at 11:15 ET the spotlight lane only resumes yesterday's run; at 12:15 it
+    claims today's."""
+    monkeypatch.setenv("MARKETING_SPOTLIGHT_HOUR_ET", "12")
+    for hour, expected in ((11, (_Y, True)), (12, (_D, False))):
+        _at(m, monkeypatch, hour)
+        be = FakeBackend(claim_reason="no_run", spotlight_reason="no_run")
+        _wire(m, monkeypatch, be)
+        assert m.main() == 0
+        assert [(t, (b["run_date"], b["resume_only"])) for t, b in be.claims] == [
+            ("runs/claim", (_Y, True)), ("lanes/spotlight/claim", expected)], hour
+
+
+def test_the_main_manifest_bytes_are_unchanged_and_a_spotlight_manifest_names_its_lane(m, tmp_path):
+    kw = dict(worker_version="v", run_date=datetime(2026, 9, 17).date(), dry_run=True,
+              ffmpeg="ffmpeg version 5.1.9", fonts_dir=str(tmp_path))
+    plain = m.build_manifest(**kw)
+    assert "lane" not in plain
+    assert json.dumps(m.build_manifest(**kw, lane="main"), sort_keys=True) == json.dumps(plain, sort_keys=True)
+    spot = m.build_manifest(**kw, lane="spotlight")
+    assert spot == {**plain, "lane": "spotlight"}
+    with pytest.raises(ValueError):
+        m.build_manifest(**kw, lane="sideline")
+
+
+def test_the_client_refuses_an_unknown_lane_before_any_call(m, monkeypatch, env):
+    be = FakeBackend()
+    _wire(m, monkeypatch, be)
+    client = m.BackendClient("https://backend.example", "tok")
+    try:
+        with pytest.raises(ValueError):
+            client.claim_run(datetime(2026, 9, 17).date(), "v", True, lane="sideline")
+    finally:
+        client.close()
+    assert be.calls == []
+
+
+@pytest.mark.parametrize("doc", ["main.py", "railway.toml", "README.md"])
+def test_the_worker_docs_name_both_lane_settings(doc):
+    """The two new worker variables are recorded where the owner reads the worker's environment (Railway does not
+    read railway.toml — it is the record of what to type into the dashboard)."""
+    text = (_PKG / doc).read_text(encoding="utf-8")
+    assert "MARKETING_SPOTLIGHT_HOUR_ET" in text and "MARKETING_RUN_LANE" in text, doc
+
+
+def test_the_worker_readme_maps_every_module_and_names_every_capability(m):
+    """The README is the worker's file map, and OWNER_TASKS calls the new worker live once a run lists EVERY capability
+    (final double-check of 2026-11-26: its main.py row named six of the eight and look.py, card_layouts.py and
+    theme_art.py had no row). The main.py row names the claim's capabilities in the claim's order, and every module of
+    the package has a row of its own."""
+    text = (_PKG / "README.md").read_text(encoding="utf-8")
+    rows = {match.group(1): match.group(2) for match in re.finditer(r"^\| `([^`|]+)` \| (.*) \|$", text, flags=re.M)}
+    assert "main.py" in rows and "cards.py" in rows                     # anti-vacuity: the table parses
+    declared = ", ".join(f"`{cap}`" for cap in m.BackendClient.WORKER_CAPABILITIES)
+    assert len(m.BackendClient.WORKER_CAPABILITIES) == 8 and f"({declared}" in rows["main.py"]
+    modules = sorted(p.name for p in _PKG.glob("*.py") if p.name != "__init__.py")
+    assert {"look.py", "card_layouts.py", "theme_art.py"} <= set(modules)
+    assert [name for name in modules if name not in rows] == []
 
 
 # ── Phase 2: the day's script ─────────────────────────────────────────────────
@@ -1040,6 +1532,7 @@ def test_unexpected_script_status_fails_the_run_loudly(m, monkeypatch, env):
     ("writer_unavailable", "writer_unavailable"),
     ("empty_pool", "empty_pool"),
     ("source_ineligible", "source_ineligible"),
+    ("nothing_qualified", "nothing_qualified"),      # a spotlight day with no record (migration 210)
 ])
 @pytest.mark.parametrize("after_polling", [False, True])
 def test_the_rejection_reason_becomes_the_skip_reason(m, monkeypatch, env, caplog, reason,
@@ -1058,7 +1551,10 @@ def test_the_rejection_reason_becomes_the_skip_reason(m, monkeypatch, env, caplo
     assert [p.get("stage") for p in be.patches if p.get("stage")] == (["selected"] if after_polling else [])
     recs = [r for r in caplog.records if "REJECTED" in r.getMessage()]
     assert len(recs) == 1 and f"skip_reason={skip_reason}" in recs[0].getMessage()
-    expected = _logging.ERROR if reason in ("writer_unavailable", "empty_pool") else _logging.WARNING
+    # an operator's problem at ERROR; a spotlight day the calendar found nothing for at INFO (routine — the digest
+    # reports it); every other content verdict at WARNING
+    expected = (_logging.ERROR if reason in ("writer_unavailable", "empty_pool")
+                else _logging.INFO if reason == "nothing_qualified" else _logging.WARNING)
     assert recs[0].levelno == expected
     assert not any("rejection reason" in r.getMessage() for r in caplog.records)
 
@@ -1075,6 +1571,7 @@ def test_the_worker_maps_exactly_the_server_rejection_reasons(m):
 @pytest.mark.parametrize("reason, skip_reason", [
     ("content", "content_rejected"), ("writer_unavailable", "writer_unavailable"),
     ("empty_pool", "empty_pool"), ("source_ineligible", "source_ineligible"),
+    ("nothing_qualified", "nothing_qualified"),
 ])
 def test_the_reason_survives_the_real_wire_schema(m, monkeypatch, env, reason, skip_reason):
     """The endpoint answers `ScriptKickResponse.model_validate(state)` under a response_model,
@@ -1573,7 +2070,8 @@ def test_an_image_and_video_day_records_each_outlet_in_its_frozen_format(m, monk
     (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
     md = card["metadata"]
     footer = script["image_footer"]
-    assert md["onscreen_text"] == [_IMAGE_POST["title"], *_IMAGE_POST["paragraphs"], footer]
+    assert md["onscreen_text"] == [_IMAGE_POST["title"], *_IMAGE_POST["paragraphs"], footer, cards.LESSON_KICKER,
+                                   cards.BRAND_ROW_WORD]                    # news-v23: + the brand row
     assert md["image_role"] == cards.IMAGE_ROLE_POST == "post_image" and len(md["render_key"]) == 64
     assert md["card_version"] == cards.CARD_RENDER_VERSION and md["template_id"] == "case_story"
     assert card["content_type"] == "image/jpeg" and card["status"] == "ready"
@@ -1582,7 +2080,9 @@ def test_an_image_and_video_day_records_each_outlet_in_its_frozen_format(m, monk
     AssetRegisterRequest.model_validate(reg)
     assert reg["ext"] == "jpg" and 0 < reg["bytes"] <= cards.POST_IMAGE_MAX_BYTES
     stored = normalize_image_post(_IMAGE_POST)
-    assert set(md["onscreen_text"]) <= {stored["title"], *stored["paragraphs"], footer} and footer in md["onscreen_text"]
+    assert (set(md["onscreen_text"]) <= {stored["title"], *stored["paragraphs"], footer, cards.LESSON_KICKER,
+                                         cards.BRAND_ROW_WORD}       # news-v23: the server's LESSON_BRAND_TEXT
+            and footer in md["onscreen_text"])
     (body,) = [b for p, b in be.uploaded.items() if "/card-" in p]
     assert b"Content-Type: image/jpeg" in body and b"\xff\xd8\xff" in body       # a real JPEG went up
     # The image is registered BEFORE the video, and both pointers ride in the ONE checkpoint PATCH.
@@ -1816,12 +2316,16 @@ def test_the_worker_mirrors_the_servers_image_contract():
     for platform, allowed in sch.POST_FORMATS_BY_PLATFORM.items():
         assert set(allowed) <= set(rd.FROZEN_FORMATS), platform
     # v3: drop 2a (template scripts); v4: Batch 2 (video features); v5: its fix round (caption figures, the
-    # data card's slot, the push-in fallback)
-    assert rd.RENDER_STAGE_VERSION == "render/v5"
+    # data card's slot, the push-in fallback); v6 (2026-11-15): the `feature` image + the per-post art, bumped once;
+    # v7 (news-v23, 2026-11-19): the approved look (cards/v6), the series in the template keys
+    assert rd.RENDER_STAGE_VERSION == "render/v7"
     from marketing import logos
 
+    from marketing import art
+
+    # workstream C: the per-post art's ONE download joins the stage's worst case
     assert rd.worst_case_seconds(120.0) == (video.worst_case_seconds(120.0) + rd.IMAGE_RENDER_SECONDS + 120.0
-                                            + logos.LOGOS_WORST_CASE_SECONDS)
+                                            + logos.LOGOS_WORST_CASE_SECONDS + art.ART_WORST_CASE_SECONDS)
 
 
 def test_the_image_render_key_changes_with_every_input_that_changes_the_bytes():
@@ -1831,8 +2335,12 @@ def test_the_image_render_key_changes_with_every_input_that_changes_the_bytes():
     k = rd.image_render_key(**base)
     assert k == rd.image_render_key(**base) and len(k) == 64
     for change in ({"texts": ["T", "P1", "P2", "F!"]}, {"texts": ["T", "P2", "P1", "F"]}, {"card_version": "c2"},
-                   {"layout_engine": "basic"}, {"max_bytes": 900_000}):
+                   {"layout_engine": "basic"}, {"max_bytes": 900_000},
+                   # news-v23: the series picks the figures' colours; the read-back's look draws the brand word
+                   {"series": "ceo_buys"}, {"look": True}):
         assert rd.image_render_key(**{**base, **change}) != k, change
+    assert rd.image_render_key(**base, series="ceo_buys") != rd.image_render_key(**base, series="thirteen_f")
+    assert rd.image_render_key(**base, series=7) == k                      # a non-string series: none
     # never the video's key for the same strings
     assert k != rd.render_key(audio_sha256="a" * 64, words=[], card_texts=[base["texts"]], threads=2,
                               card_version="c1", video_version="v1", max_seconds=75.0, layout_engine="raqm")
@@ -1921,8 +2429,11 @@ def test_the_render_key_changes_with_every_input_that_changes_the_bytes():
                    {"video_features": ["push_in"]}, {"video_features": ["hook_card"]},
                    {"card_kinds": ["brand", "text"]}, {"card_kinds": ["hook", "text"]},
                    # the fix round: which text card the data card replaced (CARDS-B2-1) — on its own
-                   {"data_card_slot": 0}, {"data_card_slot": 1}):
+                   {"data_card_slot": 0}, {"data_card_slot": 1},
+                   # news-v23: the series picks the figures' colours; the read-back's look draws its strings
+                   {"series": "ceo_buys"}, {"look": True}):
         assert rd.render_key(**{**base, **change}) != k, change
+    assert rd.render_key(**base, series="ceo_buys") != rd.render_key(**base, series="thirteen_f")
     assert rd.render_key(**base, data_card_slot=0) != rd.render_key(**base, data_card_slot=1)
     assert rd.render_key(**base, data_card_slot=None) == k                # no data card: today's key
     # the features are a SET (sorted), and a bare string is refused rather than read as letters
@@ -2099,21 +2610,29 @@ def test_every_claim_declares_the_post_image_capability_the_server_accepts(m, mo
     `image_spec` image) — without it the server gives the run the lesson, never a company-news day. Drop
     2b: `layouts_2b` (it draws the `pair` / `grid` images) — without it the server drops company_stakes
     and theme_explainer from the day's chain. Batch 2: `video_v2` (it draws the frozen video features and
-    the end card the read-back names) — without it the server freezes no feature: today's video."""
+    the end card the read-back names) — without it the server freezes no feature: today's video. 2026-11-15:
+    `layout_feature` (it draws the `feature` image, the spotlight series' art-band picture) — without it the
+    server drops those series from the chain, freezes their posts as text and refuses such a picture. 2026-11-16
+    (workstream C): `post_art`, appended LAST (it draws the per-post art) — without it the server makes no art."""
     import logging
 
     from app.schemas.marketing import WORKER_CAPABILITIES, RunClaimRequest
 
-    assert m.BackendClient.WORKER_CAPABILITIES == WORKER_CAPABILITIES == ("post_image", "news_templates",
-                                                                          "layouts_2b", "video_v2")
+    # 2026-11-16 (workstream C): this worker image draws the per-post art, so it declares `post_art` — appended LAST on
+    # both sides, the two tuples equal again (test_the_worker_declares_post_art_only_because_it_draws_the_art).
+    assert m.BackendClient.WORKER_CAPABILITIES == WORKER_CAPABILITIES == (
+        "post_image", "news_templates", "layouts_2b", "video_v2", "layout_feature", "post_art", "look_v23",
+        "theme_angles")
     be = FakeBackend()
     _wire(m, monkeypatch, be)
     assert m.main() == 0
     (body,) = be.claim_bodies
-    assert body["capabilities"] == ["post_image", "news_templates", "layouts_2b", "video_v2"]
+    assert body["capabilities"] == ["post_image", "news_templates", "layouts_2b", "video_v2", "layout_feature",
+                                    "post_art", "look_v23", "theme_angles"]
     with caplog.at_level(logging.WARNING):
-        assert RunClaimRequest.model_validate(body).capabilities == ["layouts_2b", "news_templates", "post_image",
-                                                                     "video_v2"]
+        assert RunClaimRequest.model_validate(body).capabilities == ["layout_feature", "layouts_2b", "look_v23",
+                                                                     "news_templates", "post_art", "post_image",
+                                                                     "theme_angles", "video_v2"]
     assert not [r for r in caplog.records if "does not know" in r.getMessage()]
 
 
@@ -2126,6 +2645,40 @@ def test_the_worker_declares_layouts_2b_only_because_its_cards_draw_every_2b_lay
 
     assert WORKER_CAPABILITY_LAYOUTS_2B in m.BackendClient.WORKER_CAPABILITIES
     assert set(WORKER_LAYOUTS_2B) <= set(cards.SHIPPED_LAYOUTS), (WORKER_LAYOUTS_2B, cards.SHIPPED_LAYOUTS)
+
+
+def test_the_worker_declares_layout_feature_only_because_its_cards_draw_the_feature_layout(m):
+    """`layout_feature` (2026-11-15) is the same promise about the `feature` image: the server hands a spotlight
+    series' picture only to a holder that declared it, so the worker must ACCEPT (cards.SHIPPED_LAYOUTS) and DRAW
+    (news_layouts.DRAWERS / _LAYOUTS) every one of WORKER_LAYOUTS_FEATURE — and never draw it as a data card."""
+    from app.schemas.marketing import WORKER_CAPABILITY_LAYOUT_FEATURE, WORKER_LAYOUTS_FEATURE
+    from marketing import cards, news_layouts
+
+    assert WORKER_CAPABILITY_LAYOUT_FEATURE in m.BackendClient.WORKER_CAPABILITIES
+    # appended last when it shipped; `post_art` (workstream C) came after it
+    assert m.BackendClient.WORKER_CAPABILITIES[-4:] == (WORKER_CAPABILITY_LAYOUT_FEATURE, "post_art", "look_v23",
+                                                        "theme_angles")
+    assert set(WORKER_LAYOUTS_FEATURE) <= set(cards.SHIPPED_LAYOUTS) == set(news_layouts._LAYOUTS)
+    assert not set(WORKER_LAYOUTS_FEATURE) & set(cards.DATA_CARD_LAYOUTS)
+
+
+def test_the_worker_declares_theme_angles_only_because_it_draws_the_ranked_layout_and_the_theme_marks(m):
+    """`theme_angles` (news-v23 phase 3, 2026-11-20) is the same promise for the weekly theme post: the server hands
+    a `ranked` picture, a grid's ticker chips / icon / two-line sub, and a theme cover's list only to a holder that
+    declared it, so this image must ACCEPT and DRAW every one of WORKER_LAYOUTS_THEME, every theme icon, and never
+    draw a ranked picture as a data card."""
+    from app.schemas.marketing import WORKER_CAPABILITY_THEME_ANGLES, WORKER_LAYOUTS_THEME, layout_capabilities
+    from app.services.marketing import template_onscreen as tos
+    from marketing import cards, news_layouts, theme_art
+
+    assert WORKER_CAPABILITY_THEME_ANGLES == "theme_angles" == m.BackendClient.WORKER_CAPABILITIES[-1]
+    # 2026-11-20: the theme's last three angles draw under the same capability (they ship in the same release)
+    assert WORKER_LAYOUTS_THEME == ("ranked", "figures", "ledger", "tally")
+    assert all(layout_capabilities(lay) == (WORKER_CAPABILITY_THEME_ANGLES,) for lay in WORKER_LAYOUTS_THEME)
+    assert set(WORKER_LAYOUTS_THEME) <= set(cards.SHIPPED_LAYOUTS) == set(news_layouts._LAYOUTS)
+    assert set(WORKER_LAYOUTS_THEME) <= set(news_layouts.DRAWERS)
+    assert not set(WORKER_LAYOUTS_THEME) & set(cards.DATA_CARD_LAYOUTS)
+    assert set(cards.THEME_ICONS) == set(tos.THEME_ICONS) == set(theme_art.SIZES)
 
 
 def test_the_preview_docs_name_only_scripts_and_flags_that_exist():
@@ -2174,6 +2727,29 @@ def _png_bytes(size=(200, 200), colour=(220, 20, 20, 255), *, fmt="PNG", mode="R
     return buf.getvalue()
 
 
+def _art_jpeg(shift: int = 0, size=(1376, 774)) -> bytes:
+    """A synthetic 16:9 art JPEG (workstream C): steel-blue stripes and a red block — deterministic."""
+    from PIL import Image, ImageDraw
+
+    im = Image.new("RGB", size, (40, 70, 110))
+    d = ImageDraw.Draw(im)
+    for x in range(shift % 40, size[0], 40):
+        d.line([(x, 0), (x, size[1])], fill=(90, 130, 170), width=3)
+    d.rectangle((size[0] // 3, size[1] // 4, 2 * size[0] // 3, 3 * size[1] // 4), fill=(220, 20, 20))
+    buf = __import__("io").BytesIO()
+    im.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def _art_entry(data: bytes, size=(1376, 774)) -> Dict[str, Any]:
+    """The read-back's `art` (post_art.worker_art's keys) for `data`, on the fake bucket."""
+    import hashlib
+
+    sha = hashlib.sha256(data).hexdigest()
+    return {"url": f"https://{_TPL_HOST}/storage/v1/object/public/marketing-media/art/{sha[:32]}.jpg", "sha256": sha,
+            "bytes": len(data), "width": size[0], "height": size[1]}
+
+
 def _logo_entry(key: str, name: str, data: bytes, ext: str = "png") -> Dict[str, Any]:
     import hashlib
 
@@ -2183,8 +2759,8 @@ def _logo_entry(key: str, name: str, data: bytes, ext: str = "png") -> Dict[str,
 
 
 class _Downloads:
-    """`render.download` for a template day: logo URLs answer from `objects` (counted), anything else
-    is the narration."""
+    """`render.download` for a template day: logo (and, workstream C, art) URLs answer from `objects` (counted),
+    anything else is the narration."""
 
     def __init__(self, objects: Dict[str, bytes]):
         self.objects = objects
@@ -2192,7 +2768,7 @@ class _Downloads:
 
     def __call__(self, url, **kw):
         self.calls.append((url, kw))
-        if "/logos/" in url:
+        if "/logos/" in url or "/art/" in url:
             if url not in self.objects:
                 raise RuntimeError("HTTP 404")
             return self.objects[url]
@@ -2476,9 +3052,15 @@ def test_slow_response_headers_end_the_download_before_its_body(monkeypatch):
 def test_the_twelve_logo_worst_case_fits_the_render_margin(m):
     from marketing import logos, render, video
 
+    from marketing import art
+
     worst = render.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS)
     assert worst == (video.worst_case_seconds(m.UPLOAD_TIMEOUT_SECONDS) + render.IMAGE_RENDER_SECONDS
-                     + m.UPLOAD_TIMEOUT_SECONDS + logos.LOGOS_WORST_CASE_SECONDS)
+                     + m.UPLOAD_TIMEOUT_SECONDS + logos.LOGOS_WORST_CASE_SECONDS + art.ART_WORST_CASE_SECONDS)
+    # workstream C (decision 11): the post image's share doubled for the art's draw-then-fallback, the art's one
+    # download joined, and the media margin grew to 14 min with them — 799.25 s of an 840 s margin
+    assert render.IMAGE_RENDER_SECONDS == 40 and art.ART_WORST_CASE_SECONDS == 8.0
+    assert m.STAGE_START_MARGIN_SECONDS == 14 * 60 and worst == 799.25
     # the logo step: the shared budget, which every download ends inside, + one per-phase read of headroom
     assert logos.LOGOS_WORST_CASE_SECONDS == (logos.MAX_LOGOS * logos.LOGO_DOWNLOAD_TIMEOUT_SECONDS
                                               + logos.LOGO_DOWNLOAD_TIMEOUT_SECONDS / logos.DOWNLOAD_PHASES)
@@ -2507,6 +3089,42 @@ def test_the_worker_maps_the_template_refusal_to_a_skipped_day(m, monkeypatch, e
     assert len([c for c in be.calls if c[1].endswith("/posts")]) == 1
 
 
+@pytest.mark.parametrize("kind", ["card", "video"])
+def test_a_media_registration_refused_as_a_stale_template_skips_the_day(m, caplog, kind):
+    """Final review 2026-11-20: the server refuses the picture or video of a template another template version composed
+    with 409 MARKETING_TEMPLATE_REFUSED (`run_service.stale_template_problem`) — the day is skipped `template_refused`
+    at once (one call, nothing uploaded), never sent to `_record_failure` and re-rendered six times. Any other refusal
+    still raises as before. Mutation-checked by hand (2026-11-20): with the branch in `render._register` removed, the
+    WorkerAPIError escaped and this test went red."""
+    from marketing import render as rd
+
+    class Api:
+        def __init__(self, code):
+            self.code, self.calls = code, []
+
+        def register_asset(self, run_id, **fields):
+            self.calls.append(fields["kind"])
+            raise m.WorkerAPIError("POST /runs/run-1/assets -> 409", status=409, error_code=self.code)
+
+        def complete_asset(self, *_a):                     # never reached: nothing was registered
+            raise AssertionError("no upload after a refusal")
+
+    def never_upload(*_a, **_k):
+        raise AssertionError("no upload after a refusal")
+
+    caplog.set_level(logging.ERROR)
+    api = Api(rd.TEMPLATE_REFUSED)
+    with pytest.raises(m.SkipRun) as e:
+        rd._register(api, "run-1", {}, b"bytes", uploader=never_upload, hasher=lambda b: "a" * 64, skip=m.SkipRun,
+                     kind=kind, ext="jpg" if kind == "card" else "mp4", metadata={})
+    assert str(e.value) == "template_refused" and api.calls == [kind]
+    assert any("another template version" in r.getMessage() and "run-1" in r.getMessage() for r in caplog.records)
+    other = Api("MARKETING_REQUEST_INVALID")
+    with pytest.raises(m.WorkerAPIError):
+        rd._register(other, "run-1", {}, b"bytes", uploader=never_upload, hasher=lambda b: "a" * 64, skip=m.SkipRun,
+                     kind=kind, ext="jpg", metadata={})
+
+
 # ── a whole template day against the fake backend ──────────────────────────
 
 
@@ -2525,7 +3143,11 @@ class _TemplateBackend(FakeBackend):
         return resp
 
 
-def _template_world(tmp_path, *, tamper: str = ""):
+def _template_world(tmp_path, *, tamper: str = "", art: Optional[bytes] = None, feature: bool = False,
+                    art_object: Optional[bytes] = None):
+    """A template day against the fake backend. Workstream C: `art` puts a read-back art entry for those bytes in the
+    script (its object answers `art_object`, else the same bytes); `feature` makes the picture an insider-spotlight
+    `feature` picture (the only layout that draws art) instead of a ceo_buys `rows` one."""
     pytest.importorskip("PIL")
     from datetime import date
 
@@ -2538,13 +3160,23 @@ def _template_world(tmp_path, *, tamper: str = ""):
     objects = {entries[0]["url"]: gme, entries[1]["url"]: nvda}
     if tamper:
         objects[next(e["url"] for e in entries if e["key"] == tamper)] = _png_bytes(colour=(1, 2, 3, 255))
-    footer = post_copy.image_footer(run_date, "template", source="SEC Form 4 filings", as_of="Sep 17, 2026")
+    art_entry = None
+    if art is not None:
+        art_entry = _art_entry(art)
+        objects[art_entry["url"]] = art if art_object is None else art_object
+    footer = post_copy.image_footer(run_date, "template", source=post_copy.FOOTER_SOURCE_FORM4,   # news-v23
+                                    when="filed Sep 17, 2026")
     opening = {"kicker": "FILED LAST WEEK · FORM 4", "logos": ["GME"], "chip": "GME", "figure": "$74.4M",
                "headline": "GameStop's CEO disclosed buying GameStop stock"}
     image_spec = {"layout": "rows", "version": 1, "kicker": "FILED LAST WEEK · FORM 4", "footer": footer,
                   "title": "CEO purchases disclosed last week",
                   "sections": [{"rows": [{"logo": "GME", "cells": ["GameStop", "CEO", "$74.4M"]},
                                          {"logo": "NVDA", "cells": ["NVIDIA", "CEO", "$12.0M"]}]}]}
+    if feature:
+        image_spec = {"layout": "feature", "version": 1, "kicker": "FILED SEP 16 · FORM 4", "footer": footer,
+                      "header": {"logo": "GME", "name": "GameStop", "chip": "GME"}, "figure": "$74.4M",
+                      "figure_label": "of stock, per the Form 4", "headline": "GameStop's CEO disclosed buying stock",
+                      "facts": [{"label": "Shares", "value": "1M"}, {"label": "Trade dates", "value": "Sep 14–15"}]}
     lines = ["GameStop's chief executive disclosed buying about seventy four million dollars of stock.",
              "NVIDIA's chief executive disclosed a twelve million dollar purchase the same week.",
              "Both purchases were reported on Form four filings with the SEC.",
@@ -2561,8 +3193,11 @@ def _template_world(tmp_path, *, tamper: str = ""):
         "post_formats": {"bluesky": "image", "facebook": "text", "tiktok": "video", "x": "image"},
         "image_post": {"title": "A table of CEO purchases disclosed last week",
                        "paragraphs": ["Two rows, largest first.", "Source: SEC Form 4 filings."]},
-        "image_footer": footer, "content_class": "C", "authorship": "template", "series": "ceo_buys",
+        "image_footer": footer, "content_class": "C", "authorship": "template",
+        "series": "insider_spotlight" if feature else "ceo_buys",
         "video_layout": "per_line", "opening_card": opening, "image_spec": image_spec, "logos": entries,
+        **({"art": art_entry} if art_entry is not None else {}),
+        "look": "news-v23",                    # news-v23: today's web (its read-back allows the look's own strings)
     }).model_dump()
     be = _TemplateBackend(script_states=[{"status": "accepted", "source_ref": "news:ceo_buys:2026-09-10",
                                           "template_id": "ceo_buys", "script": script}])
@@ -2607,15 +3242,19 @@ def test_a_template_day_draws_logos_once_and_declares_only_what_the_server_allow
     # the image: the server's template branch (run_service D12) — image_strings ∪ {footer}, footer required,
     # the alt text never
     img_md = card["metadata"]
-    allowed = set(tos.image_strings(script["image_spec"], script["logos"])) | {script["image_footer"]}
+    from app.schemas.marketing import PICTURE_BRAND_TEXT
+
+    allowed = (set(tos.image_strings(script["image_spec"], script["logos"])) | {script["image_footer"]}
+               | set(PICTURE_BRAND_TEXT))                                   # news-v23: the brand row's word
     assert set(img_md["onscreen_text"]) <= allowed and script["image_footer"] in img_md["onscreen_text"]
     assert not ({script["image_post"]["title"], *script["image_post"]["paragraphs"]} & set(img_md["onscreen_text"]))
-    assert img_md["image_layout"] == "rows" and img_md["card_version"] == cards.CARD_RENDER_VERSION == "cards/v4"
+    assert img_md["image_layout"] == "rows" and img_md["card_version"] == cards.CARD_RENDER_VERSION == "cards/v6"
     assert img_md["logos"] == [[e["key"], e["sha256"]] for e in script["logos"]]      # both drawn as logos
     # the video: brand text ∪ card titles/bodies ∪ disclaimer ∪ opening strings, disclaimer required
     vid_md = video["metadata"]
     v_allowed = set(VIDEO_BRAND_TEXT) | {c[k] for c in script["cards"] for k in ("title", "body")} | {
-        script["disclaimer_card"]} | set(tos.opening_strings(script["opening_card"], script["logos"]))
+        script["disclaimer_card"]} | set(tos.opening_strings(script["opening_card"], script["logos"])) | {
+        script["image_footer"]}                       # news-v23: each card's short footer (the server allows it)
     assert set(vid_md["onscreen_text"]) <= v_allowed and script["disclaimer_card"] in vid_md["onscreen_text"]
     assert "GameStop" not in vid_md["onscreen_text"]                 # the logo drew, not its wordmark
     assert vid_md["video_layout"] == "per_line" and vid_md["render_version"] == rd.RENDER_STAGE_VERSION
@@ -2645,6 +3284,212 @@ def test_a_tampered_logo_is_a_wordmark_on_both_media(m, monkeypatch, env, tmp_pa
     assert "GameStop" in tos.opening_strings(script["opening_card"], script["logos"])
     assert card["metadata"]["logos"] == [["GME", None], ["NVDA", script["logos"][1]["sha256"]]]
     assert be.run["status"] == "media_ready"
+
+
+# ── workstream C (2026-11-16): the per-post ART, end to end against the fake backend ─────────────────────────
+#
+# The read-back's `art` is resolved ONCE per stage (marketing/art.py) and drawn on the `feature` picture's band and the
+# opening card; each surface that draws it burns ART_LABEL and declares the sha (`art_sha256` / `opening_art_sha256`),
+# a surface that does not declares None and no label — exactly what the server's declaration rule accepts.
+
+
+def test_the_worker_declares_post_art_only_because_it_draws_the_art(m):
+    """`post_art` is a promise about THIS image: the server spends on art only for a holder that declared it, so the
+    worker must download it (art.resolve_art), draw it on the cover and the feature picture with the server's own
+    label, and declare it — appended LAST, and never a capability anything requires."""
+    from app.schemas.marketing import WORKER_CAPABILITY_POST_ART, WORKER_LAYOUTS_FEATURE
+    from app.services.marketing import template_onscreen as tos
+    from marketing import art, cards, news_layouts
+    from marketing import render as rd
+
+    # look_v23, then theme_angles (news-v23 phase 3), after it
+    assert m.BackendClient.WORKER_CAPABILITIES[-3] == WORKER_CAPABILITY_POST_ART == "post_art"
+    assert callable(art.resolve_art) and callable(rd._art_image) and callable(cards.art_tile)
+    assert cards.ART_LABEL == tos.ART_LABEL
+    assert news_layouts.ART_LAYOUTS == WORKER_LAYOUTS_FEATURE == ("feature",)
+    assert "opening" in cards.KINDS and "art" in {f for f in cards.CardSpec.__dataclass_fields__}
+
+
+def _art_assets(be):
+    (card,) = [a for a in be.assets.values() if a["kind"] == "card"]
+    (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
+    return card["metadata"], video["metadata"]
+
+
+def _server_accepts(md: Dict[str, Any], key: str, accepted: str) -> None:
+    from app.schemas.marketing import AssetRegisterRequest  # noqa: F401  (the bodies are validated below)
+    from app.services.marketing import template_onscreen as tos
+
+    assert tos.art_declaration_problem(md.get(key), accepted, md["onscreen_text"]) is None, (key, md.get(key))
+
+
+def test_a_main_lane_day_draws_its_art_on_the_cover_and_never_on_its_picture(m, monkeypatch, env, tmp_path, caplog):
+    """"Video cover now, pictures later": the ceo_buys `rows` picture keeps today's drawing (art_sha256 None, no
+    label, nothing skipped — the art was never offered to it); the opening card draws the art (opening_art_sha256 =
+    the sha, the label declared). The art is fetched ONCE."""
+    import hashlib
+
+    from app.schemas.marketing import AssetRegisterRequest
+    from marketing import cards
+    from marketing import render as rd
+
+    data = _art_jpeg()
+    sha = hashlib.sha256(data).hexdigest()
+    be, script, dl = _template_world(tmp_path, art=data)
+    seen: Dict[str, Any] = {}
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _video_fake(seen))
+    caplog.set_level(logging.INFO, logger="marketing.render")
+    assert m.main() == 0, be.patches[-1]
+    assert be.run["status"] == "media_ready"
+    assert [u for u, _k in dl.calls if "/art/" in u] == [script["art"]["url"]]          # once for the stage
+    img_md, vid_md = _art_assets(be)
+    assert img_md["art_sha256"] is None and "art_skipped" not in img_md
+    assert cards.ART_LABEL not in img_md["onscreen_text"]
+    assert vid_md["opening_art_sha256"] == sha and cards.ART_LABEL in vid_md["onscreen_text"]
+    assert "opening_art_skipped" not in vid_md
+    _server_accepts(img_md, "art_sha256", sha)
+    _server_accepts(vid_md, "opening_art_sha256", sha)
+    for reg in be.registered:
+        AssetRegisterRequest.model_validate(reg)
+    assert any("art run_id=" in r.getMessage() and "drawn_on=cover" in r.getMessage() for r in caplog.records)
+
+
+def test_a_feature_day_draws_its_art_on_the_picture_and_the_cover(m, monkeypatch, env, tmp_path):
+    import hashlib
+
+    from app.schemas.marketing import AssetRegisterRequest
+    from marketing import cards
+    from marketing import render as rd
+
+    data = _art_jpeg()
+    sha = hashlib.sha256(data).hexdigest()
+    be, script, dl = _template_world(tmp_path, art=data, feature=True)
+    seen: Dict[str, Any] = {}
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _video_fake(seen))
+    assert m.main() == 0, be.patches[-1]
+    img_md, vid_md = _art_assets(be)
+    assert img_md["image_layout"] == "feature"
+    assert img_md["art_sha256"] == vid_md["opening_art_sha256"] == sha
+    assert img_md["onscreen_text"][-2:] == [cards.ART_LABEL, cards.BRAND_ROW_WORD]       # news-v23: the brand last
+    assert cards.ART_LABEL in vid_md["onscreen_text"]
+    _server_accepts(img_md, "art_sha256", sha)
+    _server_accepts(vid_md, "opening_art_sha256", sha)
+    for reg in be.registered:
+        AssetRegisterRequest.model_validate(reg)
+    assert len([u for u, _k in dl.calls if "/art/" in u]) == 1
+
+
+def test_art_that_does_not_verify_is_no_art_and_every_surface_declares_none(m, monkeypatch, env, tmp_path, caplog):
+    """The object behind the content address is not the art (a sha mismatch): ERROR, and the day is TODAY'S media —
+    both surfaces declare None and no label (what the server accepts: art is never required), media_ready."""
+    from marketing import cards
+    from marketing import render as rd
+
+    be, script, dl = _template_world(tmp_path, art=_art_jpeg(), art_object=_art_jpeg(shift=9), feature=True)
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _video_fake({}))
+    caplog.set_level(logging.WARNING, logger="marketing.art")
+    assert m.main() == 0
+    assert be.run["status"] == "media_ready"
+    assert any(r.levelno == logging.ERROR and "sha256" in r.getMessage() for r in caplog.records)
+    img_md, vid_md = _art_assets(be)
+    assert img_md["art_sha256"] is None and vid_md["opening_art_sha256"] is None
+    assert cards.ART_LABEL not in img_md["onscreen_text"] + vid_md["onscreen_text"]
+    _server_accepts(img_md, "art_sha256", script["art"]["sha256"])
+    _server_accepts(vid_md, "opening_art_sha256", script["art"]["sha256"])
+
+
+def test_a_template_day_without_art_registers_todays_media_declaring_none(m, monkeypatch, env, tmp_path):
+    """The switch off (no `art` in the read-back): nothing is fetched for art, both surfaces declare None."""
+    from marketing import cards
+    from marketing import render as rd
+
+    be, script, dl = _template_world(tmp_path)
+    _wire(m, monkeypatch, be)
+    monkeypatch.setattr(rd, "download", dl)
+    monkeypatch.setattr(rd, "produce_video", _video_fake({}))
+    assert m.main() == 0
+    assert not [u for u, _k in dl.calls if "/art/" in u]
+    img_md, vid_md = _art_assets(be)
+    assert img_md["art_sha256"] is None and vid_md["opening_art_sha256"] is None
+    assert "art_skipped" not in img_md and "opening_art_skipped" not in vid_md
+    assert cards.ART_LABEL not in img_md["onscreen_text"] + vid_md["onscreen_text"]
+
+
+def test_the_art_is_fetched_only_for_a_template_with_a_surface_that_can_draw_it(tmp_path, caplog, monkeypatch):
+    """`render._art_image`: no art in the read-back → nothing; a LESSON carrying art → WARNING, ignored, never fetched;
+    a template whose day has no video and no feature picture → not fetched; a template with a video → resolved."""
+    from marketing import render as rd
+
+    data = _art_jpeg()
+    entry = _art_entry(data)
+    dl = _Downloads({entry["url"]: data})
+    listing = {"assets": [{"id": "a1", "public_url": f"https://{_TPL_HOST}/storage/v1/object/public/marketing-media/"
+                                                     "2026-09-17/manifest.json"}]}
+    caplog.set_level(logging.INFO, logger="marketing.render")
+    common = dict(dest_dir=tmp_path, run_id="run-1")
+    monkeypatch.setattr(rd, "download", dl)
+    assert rd._art_image({"authorship": "template"}, listing, template=True, need_video=True, need_image=True,
+                         **common) is None
+    assert rd._art_image({"art": entry}, listing, template=False, need_video=True, need_image=True, **common) is None
+    assert any("lesson script carries art" in r.getMessage() for r in caplog.records)
+    rows = {"art": entry, "image_spec": {"layout": "rows"}}
+    assert rd._art_image(rows, listing, template=True, need_video=False, need_image=True, **common) is None
+    assert any("no medium of the day draws it" in r.getMessage() for r in caplog.records)
+    assert not dl.calls
+    feature = {"art": entry, "image_spec": {"layout": "feature"}}
+    got = rd._art_image(feature, listing, template=True, need_video=False, need_image=True, **common)
+    assert got is not None and got.sha256 == entry["sha256"]
+    got = rd._art_image(rows, listing, template=True, need_video=True, need_image=True, **common)
+    assert got is not None and len(dl.calls) == 2
+    assert rd.picture_draws_art({"image_spec": {"layout": "feature"}}) is True
+    for script in ({"image_spec": {"layout": "rows"}}, {"image_spec": None}, {}, None):
+        assert rd.picture_draws_art(script) is False
+
+
+def test_the_stage_keys_both_media_on_the_art_it_draws(m, monkeypatch, env, tmp_path):
+    """The rendered stage's own keys (not just the key functions): the same feature day with no art, art A and art B
+    registers three different picture keys and three different video keys — an earlier attempt's media is reused
+    only for the same art."""
+    from marketing import render as rd
+
+    keys = []
+    for art in (None, _art_jpeg(), _art_jpeg(shift=17)):
+        work = tmp_path / str(len(keys))
+        work.mkdir()
+        be, _script, dl = _template_world(work, art=art, feature=True)
+        _wire(m, monkeypatch, be)
+        monkeypatch.setattr(rd, "download", dl)
+        monkeypatch.setattr(rd, "produce_video", _video_fake({}))
+        assert m.main() == 0
+        img_md, vid_md = _art_assets(be)
+        assert (img_md["art_sha256"] is None) is (art is None) and (vid_md["opening_art_sha256"] is None) is (art is None)
+        keys.append((img_md["render_key"], vid_md["render_key"]))
+    assert len({k[0] for k in keys}) == 3 and len({k[1] for k in keys}) == 3
+
+
+def test_the_render_keys_carry_the_art():
+    """A picture offered other art, or a cover drawing other art, is another object — never a stale reuse; no art
+    keys the same every time."""
+    from marketing import render as rd
+
+    base = dict(texts=["K", "F"], card_version="c", layout_engine="basic", max_bytes=950_000)
+    k0, ka, kb = (rd.image_render_key(**base, **({"art": a} if a else {})) for a in (None, "a" * 64, "b" * 64))
+    assert len({k0, ka, kb}) == 3 and k0 == rd.image_render_key(**base, art=None) and ka == rd.image_render_key(
+        **base, art="a" * 64)
+    vbase = dict(audio_sha256="0" * 64, words=[], card_texts=[["x"]], threads=2, card_version="c", video_version="v",
+                 max_seconds=75.0, layout_engine="basic")
+    v0, va, vb = (rd.render_key(**vbase, opening_art=a) for a in (None, "a" * 64, "b" * 64))
+    assert len({v0, va, vb}) == 3 and v0 == rd.render_key(**vbase)
+    with pytest.raises(ValueError):
+        rd.image_render_key(**base, art=7)
+    with pytest.raises(ValueError):
+        rd.render_key(**vbase, opening_art=b"a")
 
 
 def test_a_template_script_with_a_contract_breach_fails_the_run_loudly(m, monkeypatch, env, tmp_path):
@@ -2702,7 +3547,10 @@ def test_an_image_only_template_day_places_the_bucket_from_the_manifest_and_neve
     assert not [a for a in be.assets.values() if a["kind"] in ("audio", "video")]
     (card,) = [a for a in be.assets.values() if a["kind"] == "card"]
     assert card["metadata"]["logos"] == [[e["key"], e["sha256"]] for e in script["logos"]]
-    allowed = set(tos.image_strings(script["image_spec"], script["logos"])) | {script["image_footer"]}
+    from app.schemas.marketing import PICTURE_BRAND_TEXT
+
+    allowed = (set(tos.image_strings(script["image_spec"], script["logos"])) | {script["image_footer"]}
+               | set(PICTURE_BRAND_TEXT))                                   # news-v23: the brand row's word
     assert set(card["metadata"]["onscreen_text"]) <= allowed
     assert sorted(u for u, _k in dl.calls) == sorted(e["url"] for e in script["logos"])
     assert be.run["status"] == "media_ready"
@@ -2937,7 +3785,11 @@ def _lesson_allowed(script: Dict[str, Any]) -> set:
     from app.schemas.marketing import VIDEO_BRAND_TEXT
     from app.services.marketing import run_service as mrs
 
+    from app.schemas.marketing import LESSON_BRAND_TEXT
+    from app.services.marketing import post_copy
+
     allowed = set(VIDEO_BRAND_TEXT) | {script["disclaimer_card"]}
+    allowed |= set(LESSON_BRAND_TEXT) | {post_copy.IMAGE_FOOTER_HEAD}      # news-v23: the kicker pill, the footer
     allowed |= {c[k] for c in script["cards"] for k in ("title", "body") if c.get(k)}
     if "hook_card" in mrs.frozen_video_features(script, template=False):
         allowed.add(mrs.hook_card_text(script))
@@ -2958,7 +3810,7 @@ def test_a_lesson_day_draws_its_frozen_hook_card_and_push_in_and_declares_both(m
     assert cards.LEGACY_CTA not in md["onscreen_text"]
     assert set(md["onscreen_text"]) <= _lesson_allowed(script)
     assert md["video_features"] == ["hook_card", "push_in"]
-    assert md["card_kinds"] == ["hook", "text", "text", "disclaimer"] and md["render_version"] == "render/v5"
+    assert md["card_kinds"] == ["hook", "text", "text", "disclaimer"] and md["render_version"] == "render/v7"
     assert md["push_in"] is True and "push_in_fallback" not in md and md["data_card_slot"] is None
     for reg in be.registered:
         AssetRegisterRequest.model_validate(reg)
@@ -3066,6 +3918,8 @@ def _template_allowed(script: Dict[str, Any]) -> set:
     allowed = set(VIDEO_BRAND_TEXT) | {script["disclaimer_card"]}
     allowed |= {c[k] for c in script["cards"] for k in ("title", "body") if c.get(k)}
     allowed |= set(tos.opening_strings(script["opening_card"], script["logos"]))
+    if script.get("image_footer") and mrs.picture_footer_problem(script, template=True) is None:
+        allowed.add(script["image_footer"])                                # news-v23: every card's short footer
     if "data_card" in mrs.frozen_video_features(script, template=True):
         allowed |= set(mrs.data_card_strings(script) or [])
     return allowed
@@ -3138,7 +3992,14 @@ def test_a_template_day_whose_read_back_names_no_slot_keeps_every_text_card(m, m
     (video,) = [a for a in be.assets.values() if a["kind"] == "video"]
     md = video["metadata"]
     assert md["data_card_slot"] is None and md["video_features"] == ["data_card", "push_in"]
-    assert script["image_footer"] not in md["onscreen_text"] and set(md["onscreen_text"]) <= _template_allowed(script)
+    # news-v23: the short footer is every template card's own line; no string ONLY the picture holds is drawn (the
+    # e2e twin's check — `image_spec["lines"]` was vacuous here: a rows picture has no "lines")
+    from app.services.marketing import template_onscreen as tos
+
+    picture_only = (set(tos.image_strings(script["image_spec"], script["logos"]))
+                    - set(tos.opening_strings(script["opening_card"], script["logos"])) - {script["image_footer"]})
+    assert picture_only and not picture_only & set(md["onscreen_text"])
+    assert set(md["onscreen_text"]) <= _template_allowed(script)
     assert any("names no data_card_slot" in r.getMessage() for r in caplog.records)
     assert be.run["status"] == "media_ready"
 

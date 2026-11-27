@@ -273,8 +273,10 @@ async def test_forgot_password_is_rate_limited_per_email_across_ips():
 
 @pytest.mark.asyncio
 async def test_forgot_password_is_rate_limited_per_ip_across_emails():
-    """Per-email alone is not enough: one host could enumerate many addresses."""
-    for i in range(5):
+    """Per-email alone is not enough: one host could enumerate many addresses. Ten per IP per
+    15 minutes since 2026-11-26 (it was five an hour): looser than the address bucket (3), so a
+    person's own retries are refused by the address window, never by a longer IP one."""
+    for i in range(10):
         await auth_ep.forgot_password(
             ForgotPasswordRequest(email=f"u{i}@example.com"), _FakeRequest("203.0.113.7"),
             FakeSupabase(),
@@ -285,6 +287,20 @@ async def test_forgot_password_is_rate_limited_per_ip_across_emails():
             FakeSupabase(),
         )
     assert ei.value.status_code == 429
+    assert ei.value.headers["Retry-After"] == "900"
+
+
+@pytest.mark.asyncio
+async def test_forgot_password_per_email_denial_says_900():
+    for i in range(3):
+        await auth_ep.forgot_password(
+            ForgotPasswordRequest(email=_EMAIL), _FakeRequest(f"203.0.113.{20 + i}"), FakeSupabase(),
+        )
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.forgot_password(
+            ForgotPasswordRequest(email=_EMAIL), _FakeRequest("203.0.113.30"), FakeSupabase(),
+        )
+    assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "900"
 
 
 @pytest.mark.asyncio
@@ -732,7 +748,7 @@ def test_padded_passwords_are_rejected():
 # ── 6b. The NEW-password rule is GoTrue's own, exactly (C1, PW-1) ─────────────
 #
 # reset- and set-password spend the single-use code in `verify_otp` BEFORE the password write,
-# so a password we pass and GoTrue refuses burns the code (three recovery emails an hour). The
+# so a password we pass and GoTrue refuses burns the code (three recovery emails per 15 minutes). The
 # rule used to be a deliberate SUPERSET ("symbol" = any non-alphanumeric, "uppercase" = any
 # `isupper()`); now it is GoTrue's ASCII sets and 72-byte cap, refused here before any call.
 
@@ -1130,3 +1146,29 @@ def test_the_limiter_helper_takes_no_route_wide_retry_after():
 
     sig = inspect.signature(auth_ep._enforce_credential_limits)
     assert "retry_after" not in sig.parameters
+
+
+@pytest.mark.asyncio
+async def test_one_address_gets_at_most_six_reset_emails_an_hour():
+    """2026-11-26 review: the 15-minute window (3) would allow 12 reset emails an hour into one
+    inbox; the hourly ceiling holds it to 6. The 15-minute address bucket is cleared between
+    rounds here to stand for the next quarter-hour."""
+    from app.core.security import rate_limiter as rl
+    allowed = 0
+    for q in range(3):
+        for i in range(3):
+            try:
+                await auth_ep.forgot_password(
+                    ForgotPasswordRequest(email=_EMAIL), _FakeRequest(f"203.0.113.{40 + q * 5 + i}"),
+                    FakeSupabase(),
+                )
+                allowed += 1
+            except HTTPException as e:
+                assert e.status_code == 429
+        rl._protected.pop(f"forgot:email:{_EMAIL}", None)
+    assert allowed == 6, allowed
+    with pytest.raises(HTTPException) as ei:
+        await auth_ep.forgot_password(
+            ForgotPasswordRequest(email=_EMAIL), _FakeRequest("203.0.113.99"), FakeSupabase(),
+        )
+    assert ei.value.status_code == 429 and ei.value.headers["Retry-After"] == "3600"

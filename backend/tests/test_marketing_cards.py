@@ -3,15 +3,18 @@ Phase 4 — the video's still cards (worker side: marketing/cards.py; SYSTEM_DES
 
 What is pinned here, strongest first:
 
-* **Nothing is drawn outside the text zone** — every rendered kind is decoded and the rows of
-  the caption band, the platform chrome above the zone and the side margins are asserted to be
-  pure PAGE colour, pixel for pixel. The band itself is checked against what libass REALLY inks
-  for a caption (ffmpeg), not only against the arithmetic it is derived from.
+* **Nothing is drawn where it must not be** (news-v23, the approved look: marketing/look.py) — every
+  rendered kind is decoded and the platform chrome above the brand row, the side margins, the gap above
+  the caption band, the caption band itself and the safe bottom (the last 420 px) are asserted to be the
+  CANVAS (the gradient + glow, `look.canvas`), pixel for pixel. The band itself is checked against what
+  libass REALLY inks for a caption (ffmpeg), not only against the arithmetic it is derived from.
 * **Never truncated**: every word of every title/body comes back, in order, from the wrapped
   lines; a card that cannot fit raises CardOverflow instead.
 * **The strings are the server's**: `onscreen_strings` returns the accepted script's strings
   verbatim and exactly what the card draws, and passes the server's own allow-list logic.
-* **Deterministic bytes**, glyph refusal, the palette, the badge, the logo, both layout engines.
+* **Deterministic bytes**, glyph refusal, the look's palette (every pixel is the canvas, a look colour or a
+  blend of two — `_off_look`), the brand row on every card but the brand card, the kicker pill and the
+  short footer, the badge, the logo, both layout engines.
 * **Batch 2 (2026-10-19, "first seconds")**: the HOOK card and the DATA card are drawn only when the run
   FROZE their video feature, each falls back to today's card (never a skipped day), and the end card
   draws the read-back's `end_card_cta` — the legacy CTA against a web that names none.
@@ -22,6 +25,7 @@ skipped when absent. `app.*` is imported by the TESTS only (to pin the mirrored 
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import logging
@@ -33,7 +37,6 @@ import subprocess
 import sys
 import time
 from datetime import date
-from itertools import combinations
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -46,6 +49,7 @@ from app.schemas import marketing as sch  # noqa: E402
 from app.services.marketing import post_copy  # noqa: E402
 from marketing import captions  # noqa: E402
 from marketing import cards  # noqa: E402
+from marketing import look  # noqa: E402
 
 _BACKEND = Path(__file__).resolve().parents[1]
 FONT = str(_BACKEND / "marketing" / "assets" / "fonts" / "Inter-Bold.ttf")
@@ -74,16 +78,31 @@ def _png(data: bytes) -> Image.Image:
     return im
 
 
+#: news-v23: every 9:16 card is drawn on the look's canvas (the gradient + the gold glow), every post image on its
+#: 4:5 one — "nothing drawn here" means "those pixels ARE the canvas's".
+CANVAS = look.canvas(look.VIDEO_FRAME)
+IMAGE_CANVAS = look.canvas(look.POST_FRAME)
+
+
 def _pure_page(im: Image.Image, box: Tuple[int, int, int, int]) -> bool:
-    return im.crop(box).getextrema() == tuple((c, c) for c in PAGE_RGB)
+    """Is `box` of the 9:16 card (or the 4:5 picture) exactly the look's canvas there — nothing drawn on it?"""
+    from PIL import ImageChops
+
+    base = CANVAS if im.size == CANVAS.size else IMAGE_CANVAS
+    return ImageChops.difference(im.crop(box), base.crop(box)).getbbox() is None
 
 
+#: The brand row's top (140 px from the top: cover_13f_berkshire.jpg) and the safe bottom (nothing in the last
+#: 420 px of the card).
+BRAND_TOP = look.VIDEO_FRAME.brand[1]
+SAFE_BOTTOM = look.VIDEO_SAFE_BOTTOM
 _OUTSIDE_ZONE = {
-    "above the zone": (0, 0, cards.WIDTH, cards.TEXT_ZONE_Y[0]),
-    "below the zone (caption band + bottom chrome)": (0, cards.TEXT_ZONE_Y[1], cards.WIDTH, cards.HEIGHT),
-    "left margin": (0, cards.TEXT_ZONE_Y[0], cards.SAFE_X[0], cards.TEXT_ZONE_Y[1]),
-    "right margin": (cards.SAFE_X[1], cards.TEXT_ZONE_Y[0], cards.WIDTH, cards.TEXT_ZONE_Y[1]),
+    "above the brand row (the platforms' top chrome)": (0, 0, cards.WIDTH, BRAND_TOP),
+    "between the content zone and the caption band": (0, cards.TEXT_ZONE_Y[1], cards.WIDTH, cards.CAPTION_BAND_Y[0]),
     "caption band": (0, cards.CAPTION_BAND_Y[0], cards.WIDTH, cards.CAPTION_BAND_Y[1]),
+    "the safe bottom": (0, SAFE_BOTTOM, cards.WIDTH, cards.HEIGHT),
+    "left margin": (0, BRAND_TOP, cards.SAFE_X[0], SAFE_BOTTOM),
+    "right margin": (cards.SAFE_X[1], BRAND_TOP, cards.WIDTH, SAFE_BOTTOM),
 }
 
 
@@ -93,6 +112,56 @@ def _assert_nothing_outside_the_zone(data: bytes, what: str) -> Image.Image:
     for name, box in _OUTSIDE_ZONE.items():
         assert _pure_page(im, box), f"{what}: something was drawn in the {name} {box}"
     return im
+
+
+#: Every colour the look draws with (marketing/look.py) — a pixel off the canvas is one of these or an
+#: anti-aliased blend of two of them, or of one of them with the canvas under it.
+LOOK_COLOURS = [look.GOLD, look.WHITE, look.SUB, look.CARD, look.CARD_EDGE, look.INK, look.INK2, look.GREEN,
+                look.RED, look.GOLD_INK, look.NAVY_CHIP, look.PILL, look.GREY, look.BAR_TRACK, look.BAR_FILL,
+                look.NOTE_PANEL, look.TILE, look.DIVIDER, look.PALE_RED, look.BRAND_OUTLINE, *look.SEG_COLORS,
+                (217, 160, 30)]
+
+
+def _off_look(im: Image.Image, exclude=(), tol: float = 3.0) -> List[Tuple[int, int, int]]:
+    """The colours of `im` (outside the `exclude` boxes — logo discs, the brand tile) that are neither its canvas
+    nor a look colour nor a blend of two look colours or of a look colour with the canvas pixel under it."""
+    np = pytest.importorskip("numpy")
+    base = CANVAS if im.size == CANVAS.size else IMAGE_CANVAS
+    a = np.asarray(im).astype(np.int16)
+    c = np.asarray(base).astype(np.int16)
+    keep = np.ones(a.shape[:2], dtype=bool)
+    for b in exclude:
+        keep[b[1]:b[3], b[0]:b[2]] = False
+    changed = keep & (np.abs(a - c).sum(axis=2) > 0)
+    pairs = np.unique(np.concatenate([a[changed], c[changed]], axis=1), axis=0).astype(np.float64)
+    if not len(pairs):
+        return []
+    px, under = pairs[:, :3], pairs[:, 3:]
+    pal = np.array(LOOK_COLOURS, dtype=np.float64)
+    best = np.full(len(px), np.inf)
+    ends = [(pal[i], pal[j]) for i in range(len(pal)) for j in range(i, len(pal))]
+    for p0, p1 in ends:
+        d = p1 - p0
+        dd = float((d * d).sum())
+        t = np.zeros(len(px)) if dd == 0 else np.clip(((px - p0) @ d) / dd, 0, 1)
+        best = np.minimum(best, np.sqrt(((px - (p0 + t[:, None] * d)) ** 2).sum(axis=1)))
+    for p0 in pal:
+        d = under - p0
+        dd = (d * d).sum(axis=1)
+        t = np.where(dd == 0, 0.0, np.clip(((px - p0) * d).sum(axis=1) / np.where(dd == 0, 1, dd), 0, 1))
+        best = np.minimum(best, np.sqrt(((px - (p0 + t[:, None] * d)) ** 2).sum(axis=1)))
+    return [tuple(int(v) for v in px[i]) for i in np.nonzero(best > tol)[0]]
+
+
+def _red(c) -> bool:
+    """A strong RED (the test logos' 220,20,20) — never the look's GOLD (246,196,69) nor its text-safe RED ink's
+    anti-aliased edges against the warm card."""
+    return c[0] > 150 and c[1] < 90 and c[2] < 90 and c[0] - max(c[1], c[2]) > 100
+
+
+def _brand_tile(frame=look.VIDEO_FRAME):
+    x, y = frame.brand
+    return (x - 2, y - 2, x + look.BRAND_TILE_PX + 2, y + look.BRAND_TILE_PX + 2)
 
 
 def _fixture_cards() -> List[Dict[str, str]]:
@@ -143,7 +212,18 @@ def test_the_video_features_mirror_the_server():
     assert sch.VIDEO_FEATURES_KEY == "video_features"
     assert {"video_features", "end_card_cta"} <= set(sch.WorkerScript.model_fields)
     assert cards.KINDS == ("brand", "text", "stat", "disclaimer", "opening", "hook", "data")
-    assert cards.HOOK_CARD_KINDS == ("opening", "hook") and cards.CARD_RENDER_VERSION == "cards/v4"
+    assert cards.HOOK_CARD_KINDS == ("opening", "hook") and cards.CARD_RENDER_VERSION == "cards/v6"
+
+
+def test_the_brand_row_and_lesson_mirrors_are_the_servers():
+    """news-v23 (restyle 2026-11-19): the brand row's word, the lesson's kicker pill and its short footer — the
+    worker's mirrors (cards, and look which draws them) equal the server's allow-list constants."""
+    assert cards.BRAND_ROW_WORD == look.BRAND_ROW_WORD == sch.BRAND_ROW_WORD == "Caydex"
+    assert cards.LESSON_KICKER == look.LESSON_KICKER == sch.LESSON_KICKER == "INVESTING LESSON"
+    assert cards.LESSON_FOOTER == look.LESSON_FOOTER == post_copy.IMAGE_FOOTER_HEAD == "Not investment advice"
+    assert sch.PICTURE_BRAND_TEXT == (cards.BRAND_ROW_WORD,)
+    assert sch.LESSON_BRAND_TEXT == (cards.BRAND_ROW_WORD, cards.LESSON_KICKER)
+    assert cards.BRAND_ROW_WORD in sch.VIDEO_BRAND_TEXT
 
 
 def test_geometry_constants():
@@ -161,10 +241,58 @@ def test_geometry_constants():
     assert isinstance(cards.CARD_RENDER_VERSION, str) and cards.CARD_RENDER_VERSION
 
 
-def test_brand_colours_are_the_brand_hexes():
-    assert (cards.PAGE, cards.CARD, cards.ACCENT, cards.TEXT) == ("#171B26", "#1E2330", "#60A5FA", "#FFFFFF")
-    # the caption file's outline is the page colour and its highlight the accent (one palette)
+def test_the_look_palette_is_the_approved_kits():
+    """news-v23: the palette is the approved design kit's (out/marketing_v2_preview/FINAL_REFERENCE/scripts/
+    style_kit.py), value for value — the text-safe card inks the owner's colour rules name (GREEN a purchase /
+    an increase / a profit, RED a decrease / a loss, GOLD_INK neutral emphasis)."""
+    assert (look.NAVY_TOP, look.NAVY_BOT, look.GLOW) == ((14, 24, 48), (6, 9, 18), (60, 50, 10))
+    assert (look.GOLD, look.WHITE, look.SUB, look.CARD) == ((246, 196, 69), (255, 255, 255), (203, 213, 225),
+                                                          (250, 248, 242))
+    assert (look.INK, look.INK2, look.GREEN, look.RED, look.GOLD_INK) == (
+        (17, 24, 39), (75, 85, 99), (21, 128, 61), (185, 28, 28), (146, 100, 0))
+    assert (look.NAVY_CHIP, look.PILL, look.GREY) == ((17, 24, 39), (40, 52, 84), (156, 163, 175))
+    assert cards._rgb(cards.PLATE) == look.WHITE
+    # the caption file keeps its own colours (the captions are not cards: unchanged by the restyle)
     assert captions.OUTLINE_COLOUR == "&H00261B17" and captions.HIGHLIGHT_C == "&HFAA560&"
+
+
+def _luminance(rgb) -> float:
+    def ch(v: int) -> float:
+        v = v / 255
+        return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (ch(v) for v in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast(a, b) -> float:
+    la, lb = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def test_every_ink_is_legible_on_what_it_is_drawn_on():
+    """The kit's colour notes, measured: every text ink on the warm card is WCAG 4.5:1 or better; the gold kicker on
+    its pill and the white / gold headline on the darkest and the lightest canvas rows too."""
+    for ink in (look.INK, look.INK2, look.GREEN, look.RED, look.GOLD_INK):
+        assert _contrast(ink, look.CARD) >= 4.5, ink
+    assert _contrast(look.GOLD, look.PILL) >= 4.5 and _contrast(look.SUB, look.NOTE_PANEL) >= 4.5
+    assert _contrast(look.WHITE, look.NAVY_CHIP) >= 4.5 and _contrast(look.INK, look.GOLD) >= 4.5
+    for y in (140, 700, 1300):
+        page = CANVAS.getpixel((540, y))
+        assert _contrast(look.WHITE, page) >= 4.5 and _contrast(look.GOLD, page) >= 4.5 and _contrast(look.GREY, page) >= 4.5
+
+
+def test_news_v23_the_table_and_list_tints_carry_their_inks():
+    """news-v23 (the earnings table and the Congress list): the estimate's recessed pill under INK / INK2, a positive
+    surprise's GREEN on its tint, a negative one's RED on its tint, the Congress count's GREEN figure on its tint, the
+    white "purchases" word on its solid GREEN pill and the reported figure's white on its dark pill — each WCAG 4.5:1 or
+    better, at the mock kit's values."""
+    assert (look.PILL_LIGHT, look.GREEN_TINT, look.RED_TINT) == ((238, 234, 223), (234, 248, 238), (253, 234, 234))
+    for ink in (look.INK, look.INK2):
+        assert _contrast(ink, look.PILL_LIGHT) >= 4.5, ink
+    assert _contrast(look.GREEN, look.GREEN_TINT) >= 4.5 and _contrast(look.RED, look.RED_TINT) >= 4.5
+    assert _contrast(look.WHITE, look.GREEN) >= 4.5 and _contrast(look.WHITE, look.NAVY_CHIP) >= 4.5
+    # every tint sits on the warm card: each must stay visibly apart from it (a tile, not a hole)
+    assert all(t != look.CARD for t in (look.PILL_LIGHT, look.GREEN_TINT, look.RED_TINT))
 
 
 def _libass_available() -> bool:
@@ -264,6 +392,7 @@ def _script(**over):
                   {"title": "Keep costs low", "body": "Fees compound too."}],
         "carousel_slides": [],
         "disclaimer_card": DISCLAIMER,
+        "look": cards.LOOK,          # news-v23: a read-back from this web (the look's own strings are allowed)
     }
     s.update(over)
     return s
@@ -288,8 +417,9 @@ def test_the_hook_and_the_wordmark_are_never_drawn_when_there_are_text_cards():
     specs = cards.cards_for_script(_script())
     drawn = [t for s in specs for t in cards.onscreen_strings(s)]
     assert all("smart first investor" not in t for t in drawn)
-    assert cards.WORDMARK not in drawn
-    assert cards.onscreen_strings(specs[0]) == ["Start early", "Time does most of the work."]
+    assert all(s.kind != "brand" for s in specs)      # "Caydex" is drawn only as the brand ROW's word (news-v23)
+    assert cards.onscreen_strings(specs[0]) == ["Start early", "Time does most of the work.", cards.LESSON_KICKER,
+                                                cards.LESSON_FOOTER, cards.BRAND_ROW_WORD]
 
 
 def test_cards_for_script_skips_empty_cards_and_strips():
@@ -340,7 +470,8 @@ def test_the_disclaimer_is_kept_verbatim():
     odd = DISCLAIMER + "  "
     specs = cards.cards_for_script(_script(disclaimer_card=odd))
     assert specs[-1].body == odd
-    assert cards.onscreen_strings(specs[-1]) == [odd, cards.LEGACY_CTA]   # a read-back naming no CTA
+    assert cards.onscreen_strings(specs[-1]) == [odd, cards.LEGACY_CTA, cards.LESSON_KICKER,
+                                                 cards.BRAND_ROW_WORD]   # a read-back naming no CTA
 
 
 # ── onscreen_strings ─────────────────────────────────────────────────────────
@@ -349,43 +480,53 @@ def test_the_disclaimer_is_kept_verbatim():
 def test_onscreen_strings_are_verbatim_and_exactly_what_is_drawn():
     title, body = "Two  spaces  here", "Wraps\nacross a newline and   runs"
     spec = cards.CardSpec("text", title=title, body=body)
-    assert cards.onscreen_strings(spec) == [title, body]          # the SAME strings, unmodified
+    assert cards.onscreen_strings(spec) == [title, body, cards.BRAND_ROW_WORD]    # the SAME strings, unmodified
     layout = cards.layout_card(spec, font_path=FONT)
-    # the drawing re-wraps them (single spaces), but draws nothing else
-    assert " ".join(layout.field_lines("title")) == " ".join(title.split())
+    # the drawing re-wraps them (single spaces) and draws the title upper-cased — its words, nothing else
+    assert " ".join(layout.field_lines("title")) == " ".join(title.split()).upper()
     assert " ".join(layout.field_lines("body")) == " ".join(body.split())
-    assert {ln.field for ln in layout.lines} == {"title", "body"}
+    assert layout.field_lines("brand") == [cards.BRAND_ROW_WORD]
+    assert {ln.field for ln in layout.lines} == {"title", "body", "brand"}
+
+
+_B = cards.BRAND_ROW_WORD
 
 
 @pytest.mark.parametrize("spec, expected, fields", [
-    (cards.CardSpec("brand"), [cards.WORDMARK], {"wordmark"}),
-    (cards.CardSpec("text", title="T"), ["T"], {"title"}),
-    (cards.CardSpec("text", body="B"), ["B"], {"body"}),
-    (cards.CardSpec("text", title="T", body="B", badge="Sample data"), ["T", "B", "Sample data"],
-     {"title", "body", "badge"}),
-    (cards.CardSpec("text", title="T", badge="   "), ["T"], {"title"}),
+    (cards.CardSpec("brand"), [cards.WORDMARK], {"wordmark"}),                 # the brand card: no brand row
+    (cards.CardSpec("text", title="T"), ["T", _B], {"title", "brand"}),
+    (cards.CardSpec("text", body="B"), ["B", _B], {"body", "brand"}),
+    (cards.CardSpec("text", title="T", body="B", badge="Sample data"), ["T", "B", "Sample data", _B],
+     {"title", "body", "badge", "brand"}),
+    (cards.CardSpec("text", title="T", badge="   "), ["T", _B], {"title", "brand"}),
     (cards.CardSpec("stat", figure="$6.9 billion", label="Deal value", body="As filed.", badge="Sample data"),
-     ["$6.9 billion", "Deal value", "As filed.", "Sample data"], {"figure", "label", "body", "badge"}),
-    (cards.CardSpec("stat", figure="42"), ["42"], {"figure"}),
-    (cards.CardSpec("disclaimer", body="D"), ["D", cards.LEGACY_CTA], {"body", "cta"}),
-    (cards.CardSpec("disclaimer", body="D", cta=cards.CTA), ["D", cards.CTA], {"body", "cta"}),
-    (cards.CardSpec("hook", title="Why do fees matter so much?"), ["Why do fees matter so much?"], {"title"}),
+     ["$6.9 billion", "Deal value", "As filed.", "Sample data", _B], {"figure", "label", "body", "badge", "brand"}),
+    (cards.CardSpec("stat", figure="42"), ["42", _B], {"figure", "brand"}),
+    (cards.CardSpec("disclaimer", body="D"), ["D", cards.LEGACY_CTA, _B], {"body", "cta", "brand"}),
+    (cards.CardSpec("disclaimer", body="D", cta=cards.CTA), ["D", cards.CTA, _B], {"body", "cta", "brand"}),
+    (cards.CardSpec("hook", title="Why do fees matter so much?"), ["Why do fees matter so much?", _B],
+     {"title", "brand"}),
+    # news-v23: the kicker pill and the short footer, declared and drawn with their own fields
+    (cards.CardSpec("text", title="T", body="B", pill=cards.LESSON_KICKER, footer=cards.LESSON_FOOTER),
+     ["T", "B", cards.LESSON_KICKER, cards.LESSON_FOOTER, _B], {"title", "body", "pill", "footer", "brand"}),
+    (cards.CardSpec("disclaimer", body="D", pill=cards.LESSON_KICKER),
+     ["D", cards.LEGACY_CTA, cards.LESSON_KICKER, _B], {"body", "cta", "pill", "brand"}),
 ])
 def test_onscreen_strings_per_kind_match_the_drawn_fields(spec, expected, fields):
     assert cards.onscreen_strings(spec) == expected
     layout = cards.layout_card(spec, font_path=FONT)
     assert {ln.field for ln in layout.lines} == fields
-    # every drawn line belongs to a returned string (brand/CTA text included)
-    returned = " ".join(expected)
+    # every drawn line belongs to a returned string (brand/CTA text included; a title is drawn upper-cased)
+    returned = " ".join(expected).casefold()
     for ln in layout.lines:
-        assert ln.text in returned or all(w in returned for w in ln.text.split())
+        assert ln.text.casefold() in returned or all(w.casefold() in returned for w in ln.text.split())
 
 
 def test_every_declared_string_passes_the_servers_allow_list():
     """Mirrors run_service._check_onscreen_text: brand text + the accepted script's card titles
     and bodies + its disclaimer card, and the disclaimer must be among them."""
     script = _script()
-    allowed = set(sch.VIDEO_BRAND_TEXT)
+    allowed = set(sch.VIDEO_BRAND_TEXT) | set(sch.LESSON_BRAND_TEXT) | {post_copy.IMAGE_FOOTER_HEAD}   # news-v23
     for card in script["cards"]:
         allowed.update(str(card.get(k)) for k in ("title", "body") if card.get(k))
     allowed.add(script["disclaimer_card"])
@@ -416,27 +557,49 @@ def test_wrap_exact_fit_boundary():
 
 
 def _assert_all_words_in_order(layout: cards.CardLayout, spec: cards.CardSpec) -> None:
+    """Every word of each field, in order (a headline is drawn upper-cased: compared case-insensitively)."""
     for name in ("title", "body", "figure", "label"):
         text = getattr(spec, name, "")
         lines = layout.field_lines(name)
-        assert [w for ln in lines for w in ln.split()] == _words(text), (name, text, lines)
+        assert [w.casefold() for ln in lines for w in ln.split()] == [w.casefold() for w in _words(text)], (
+            name, text, lines)
         assert all(ln == " ".join(ln.split()) and ln for ln in lines)
 
 
+#: news-v23: the content zone (cards.SAFE_X × [the brand row's foot + 36, TEXT_ZONE_Y[1]] — look.VIDEO_FRAME.area);
+#: the brand row (the tile, "Caydex", the kicker pill) above it, the short footer under the caption band, nothing in
+#: the safe bottom.
+CONTENT = look.VIDEO_FRAME.area
+CHROME = (cards.SAFE_X[0], BRAND_TOP - 10, cards.SAFE_X[1], SAFE_BOTTOM)
+
+
+def _chrome_fields(layout) -> set:
+    """The fields a 9:16 layout draws in its brand row or footer (an opening card's kicker is its `badge`; a data
+    card's its `kicker`)."""
+    out = {"brand", "pill", "footer", "kicker"}
+    if layout.kind == "opening":
+        out.add("badge")
+    return out
+
+
 def _assert_ink_inside(layout: cards.CardLayout) -> None:
-    """Every line, box and plate inside the card's panel (or the text zone when it has none). A DATA card's
-    layout (Batch 2, a news_layouts.TemplateLayout) keeps its footer on the page under its panel — inside
-    the zone — and its bars, pills and plates in the panel."""
-    zone = (cards.SAFE_X[0], cards.TEXT_ZONE_Y[0], cards.SAFE_X[1], cards.TEXT_ZONE_Y[1])
-    bounds = layout.panel or zone
-    assert cards._within(bounds, zone)
-    data = layout.kind.startswith("data:")
+    """Every content line, disc and card inside the content zone; the brand row and the footer inside the card's
+    chrome (SAFE_X × [the brand row, the safe bottom]), the footer under the caption band; every box inside it."""
+    chrome = _chrome_fields(layout)
     for ln in layout.lines:
-        assert cards._within(ln.ink, zone if data and ln.field == "footer" else bounds), (ln.field, ln.text, ln.ink)
-    for b in (getattr(layout, "rule", None), getattr(layout, "badge", None), getattr(layout, "logo", None),
-              *(t[0] for t in layout.tiles), *(r.box for r in getattr(layout, "rects", ()))):
+        if ln.field in chrome:
+            assert cards._within(ln.ink, CHROME), (ln.field, ln.text, ln.ink)
+            if ln.field == "footer":
+                assert ln.ink[1] >= cards.CAPTION_BAND_Y[1], (ln.text, ln.ink)
+            else:
+                assert ln.ink[3] <= CONTENT[1], (ln.field, ln.ink)
+        elif ln.field != "art_label":
+            assert cards._within(ln.ink, CONTENT), (ln.field, ln.text, ln.ink)
+    for b in (getattr(layout, "logo", None), *(t[0] for t in layout.tiles)):
         if b:
-            assert cards._within(b, bounds)
+            assert cards._within(b, CONTENT), b
+    for r in getattr(layout, "rects", ()):
+        assert cards._within(r.box, (CHROME[0], CHROME[1], CHROME[2], CONTENT[3])), r
 
 
 def test_the_writers_maximum_card_fits_whole():
@@ -468,22 +631,23 @@ def test_title_only_and_body_only_cards():
     for spec in (cards.CardSpec("text", title="Only a title"), cards.CardSpec("text", body="Only a body")):
         layout = cards.layout_card(spec, font_path=FONT)
         _assert_all_words_in_order(layout, spec)
-        assert layout.rule is not None and layout.badge is None
+        assert layout.rule is None and layout.badge is None and layout.panel is None
 
 
 def test_a_word_too_wide_at_the_start_size_steps_down_instead_of_breaking():
     word = "Counterrevolutionaries"
-    assert cards._font(FONT, cards.TITLE_STYLE.start, "basic").getlength(word) > 808
+    column = CONTENT[2] - CONTENT[0] - 16
+    assert cards._font(FONT, cards.TITLE_STYLE.start, "basic").getlength(word.upper()) > column
     spec = cards.CardSpec("text", title=f"The {word} Idea", body="Short body.")
     layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
     assert layout.step > 0
-    assert word in layout.field_lines("title")                                  # whole, own line
+    assert word.upper() in layout.field_lines("title")                          # whole, own line (upper-cased)
     _assert_all_words_in_order(layout, spec)
 
 
 @pytest.mark.parametrize("spec", [
     cards.CardSpec("text", title="Pneumonoultramicroscopicsilicovolcanoconiosis", body="b"),
-    cards.CardSpec("text", title="t", body="A Pneumonoultramicroscopicsilicovolcanoconiosis case"),
+    cards.CardSpec("text", title="t", body="A Pneumonoultramicroscopicsilicovolcanoconiosisesisis case"),
     cards.CardSpec("text", body="x" * 80),
     cards.CardSpec("stat", figure="$1,000,000,000,000,000,000"),
     cards.CardSpec("disclaimer", body="Supercalifragilisticexpialidocious" * 3),
@@ -498,7 +662,7 @@ def test_one_word_wider_than_the_column_at_the_floor_is_an_overflow(spec):
 def test_too_many_lines_at_the_floor_is_an_overflow_never_a_cut():
     body = " ".join(["WW"] * 199)
     assert len(body) <= cards.MAX_STRING_CHARS
-    with pytest.raises(cards.CardOverflow, match="line"):
+    with pytest.raises(cards.CardOverflow, match="line|room"):
         cards.layout_card(cards.CardSpec("text", title=MAX_TITLE, body=body), font_path=FONT)
     figure = " ".join(["88"] * 150)
     with pytest.raises(cards.CardOverflow):
@@ -526,14 +690,34 @@ def test_pathological_inputs_under_the_cap_end_quickly():
     assert time.monotonic() - t0 < 20.0
 
 
+_TEXT_STYLES = (cards.TITLE_STYLE, cards.BODY_STYLE, cards.FIGURE_STYLE, cards.LABEL_STYLE, cards.STAT_BODY_STYLE,
+                cards.DISCLAIMER_STYLE, cards.CTA_STYLE, cards.WORDMARK_STYLE, cards.STORE_CTA_STYLE, cards.HOOK_STYLE,
+                cards.CHIP_STYLE, cards.OPENING_HEADLINE_STYLE, cards.OPENING_FIGURE_STYLE, cards.IMAGE_TITLE_STYLE,
+                cards.IMAGE_PARAGRAPH_STYLE)
+
+
 def test_sizes_step_from_start_to_floor_in_bounded_integer_steps():
-    for style in (cards.TITLE_STYLE, cards.BODY_STYLE, cards.FIGURE_STYLE, cards.LABEL_STYLE,
-                  cards.STAT_BODY_STYLE, cards.DISCLAIMER_STYLE, cards.CTA_STYLE, cards.WORDMARK_STYLE,
-                  cards.STORE_CTA_STYLE, cards.HOOK_STYLE):
+    for style in (*_TEXT_STYLES, cards.OPENING_DISC, cards.OPENING_ART_DISC, cards.BRAND_TILE_STYLE):
         sizes = [style.size(i) for i in range(cards.RAMP_STEPS + 1)]
         assert sizes[0] == style.start and sizes[-1] == style.floor
         assert sizes == sorted(sizes, reverse=True) and all(isinstance(s, int) for s in sizes)
-        assert style.leading >= 1.05
+        assert style.leading >= 1.0
+    for style in _TEXT_STYLES:
+        if style not in (cards.CHIP_STYLE,):
+            assert style.leading >= 1.04, style
+
+
+def test_every_text_is_at_least_22px_at_every_step():
+    """news-v23 (the spec: "every text ≥ 22 px except logo wordmarks"): no text style of a card, a picture or a data
+    card steps below 22 px — the data card's legibility floor (news_layouts.DATA_CARD_MIN_PX) is therefore met by
+    construction — and the footer and kicker floors are 22 px too."""
+    from marketing import news_layouts as nl_
+
+    styles = [*_TEXT_STYLES, *(v for k, v in vars(nl_).items() if k.endswith("_STYLE") and isinstance(v, cards._Style))]
+    assert len(styles) > 30
+    for style in styles:
+        assert style.floor >= 22 == nl_.DATA_CARD_MIN_PX, style
+    assert look.FOOTER_FLOOR_PX == look.KICKER_FLOOR_PX == 22
 
 
 # ── pixels: nothing outside the zone (the strongest check) ───────────────────
@@ -571,33 +755,32 @@ def test_nothing_is_drawn_outside_the_text_zone(name, monkeypatch):
     _assert_ink_inside(layout)
 
 
-def _on_palette(colour: Tuple[int, int, int], tol: float = 2.0) -> bool:
-    """Is `colour` one of the brand hexes or an alpha blend of two of them?"""
-    base = [cards._rgb(h) for h in (cards.PAGE, cards.CARD, cards.ACCENT, cards.TEXT)]
-    for a, b in list(combinations(base, 2)) + [(x, x) for x in base]:
-        d = [bv - av for av, bv in zip(a, b)]
-        dd = sum(v * v for v in d)
-        t = 0.0 if dd == 0 else max(0.0, min(1.0, sum((c - av) * dv for c, av, dv in zip(colour, a, d)) / dd))
-        p = [av + t * dv for av, dv in zip(a, d)]
-        if sum((c - pv) ** 2 for c, pv in zip(colour, p)) ** 0.5 <= tol:
-            return True
-    return False
-
-
 @pytest.mark.parametrize("name", [n for n in sorted(_KINDS_TO_RENDER) if _KINDS_TO_RENDER[n][1] is None])
 def test_only_brand_colours_and_their_alpha_blends(name):
+    """news-v23: every pixel off the canvas is a look colour or an anti-aliased blend (the brand tile excepted —
+    the vendored logo's own pixels)."""
     spec, _ = _KINDS_TO_RENDER[name]
     im = _png(cards.render_card(spec, font_path=FONT))
-    colours = im.getcolors(maxcolors=1 << 20)
-    off = [c for _, c in colours if not _on_palette(c)]
-    assert off == [], f"{name}: {len(off)} off-palette colours, e.g. {off[:5]}"
+    off = _off_look(im, exclude=[_brand_tile()])
+    assert off == [], f"{name}: {len(off)} off-look colours, e.g. {off[:5]}"
 
 
-def test_the_title_is_accent_and_the_body_white():
-    im = _png(cards.render_card(_KINDS_TO_RENDER["text"][0], font_path=FONT))
+def test_the_off_look_check_catches_an_off_palette_pixel():
+    """Mutation check of the check itself: one magenta pixel on a card is caught."""
+    im = _png(cards.render_card(_KINDS_TO_RENDER["text"][0], font_path=FONT)).copy()
+    im.putpixel((540, 700), (255, 0, 255))
+    assert (255, 0, 255) in _off_look(im, exclude=[_brand_tile()])
+
+
+def test_the_title_is_white_then_gold_and_the_body_ink_on_its_card():
+    spec = _KINDS_TO_RENDER["text"][0]
+    layout = cards.layout_card(spec, font_path=FONT)
+    fills = [ln.fill for ln in layout.lines if ln.field == "title"]
+    assert fills[0] == look.WHITE and fills[-1] == look.GOLD and set(fills) == {look.WHITE, look.GOLD}
+    assert {ln.fill for ln in layout.lines if ln.field == "body"} == {look.INK}
+    im = _png(cards.render_card(spec, font_path=FONT))
     colours = {c for _, c in im.getcolors(maxcolors=1 << 20)}
-    assert cards._rgb(cards.ACCENT) in colours and cards._rgb(cards.TEXT) in colours
-    assert cards._rgb(cards.CARD) in colours   # the panel
+    assert {look.WHITE, look.GOLD, look.INK, look.CARD} <= colours     # the warm card under the body
 
 
 # ── badge ────────────────────────────────────────────────────────────────────
@@ -607,19 +790,17 @@ def test_the_badge_is_drawn_only_when_set():
     base = dict(title="Sample", body="Illustrative figures.")
     plain = cards.layout_card(cards.CardSpec("text", **base), font_path=FONT)
     badged = cards.layout_card(cards.CardSpec("text", badge="Sample data", **base), font_path=FONT)
-    assert plain.badge is None and plain.rule is not None
-    assert badged.badge is not None and badged.rule is None
+    assert plain.badge is None and badged.badge is not None
     assert badged.field_lines("badge") == ["Sample data"] and plain.field_lines("badge") == []
-    # top-left of the panel
-    assert badged.badge[0] == badged.panel[0] + cards.PANEL_PAD_X
-    assert badged.badge[1] == badged.panel[1] + cards.PANEL_PAD_Y
-    # The pill's fill is ACCENT at 16 % over CARD — a colour text anti-aliasing also produces
-    # on a few edge pixels, so count it: a pill is thousands of pixels, stray edges a handful.
-    def fill_pixels(spec):
-        return dict((c, n) for n, c in _png(cards.render_card(spec, font_path=FONT)).getcolors(1 << 20)).get(
-            cards.BADGE_FILL, 0)
+    # a chip above the title, at the content column's left
+    title_top = min(ln.ink[1] for ln in badged.lines if ln.field == "title")
+    assert badged.badge[3] < title_top and badged.badge[0] == CONTENT[0] + 8
 
-    assert fill_pixels(cards.CardSpec("text", badge="Sample data", **base)) > 5000
+    def fill_pixels(spec):          # the chip is PILL under GOLD ink; nothing else on these cards is PILL
+        return dict((c, n) for n, c in _png(cards.render_card(spec, font_path=FONT)).getcolors(1 << 20)).get(
+            look.PILL, 0)
+
+    assert fill_pixels(cards.CardSpec("text", badge="Sample data", **base)) > 3000
     assert fill_pixels(cards.CardSpec("text", **base)) < 200
 
 
@@ -738,11 +919,12 @@ def test_the_logo_is_drawn_in_its_box():
     layout = cards.layout_card(spec, font_path=FONT, with_logo=True)
     im = _png(cards.render_card(spec, font_path=FONT, logo_path=LOGO))
     x0, y0, x1, y1 = layout.logo
-    assert (x1 - x0, y1 - y0) == (cards.LOGO_BRAND_PX, cards.LOGO_BRAND_PX)
-    tile = im.crop(layout.logo)
+    side = cards.BRAND_TILE_STYLE.size(layout.step)
+    assert (x1 - x0, y1 - y0) == (side, side) and cards._within(layout.logo, CONTENT)
     assert not _pure_page(im, layout.logo)
-    # the tile's corners are the page colour (the vendored logo blends in), its mark is light grey
-    assert tile.getpixel((0, 0)) == PAGE_RGB and tile.getpixel((cards.LOGO_BRAND_PX - 1,) * 2) == PAGE_RGB
+    tile = im.crop(layout.logo)
+    # the tile's corners are rounded (the canvas shows), its mark is light grey on the logo's dark ground
+    assert tile.getpixel((0, 0)) == CANVAS.getpixel((x0, y0))
     assert max(tile.getextrema()[0]) > 200
 
 
@@ -751,14 +933,14 @@ def test_a_transparent_or_non_square_logo_is_composited_on_the_page(tmp_path):
     im = Image.new("RGBA", (400, 100), (0, 0, 0, 0))
     im.paste((250, 250, 250, 255), (150, 25, 250, 75))
     im.save(p)
-    spec = cards.CardSpec("disclaimer", body=DISCLAIMER)
+    spec = cards.CardSpec("brand")
     data = cards.render_card(spec, font_path=FONT, logo_path=str(p))
-    out = _assert_nothing_outside_the_zone(data, "disclaimer, transparent logo")
+    out = _assert_nothing_outside_the_zone(data, "brand, transparent logo")
     box = cards.layout_card(spec, font_path=FONT, with_logo=True).logo
     tile = out.crop(box)
-    assert tile.getpixel((0, 0)) == PAGE_RGB and tile.getpixel((box[2] - box[0] - 1, 0)) == PAGE_RGB
-    centre = tile.getpixel(((box[2] - box[0]) // 2, (box[3] - box[1]) // 2))
-    assert min(centre) > 200
+    w = box[2] - box[0]
+    assert tile.getpixel((w // 2, 2)) == PAGE_RGB                          # the transparent rows: the tile's ground
+    assert min(tile.getpixel((w // 2, w // 2))) > 200                      # the mark, centred
 
 
 def test_unreadable_assets_are_typed_errors(tmp_path):
@@ -811,11 +993,11 @@ def test_basic_engine_renders_every_kind():
 
 _RAQM_CHECK = r"""
 import io, sys, hashlib
-from PIL import Image
-from marketing import cards
+from PIL import Image, ImageChops
+from marketing import cards, look
 assert cards.raqm_available(), "no raqm"
 F, L, D = sys.argv[1], sys.argv[2], sys.argv[3]
-page = cards._rgb(cards.PAGE)
+base = look.canvas(look.VIDEO_FRAME)
 specs = [cards.CardSpec("brand"), cards.CardSpec("text", title=sys.argv[4], body=sys.argv[5]),
          cards.CardSpec("stat", figure="$6.9 billion", label="Deal value", body="As filed.", badge="Sample data"),
          cards.CardSpec("disclaimer", body=D), cards.CardSpec("disclaimer", body=D, cta=cards.CTA),
@@ -825,9 +1007,9 @@ for s in specs:
     assert a == cards.render_card(s, font_path=F, logo_path=L, layout_engine="raqm")
     assert a != cards.render_card(s, font_path=F, logo_path=L, layout_engine="basic") or s.kind == "brand"
     im = Image.open(io.BytesIO(a)); im.load()
-    for box in [(0, 0, 1080, cards.TEXT_ZONE_Y[0]), (0, cards.TEXT_ZONE_Y[1], 1080, 1920),
-                (0, 0, cards.SAFE_X[0], 1920), (cards.SAFE_X[1], 0, 1080, 1920)]:
-        assert im.crop(box).getextrema() == tuple((c, c) for c in page), (s.kind, box)
+    for box in [(0, 0, 1080, 140), (0, cards.TEXT_ZONE_Y[1], 1080, cards.CAPTION_BAND_Y[1]), (0, 1500, 1080, 1920),
+                (0, 140, cards.SAFE_X[0], 1500), (cards.SAFE_X[1], 140, 1080, 1500)]:
+        assert ImageChops.difference(im.crop(box), base.crop(box)).getbbox() is None, (s.kind, box)
     layout = cards.layout_card(s, font_path=F, layout_engine="raqm")
     assert layout.engine == "raqm"
 print("RAQM-OK")
@@ -918,7 +1100,9 @@ def test_the_post_image_constants_mirror_the_server():
     assert cards.IMAGE_WIDTH * 5 == cards.IMAGE_HEIGHT * 4                      # 4:5
     q = cards.JPEG_QUALITIES
     assert list(q) == sorted(set(q), reverse=True) and all(1 <= v <= 95 for v in q)
-    assert cards.CARD_RENDER_VERSION == "cards/v4"     # v4: Batch 2 (hook card, data card, App Store end card)
+    # v4: Batch 2; v5 (2026-11-15): the `feature` image + the art (C); v6 (news-v23, 2026-11-19): the approved look
+    # on every card and picture
+    assert cards.CARD_RENDER_VERSION == "cards/v6"
 
 
 def test_image_for_script_reads_the_worker_script_verbatim():
@@ -971,9 +1155,10 @@ def test_imagespec_refuses_what_it_cannot_draw_faithfully(kwargs, exc):
 
 
 def test_image_onscreen_strings_are_verbatim_in_order_and_once():
-    assert cards.image_onscreen_strings(_img()) == [IMG_TITLE, *IMG_PARAGRAPHS, FOOTER]
+    extra = [cards.LESSON_KICKER, cards.BRAND_ROW_WORD]                    # news-v23: the brand row
+    assert cards.image_onscreen_strings(_img()) == [IMG_TITLE, *IMG_PARAGRAPHS, FOOTER, *extra]
     twice = _img(paragraphs=(IMG_TITLE, "Different."))
-    assert cards.image_onscreen_strings(twice) == [IMG_TITLE, "Different.", FOOTER]
+    assert cards.image_onscreen_strings(twice) == [IMG_TITLE, "Different.", FOOTER, *extra]
 
 
 def test_what_the_worker_registers_passes_the_servers_schema_and_its_allow_list():
@@ -990,7 +1175,7 @@ def test_what_the_worker_registers_passes_the_servers_schema_and_its_allow_list(
                   "card_version": cards.CARD_RENDER_VERSION})
     assert body.metadata["onscreen_text"] == drawn
     stored = sch.normalize_image_post(script["image_post"])
-    allowed = {stored["title"], *stored["paragraphs"], script["image_footer"]}
+    allowed = {stored["title"], *stored["paragraphs"], script["image_footer"], *sch.LESSON_BRAND_TEXT}
     assert [t for t in drawn if t not in allowed] == [] and script["image_footer"] in drawn
     sch.validate_onscreen_text(drawn)
     # …and the schema really is the fence: no footer declared, or too many bytes, is refused.
@@ -1001,23 +1186,30 @@ def test_what_the_worker_registers_passes_the_servers_schema_and_its_allow_list(
 
 def _assert_every_word_in_order(layout: "cards.CardLayout", spec: "cards.ImageSpec") -> None:
     fields = [("title", spec.title)] + [(f"paragraph{i}", p) for i, p in enumerate(spec.paragraphs)] + [
-        ("footer", spec.footer)]
+        ("footer", spec.footer), ("kicker", cards.LESSON_KICKER), ("brand", cards.BRAND_ROW_WORD)]
     for name, text in fields:
         lines = layout.field_lines(name)
-        assert [w for ln in lines for w in ln.split()] == text.split(), (name, text, lines)
+        assert [w.casefold() for ln in lines for w in ln.split()] == text.casefold().split(), (name, text, lines)
     assert {ln.field for ln in layout.lines} == {name for name, _ in fields}
 
 
+#: news-v23: the lesson picture's content area (look.POST_FRAME: the cards' 56 px side edges, the headline at 140)
+IMAGE_AREA = look.POST_FRAME.area
+
+
 def _assert_image_ink_inside(layout: "cards.CardLayout") -> None:
-    m = cards.IMAGE_MARGIN
-    page_zone = (m, m, cards.IMAGE_WIDTH - m, cards.IMAGE_HEIGHT - m)
-    assert layout.panel and cards._within(layout.panel, page_zone)
-    assert layout.rule and cards._within(layout.rule, layout.panel)
+    """The brand row and the kicker above the content area, every content line and card inside it (the panel:
+    its top at the headline, its bottom over the footer), the footer centred on the canvas under it."""
+    assert layout.panel and cards._within(layout.panel, IMAGE_AREA)
     for ln in layout.lines:
-        bounds = page_zone if ln.field == "footer" else layout.panel
-        assert cards._within(ln.ink, bounds), (ln.field, ln.text, ln.ink, bounds)
-        if ln.field == "footer":
-            assert ln.ink[1] >= layout.panel[3] + cards.IMAGE_FOOTER_GAP          # below the panel
+        if ln.field in ("brand", "kicker"):
+            assert ln.ink[3] <= IMAGE_AREA[1] and cards._within(ln.ink, (56, 30, 1024, IMAGE_AREA[1]))
+        elif ln.field == "footer":
+            assert ln.ink[1] >= layout.panel[3] and cards._within(ln.ink, (60, 0, 1020, cards.IMAGE_HEIGHT - 20))
+        else:
+            assert cards._within(ln.ink, layout.panel), (ln.field, ln.text, ln.ink, layout.panel)
+    for r in layout.rects:
+        assert cards._within(r.box, (56, 30, 1024, layout.panel[3])), r
 
 
 @pytest.mark.parametrize("engine", ["basic"])
@@ -1052,18 +1244,21 @@ def _raw_image(spec: "cards.ImageSpec") -> Tuple[Image.Image, "cards.CardLayout"
 
 @pytest.mark.parametrize("spec", [_img(), _max_img()], ids=["real", "writer_max"])
 def test_nothing_is_drawn_in_the_image_margins_and_only_brand_colours(spec):
+    """news-v23: the lesson picture is the look's canvas wherever nothing is drawn — the side margins of the cards,
+    the gap over the footer — and every pixel off it is a look colour or a blend (the brand tile excepted)."""
     im, layout = _raw_image(spec)
     assert im.size == (cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT) and im.mode == "RGB"
-    m, w, h = cards.IMAGE_MARGIN, cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT
+    w, h = cards.IMAGE_WIDTH, cards.IMAGE_HEIGHT
     footer_top = min(ln.ink[1] for ln in layout.lines if ln.field == "footer")
-    for name, box in {"top": (0, 0, w, layout.panel[1]), "left": (0, 0, m, h), "right": (w - m, 0, w, h),
-                      "bottom": (0, h - m, w, h), "panel→footer": (0, layout.panel[3], w, footer_top)}.items():
+    for name, box in {"left": (0, IMAGE_AREA[1], IMAGE_AREA[0], h), "right": (IMAGE_AREA[2], IMAGE_AREA[1], w, h),
+                      "panel→footer": (0, layout.panel[3], w, footer_top - 2),
+                      "under the footer": (0, h - 20, w, h)}.items():
         assert _pure_page(im, box), f"something was drawn in the {name} margin {box}"
     assert not _pure_page(im, layout.panel)                                    # anti-vacuity
-    off = [c for _, c in im.getcolors(maxcolors=1 << 20) if not _on_palette(c)]
-    assert off == [], f"{len(off)} off-palette colours, e.g. {off[:5]}"
+    off = _off_look(im, exclude=[_brand_tile(look.POST_FRAME)])
+    assert off == [], f"{len(off)} off-look colours, e.g. {off[:5]}"
     colours = {c for _, c in im.getcolors(maxcolors=1 << 20)}
-    assert {cards._rgb(cards.ACCENT), cards._rgb(cards.TEXT), cards._rgb(cards.CARD), cards.FOOTER_FILL} <= colours
+    assert {look.WHITE, look.GOLD, look.INK, look.CARD, look.PILL, (217, 160, 30)} <= colours
 
 
 def test_the_post_image_is_a_baseline_jpeg_under_the_cap_with_no_metadata():
@@ -1090,8 +1285,10 @@ def test_the_post_image_bytes_are_deterministic_and_follow_the_text():
     b = cards.render_image(_img(), font_path=FONT, layout_engine="basic").data
     assert a == b
     c = cards.render_image(_img(title=IMG_TITLE + "!"), font_path=FONT, layout_engine="basic").data
-    d = cards.render_image(_img(footer=post_copy.image_footer(date(2026, 10, 10))), font_path=FONT,
-                           layout_engine="basic").data
+    # news-v23: a lesson footer no longer carries the date, so another FOOTER text is a template family's line
+    d = cards.render_image(_img(footer=post_copy.image_footer(date(2026, 10, 10), "template",
+                                                              source=post_copy.FOOTER_SOURCE_FILINGS)),
+                           font_path=FONT, layout_engine="basic").data
     assert len({a, c, d}) == 3
 
 
@@ -1139,7 +1336,13 @@ def test_check_image_glyphs_refuses_what_the_font_cannot_draw(over, missing):
 
 
 def test_the_real_footer_and_sample_have_every_glyph():
-    assert "·" in FOOTER
+    # news-v23 (restyle 2026-11-19): the lesson footer is one short line with no separator; a template family's
+    # footer carries the "·" and the en dash, so both are checked
+    assert "·" not in FOOTER
+    dated = post_copy.image_footer(date(2026, 10, 10), "template", source=post_copy.FOOTER_SOURCE_FORM4,
+                                   when="filed Dec 31, 2026–Jan 4, 2027")
+    assert "·" in dated and "–" in dated
+    cards.check_image_glyphs(_img(footer=dated), FONT)
     cards.check_image_glyphs(_img(), FONT)
     cards.check_image_glyphs(_max_img(), FONT)
 
@@ -1153,15 +1356,16 @@ spec = cards.ImageSpec(T, (P1, P2, P1, P2), FOOT)
 layout = cards.layout_image(spec, font_path=F, layout_engine="raqm")
 assert layout.engine == "raqm" and layout.step < cards.RAMP_STEPS, layout.step
 for name, text in [("title", T), ("paragraph0", P1), ("paragraph1", P2), ("footer", FOOT)]:
-    assert [w for ln in layout.field_lines(name) for w in ln.split()] == text.split(), name
+    assert [w.casefold() for ln in layout.field_lines(name) for w in ln.split()] == text.casefold().split(), name
 a = cards.render_image(spec, font_path=F, layout_engine="raqm").data
 assert a == cards.render_image(spec, font_path=F, layout_engine="raqm").data
 assert len(a) <= cards.POST_IMAGE_MAX_BYTES
 im, lay = cards.draw_image(spec, font_path=F, layout_engine="raqm")
-page = cards._rgb(cards.PAGE)
-m = cards.IMAGE_MARGIN
-for box in [(0, 0, 1080, m), (0, 0, m, 1350), (1080 - m, 0, 1080, 1350), (0, 1350 - m, 1080, 1350)]:
-    assert im.crop(box).getextrema() == tuple((c, c) for c in page), box
+from PIL import ImageChops
+from marketing import look
+base = look.canvas(look.POST_FRAME)
+for box in [(0, 0, 1080, 40), (0, 120, 56, 1250), (1024, 120, 1080, 1250), (0, 1340, 1080, 1350)]:
+    assert ImageChops.difference(im.crop(box), base.crop(box)).getbbox() is None, box
 print("RAQM-IMAGE-OK")
 """
 
@@ -1226,7 +1430,10 @@ def test_the_preview_renders_the_demo_image(tmp_path):
     report = preview.preview_image(preview.DEMO, tmp_path, FONT)
     data = (tmp_path / "post_image.jpg").read_bytes()
     assert report["bytes"] == len(data) <= cards.POST_IMAGE_MAX_BYTES and data[:2] == b"\xff\xd8"
-    assert report["onscreen_text"][-1] == preview.DEMO["image_footer"]
+    # news-v23: the demo is today's lesson picture — the short footer and a news-v23 read-back (finding: it drew the
+    # long footer, "Caydex" twice and "Educational only" on the image, and this test accepted whatever DEMO said)
+    assert preview.DEMO["image_footer"] == cards.LESSON_FOOTER and preview.DEMO["look"] == cards.LOOK
+    assert report["onscreen_text"][-3:] == [cards.LESSON_FOOTER, cards.LESSON_KICKER, cards.BRAND_ROW_WORD]
     assert "error" not in report and "skipped" not in report
 
 
@@ -1285,7 +1492,7 @@ def _template_script(**over):
     s = {"hook": "A chief executive disclosed a large purchase last week.", "video_script": list(_TPL_LINES),
          "cards": [dict(c) for c in _TPL_CARDS], "carousel_slides": [], "disclaimer_card": TEMPLATE_DISCLAIMER,
          "authorship": "template", "content_class": "C", "series": "ceo_buys", "video_layout": "per_line",
-         "opening_card": dict(_OPENING), "logos": [dict(e) for e in _TPL_ENTRIES]}
+         "opening_card": dict(_OPENING), "logos": [dict(e) for e in _TPL_ENTRIES], "look": cards.LOOK}
     s.update(over)
     return s
 
@@ -1298,7 +1505,7 @@ def _red_logo(path: Path) -> str:
 
 
 def test_the_opening_kind_and_the_template_mirrors():
-    assert "opening" in cards.KINDS and cards.CARD_RENDER_VERSION == "cards/v4"
+    assert "opening" in cards.KINDS and cards.CARD_RENDER_VERSION == "cards/v6"
     assert cards.LAYOUTS == tos.LAYOUTS and cards.OPENING_KEYS == tos.OPENING_KEYS
     assert cards.MAX_OPENING_LOGOS == tos.MAX_OPENING_LOGOS == 2
     assert cards.TEMPLATE_AUTHORSHIP == sch.TEMPLATE_AUTHORSHIP and cards.VIDEO_LAYOUT_PER_LINE == sch.VIDEO_LAYOUT_PER_LINE
@@ -1333,32 +1540,32 @@ def test_the_opening_card_draws_exactly_its_strings_and_the_server_allows_them(r
     spec = cards.opening_spec(_OPENING, cards.logo_table(_template_script(), files))
     strings = cards.onscreen_strings(spec)
     server = tos.opening_strings(_OPENING, _TPL_ENTRIES)
-    assert server and set(strings) <= set(server)
+    assert server and set(strings) <= set(server) | set(sch.VIDEO_BRAND_TEXT)
     if resolved:
-        assert "GameStop" not in strings and strings == [s for s in server if s != "GameStop"]
+        assert "GameStop" not in strings and strings == [s for s in server if s != "GameStop"] + [cards.BRAND_ROW_WORD]
     else:
-        assert strings == server                       # kicker, wordmark name, chip, figure, headline
+        assert strings == server + [cards.BRAND_ROW_WORD]   # kicker, wordmark name, chip, figure, headline, brand
     layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
     by_field: Dict[str, List[str]] = {}
     for ln in layout.lines:
         by_field.setdefault(ln.field, []).extend(ln.text.split())
     expected = {"badge": _OPENING["kicker"], "label": _OPENING["chip"], "figure": _OPENING["figure"],
-                "title": _OPENING["headline"]}
+                "title": _OPENING["headline"].upper(), "brand": cards.BRAND_ROW_WORD}
     if not resolved:
         expected["wordmark:GME"] = "GameStop"
     assert {f: " ".join(w) for f, w in by_field.items()} == expected
     assert len(layout.tiles) == 1 and layout.tiles[0][1].key == "GME"
     _assert_ink_inside(layout)
     for box, _art in layout.tiles:
-        assert cards._within(box, (cards.SAFE_X[0], cards.TEXT_ZONE_Y[0], cards.SAFE_X[1], cards.TEXT_ZONE_Y[1]))
+        assert cards._within(box, CONTENT)
     data = cards.render_card(spec, font_path=FONT, layout_engine="basic")
     im = _assert_nothing_outside_the_zone(data, "opening")
     # the logo (pure red) is drawn on its plate, unaltered — and nowhere else is red
     px = im.load()
     box = layout.tiles[0][0]
-    reds = [(x, y) for y in range(cards.TEXT_ZONE_Y[0], cards.TEXT_ZONE_Y[1], 4)
+    reds = [(x, y) for y in range(CONTENT[1], cards.TEXT_ZONE_Y[1], 4)
             for x in range(cards.SAFE_X[0], cards.SAFE_X[1], 4)
-            if px[x, y][0] - max(px[x, y][1], px[x, y][2]) > 40]
+            if _red(px[x, y])]
     assert all(box[0] <= x < box[2] and box[1] <= y < box[3] for x, y in reds)
     assert bool(reds) == resolved
     assert (220, 20, 20) in {c for _n, c in im.crop(box).getcolors(1 << 20)} or not resolved
@@ -1368,7 +1575,7 @@ def test_the_opening_card_with_two_companies_and_no_chip_or_figure():
     card = {"kicker": "13F SEASON", "logos": ["GME", "NVDA"], "headline": "A filer reported two changes"}
     assert tos.validate_opening_card(card, tos.logo_keys(_TPL_ENTRIES)) is None
     spec = cards.opening_spec(card, cards.logo_table(_template_script()))
-    assert cards.onscreen_strings(spec) == tos.opening_strings(card, _TPL_ENTRIES)
+    assert cards.onscreen_strings(spec) == tos.opening_strings(card, _TPL_ENTRIES) + [cards.BRAND_ROW_WORD]
     layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
     (a, _), (b, _) = layout.tiles
     assert a[2] < b[0] and a[1] == b[1] and (a[2] - a[0]) == (b[2] - b[0])          # side by side, equal
@@ -1376,13 +1583,74 @@ def test_the_opening_card_with_two_companies_and_no_chip_or_figure():
 
 
 def test_the_opening_card_uses_only_neutral_colours_off_its_plates():
+    """With no series the figure is neutral INK: every pixel is the look's (the disc is WHITE, its wordmark INK,
+    its gold ring GOLD)."""
     spec = cards.opening_spec(_OPENING, cards.logo_table(_template_script()))
     layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
     im = _png(cards.render_card(spec, font_path=FONT, layout_engine="basic"))
     box = layout.tiles[0][0]
-    off = [c for _n, c in im.getcolors(1 << 20) if not _on_palette(c)]
-    assert off == [], off[:5]           # the plate is TEXT, the wordmark PAGE: still the brand palette
-    assert cards._rgb(cards.PLATE) == (255, 255, 255) and im.getpixel(((box[0] + box[2]) // 2, box[1] + 3)) == (255, 255, 255)
+    off = _off_look(im, exclude=[_brand_tile()])
+    assert off == [], off[:5]
+    assert {ln.fill for ln in layout.lines if ln.field == "figure"} == {look.INK}
+    assert cards._rgb(cards.PLATE) == (255, 255, 255) and im.getpixel(((box[0] + box[2]) // 2, box[1] + 10)) == (255, 255, 255)
+
+
+@pytest.mark.parametrize("series, figure, tone", [
+    ("ceo_buys", "$74.4M", look.GREEN), ("insider_spotlight", "$2M", look.GREEN), ("congress_count", "3", look.GREEN),
+    ("thirteen_f_spotlight", "+5.6M shares", look.GREEN), ("thirteen_f_spotlight", "\u221218.1M shares", look.RED),
+    # news-v23 fix round: a ROUNDED cover figure reads through its "About" (it was drawn neutral INK); the
+    # insider_buys roundup's amounts are GREEN only through look.GAIN_SERIES — pinned here too
+    ("thirteen_f_spotlight", "About \u221218.1M shares", look.RED), ("thirteen_f_spotlight", "About +4.5M shares", look.GREEN),
+    ("insider_buys", "$1.3M", look.GREEN),
+    ("thirteen_f", "-4.3M", look.RED), ("thirteen_f", "3", look.INK), ("company_stakes", "$5B", look.GOLD_INK),
+    ("theme_explainer", "14", look.GOLD_INK), ("earnings", "-$0.05", look.INK), ("money_map", "$2.94", look.INK),
+    (None, "$74.4M", look.INK), ("unknown_series", "+5%", look.INK),
+])
+def test_the_covers_figure_takes_its_series_tone(series, figure, tone):
+    """news-v23 colour rules (owner 2026-11-19): a purchase / a members' count GREEN, a 13F change GREEN up and RED
+    down, a stake's amount and a theme's count GOLD_INK, an earnings figure and anything unknown neutral INK."""
+    card = dict(_OPENING, figure=figure)
+    spec = cards.opening_spec(card, cards.logo_table(_template_script()), series=series)
+    layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+    assert {ln.fill for ln in layout.lines if ln.field == "figure"} == {tone}
+    script = _template_script(series=series, opening_card=card)
+    assert cards.cards_for_script(script)[0] == spec
+
+
+@pytest.mark.parametrize("name, tone", [("costco_money_map", look.GREEN), ("rivian_money_map", look.RED)])
+def test_fidelity_the_money_map_cover_figure_takes_the_net_lines_tone(name, tone):
+    """Fidelity review 2026-11-20 (HIGH): the Money Map cover's "per $100" figure was drawn INK while the picture's
+    callout draws the same figure GREEN for a profit, RED for a loss (RESTYLE_SPEC §1 / §2.6). It now takes the tone of
+    the post image's net line (its flow's last `style`: fill / outline). Mutation-checked by hand: without
+    `money_map_net_tone` both covers read INK."""
+    import test_marketing_news_templates as NT
+
+    (_n, factory, run_date), = [x for x in NT.SAMPLES if x[0] == name]
+    out = _T.compose(factory(), run_date=run_date, store_state="live", allow_x_url=False)
+    entries = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None} for r in out["logo_refs"]]
+    script = dict(out, look=cards.LOOK, logos=entries)
+    cover = cards.cards_for_script(script, cards.logo_table(script, {}))[0]
+    assert cover.kind == "opening" and cover.figure == out["opening_card"]["figure"]
+    # owner decision 2026-11-20: a LOSS year's cover is its costs card — whose figure line ("so the net loss was …") is
+    # RED as on the picture; the plain figure card it falls back to keeps the tone below
+    assert (cover.image is not None) == (name == "rivian_money_map")
+    if cover.image is not None:
+        costs_layout = cards.layout_card(cover, font_path=FONT, layout_engine="basic")
+        assert {ln.fill for ln in costs_layout.lines if ln.field == "costs.callout[1]"} == {tone}
+        cover = dataclasses.replace(cover, image=None)
+    layout = cards.layout_card(cover, font_path=FONT, layout_engine="basic")
+    assert {ln.fill for ln in layout.lines if ln.field == "figure"} == {tone}
+
+
+@pytest.mark.parametrize("series, spec, tone", [
+    ("money_map", {"flow": [{"style": "fill"}, {"style": "outline"}]}, "loss"),
+    ("money_map", {"flow": [{"style": "fill"}]}, "gain"),
+    ("money_map", {"flow": []}, None), ("money_map", {"flow": [{"style": "dotted"}]}, None),
+    ("money_map", None, None), ("money_map", {"flow": "x"}, None), ("money_map", {"flow": ["x"]}, None),
+    ("earnings", {"flow": [{"style": "outline"}]}, None),
+])
+def test_fidelity_the_money_map_net_tone_reads_only_a_well_formed_flow(series, spec, tone):
+    assert cards.money_map_net_tone(series, spec) == tone
 
 
 @pytest.mark.parametrize("card, needle", [
@@ -1445,18 +1713,23 @@ def test_a_lesson_script_keeps_the_drop_1_card_set_whatever_logos_it_is_given(tm
         cards.cards_for_script({**lesson, "video_layout": "per_line"})              # no opening card
 
 
-#: The drop-1 bytes of a lesson card and a lesson post image, measured 2026-10-09 BEFORE drop 2a
-#: touched cards.py (Pillow 12.0.0, the basic layout engine): drop 2a must not move a lesson pixel.
+#: A lesson card's, end card's, brand card's and lesson post image's bytes in the approved look (news-v23, cards/v6;
+#: Pillow 12.0.0, the basic layout engine) — re-pinned when the look changed every pixel (they were drop 1's).
 _DROP1_GOLDEN = {
-    "text": "131841d08529bb1663cba627527edd72955e17f90d1088eb50aeae9b153527ea",
-    "disclaimer": "547d820e2556cc21b34f442f4d7e138ec6e3711526cd11c8947a266b67c6a4c7",
-    "brand": "1dd83d1bd703c6318251c0dd1fa815ad8b52f01a770b1b70ea508c4140e4d496",
-    "image": "dae9aa5326e0894a1abaa119c403d178cb873d75d0b7ce5fac54e91cb5380f6a",
+    # 2026-11-20 (the two-tone split): "Myth: Design and Manufacturing Are One" splits at its clause boundary ("MYTH:"
+    # white, the rest gold) and "Why diversification matters" is one block, its last line gold — both re-pinned
+    "text": "0331593e6a1e20ef902aa0b0946a2ecfb27c4a5d875422589003868313e0441f",
+    "disclaimer": "01cf3612383604c30e6b510fb0d1c3a12c67046bc422ba0aebe8b7ffca00a904",
+    "brand": "ec891b4ddcd3f8cd93b31bd1799821b5b0ab7cd000fb87b0e8b4228b814d7755",
+    "image": "05a9cb5e9746564681bd45687ba93fff8796c5d742a9a9ab3a044e52ecd93bbb",
 }
 
 
 @pytest.mark.skipif(PIL.__version__ != "12.0.0", reason="the golden bytes were measured on Pillow 12.0.0")
-def test_a_lesson_renders_byte_identical_to_drop_1():
+def test_a_lesson_card_and_picture_are_pinned():
+    """The lesson's text card, end card, brand card and post picture, byte for byte — the picture as a news-v23
+    read-back draws it: the SHORT lesson footer (cards.LESSON_FOOTER) and the look's kicker and brand word (it was
+    pinned with the old long footer, which the server now refuses — a golden of a picture that can never register)."""
     import hashlib
 
     d1 = ("Educational, impersonal information — not investment advice. Investing involves risk. "
@@ -1472,7 +1745,7 @@ def test_a_lesson_renders_byte_identical_to_drop_1():
             {"image_post": {"title": "Why diversification matters",
                             "paragraphs": ["Spreading money across many companies lowers the damage any one can do.",
                                            "It does not remove risk; it changes its shape."]},
-             "image_footer": "Educational only · not investment advice · Written with AI assistance · Sep 29, 2026 · Caydex"},
+             "image_footer": cards.LESSON_FOOTER, "look": cards.LOOK},
             font_path=FONT, layout_engine="basic").data,
     }
     assert {k: hashlib.sha256(v).hexdigest() for k, v in got.items()} == _DROP1_GOLDEN
@@ -1497,7 +1770,8 @@ def _rs():
     return importlib.import_module("app.services.marketing.run_service")
 
 
-_TPL_FOOTER = post_copy.image_footer(date(2026, 11, 16), "template", source="SEC Form 4 filings", as_of="Nov 16, 2026")
+_TPL_FOOTER = post_copy.image_footer(date(2026, 11, 16), "template", source=post_copy.FOOTER_SOURCE_FORM4,   # news-v23
+                                     when="filed Nov 16, 2026")
 _TPL_IMAGE_SPEC = {"layout": "spotlight", "version": 1, "kicker": "FILED LAST WEEK · FORM 4", "footer": _TPL_FOOTER,
                    "header": {"logo": "GME", "name": "GameStop", "chip": "GME"}, "figure": "$74.4M",
                    "headline": "GameStop's CEO disclosed buying GameStop stock",
@@ -1550,6 +1824,12 @@ def _server_allowed(script) -> set:
     allowed = set(sch.VIDEO_BRAND_TEXT) | {c[k] for c in script["cards"] for k in ("title", "body") if c.get(k)}
     allowed.add(script["disclaimer_card"])
     features = rs.frozen_video_features(script, template=template)
+    # news-v23: the brand row's kicker pill and the short footer line (a lesson's constants; a template's opening
+    # kicker — among its opening strings — and its own image_footer while it is today's short footer)
+    if not template:
+        allowed |= set(sch.LESSON_BRAND_TEXT) | {post_copy.IMAGE_FOOTER_HEAD}
+    elif script.get("image_footer") and rs.picture_footer_problem(script, template=True) is None:
+        allowed.add(script["image_footer"])
     if template:
         allowed |= set(tos.opening_strings(script["opening_card"], script["logos"]))
         if sch.VIDEO_FEATURE_DATA_CARD in features:
@@ -1622,7 +1902,8 @@ def test_the_end_card_draws_the_read_backs_cta_or_the_legacy_one(over, expected,
         assert cards.end_card_cta(script) == expected
         specs = cards.cards_for_script(script, font_path=FONT, layout_engine="basic")
         assert specs[-1].kind == "disclaimer" and specs[-1].end_cta == expected
-        assert cards.onscreen_strings(specs[-1]) == [script["disclaimer_card"], expected]
+        pill = _OPENING["kicker"] if cards.is_template(script) else cards.LESSON_KICKER      # news-v23
+        assert cards.onscreen_strings(specs[-1]) == [script["disclaimer_card"], expected, pill, cards.BRAND_ROW_WORD]
         assert expected in sch.VIDEO_BRAND_TEXT                       # both webs allow it
     assert any(r.name == "marketing.cards" and r.levelno == logging.ERROR and "end_card_cta" in r.getMessage()
                for r in caplog.records) == logged
@@ -1648,7 +1929,7 @@ def test_the_app_store_cta_is_one_line_at_every_step_where_the_legacy_size_would
     layout = cards.layout_card(cards.CardSpec("disclaimer", body=DISCLAIMER, cta=cards.CTA), font_path=FONT,
                                layout_engine="basic")
     assert layout.field_lines("cta") == [cards.CTA] and layout.step == 0
-    assert all(ln.size == cards.STORE_CTA_STYLE.start and ln.fill == cards._rgb(cards.ACCENT)
+    assert all(ln.size == cards.STORE_CTA_STYLE.start and ln.fill == look.GOLD
                for ln in layout.lines if ln.field == "cta")
     legacy = cards.layout_card(cards.CardSpec("disclaimer", body=DISCLAIMER), font_path=FONT, layout_engine="basic")
     assert legacy.field_lines("cta") == [cards.LEGACY_CTA]
@@ -1661,11 +1942,13 @@ def test_a_lesson_with_hook_card_frozen_opens_on_the_hook_verbatim():
     script = _hook_script()
     specs = _cards(script)
     assert [s.kind for s in specs] == ["hook", "text", "text", "text", "disclaimer"]
-    assert specs[0] == cards.CardSpec("hook", title=script["hook"]) and specs[0].title is script["hook"]
+    assert specs[0] == cards.CardSpec("hook", title=script["hook"], pill=cards.LESSON_KICKER,
+                                      footer=cards.LESSON_FOOTER) and specs[0].title is script["hook"]
     assert specs[1:] == _cards(_script(end_card_cta=cards.CTA))           # the rest is today's video
     assert cards.opens_on_hook_card(specs) and not cards.opens_on_hook_card(_cards(_script()))
     assert cards.opens_on_hook_card(_cards(_template_script())) and not cards.opens_on_hook_card([])
-    assert cards.onscreen_strings(specs[0]) == [script["hook"]]
+    assert cards.onscreen_strings(specs[0]) == [script["hook"], cards.LESSON_KICKER, cards.LESSON_FOOTER,
+                                                cards.BRAND_ROW_WORD]
     # a lesson ignores any logos it is given, with or without the feature
     assert _cards(script, logos=cards.logo_table(_template_script())) == specs
     # what the video declares is what the server allows for THIS run — the hook only because it is frozen
@@ -1676,24 +1959,25 @@ def test_a_lesson_with_hook_card_frozen_opens_on_the_hook_verbatim():
     assert script["hook"] not in _server_allowed(_hook_script(video_features=[]))
 
 
-def test_the_hook_card_is_the_hook_big_and_centred_under_an_accent_rule(monkeypatch):
+def test_the_hook_card_is_the_hook_big_and_centred(monkeypatch):
+    """news-v23: the hook card is the hook ALONE, big, two-tone (white, then gold), upper-cased, centred in the
+    content zone under the brand row — no card, no panel, no rule."""
     monkeypatch.setattr(cards, "_warned", set())
-    spec = cards.CardSpec("hook", title=HOOK)
+    spec = cards.CardSpec("hook", title=HOOK, pill=cards.LESSON_KICKER, footer=cards.LESSON_FOOTER)
     layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
     _assert_all_words_in_order(layout, spec)
     _assert_ink_inside(layout)
     assert layout.step == 0 and layout.panel is None and layout.badge is None and layout.logo is None
-    assert {ln.field for ln in layout.lines} == {"title"}
-    assert all(ln.anchor == "ma" and ln.x == cards.WIDTH // 2 and ln.size == cards.HOOK_STYLE.start
-               and ln.fill == cards._rgb(cards.TEXT) for ln in layout.lines)
-    rx0, ry0, rx1, ry1 = layout.rule
-    assert (rx1 - rx0, ry1 - ry0) == (cards.RULE_W, cards.RULE_H) and rx0 + rx1 == cards.WIDTH       # centred
-    assert ry1 + cards.HOOK_RULE_GAP == layout.lines[0].y                                          # above the hook
+    assert layout.rule is None
+    assert {ln.field for ln in layout.lines} == {"title", "brand", "pill", "footer"}
+    title = [ln for ln in layout.lines if ln.field == "title"]
+    assert all(ln.size == cards.HOOK_STYLE.start and ln.text == ln.text.upper() for ln in title)
+    assert title[0].fill == look.WHITE and title[-1].fill == look.GOLD
     im = _assert_nothing_outside_the_zone(cards.render_card(spec, font_path=FONT, layout_engine="basic"), "hook")
-    assert cards._rgb(cards.ACCENT) in {c for _n, c in im.getcolors(1 << 20)}                     # the rule
-    # the zone is vertically centred on the card's content (it is the video's first frame)
-    zone_mid = (cards.TEXT_ZONE_Y[0] + cards.TEXT_ZONE_Y[1]) / 2
-    assert abs((ry0 + layout.lines[-1].ink[3]) / 2 - zone_mid) < cards.HOOK_STYLE.start
+    assert look.GOLD in {c for _n, c in im.getcolors(1 << 20)}
+    top, bottom = min(ln.ink[1] for ln in title), max(ln.ink[3] for ln in title)
+    zone_mid = (CONTENT[1] + CONTENT[3]) / 2
+    assert abs((top + bottom) / 2 - zone_mid) < cards.HOOK_STYLE.start
 
 
 def test_every_real_hook_fits_its_card_at_the_start_size_and_the_writers_longest_fits_too():
@@ -1710,7 +1994,8 @@ def test_every_real_hook_fits_its_card_at_the_start_size_and_the_writers_longest
     assert len(MAX_HOOK.split()) == 14                                       # writer_prompts.HOOK_MAX_WORDS
     spec = cards.CardSpec("hook", title=MAX_HOOK)
     layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
-    assert layout.step < cards.RAMP_STEPS and min(ln.size for ln in layout.lines) >= cards.HOOK_STYLE.floor
+    assert layout.step < cards.RAMP_STEPS
+    assert min(ln.size for ln in layout.lines if ln.field == "title") >= cards.HOOK_STYLE.floor
     _assert_all_words_in_order(layout, spec)
     _assert_ink_inside(layout)
 
@@ -1743,7 +2028,8 @@ def test_a_hook_card_that_would_take_the_video_past_the_string_cap_is_left_out(m
     script = _hook_script()
     with_hook = _declared(_cards(script))
     today = _declared(_cards(_hook_script(video_features=["push_in"])))
-    assert with_hook == [HOOK, *today]
+    # the hook card adds the hook alone: its pill, footer and brand word are every lesson card's
+    assert set(with_hook) == {HOOK, *today} and len(with_hook) == len(today) + 1
     monkeypatch.setattr(cards, "ONSCREEN_TEXT_MAX", len(today))          # one string short of the hook card
     specs = _cards(script)
     assert [s.kind for s in specs] == ["text", "text", "text", "disclaimer"] and _declared(specs) == today
@@ -1776,7 +2062,7 @@ def test_a_template_with_data_card_frozen_draws_its_post_image_in_place_of_the_c
     assert cards.opens_on_hook_card(specs) and specs[-1].end_cta == cards.CTA
     image = nl.template_image_for_script(script, table)
     assert specs[at] == cards.CardSpec("data", image=image)
-    assert cards.onscreen_strings(specs[at]) == list(image.strings)
+    assert cards.onscreen_strings(specs[at]) == [*image.strings, cards.BRAND_ROW_WORD]
     texts = [v for kind, _path, v in nl.walk(script["image_spec"], table) if kind == "text"]
     if resolved:
         assert list(image.strings) == list(dict.fromkeys(texts))            # a verified logo adds no name
@@ -1786,7 +2072,8 @@ def test_a_template_with_data_card_frozen_draws_its_post_image_in_place_of_the_c
     assert {_TPL_CARDS[-1]["title"], _TPL_CARDS[-1]["body"]} <= set(drawn)
     assert set(drawn) <= _server_allowed(script) and _TPL_FOOTER in drawn
     unfrozen = _server_allowed(_data_script(video_features=["push_in"]))
-    assert not {_TPL_FOOTER, *_TPL_IMAGE_SPEC["lines"]} & unfrozen           # allowed only while frozen
+    assert not set(_TPL_IMAGE_SPEC["lines"]) & unfrozen                     # allowed only while frozen
+    assert _TPL_FOOTER in unfrozen                                           # news-v23: every template card's footer
     cards.check_glyphs(specs, FONT)
     layout = cards.layout_card(specs[at], font_path=FONT, layout_engine="basic")
     assert layout.kind == "data:spotlight" and nl.illegible_lines(layout) == []
@@ -1796,16 +2083,17 @@ def test_a_template_with_data_card_frozen_draws_its_post_image_in_place_of_the_c
     assert not _pure_page(im, (cards.SAFE_X[0], cards.TEXT_ZONE_Y[0], cards.SAFE_X[1], cards.TEXT_ZONE_Y[1]))
     cards._font.cache_clear()
     assert cards.render_card(specs[at], font_path=FONT, layout_engine="basic") == data            # deterministic
-    reds = [c for _n, c in im.getcolors(1 << 20) if c[0] - max(c[1], c[2]) > 40]
-    assert bool(reds) == resolved                       # the logo, unaltered, on its plate — nothing else is red
-    if not resolved:
-        off = [c for _n, c in im.getcolors(1 << 20) if not _on_palette(c)]
-        assert off == [], off[:5]
+    reds = [c for _n, c in im.getcolors(1 << 20) if _red(c)]
+    assert bool(reds) == resolved                       # the logo, unaltered, on its disc — nothing else is red
+    off = _off_look(im, exclude=[_brand_tile(), *(t[0] for t in layout.tiles)])
+    assert off == [], off[:5]
+    # a ceo_buys picture: its purchase figure GREEN (look.figure_tone)
+    assert {ln.fill for ln in layout.lines if ln.field == "figure"} == {look.GREEN}
 
 
 def _tall_headline_spec() -> Dict:
-    """The fixture's picture with a 600-character headline: it fits the card's text zone only from a step
-    where the chip is drawn under DATA_CARD_MIN_PX — no legible data card."""
+    """The fixture's picture with a 600-character headline: it does not fit the card's content zone at any step
+    (news-v23: every text floor is 22 px, so the data card fails on fit, never on legibility) — no data card."""
     spec = json.loads(json.dumps(_TPL_IMAGE_SPEC))
     spec["headline"] = " ".join(["Disclosed"] * 60)
     assert len(spec["headline"]) <= cards.MAX_STRING_CHARS
@@ -1814,7 +2102,7 @@ def _tall_headline_spec() -> Dict:
 
 
 @pytest.mark.parametrize("over, level, needle", [
-    ({"image_spec": _tall_headline_spec()}, logging.WARNING, "legibility"),
+    ({"image_spec": _tall_headline_spec()}, logging.WARNING, "does not fit"),
     ({"image_spec": {**_TPL_IMAGE_SPEC, "lines": ["Growth 🚀 ahead"]}}, logging.WARNING, "MissingGlyphs"),
     ({"image_spec": None}, logging.ERROR, "image_spec"),
     ({"image_footer": None}, logging.ERROR, "image_footer"),
@@ -1838,7 +2126,7 @@ def test_a_data_card_that_would_take_the_video_past_the_string_cap_is_left_out(m
     caplog.set_level(logging.WARNING, logger="marketing.cards")
     script = _data_script()
     with_data, today = _declared(_cards(script)), _declared(_cards(_data_script(video_features=["push_in"])))
-    assert len(with_data) > len(today)
+    assert set(with_data) - set(today)                                     # the picture's own lines
     monkeypatch.setattr(cards, "ONSCREEN_TEXT_MAX", len(with_data) - 1)
     specs = _cards(script)
     assert [s.kind for s in specs] == _TEXT_KINDS and len(_declared(specs)) == len(today)
@@ -1894,7 +2182,8 @@ def test_the_closing_hedge_card_stays_on_screen_when_the_web_names_the_fact_card
     counted"); the picture replaces the fact card it repeats, and each hedge keeps its whole line."""
     specs = _cards(_data_script())
     hedge = _TPL_CARDS[-1]
-    assert specs[-2] == cards.CardSpec("text", title=hedge["title"], body=hedge["body"])
+    assert specs[-2] == cards.CardSpec("text", title=hedge["title"], body=hedge["body"], pill=_OPENING["kicker"],
+                                       footer=_TPL_FOOTER)
     assert specs[_TPL_DATA_SLOT + 1].kind == "data"
 
 
@@ -1918,7 +2207,8 @@ def test_without_a_usable_slot_no_data_card_is_drawn_and_it_is_said(raw, level, 
     assert [s.kind for s in specs] == _TEXT_KINDS and cards.applied_data_card_slot(specs) is None
     said = [r for r in caplog.records if r.name == "marketing.cards" and "data_card_slot" in r.getMessage()]
     assert said and all(r.levelno == level for r in said) and needle in said[0].getMessage(), caplog.records
-    assert not {_TPL_FOOTER, *_TPL_IMAGE_SPEC["lines"]} & set(_declared(specs))   # nothing of the picture drawn
+    # nothing of the picture drawn (its footer is every template card's own short footer line: news-v23)
+    assert not set(_TPL_IMAGE_SPEC["lines"]) & set(_declared(specs)) and _TPL_FOOTER in _declared(specs)
 
 
 def test_a_slot_without_a_frozen_data_card_is_ignored(caplog):
@@ -1965,23 +2255,23 @@ def test_the_feature_cards_declare_what_the_server_allows_and_render_inside_the_
 
 _RAQM_FEATURE_CHECK = r"""
 import io, json, sys
-from PIL import Image
-from marketing import cards
+from PIL import Image, ImageChops
+from marketing import cards, look
 assert cards.raqm_available(), "no raqm"
 F = sys.argv[1]
+base = look.canvas(look.VIDEO_FRAME)
 for name in ("lesson", "template"):
     script = json.loads(sys.argv[2 if name == "lesson" else 3])
     specs = cards.cards_for_script(script, font_path=F, layout_engine="raqm")
     kinds = [s.kind for s in specs]
     assert (kinds[0] == "hook") if name == "lesson" else (kinds[script["data_card_slot"] + 1] == "data"), kinds
-    page = cards._rgb(cards.PAGE)
     for s in specs:
         a = cards.render_card(s, font_path=F, layout_engine="raqm")
         assert a == cards.render_card(s, font_path=F, layout_engine="raqm")
         im = Image.open(io.BytesIO(a)); im.load()
-        for box in [(0, 0, 1080, cards.TEXT_ZONE_Y[0]), (0, cards.TEXT_ZONE_Y[1], 1080, 1920),
-                    (0, 0, cards.SAFE_X[0], 1920), (cards.SAFE_X[1], 0, 1080, 1920)]:
-            assert im.crop(box).getextrema() == tuple((c, c) for c in page), (s.kind, box)
+        for box in [(0, 0, 1080, 140), (0, cards.TEXT_ZONE_Y[1], 1080, cards.CAPTION_BAND_Y[1]),
+                    (0, 1500, 1080, 1920), (0, 140, cards.SAFE_X[0], 1500), (cards.SAFE_X[1], 140, 1080, 1500)]:
+            assert ImageChops.difference(im.crop(box), base.crop(box)).getbbox() is None, (s.kind, box)
         assert cards.layout_card(s, font_path=F, layout_engine="raqm").engine == "raqm"
 print("RAQM-FEATURES-OK")
 """
@@ -2050,9 +2340,9 @@ def test_the_webs_own_read_back_draws_the_frozen_feature_cards(state, cta):
 # its font and engine, the opening derived by produce_video from the cards, push_in only when frozen.
 
 
-def _run_preview(monkeypatch, tmp_path, script):
-    """`marketing.preview.main` on `script`, with the narration (Kokoro, the AAC encode), the render and the
-    ffprobe faked: (the produce_video calls' keywords, report.json)."""
+def _run_preview(monkeypatch, tmp_path, script, *extra: str):
+    """`marketing.preview.main` on `script` (plus `extra` arguments), with the narration (Kokoro, the AAC encode),
+    the render and the ffprobe faked: (the produce_video calls' keywords, report.json)."""
     from marketing import preview, render, timings, voice
 
     calls: List[Dict] = []
@@ -2075,7 +2365,7 @@ def _run_preview(monkeypatch, tmp_path, script):
     monkeypatch.setattr(preview, "_ffprobe", lambda path: {})
     path = tmp_path / "script.json"
     path.write_text(json.dumps(script), encoding="utf-8")
-    assert preview.main([str(path), "--out", str(tmp_path / "out")]) == 0
+    assert preview.main([str(path), "--out", str(tmp_path / "out"), *extra]) == 0
     return calls, json.loads((tmp_path / "out" / "report.json").read_text(encoding="utf-8"))
 
 
@@ -2143,3 +2433,580 @@ def test_the_preview_never_falls_back_from_a_failed_push_in(monkeypatch, tmp_pat
     with pytest.raises(video.RenderFailed, match="zoompan"):
         preview.main([str(path), "--out", str(tmp_path / "out2")])
     assert len(calls) == 1 and calls[0]["push_in"] is True
+
+
+# ── workstream C (2026-11-16): the per-post ART on the template OPENING card — the cover ──────────────────────────
+#
+# Owner decisions 2026-11-15 ("Picture and video cover"; main lane "Video cover now"): a single-company template video
+# opens on a 920×518 band of the art at the top of the text zone, its ONE logo plate on the band's bottom edge, the
+# kicker, chip, figure and headline under it, and the code-owned "AI illustration" burned on the band. Pinned here:
+# everything stays in the zone (nothing in the caption band); the strings end with the label and the server allows
+# them; the plain opening card did not move a pixel; the FIT RATE over every real composed opening card of the art
+# series; and every way the art cannot be drawn keeps today's opening card with a WARNING — never CardOverflow.
+
+import hashlib  # noqa: E402
+
+np = pytest.importorskip("numpy")
+from app.services.marketing import company_news_rules as _R  # noqa: E402
+from app.services.marketing import news_templates as _T  # noqa: E402
+from app.services.marketing import post_art  # noqa: E402
+
+
+def _art_bytes(size=(1376, 774), shift: int = 0) -> bytes:
+    """A deterministic synthetic art: steel-blue stripes and a RED block in the middle (the palette checks bite)."""
+    from PIL import ImageDraw
+
+    w, h = size
+    im = Image.new("RGB", size, (40, 70, 110))
+    d = ImageDraw.Draw(im)
+    for x in range(shift % 40, w, 40):
+        d.line([(x, 0), (x, h)], fill=(90, 130, 170), width=3)
+    d.rectangle((w // 3, h // 4, 2 * w // 3, 3 * h // 4), fill=(220, 20, 20))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=90)
+    return buf.getvalue()
+
+
+def _art(tmp_path: Path, name: str = "art.jpg", **kw) -> "cards.ArtImage":
+    data = _art_bytes(**kw)
+    (tmp_path / name).write_bytes(data)
+    with Image.open(io.BytesIO(data)) as im:
+        w, h = im.size
+    return cards.ArtImage(sha256=hashlib.sha256(data).hexdigest(), path=str(tmp_path / name), width=w, height=h)
+
+
+def _art_opening(art, card=None, files=None) -> "cards.CardSpec":
+    plain = cards.opening_spec(card or _OPENING, cards.logo_table(_template_script(), files or {}))
+    return cards.CardSpec("opening", badge=plain.badge, label=plain.label, figure=plain.figure, title=plain.title,
+                          logos=plain.logos, art=art)
+
+
+def test_the_opening_art_geometry_stays_in_the_zone_at_every_step():
+    """news-v23 (the cover in the approved look, spot_insider.jpg's idea on 9:16): the band is the card's full width
+    at its very top — the brand row reads on its navy scrim — native 16:9; the logo disc (64-100 px radius) in its gold
+    ring on the band's bottom-left edge; the label a fixed pill at the band's bottom-right, clear of the disc; the
+    band ends far above the caption band, the text has the content zone under it."""
+    assert (cards.OPENING_ART_W, cards.OPENING_ART_H) == (cards.WIDTH, 608)
+    assert abs(cards.OPENING_ART_W / cards.OPENING_ART_H - 16 / 9) < 0.002
+    assert cards.OPENING_ART_H + cards.OPENING_ART_DISC.start + 300 < cards.TEXT_ZONE_Y[1] < cards.CAPTION_BAND_Y[0]
+    lw, lh = cards.art_label_size(FONT, "basic")
+    label_x0 = cards.WIDTH - 40 - lw
+    for step in range(cards.RAMP_STEPS + 1):
+        r = cards.OPENING_ART_DISC.size(step)
+        assert 64 <= r <= 100
+        assert CONTENT[0] + 12 + 2 * r + 12 < label_x0                  # the label never reaches the disc
+    assert lh + 28 < cards.OPENING_ART_H - BRAND_TOP - look.BRAND_TILE_PX  # nor the brand row
+    assert cards.ART_LABEL == tos.ART_LABEL and cards.ART_LABEL_PX >= 24
+    assert cards.ART_LABEL_FILL == look.NAVY_CHIP and cards.ART_LABEL_INK == look.WHITE
+
+
+@pytest.mark.parametrize("resolved", [False, True], ids=["wordmark", "logo"])
+def test_an_opening_card_with_art_draws_the_band_the_plate_on_its_edge_and_the_text_under_it(resolved, tmp_path):
+    files = {"GME": Path(_red_logo(tmp_path / "gme.png"))} if resolved else {}
+    art = _art(tmp_path)
+    spec = _art_opening(art, files=files)
+    layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+    band, label = layout.art_box, layout.label_box
+    assert band == (0, 0, cards.WIDTH, cards.OPENING_ART_H)
+    ((plate, logo),) = layout.tiles
+    r = (plate[2] - plate[0]) // 2
+    assert plate[3] - plate[1] == 2 * r == 2 * cards.OPENING_ART_DISC.size(layout.step) and logo.key == "GME"
+    assert abs((plate[1] + plate[3]) / 2 - band[3]) <= 8                       # on the band's bottom edge
+    assert plate[0] == CONTENT[0] + 12                                          # bottom-left
+    assert (label[2], label[3]) == (band[2] - 40, band[3] - 28) and cards._within(label, band)
+    assert not cards._overlap(label, plate)
+    by_field: Dict[str, List[str]] = {}
+    for ln in layout.lines:
+        by_field.setdefault(ln.field, []).extend(ln.text.split())
+    expected = {"badge": _OPENING["kicker"], "label": _OPENING["chip"], "figure": _OPENING["figure"],
+                "title": _OPENING["headline"].upper(), "art_label": cards.ART_LABEL, "brand": cards.BRAND_ROW_WORD}
+    if not resolved:
+        expected["wordmark:GME"] = "GameStop"
+    assert {f: " ".join(w) for f, w in by_field.items()} == expected
+    for ln in layout.lines:
+        if ln.field == "art_label":
+            assert cards._within(ln.ink, label)
+        elif ln.field.startswith("wordmark:"):
+            assert cards._within(ln.ink, plate)
+        elif ln.field in ("brand", "badge"):                                    # the brand row, on the band's scrim
+            assert cards._within(ln.ink, (cards.SAFE_X[0], BRAND_TOP - 10, cards.SAFE_X[1], CONTENT[1]))
+        else:                                                                    # under the band, above the captions
+            assert ln.ink[1] >= band[3] and ln.ink[3] <= cards.TEXT_ZONE_Y[1], (ln.field, ln.ink)
+            assert cards._within(ln.ink, (cards.SAFE_X[0], 0, cards.SAFE_X[1], cards.HEIGHT)), (ln.field, ln.ink)
+    data = cards.render_card(spec, font_path=FONT, layout_engine="basic")
+    im = _png(data)
+    shadow = band[3] + 44                                                        # the band's soft shadow
+    for name, box in {**{k: v for k, v in _OUTSIDE_ZONE.items() if k in (
+            "between the content zone and the caption band", "caption band", "the safe bottom")},
+            "left margin": (0, shadow, cards.SAFE_X[0], SAFE_BOTTOM),
+            "right margin": (cards.SAFE_X[1], shadow, cards.WIDTH, SAFE_BOTTOM)}.items():
+        assert _pure_page(im, box), f"opening with art: something was drawn in the {name} {box}"
+    px = np.asarray(im)
+    tile = np.asarray(cards.art_tile(art, band[2] - band[0], band[3] - band[1]))
+    mask = np.zeros(tile.shape[:2], dtype=bool)
+    mask[340:, :] = True                                                         # under the scrim
+    for b in (label, (plate[0] - 14, plate[1] - 14, plate[2] + 14, plate[3] + 14)):
+        mask[max(b[1], 0):min(b[3], band[3]), max(b[0], 0):b[2]] = False
+    assert (px[band[1]:band[3], band[0]:band[2]][mask] == tile[mask]).all()            # the band IS the art
+    assert (px[label[1] + 2, (label[0] + label[2]) // 2] == np.array(cards.ART_LABEL_FILL)).all()
+    # the disc is drawn OVER the band's edge: its white on both sides of the edge
+    assert tuple(px[band[3] - 4, plate[0] + 14]) == tuple(px[band[3] + 4, plate[0] + 14]) == (255, 255, 255)
+
+
+def test_the_art_cover_declares_the_label_last_and_the_server_allows_it(tmp_path):
+    art = _art(tmp_path)
+    spec = _art_opening(art)
+    plain = cards.opening_spec(_OPENING, cards.logo_table(_template_script()))
+    strings = cards.onscreen_strings(spec)
+    assert strings == [*cards.onscreen_strings(plain), cards.ART_LABEL]
+    allowed = (set(tos.opening_strings(_OPENING, _TPL_ENTRIES)) | set(tos.art_allowed(art.sha256))
+               | set(sch.VIDEO_BRAND_TEXT))
+    assert set(strings) <= allowed and cards.ART_LABEL not in tos.opening_strings(_OPENING, _TPL_ENTRIES)
+    assert tos.art_declaration_problem(art.sha256, art.sha256, strings) is None
+    assert tos.art_declaration_problem(None, art.sha256, cards.onscreen_strings(plain)) is None
+    # the glyph check covers the label: a face without one of its glyphs refuses the card
+    cards.check_glyphs([spec], FONT)
+
+
+#: The PLAIN opening card's bytes (Pillow 12.0.0, the basic engine) in the approved look (news-v23, cards/v6): a
+#: wordmark, a verified red logo, two companies. A cover without art must not move a pixel.
+#: Fidelity review 2026-11-20: re-pinned (the kit's chip box: size + 16 tall, its label 6 px under its top).
+#: Content round 2026-11-20: re-pinned for the two-tone split — both sample headlines have no gold tail and no boundary
+#: ("GameStop's CEO disclosed buying GameStop stock", "A filer reported two changes"), so each is one block with its
+#: last line gold (the half-of-the-words split is gone); the figure card itself did not move.
+#: Visual-fidelity round 2 (2026-11-20): re-pinned — the plate is the list covers' (r 86, a 24 px chip; it was r 110 /
+#: 30 px) and the content starts at the top under the brand row (it was centred ~170 px under it).
+_PLAIN_OPENING_GOLDEN = {
+    "opening:wm": "e74b639ef2f215384a6b253cfd1956cf0678d71ca13f2e92baf1eb08f941b693",
+    "opening:logo": "a1627a3b99dfe0c0b47a24db1f67f4a9c8273fa43c8b36e03af5e83a3040754a",
+    "opening:two": "3fe3284db93d84683538de8e98f123e4fa24a0fddac769fe15eda1c4e8cb3b6f",
+}
+
+
+@pytest.mark.skipif(PIL.__version__ != "12.0.0", reason="the golden bytes were measured on Pillow 12.0.0")
+def test_the_plain_opening_card_did_not_move_a_pixel(tmp_path):
+    two = {"kicker": "13F SEASON", "logos": ["GME", "NVDA"], "headline": "A filer reported two changes"}
+    logo = Path(_red_logo(tmp_path / "gme.png"))
+    got = {}
+    for name, card, files in (("opening:wm", _OPENING, {}), ("opening:logo", _OPENING, {"GME": logo}),
+                              ("opening:two", two, {})):
+        spec = cards.opening_spec(card, cards.logo_table(_template_script(), files))
+        got[name] = hashlib.sha256(cards.render_card(spec, font_path=FONT, layout_engine="basic")).hexdigest()
+    assert got == _PLAIN_OPENING_GOLDEN
+
+
+def test_fidelity2_a_plain_cover_uses_the_list_covers_plate_and_starts_under_the_brand_row():
+    """cover_13f_berkshire.jpg: the plate's disc r 86 in its gold ring, the ticker on a 24 px gold pill, the headline
+    from the content's top (~60 px under the brand row). The plain cover drew r 110 / 30 px and centred its block
+    (~170 px under the brand row). One plate on every cover: OPENING_DISC / OPENING_CHIP_STYLE are the list covers'
+    news_layouts.PLATE_DISC / CHIP_PX (two companies: × 0.75 each, as before)."""
+    from marketing import news_layouts as nl
+
+    assert cards.OPENING_DISC == nl.PLATE_DISC and cards.OPENING_CHIP_STYLE == nl.CHIP_PX
+    assert (cards.OPENING_DISC.size(0), cards.OPENING_CHIP_STYLE.size(0)) == (86, 24)
+    for card, n in ((_OPENING, 1), ({"kicker": "13F SEASON", "logos": ["GME", "NVDA"],
+                                    "headline": "A filer reported two changes"}, 2)):
+        spec = cards.opening_spec(card, cards.logo_table(_template_script()))
+        lay = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+        assert lay.step == 0
+        title = [ln for ln in lay.lines if ln.field == "title"]
+        assert title[0].y == look.VIDEO_FRAME.area[1]                             # never centred
+        assert {d.box[2] - d.box[0] for d in lay.discs} == {2 * (86 if n == 1 else int(round(86 * 0.75)))}
+        assert {ln.size for ln in lay.lines if ln.field == "label"} <= {24}
+
+
+def test_an_art_cover_is_deterministic_and_the_art_changes_it(tmp_path):
+    a, b = _art(tmp_path, "a.jpg"), _art(tmp_path, "b.jpg", shift=13)
+    one = cards.render_card(_art_opening(a), font_path=FONT, layout_engine="basic")
+    cards._font.cache_clear()
+    cards._fit_wordmark.cache_clear()
+    again = cards.render_card(_art_opening(a), font_path=FONT, layout_engine="basic")
+    other = cards.render_card(_art_opening(b), font_path=FONT, layout_engine="basic")
+    plain = cards.render_card(cards.opening_spec(_OPENING, cards.logo_table(_template_script())), font_path=FONT,
+                              layout_engine="basic")
+    assert one == again and len({one, other, plain}) == 3
+
+
+def test_off_the_band_and_the_plate_the_art_cover_is_the_brand_palette(tmp_path):
+    """Everything off the band (and its shadow), the disc with its ring and the label is the look's: the canvas,
+    a look colour or a blend — the red art lives only in the band."""
+    art = _art(tmp_path)
+    spec = _art_opening(art)
+    layout = cards.layout_card(spec, font_path=FONT, layout_engine="basic")
+    im = _png(cards.render_card(spec, font_path=FONT, layout_engine="basic"))
+    band = layout.art_box
+    plate = layout.tiles[0][0]
+    excluded = [(band[0], band[1], band[2], band[3] + 44), (plate[0] - 14, plate[1] - 14, plate[2] + 14, plate[3] + 14)]
+    assert _off_look(im, exclude=excluded) == []
+    px = np.asarray(im)
+    red = (px[..., 0] > 150) & (px[..., 1] < 90) & (px[..., 2] < 90)
+    assert red[:band[3]].any() and not red[band[3] + 44:].any()
+
+
+# The FIT RATE: every opening card the art series really compose — the templates' samples whose record gets art
+# (post_art.art_subject_for: the spotlights, money_map, congress_count, single-company ceo_buys / insider_buys /
+# earnings) and the widest spotlight records — laid out with art by the worker's own code.
+
+
+def _art_series_openings(monkeypatch) -> Dict[str, Dict]:
+    """The real composed covers the kept art code would draw on. Owner decision 2026-11-20 ("use it nowhere for now"):
+    no shipped series carries art, so the Money Map — the series the art cover was built for — is put back into the
+    art set for the test (test_marketing_post_art.keep_art_on_money_map): the worker's art cover keeps its measured
+    room for the day the owner turns it on."""
+    import test_marketing_news_layouts as NL
+    import test_marketing_news_templates as NT
+    from test_marketing_post_art import keep_art_on_money_map
+
+    keep_art_on_money_map(monkeypatch)
+
+    out: Dict[str, Dict] = {}
+    for name, factory, run_date in NT.SAMPLES:
+        rec = factory()
+        composed = _T.compose(rec, run_date=run_date, store_state="live", allow_x_url=False)
+        if post_art.art_subject_for(rec.series, composed, rec) is not None:
+            out[name] = composed
+    # the widest one-issuer insider covers as news-v23 composed them (frozen: owner decisions 2026-11-20 compose no
+    # insider art) — a stress test of the art cover's room the worker still draws for any art it is handed
+    for name, composed in NL._SPOTLIGHT_OUTPUTS.items():
+        if "worst" in name:
+            out[name] = composed
+    return out
+
+
+def _cover_step(composed: Dict, art, engine: str):
+    entries = [{"key": r["key"], "name": r["name"], "url": None, "sha256": None} for r in composed["logo_refs"]]
+    plain = cards.opening_spec(composed["opening_card"], cards.logo_table({"logos": entries}))
+    spec = cards.CardSpec("opening", badge=plain.badge, label=plain.label, figure=plain.figure, body=plain.body,
+                          title=plain.title, logos=plain.logos, art=art)
+    try:
+        return cards.layout_card(spec, font_path=FONT, layout_engine=engine).step
+    except cards.CardOverflow:
+        return None
+
+
+#: The measured steps (basic engine; news-v23, the look's cover: the art across the top 608 rows, the text under it):
+#: every real composed cover fits by step 9 — the Money Maps at 8-9 (2026-11-20: the picture's headline, the ticker chip
+#: and the figure's label under it inside its card; Costco 9 → 8), the rest at 6-7 — and so do the widest Form 4
+#: spotlights (12-15). The drop is the art leaving the cover only when it cannot fit at all (`_with_opening_art`:
+#: CardOverflow at step RAMP_STEPS). news-v23 (2026-11-19): neither 13F series draws art — the 13F spotlight is the
+#: ONE 13F list (`post_art.NEVER_ART_SERIES`), its cover the list itself — so its single-holding covers and their
+#: synthetic 60-character "W" filers left this corpus; and (the restyle's earnings table and Congress list, the same
+#: day) neither does the Congress Count nor earnings: each is ONE post of 2-4 companies whose cover is the list, so
+#: congress_accenture (step 11) and earnings_loss / earnings_profit (9 / 8) left it too. Owner decisions 2026-11-20 ("Drop
+#: it from insider posts"; every Form 4 post 3-5 companies): no insider post carries art — the one-company Form 4 covers
+#: and the insider spotlight's left the corpus; the Money Map is the one art series (its covers unchanged), and the
+#: frozen widest insider covers stay as the stress test.
+_COVER_STEPS_BASIC = {
+    "costco_money_map": 8, "rivian_money_map": 9, "comcast_money_map": 9, "coca_cola_money_map": 9,
+    "mcdonalds_money_map": 9, "amazon_money_map": 9,
+    "isp_worst_cluster": 13, "isp_worst_held": 12, "isp_worst_cost": 13, "isp_worst_words": 15,
+}
+#: Every real cover fits at this step or under (the ceiling the other layouts keep: never the floor sizes).
+COVER_ART_CEILING = cards.RAMP_STEPS - 2
+
+
+@pytest.mark.parametrize("engine", ["basic"] + (["raqm"] if cards.raqm_available() else []))
+def test_the_art_cover_fit_rate_over_every_real_composed_opening_card(engine, tmp_path, monkeypatch):
+    monkeypatch.setattr(_R, "members_elect_window", lambda day: False)
+    art = _art(tmp_path)
+    openings = _art_series_openings(monkeypatch)
+    steps = {name: _cover_step(composed, art, engine) for name, composed in openings.items()}
+    real = {n: s for n, s in steps.items() if "worst" not in n}
+    # anti-vacuity: every art series is in the corpus, and only single-company covers are
+    series = {openings[n]["series"] for n in real}
+    assert series == {"money_map"}, series                               # owner decisions 2026-11-20: the one art series
+    assert all(len(openings[n]["opening_card"]["logos"]) == 1 for n in steps)
+    assert len(real) == 6 and all(s is not None and s <= COVER_ART_CEILING for s in real.values()), real
+    fit = [n for n, s in steps.items() if s is not None]
+    assert len(fit) == 10 and len(steps) == 10, steps                  # the pinned fit rate: 10 of 10 (6 of 6 real)
+    if engine == "basic":
+        assert steps == _COVER_STEPS_BASIC, steps
+
+
+# news-v23 (2026-11-19): `test_the_longest_real_13f_covers_keep_their_art` pinned the 13F spotlight's single-holding
+# covers WITH art; that post is gone (the ONE 13F list, whose cover is the list and never takes art —
+# tests/test_marketing_news_layouts.py::test_the_list_cover_declares_only_what_the_server_allows_and_never_draws_art).
+
+
+def test_without_the_band_at_the_zones_top_no_real_cover_would_fit(tmp_path, monkeypatch):
+    """The band's height is a real bound (measured, anti-regression): were the art band 300 px taller, the text under
+    it would leave the content zone and NOT ONE real composed cover would fit even at the floor sizes."""
+    from marketing import card_layouts
+
+    monkeypatch.setattr(_R, "members_elect_window", lambda day: False)
+    monkeypatch.setattr(card_layouts, "OPENING_ART_H", cards.OPENING_ART_H + 300)
+    art = _art(tmp_path)
+    openings = _art_series_openings(monkeypatch)
+    assert all(_cover_step(c, art, "basic") is None for n, c in openings.items() if "worst" not in n)
+
+
+def _art_template_script(card=None):
+    return _template_script(**({"opening_card": card} if card is not None else {}))
+
+
+def test_a_cover_that_cannot_draw_its_art_is_todays_opening_card_with_a_warning(tmp_path, monkeypatch, caplog):
+    """Every way the art cannot go on the cover keeps the PLAIN opening card (byte for byte today's), with a WARNING
+    and the reason in the report — never CardOverflow, never a skipped day."""
+    import test_marketing_news_layouts as NL
+
+    art = _art(tmp_path)
+    plain_specs = cards.cards_for_script(_art_template_script(), font_path=FONT, layout_engine="basic")
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+
+    def run(script, a=art, **kw):
+        report: Dict = {}
+        specs = cards.cards_for_script(script, font_path=FONT, layout_engine="basic", art=a, report=report, **kw)
+        return specs, report.get("opening_art_skipped")
+
+    # no fit: a server-valid cover whose 165-character headline of 16-letter "W" words cannot sit under the band at the
+    # floor sizes (news-v23: the 13F spotlight's single-holding covers that played this part are gone; 2026-11-20: a
+    # headline with no boundary is ONE balanced block, fewer lines than its two halves took, so the 122-character Form 4
+    # worst of before now fits — this one names a second officer)
+    name = NL._w_name(32, 16)
+    worst = {"kicker": "FORM 4", "logos": ["WWWWA"], "figure": "+987.7M",
+             "headline": f"{NL._w_name(60, 16)}'s CEO and {NL._w_name(32, 16)}'s CFO disclosed buying {name} stock"}
+    entries = [{"key": "WWWWA", "name": name, "url": None, "sha256": None}]
+    assert tos.validate_opening_card(worst, tos.logo_keys(entries)) is None and len(worst["headline"]) == 165
+    script = _template_script(opening_card=worst, logos=entries)
+    specs, why = run(script)
+    assert why == "no_fit" and specs[0].art is None and cards.ART_LABEL not in cards.onscreen_strings(specs[0])
+    assert specs == cards.cards_for_script(script, font_path=FONT, layout_engine="basic")
+    # two companies
+    two = {"kicker": "13F SEASON", "logos": ["GME", "NVDA"], "headline": "A filer reported two changes"}
+    specs, why = run(_art_template_script(two))
+    assert why == "two_companies" and specs[0].art is None
+    # an unreadable art file
+    gone = _art(tmp_path, "gone.jpg")
+    Path(gone.path).unlink()
+    specs, why = run(_art_template_script(), a=gone)
+    assert (why, specs) == ("unreadable", plain_specs)
+    # a glyph of the label the face lacks
+    with monkeypatch.context() as mp:
+        mp.setattr(cards, "ART_LABEL", "AI illustration ☃")
+        specs, why = run(_art_template_script())
+    assert (why, specs) == ("missing_glyphs", plain_specs)
+    # the label would take the video past the string cap
+    n = len(dict.fromkeys(t for s in plain_specs for t in cards.onscreen_strings(s)))
+    with monkeypatch.context() as mp:
+        mp.setattr(cards, "ONSCREEN_TEXT_MAX", n)
+        specs, why = run(_art_template_script())
+    assert (why, specs) == ("too_many_strings", plain_specs)
+    # owner decision 2026-11-20: a Money Map LOSS year's cover is its costs card — never art on it (the server makes
+    # none: post_art `costs_cover`); the costs cover is kept
+    import test_marketing_news_templates as NT
+
+    loss = _T.compose(NT.rivian(), run_date=NT.THU, store_state="live", allow_x_url=False)
+    loss_script = dict(loss, look=cards.LOOK, logos=[{"key": r["key"], "name": r["name"], "url": None, "sha256": None}
+                                                     for r in loss["logo_refs"]])
+    specs, why = run(loss_script)
+    assert why == "costs_cover" and specs[0].art is None and specs[0].image is not None
+    assert specs == cards.cards_for_script(loss_script, font_path=FONT, layout_engine="basic")
+    warnings_ = [r.getMessage() for r in caplog.records if "no art on the opening card" in r.getMessage()]
+    assert len(warnings_) == 6
+    assert set(cards.OPENING_ART_SKIP_REASONS) == {"two_companies", "missing_glyphs", "no_fit", "unreadable",
+                                                   "too_many_strings", "costs_cover"}
+    # …and when it CAN be drawn: the opening card carries it, nothing else changes
+    specs, why = run(_art_template_script())
+    assert why is None and specs[0].art == art and specs[1:] == plain_specs[1:]
+    assert cards.cards_for_script(_art_template_script(), font_path=FONT, layout_engine="basic") == plain_specs
+
+
+def test_the_art_arguments_are_checked_and_a_lesson_never_draws_art(tmp_path, caplog):
+    art = _art(tmp_path)
+    with pytest.raises(ValueError, match="font_path"):
+        cards.cards_for_script(_art_template_script(), art=art)
+    with pytest.raises(TypeError):
+        cards.cards_for_script(_art_template_script(), font_path=FONT, art="art.jpg")
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    lesson = _script()
+    assert cards.cards_for_script(lesson, font_path=FONT, art=art) == cards.cards_for_script(lesson)
+    assert any("lesson script" in r.getMessage() and "ignored" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("kwargs, exc", [
+    ({"kind": "text", "title": "t"}, ValueError),                                    # only an opening draws art
+    ({"kind": "disclaimer", "body": "d"}, ValueError),
+    ({"kind": "opening", "badge": "k", "title": "h", "logos": (cards.LogoArt("A", "Alpha"), cards.LogoArt("B", "Beta"))},
+     ValueError),                                                                    # one company only
+])
+def test_cardspec_draws_art_only_on_a_one_company_opening_card(kwargs, exc, tmp_path):
+    with pytest.raises(exc):
+        cards.CardSpec(**kwargs, art=_art(tmp_path))
+    with pytest.raises(TypeError):
+        cards.CardSpec("opening", badge="k", title="h", logos=(cards.LogoArt("A", "Alpha"),), art="art.jpg")
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"sha256": "A" * 64}, {"sha256": "a" * 63}, {"sha256": 7}, {"path": ""}, {"path": None},
+    {"width": 0}, {"height": -1}, {"width": True}, {"height": 774.0},
+])
+def test_art_image_refuses_what_it_cannot_be(kwargs):
+    base = {"sha256": "a" * 64, "path": "/tmp/x.jpg", "width": 1376, "height": 774}
+    with pytest.raises((ValueError, TypeError)):
+        cards.ArtImage(**{**base, **kwargs})
+
+
+def test_the_preview_draws_a_local_art_file_on_a_templates_cover_and_says_where(monkeypatch, tmp_path):
+    """`marketing.preview --art-file`: a local JPEG, checked like a downloaded one, drawn on the opening card (and on
+    a feature picture's band — this ceo_buys day's picture is `spotlight`, so not there); report.json says so. A bad
+    file is recorded, never raised; a lesson ignores it."""
+    art = _art(tmp_path)
+    calls, report = _run_preview(monkeypatch, tmp_path, _data_script(), "--art-file", art.path)
+    (kw,) = calls
+    assert kw["specs"][0].kind == "opening" and kw["specs"][0].art.sha256 == art.sha256
+    assert report["art"]["cover"] is True and report["art"]["picture"] is False and report["art"]["problem"] is None
+    assert cards.ART_LABEL in report["onscreen_text"]
+    bad = tmp_path / "bad.jpg"
+    bad.write_bytes(_art_bytes(size=(1600, 1600)))
+    calls, report = _run_preview(monkeypatch, tmp_path, _data_script(), "--art-file", str(bad))
+    assert calls[-1]["specs"][0].art is None and "16:9" in report["art"]["problem"]
+    calls, report = _run_preview(monkeypatch, tmp_path, _hook_script(), "--art-file", art.path)
+    assert all(s.art is None for s in calls[-1]["specs"]) and "lesson" in report["art"]["problem"]
+
+
+def test_a_label_that_would_run_into_the_plate_is_no_fit_never_drawn_over_it(tmp_path, monkeypatch, caplog):
+    """Defence in depth, made to bite: a label pill as wide as most of the band would cover the disc at its left —
+    the cover does not fit (CardOverflow naming why), and cards_for_script keeps today's opening card."""
+    art = _art(tmp_path)
+    monkeypatch.setattr(cards, "art_label_size", lambda font_path, engine: (860, 44))
+    with pytest.raises(cards.CardOverflow, match="runs into"):
+        cards.layout_card(_art_opening(art), font_path=FONT, layout_engine="basic")
+    report: Dict = {}
+    caplog.set_level(logging.WARNING, logger="marketing.cards")
+    specs = cards.cards_for_script(_art_template_script(), font_path=FONT, layout_engine="basic", art=art,
+                                   report=report)
+    assert specs[0].art is None and report == {"opening_art_skipped": "no_fit"}
+
+
+# ── news-v23 fix round (2026-11-19) ─────────────────────────────────────────────────────────────────────────────────
+
+
+def _lesson_layout(paragraphs, footer=None, **over):
+    script = _image_script(image_post={"title": IMG_TITLE, "paragraphs": list(paragraphs)},
+                           image_footer=footer or cards.LESSON_FOOTER, **over)
+    spec = cards.image_for_script(script)
+    return spec, cards.layout_image(spec, font_path=FONT, layout_engine="basic")
+
+
+@pytest.mark.parametrize("paragraphs", [IMG_PARAGRAPHS, IMG_PARAGRAPHS[:2],
+                                        ("Short one.", "A much longer paragraph that takes more lines to say what it "
+                                         "needs to say about the business and its owners.", "Mid-length one here.")])
+def test_the_lesson_picture_cards_are_equal_and_fill_the_room(paragraphs):
+    """mock_lesson.lesson: ONE warm card per paragraph, all the same height, from the title + 34 to the footer − 34,
+    each paragraph centred in its card; a gold dot (r 16) at the card's left + 34, centred on it; the dots joined by
+    rail segments that stop 10 px short of each. The worker sized each card to its text and centred the stack
+    (floating cards of unequal height, a 13 px dot, one rail through the dots)."""
+    from marketing import card_layouts as cl
+
+    _spec, layout = _lesson_layout(paragraphs)
+    boxes = sorted((r.box for r in layout.rects if r.fill == look.CARD), key=lambda b: b[1])
+    assert len(boxes) == len(paragraphs)
+    heights = {b[3] - b[1] for b in boxes}
+    assert max(heights) - min(heights) <= 1                                  # equal (rounding)
+    title_bottom = max(ln.ink[3] for ln in layout.lines if ln.field == "title")
+    # from just under the title (34 px under its last line's descender foot — the mock's card top is y 356 under the
+    # same two-line 80 px title) …
+    assert cl.LESSON_CARDS_TOP_GAP <= boxes[0][1] - title_bottom <= cl.LESSON_CARDS_TOP_GAP + 0.3 * 80
+    if len(paragraphs) == 3 and paragraphs == IMG_PARAGRAPHS:
+        assert abs(boxes[0][1] - 356) <= 4
+    assert boxes[-1][3] == pytest.approx(layout.footer_top - cl.LESSON_CARDS_BOTTOM_GAP, abs=1)   # … to the footer
+    for i, box in enumerate(boxes):
+        ink = [ln.ink for ln in layout.lines if ln.field == f"paragraph{i}"]
+        top, bot = min(b[1] for b in ink), max(b[3] for b in ink)
+        mid = (box[1] + box[3]) / 2
+        assert abs((top + bot) / 2 - mid) <= 14                              # centred in its card
+    dots = sorted(layout.ellipses, key=lambda e: e.box[1])
+    assert len(dots) == len(paragraphs)
+    for d, box in zip(dots, boxes):
+        assert d.box[2] - d.box[0] == 2 * cl.LESSON_DOT_R and d.box[0] == box[0] + cl.LESSON_DOT_X
+        assert abs((d.box[1] + d.box[3]) / 2 - (box[1] + box[3]) / 2) <= 1
+    rails = sorted((r.box for r in layout.rects if r.fill == cl.LESSON_RAIL), key=lambda b: b[1])
+    assert len(rails) == len(paragraphs) - 1
+    for rail, a, b in zip(rails, dots, dots[1:]):
+        assert rail[1] - a.box[3] == pytest.approx(cl.LESSON_RAIL_CLEAR, abs=1)
+        assert b.box[1] - rail[3] == pytest.approx(cl.LESSON_RAIL_CLEAR, abs=1)
+
+
+def test_the_lesson_paragraphs_shrink_before_the_title_does():
+    """mock_lesson: the paragraphs' size steps down (46 → 30) to fit the equal cards before anything else; the title
+    keeps 80 px."""
+    long = ["Some days he is gloomy and names a very low price for everything the business owns and earns. " * 2] * 3
+    spec, layout = _lesson_layout([p.strip()[:219] for p in long])
+    assert layout.step == 0 and {ln.size for ln in layout.lines if ln.field == "title"} == {80}
+    sizes = {ln.size for ln in layout.lines if ln.field.startswith("paragraph")}
+    assert len(sizes) == 1 and 30 <= sizes.pop() < cards.IMAGE_PARAGRAPH_STYLE.start
+
+
+# the look's strings only from a news-v23 web — `look` on the read-back (finding: a new worker on an old web 422'd)
+
+def test_the_look_constants_mirror_the_server():
+    from app.schemas import marketing as sch
+
+    assert cards.LOOK == sch.READBACK_LOOK == "news-v23"
+    assert "look_v23" in sch.WORKER_CAPABILITIES
+    assert cards.new_look({"look": cards.LOOK}) and not cards.new_look({}) and not cards.new_look({"look": "news-v22"})
+    assert not cards.new_look(None) and not cards.new_look({"look": True})
+
+
+def _old_web(script):
+    out = dict(script)
+    out.pop("look", None)
+    return out
+
+
+def test_a_lesson_from_an_older_web_draws_no_kicker_no_footer_and_no_word_on_its_picture():
+    """An older web (news-v22 or a rollback) refuses LESSON_KICKER and the lesson footer on every video card, and
+    "Caydex" and LESSON_KICKER on the picture — each a 422 that failed the whole render. Without `look`, none is drawn
+    or declared: a video draws only its own strings and the brand word (VIDEO_BRAND_TEXT on every web)."""
+    old = _old_web(_image_script(image_footer="Educational only · not investment advice · Written with AI assistance"
+                                                " · Sep 29, 2026 · Caydex"))
+    specs = cards.cards_for_script(old)
+    assert specs and all(not s.pill and not s.footer for s in specs)
+    for s in specs:
+        drawn = cards.onscreen_strings(s)
+        assert cards.LESSON_KICKER not in drawn and cards.LESSON_FOOTER not in drawn
+    img = cards.image_for_script(old)
+    assert img.look is False
+    strings = cards.image_onscreen_strings(img)
+    assert cards.LESSON_KICKER not in strings and cards.BRAND_ROW_WORD not in strings
+    layout = cards.layout_image(img, font_path=FONT, layout_engine="basic")
+    assert not {"brand", "kicker"} & {ln.field for ln in layout.lines} and layout.pill is None
+    assert layout.brand is not None                                         # the tile (pixels) is still drawn
+    new = cards.cards_for_script(_image_script())
+    assert all(s.pill == cards.LESSON_KICKER for s in new)
+    assert {cards.LESSON_KICKER, cards.BRAND_ROW_WORD} <= set(cards.image_onscreen_strings(
+        cards.image_for_script(_image_script())))
+
+
+def test_a_template_from_an_older_web_draws_no_footer_on_its_cards_and_no_word_on_its_picture():
+    import test_marketing_news_layouts as NL
+    from marketing import news_layouts as nl
+
+    long_footer = ("Educational only · not investment advice · Source: SEC Form 4 · filed Nov 9–15, 2026 · Caydex · "
+                   "Not affiliated with anyone named")
+    script = _old_web(_template_script(image_footer=long_footer))
+    specs = cards.cards_for_script(script)
+    assert all(not s.footer for s in specs)
+    assert all(long_footer not in cards.onscreen_strings(s) for s in specs)
+    spec = dict(NL._rows_spec(), footer=long_footer)
+    image = nl.template_image_for_script({"authorship": "template", "image_spec": spec, "image_footer": long_footer,
+                                          "logos": NL._entries()}, NL._table())
+    assert image.look is False
+    layout = nl.layout_template(image, font_path=FONT, layout_engine="basic")   # the long footer still fits
+    assert "brand" not in {ln.field for ln in layout.lines}
+    assert cards.BRAND_ROW_WORD not in nl.drawn_strings(image, layout)
+    assert long_footer in nl.drawn_strings(image, layout)
+
+
+def test_the_video_brand_row_has_the_covers_sizes():
+    """cover_13f_berkshire.jpg: a 56 px tile, a 34 px word, a 28 px kicker pill (46 px tall) — the picture's 52 / 32 /
+    26 were used on every video card."""
+    layout = cards.layout_card(cards.CardSpec("text", title="Prices swing", body="Gloomy days, low quotes.",
+                                              pill=cards.LESSON_KICKER, footer=cards.LESSON_FOOTER),
+                               font_path=FONT, layout_engine="basic")
+    brand = [ln for ln in layout.lines if ln.field == "brand"]
+    pill = [ln for ln in layout.lines if ln.field == "pill"]
+    assert brand[0].size == 34 and pill[0].size == 28
+    assert layout.brand == (88, 140, 144, 196) and layout.pill[3] - layout.pill[1] == 46 and layout.pill[2] == 992
+    title = [ln for ln in layout.lines if ln.field == "title"]
+    assert title[0].x == layout.brand[0]                                     # the mark and the headline line up

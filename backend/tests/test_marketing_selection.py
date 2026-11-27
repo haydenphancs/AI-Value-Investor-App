@@ -53,8 +53,11 @@ from app.services.marketing.selection import (
 def _declared_post_weekdays(monkeypatch):
     """Batch 3: the posting days are the web setting MARKETING_POST_WEEKDAYS, read at CALL time — pin it to its
     declared default (Mon/Tue/Thu/Sat, pinned in the Batch 3 contract section below), so a developer's .env can
-    never move a golden pick. A test that wants another cadence sets its own."""
+    never move a golden pick. A test that wants another cadence sets its own. The spotlight lane (2026-11-15) is
+    pinned OFF the same way — its declared default — so `news_recent_limit` and every main-lane golden stay
+    today's; a spotlight test turns it on itself."""
     monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
+    monkeypatch.setattr(sel.settings, "MARKETING_SPOTLIGHT_ENABLED", False)
 
 
 def _pool(n: int, kind: str = "journey") -> List[str]:
@@ -495,6 +498,8 @@ KNOWN_TEMPLATE_IDS = {
     "myth_vs_fact": "A", "three_takeaways": "A", "case_story": "A", "question_hook": "A", "checklist": "A",
     "ceo_buys": "C", "insider_buys": "C", "thirteen_f": "C", "congress_count": "C",
     "company_stakes": "F", "earnings": "F", "money_map": "F", "theme_explainer": "F",
+    # 2026-11-15: the spotlight lane's single-company series (registered first, shipped with their code)
+    "insider_spotlight": "C", "thirteen_f_spotlight": "C",
 }
 
 
@@ -528,12 +533,18 @@ DROP_2A = frozenset({"ceo_buys", "insider_buys", "thirteen_f", "money_map"})
 DROP_2B = frozenset({"congress_count", "company_stakes", "earnings", "theme_explainer"})
 
 
-def test_every_series_has_shipped_since_drop_2b():
-    """Drop 2b ships the last four series in CODE: SHIPPED_SERIES is now every series. Production still
-    runs only what the per-series switch lists (its default is the 2a four — test_marketing_news_series_
-    switch.py pins that the 2b days stay off with it)."""
-    assert sel.SHIPPED_SERIES == DROP_2A | DROP_2B == frozenset(sel.SERIES_BY_ID)
-    assert not DROP_2A & DROP_2B
+#: The spotlight lane's single-company series (2026-11-15): registered with the lane, shipped with their templates.
+SPOTLIGHT = frozenset({"insider_spotlight", "thirteen_f_spotlight"})
+
+
+def test_every_series_has_shipped():
+    """Drop 2b shipped the last four main-lane series in CODE, and news-v22 (2026-11-15) the spotlight pair:
+    SHIPPED_SERIES is every registered series. Production still runs only what the per-series switch lists (its
+    default is the 2a four — test_marketing_news_series_switch.py pins that the 2b and spotlight days stay off
+    with it), and the spotlight pair only on the spotlight lane (`spotlight_plan_for`)."""
+    assert sel.SHIPPED_SERIES == DROP_2A | DROP_2B | SPOTLIGHT == frozenset(sel.SERIES_BY_ID)
+    assert SPOTLIGHT == sel.SPOTLIGHT_SERIES
+    assert not DROP_2A & DROP_2B and not (DROP_2A | DROP_2B) & SPOTLIGHT
     assert isinstance(sel.SHIPPED_SERIES, frozenset)
 
 
@@ -654,12 +665,13 @@ def test_the_named_days_plans():
     assert sel.plan_for(date(2026, 11, 10)).chain[:2] == ("congress_count", "company_stakes")
     assert sel.plan_for(date(2026, 10, 13)).reason == "tuesday_congress"
     assert sel.plan_for(date(2026, 10, 20)) == sel.DayPlan(
-        False, ("company_stakes", "theme_explainer", "money_map", sel.LESSON), "tuesday")
+        False, ("company_stakes", "money_map", sel.LESSON), "tuesday")
+    # owner decisions 2026-11-20 ("if it's a quite week ... posting the theme"): the theme right after the Form 4 pair
     assert sel.plan_for(date(2026, 11, 16)) == sel.DayPlan(
-        False, ("ceo_buys", "insider_buys", "money_map", "theme_explainer", sel.LESSON), "monday")
+        False, ("ceo_buys", "insider_buys", "theme_explainer", "money_map", sel.LESSON), "monday")
     assert sel.plan_for(date(2026, 11, 19)).chain[0] == "earnings"
     assert sel.plan_for(date(2026, 11, 26)) == sel.DayPlan(
-        False, ("money_map", "theme_explainer", sel.LESSON), "thursday_off")
+        False, ("money_map", sel.LESSON), "thursday_off")
     assert sel.plan_for(date(2026, 11, 21)) == sel.DayPlan(False, (sel.LESSON,), "saturday")
     for rest in (date(2026, 11, 18), date(2026, 11, 20), date(2026, 11, 22)):
         assert sel.plan_for(rest) == sel.DayPlan(True)
@@ -686,13 +698,13 @@ def test_every_chain_ends_in_the_lesson_without_duplicates_for_ten_years():
 
 def test_enabled_chain_filters_by_class_shipping_and_order():
     tue = sel.plan_for(date(2026, 12, 8)).chain
-    assert tue == ("congress_count", "thirteen_f", "company_stakes", "theme_explainer", "money_map", sel.LESSON)
+    assert tue == ("congress_count", "thirteen_f", "company_stakes", "money_map", sel.LESSON)
     acf = frozenset({"A", "C", "F"})
     # every series has shipped: the default shipped set keeps the whole chain
     assert sel.enabled_chain(tue, acf) == tue
     assert sel.enabled_chain(tue, frozenset({"A", "C"})) == ("congress_count", "thirteen_f", sel.LESSON)
     assert sel.enabled_chain(tue, frozenset({"A", "F"})) == (
-        "company_stakes", "theme_explainer", "money_map", sel.LESSON)
+        "company_stakes", "money_map", sel.LESSON)
     assert sel.enabled_chain(tue, frozenset({"A"})) == (sel.LESSON,)
     # the shipped set (production passes the per-series switch) filters, keeping the chain's order
     assert sel.enabled_chain(tue, acf, shipped=DROP_2A) == ("thirteen_f", "money_map", sel.LESSON)
@@ -999,6 +1011,18 @@ def _legacy_plan_for(d: date) -> sel.DayPlan:
     return sel.DayPlan(False, (sel.LESSON,), "lesson_only")
 
 
+def _theme_moved(plan: sel.DayPlan) -> sel.DayPlan:
+    """A legacy plan as the theme moves leave it: news-v23 phase 3 (owner 2026-11-19: weekly theme posts lead
+    WEDNESDAY) took `theme_explainer` out of every other day's chain; owner decisions 2026-11-20 ("if it's a quite week
+    - if we don't have enough data, then use different topic like posting the theme") put it back on MONDAY right
+    after the Form 4 pair — so a quiet Form 4 week posts a theme, not the Money Map."""
+    chain = tuple(s for s in plan.chain if s != "theme_explainer")
+    if plan.reason == "monday":
+        cut = chain.index("insider_buys") + 1
+        chain = chain[:cut] + ("theme_explainer",) + chain[cut:]
+    return sel.DayPlan(plan.rest_day, chain, plan.reason)
+
+
 def _cadence(monkeypatch, raw: str) -> None:
     monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", raw)
 
@@ -1017,7 +1041,10 @@ def test_batch3_the_default_cadence_is_byte_identical_for_two_years(monkeypatch,
     while d <= end:
         assert sel.is_posting_day(d) is _legacy_is_posting_day(d), d
         assert sel.posting_ordinal(d) == _legacy_posting_ordinal(d), d
-        assert sel.plan_for(d) == _legacy_plan_for(d), d
+        # news-v23 phase 3 (owner 2026-11-19): the theme explainer leads WEDNESDAY; owner decisions 2026-11-20: and it
+        # follows Monday's Form 4 pair — on the default calendar (no Wednesday) every plan is the legacy plan with the
+        # theme moved (`_theme_moved`), nothing else
+        assert sel.plan_for(d) == _theme_moved(_legacy_plan_for(d)), d
         for name, pool in pools.items():
             recent = history[name][::-1][:sel.news_recent_limit()]
             got = sel.choose(pool, d, recent)
@@ -1084,7 +1111,7 @@ def test_batch3_the_switch_is_read_at_call_time(monkeypatch):
     _cadence(monkeypatch, _ALL_DAYS)
     posting, ordinal, plan, pick = answers()
     assert (posting, ordinal) == (True, 44)       # 6 weeks of 7 days since EPOCH, plus Mon and Tue
-    assert plan == sel.DayPlan(False, ("earnings", "money_map", "theme_explainer", sel.LESSON), "wednesday_earnings")
+    assert plan == sel.DayPlan(False, ("theme_explainer", "earnings", "money_map", sel.LESSON), "wednesday_earnings")
     assert not pick.rest_day and pick.source_ref in pool and pick.posting_ordinal == 44
     # an explicit calendar beats the setting, both ways
     assert sel.plan_for(wed, POST_WEEKDAYS) == sel.DayPlan(True) and not sel.is_posting_day(wed, POST_WEEKDAYS)
@@ -1124,11 +1151,13 @@ def test_batch3_the_seven_day_calendar(monkeypatch):
     Sunday runs the Money Map tail ALWAYS — never earnings (it leads Wed/Thu/Fri); Saturday is the lesson alone;
     Monday, Tuesday and Thursday plan exactly as on the default calendar. Ten years, every chain ending once in the
     lesson, no rest day, never the `lesson_only` guard."""
-    tail = ("money_map", "theme_explainer", sel.LESSON)
+    tail = ("money_map", sel.LESSON)
     _cadence(monkeypatch, _ALL_DAYS)
-    assert sel.plan_for(date(2026, 11, 4)) == sel.DayPlan(False, ("earnings",) + tail, "wednesday_earnings")
+    # news-v23 phase 3: Wednesday LEADS with the weekly theme post, earnings right after it while in season
+    assert sel.plan_for(date(2026, 11, 4)) == sel.DayPlan(False, ("theme_explainer", "earnings") + tail,
+                                                          "wednesday_earnings")
     assert sel.plan_for(date(2026, 11, 6)) == sel.DayPlan(False, ("earnings",) + tail, "friday_earnings")
-    assert sel.plan_for(date(2026, 12, 2)) == sel.DayPlan(False, tail, "wednesday_off")
+    assert sel.plan_for(date(2026, 12, 2)) == sel.DayPlan(False, ("theme_explainer",) + tail, "wednesday_off")
     assert sel.plan_for(date(2026, 12, 4)) == sel.DayPlan(False, tail, "friday_off")
     sunday = date(2026, 11, 8)
     assert sel.in_earnings_season(sunday) and sel.plan_for(sunday) == sel.DayPlan(False, tail, "sunday")
@@ -1138,11 +1167,22 @@ def test_batch3_the_seven_day_calendar(monkeypatch):
         assert not plan.rest_day and plan.chain[-1] == sel.LESSON and plan.chain.count(sel.LESSON) == 1, (d, plan)
         assert len(set(plan.chain)) == len(plan.chain) and plan.reason != "lesson_only", (d, plan)
         assert set(plan.chain) - {sel.LESSON} <= set(sel.SERIES_BY_ID), (d, plan)
-        if weekday in (0, 1, 3):
-            assert plan == sel.plan_for(d, POST_WEEKDAYS) == _legacy_plan_for(d), d
+        if weekday in (0, 1):
+            assert plan == sel.plan_for(d, POST_WEEKDAYS) == _theme_moved(_legacy_plan_for(d)), d
+        elif weekday == 3:
+            # news-v23 phase 3: the Thursday right after a season that ended on its Wednesday also leads with earnings
+            # (Wednesday posts the theme first; Thursday's 8-day window takes the reports it used to cover)
+            extra = not sel.in_earnings_season(d) and sel.in_earnings_season(d - timedelta(days=1))
+            want = _theme_moved(_legacy_plan_for(d))
+            if extra:
+                want = sel.DayPlan(False, ("earnings",) + tail, "thursday_earnings")
+                seen["thursday_after"] += 1
+            assert plan == want, d
+            assert sel.plan_for(d, POST_WEEKDAYS) == _theme_moved(_legacy_plan_for(d)), d
         elif weekday in (2, 4):
             season = sel.in_earnings_season(d)
-            assert plan.chain == (("earnings",) if season else ()) + tail, d
+            head = ("theme_explainer",) if weekday == 2 else ()
+            assert plan.chain == head + (("earnings",) if season else ()) + tail, d
             assert plan.reason == ("wednesday" if weekday == 2 else "friday") + ("_earnings" if season else "_off"), d
             seen["midweek_earnings"] += season
         elif weekday == 5:
@@ -1152,6 +1192,7 @@ def test_batch3_the_seven_day_calendar(monkeypatch):
             seen["sunday_in_season"] += sel.in_earnings_season(d)
     # not vacuous: the ten years hold hundreds of earnings Wednesdays/Fridays and in-season Sundays
     assert seen["midweek_earnings"] > 300 and seen["sunday_in_season"] > 150, seen
+    assert seen["thursday_after"] >= 5, seen       # the post-season Thursday exists in ten years (2026-11-26 …)
     # every weekday's plan at the extremes of `datetime.date` (no quarter end before year 1, no 13F calendar)
     for d in [date.min + timedelta(days=i) for i in range(7)] + [date.max - timedelta(days=i) for i in range(7)]:
         plan = sel.plan_for(d)
@@ -1286,3 +1327,618 @@ def test_batch3_switching_seven_days_back_to_four_keeps_todays_pool_whole(monkey
     lessons = _simulate_lessons(monkeypatch, 45, "A,C,F", None, flips)
     assert _repeats(lessons, 45), "the gap no longer bites: update the selection docstring and the docs"
     assert nearest_repeat(lessons) >= 35
+
+
+# ══ The spotlight lane (owner decision 2026-11-15: "Add a second daily post" on "Tue, Thu, Sat") ══════════
+#
+# A second run on a spotlight day. Pinned here: its switches are read at call time and fail CLOSED (an unreadable
+# weekday value is no day, never the default; a lane whose hours would run into the main run's is closed and
+# logged once); its calendar (`spotlight_plan_for`) never holds the lesson or a weekly Form 4 roundup and always
+# ends in SKIP, with the 13F spotlight leading the week's LAST spotlight day in season; `enabled_chain` keeps SKIP
+# as a terminal; and with the lane closed `news_recent_limit` and the main calendar are today's, byte for byte.
+
+_SPOT_DEFAULT = (1, 3, 5)          # tue, thu, sat — MARKETING_SPOTLIGHT_WEEKDAYS' declared default
+_ACF = frozenset({"A", "C", "F"})
+
+
+@pytest.fixture
+def fresh_spotlight_caches():
+    """The spotlight parse and the lane-closed ERROR are memoised per value (so they log once): every case starts
+    from empty caches."""
+    sel._parse_spotlight_weekdays_text.cache_clear()
+    sel._log_lane_closed.cache_clear()
+    sel._news_series_once.cache_clear()
+    yield
+    sel._parse_spotlight_weekdays_text.cache_clear()
+    sel._log_lane_closed.cache_clear()
+    sel._news_series_once.cache_clear()
+
+
+#: The per-series switch the spotlight tests run under (C0, 2026-11-16: whether a date is a spotlight day depends on
+#: it — a chain left with no series once the main lane's are dropped is no spotlight day): the 2a four plus the
+#: shipped spotlight pair, the switch-on order's production value. Pinned, so a developer's .env cannot move it.
+_SPOT_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight,thirteen_f_spotlight"
+
+
+def _lane(monkeypatch, *, on=True, days="tue,thu,sat", hour=10, attempts=6, run_hour=16, classes="A,C,F",
+          series=_SPOT_SERIES):
+    """Set the spotlight lane's settings on the shared settings object (patched in place, restored by monkeypatch)."""
+    for name, value in (("MARKETING_SPOTLIGHT_ENABLED", on), ("MARKETING_SPOTLIGHT_WEEKDAYS", days),
+                        ("MARKETING_SPOTLIGHT_HOUR_ET", hour), ("MARKETING_MAX_RUN_ATTEMPTS", attempts),
+                        ("MARKETING_RUN_HOUR_ET", run_hour), ("MARKETING_CONTENT_CLASSES", classes),
+                        ("MARKETING_NEWS_SERIES", series)):
+        monkeypatch.setattr(sel.settings, name, value)
+
+
+def _spot_records(caplog):
+    return [r for r in caplog.records if r.name == sel.logger.name]
+
+
+def test_spotlight_constants():
+    assert sel.SKIP == "skip" and sel.LESSON == "lesson" and sel.CHAIN_TERMINALS == {sel.LESSON, sel.SKIP}
+    for terminal in sel.CHAIN_TERMINALS:
+        assert terminal not in sel.SERIES_BY_ID and terminal not in sel.TEMPLATES_BY_ID
+        assert sel.content_class_of(terminal) is None
+    assert sel.SPOTLIGHT_SERIES == SPOTLIGHT and SPOTLIGHT <= set(sel.SERIES_BY_ID)
+    assert all(sel.SERIES_BY_ID[s].content_class == "C" for s in SPOTLIGHT)
+    assert sel.WEEKLY_ROUNDUP_SERIES == {"ceo_buys", "insider_buys"} <= set(sel.SERIES_BY_ID)
+    assert not sel.WEEKLY_ROUNDUP_SERIES & sel.SPOTLIGHT_SERIES
+    # news-v22 (2026-11-15): shipped with their templates — still off until MARKETING_NEWS_SERIES lists them
+    assert SPOTLIGHT <= sel.SHIPPED_SERIES
+    # the schema's lane vocabulary (migration 210)
+    assert mschemas.RUN_LANES == (mschemas.RUN_LANE_MAIN, mschemas.RUN_LANE_SPOTLIGHT) == ("main", "spotlight")
+    assert "nothing_qualified" in mschemas.SCRIPT_REJECT_REASONS
+
+
+@pytest.mark.parametrize("raw, expected, level", [
+    ("tue,thu,sat", (1, 3, 5), None),
+    (" SAT, tue ,THU ", (1, 3, 5), None),                      # weekday order, case and spaces folded
+    ("sun", (6,), None),
+    ("mon,mon", (0,), None),
+    (_ALL_DAYS, (0, 1, 2, 3, 4, 5, 6), None),
+    ("", (), None),                                            # blank = a deliberate "no day": closed, quiet here
+    (" , ", (), None),
+    ("tue,funday", (1,), logging.ERROR),                       # the unknown token dropped, the rest kept
+    ("funday", (), logging.ERROR),                             # nothing left: NO day — never the default
+    ("tuesday,saturday", (), logging.ERROR),                   # three-letter tokens only
+    ("tue;thu", (), logging.ERROR),                            # one unknown token — never half-parsed
+    (None, (), logging.ERROR),
+    (7, (), logging.ERROR),
+    ([], (), logging.ERROR),                                   # unhashable: never reaches the cache
+    (["tue"], (), logging.ERROR),
+])
+def test_spotlight_parse_weekdays_matrix_fails_closed(fresh_spotlight_caches, caplog, raw, expected, level):
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        got = sel.parse_spotlight_weekdays(raw)
+    assert got == expected and isinstance(got, tuple)
+    assert list(got) == sorted(set(got)) and all(0 <= d <= 6 for d in got)
+    assert got != _SPOT_DEFAULT or raw in ("tue,thu,sat", " SAT, tue ,THU ")     # never a silent default
+    records = _spot_records(caplog)
+    assert all("MARKETING_SPOTLIGHT_WEEKDAYS" in r.getMessage() for r in records)
+    assert max((r.levelno for r in records), default=None) == level, [r.getMessage() for r in records]
+
+
+def test_spotlight_a_bad_weekday_value_read_100_times_logs_once(fresh_spotlight_caches, caplog, monkeypatch):
+    _lane(monkeypatch, days="tue,funday")
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        for _ in range(100):
+            assert sel.spotlight_weekdays() == (1,)
+            assert sel.spotlight_lane_open() and sel.is_spotlight_day(date(2026, 11, 17))
+    assert [r.levelno for r in _spot_records(caplog)] == [logging.ERROR]
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        assert sel.parse_spotlight_weekdays(",".join(f"z{i}{'q' * 500}" for i in range(50))) == ()
+    assert all(len(r.getMessage()) < 400 for r in _spot_records(caplog))
+
+
+def test_spotlight_config_literal_equals_weekday_tokens_and_never_falls_back_to_its_default(caplog):
+    """config.py imports no app module, so `_spotlight_weekdays_fail_closed` carries an inline copy of WEEKDAY_TOKENS.
+    Read by AST and by behaviour: the declared default is Tue/Thu/Sat; junk, a non-string or no known day is "" with an
+    ERROR (no spotlight day — NEVER the default, unlike MARKETING_POST_WEEKDAYS); blank is "" quietly; and the
+    validator's output always parses to what the raw value parses to."""
+    import ast
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "config.py").read_text(encoding="utf-8")
+    fn = next(n for n in ast.walk(ast.parse(src))
+              if isinstance(n, ast.FunctionDef) and n.name == "_spotlight_weekdays_fail_closed")
+    literals = [ast.literal_eval(a.value) for a in ast.walk(fn)
+                if isinstance(a, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "known" for t in a.targets)]
+    assert literals == [sel.WEEKDAY_TOKENS]
+    default = Settings.model_fields["MARKETING_SPOTLIGHT_WEEKDAYS"].default
+    assert default == "tue,thu,sat" and sel.parse_spotlight_weekdays(default) == _SPOT_DEFAULT
+    for junk in ("funday", None, 3, ["tue"], "tue;thu"):
+        caplog.clear()
+        with caplog.at_level(logging.ERROR, logger="app.config"):
+            assert Settings(MARKETING_SPOTLIGHT_WEEKDAYS=junk).MARKETING_SPOTLIGHT_WEEKDAYS == "", junk
+        assert any("MARKETING_SPOTLIGHT_WEEKDAYS" in r.getMessage() for r in caplog.records
+                   if r.name == "app.config" and r.levelno >= logging.ERROR), junk
+    for blank in ("", "  ", ",,"):
+        caplog.clear()
+        with caplog.at_level(logging.ERROR, logger="app.config"):
+            assert Settings(MARKETING_SPOTLIGHT_WEEKDAYS=blank).MARKETING_SPOTLIGHT_WEEKDAYS == ""
+        assert not [r for r in caplog.records if r.name == "app.config" and r.levelno >= logging.ERROR], blank
+    assert Settings(MARKETING_SPOTLIGHT_WEEKDAYS="SAT, tue,thu").MARKETING_SPOTLIGHT_WEEKDAYS == "tue,thu,sat"
+    for raw in ("tue,thu,sat", "sun,mon", "tue,funday", "funday", "", " , ", _ALL_DAYS, "tue;thu"):
+        assert sel.parse_spotlight_weekdays(Settings(MARKETING_SPOTLIGHT_WEEKDAYS=raw).MARKETING_SPOTLIGHT_WEEKDAYS) == \
+            sel.parse_spotlight_weekdays(raw), raw
+
+
+def test_spotlight_settings_are_declared_fail_closed():
+    fields = Settings.model_fields
+    assert fields["MARKETING_SPOTLIGHT_ENABLED"].default is False
+    assert fields["MARKETING_SPOTLIGHT_HOUR_ET"].default == 10
+    # pydantic v2 keeps the bounds in FieldInfo.metadata: an hour outside 0-23 fails the deploy
+    bounds = {type(m).__name__: m for m in fields["MARKETING_SPOTLIGHT_HOUR_ET"].metadata}
+    assert bounds["Ge"].ge == 0 and bounds["Le"].le == 23
+    for bad in (-1, 24):
+        with pytest.raises(Exception):
+            Settings(MARKETING_SPOTLIGHT_HOUR_ET=bad)
+    # the declared defaults satisfy the hour rule with the declared run hour and attempts (10 + 6 <= 16)
+    assert sel.spotlight_hours_problem(fields["MARKETING_SPOTLIGHT_HOUR_ET"].default,
+                                       fields["MARKETING_MAX_RUN_ATTEMPTS"].default,
+                                       fields["MARKETING_RUN_HOUR_ET"].default) is None
+
+
+@pytest.mark.parametrize("hour, attempts, run_hour, ok", [
+    (10, 6, 16, True),            # the defaults: the last spotlight attempt ends by 16:00
+    (9, 6, 16, True),
+    (0, 1, 1, True),
+    (0, 6, 6, True),
+    (11, 6, 16, False),           # 17:00 > 16:00
+    (10, 7, 16, False),
+    (16, 6, 16, False),           # equal hours: the two lanes would race the cross-lane read
+    (18, 6, 16, False),           # after the main run: the run-health timing could not cover it
+    (23, 1, 23, False),
+    (10, 0, 16, False),           # no attempt at all
+    (10, -3, 12, False),          # a negative cap never opens a late hour
+    (24, 1, 23, False), (-1, 1, 16, False), (10, 6, 24, False),
+    (True, 6, 16, False), (10, True, 16, False), (10, 6, True, False),    # bools are not hours
+    ("10", 6, 16, False), (10.0, 6, 16, False), (None, 6, 16, False),
+])
+def test_spotlight_hours_problem_matrix(hour, attempts, run_hour, ok):
+    problem = sel.spotlight_hours_problem(hour, attempts, run_hour)
+    assert (problem is None) == ok, problem
+    if problem is not None:
+        assert isinstance(problem, str) and 0 < len(problem) < 300
+
+
+def test_spotlight_hours_problem_names_the_fix():
+    msg = sel.spotlight_hours_problem(11, 6, 16)
+    assert "MARKETING_SPOTLIGHT_HOUR_ET 11" in msg and "MARKETING_RUN_HOUR_ET 16" in msg and "10 or earlier" in msg
+    assert "no spotlight hour fits" in sel.spotlight_hours_problem(3, 6, 4)
+
+
+def test_spotlight_lane_off_reads_nothing_and_logs_nothing(fresh_spotlight_caches, caplog, monkeypatch):
+    """The switch off is the main lane's byte-for-byte state: whatever junk the other spotlight settings hold, the lane
+    is closed, no date is a spotlight day, and nothing is logged."""
+    for on in (False, None, "true", 1, "True"):          # only the bool True opens it
+        _lane(monkeypatch, on=on, days="funday", hour=23, attempts=0, classes="A")
+        with caplog.at_level(logging.DEBUG, logger=sel.logger.name):
+            assert sel.spotlight_on() is False and sel.spotlight_lane_open() is False
+            assert not any(sel.is_spotlight_day(date(2026, 11, 14) + timedelta(i)) for i in range(7))
+        assert _spot_records(caplog) == [], on
+
+
+def test_spotlight_lane_open_with_the_defaults_and_the_spotlight_days(fresh_spotlight_caches, caplog, monkeypatch):
+    _lane(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        assert sel.spotlight_on() and sel.spotlight_lane_open()
+        week = [date(2026, 11, 16) + timedelta(i) for i in range(7)]      # Mon .. Sun
+        assert [sel.is_spotlight_day(d) for d in week] == [False, True, False, True, False, True, False]
+    assert _spot_records(caplog) == []
+
+
+@pytest.mark.parametrize("kw, needle", [
+    ({"hour": 11}, "MARKETING_SPOTLIGHT_HOUR_ET 11"),
+    ({"hour": 16}, "MARKETING_RUN_HOUR_ET 16"),
+    ({"hour": 18}, "MARKETING_SPOTLIGHT_HOUR_ET 18"),
+    ({"attempts": 7}, "MARKETING_MAX_RUN_ATTEMPTS 7"),
+    ({"run_hour": 15}, "MARKETING_RUN_HOUR_ET 15"),
+    ({"attempts": 0}, "below 1"),
+    ({"hour": True}, "not an integer"),
+    ({"days": ""}, "names no day"),
+    ({"days": "funday"}, "names no day"),
+    ({"classes": "A"}, "no news class"),
+    ({"classes": "A,bogus"}, "no news class"),
+])
+def test_spotlight_lane_closed_is_an_error_logged_once(fresh_spotlight_caches, caplog, monkeypatch, kw, needle):
+    """The switch on but the lane cannot run (the hour rule, no day, no news class): CLOSED — every date is no
+    spotlight day — and ONE ERROR names why, however often the lane is asked (kick, claim, ledger-read sizing)."""
+    _lane(monkeypatch, **kw)
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        for _ in range(50):
+            assert sel.spotlight_lane_open() is False
+            assert not sel.is_spotlight_day(date(2026, 11, 17))
+            assert sel.news_recent_limit() == 240                 # the main lane's read, byte for byte
+    closed = [r for r in _spot_records(caplog) if "spotlight lane CLOSED" in r.getMessage()]
+    assert len(closed) == 1 and closed[0].levelno == logging.ERROR and needle in closed[0].getMessage(), \
+        [r.getMessage() for r in _spot_records(caplog)]
+
+
+def test_spotlight_the_lane_reopens_when_the_setting_is_fixed(fresh_spotlight_caches, monkeypatch):
+    _lane(monkeypatch, hour=11)
+    assert not sel.spotlight_lane_open()
+    monkeypatch.setattr(sel.settings, "MARKETING_SPOTLIGHT_HOUR_ET", 10)        # read at call time, nothing frozen
+    assert sel.spotlight_lane_open() and sel.is_spotlight_day(date(2026, 11, 19))
+
+
+def test_spotlight_news_recent_limit_follows_the_lane(fresh_spotlight_caches, monkeypatch):
+    """Closed (the default), the read is today's 240, byte for byte. Open, it also holds the spotlight's runs:
+    60 × (main days + spotlight days) — at most 840 (seven + seven), under PostgREST's ~1,000-row page."""
+    assert sel.news_recent_limit() == 240                                   # the autouse fixture: lane off
+    _lane(monkeypatch, on=False)
+    assert sel.news_recent_limit() == 240
+    _lane(monkeypatch)
+    assert sel.news_recent_limit() == 420 == sel.RECENT_WINDOW * (4 + 3)
+    _lane(monkeypatch, days="sat")
+    assert sel.news_recent_limit() == 300
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", _ALL_DAYS)
+    _lane(monkeypatch, days=_ALL_DAYS)
+    assert sel.news_recent_limit() == 840 < 1000
+    _lane(monkeypatch, days=_ALL_DAYS, hour=12)                            # closed by the hour rule
+    assert sel.news_recent_limit() == 420
+
+
+def _week_monday(d: date) -> date:
+    return d - timedelta(days=d.weekday())
+
+
+def test_spotlight_plan_for_the_q3_2026_season():
+    """The named days around the Q3 2026 13F wave (due Mon 2026-11-16, in season to Sun 2026-12-27): Saturday — the
+    week's last spotlight day — leads with the 13F spotlight; Tue/Thu run it second; off season it is gone."""
+    # owner decisions 2026-11-20: the theme right after the insider list (a quiet Form 4 window posts a theme)
+    lead = ("thirteen_f_spotlight", "insider_spotlight", "theme_explainer", "money_map", sel.SKIP)
+    season = ("insider_spotlight", "theme_explainer", "thirteen_f_spotlight", "money_map", sel.SKIP)
+    off = ("insider_spotlight", "theme_explainer", "money_map", sel.SKIP)
+    plan = lambda d: sel.spotlight_plan_for(d, _SPOT_DEFAULT)     # noqa: E731
+    assert plan(date(2026, 11, 14)) == sel.DayPlan(False, off, "spotlight")             # Sat, the wave not due yet
+    assert plan(date(2026, 11, 17)) == sel.DayPlan(False, season, "spotlight_13f")      # Tue
+    assert plan(date(2026, 11, 19)) == sel.DayPlan(False, season, "spotlight_13f")      # Thu
+    assert plan(date(2026, 11, 21)) == sel.DayPlan(False, lead, "spotlight_13f_lead")   # Sat
+    assert plan(date(2026, 12, 26)) == sel.DayPlan(False, lead, "spotlight_13f_lead")   # the season's last Saturday
+    assert plan(date(2026, 12, 29)) == sel.DayPlan(False, off, "spotlight")             # Tue, season over
+    for rest in (date(2026, 11, 16), date(2026, 11, 18), date(2026, 11, 20), date(2026, 11, 22)):
+        assert plan(rest) == sel.DayPlan(True)
+
+
+@pytest.mark.parametrize("weekdays", [(1, 3, 5), (0, 2, 4), (6,), (1,), (0, 1, 2, 3, 4, 5, 6), (5, 6)])
+def test_spotlight_chains_for_ten_years_never_hold_the_lesson_or_a_weekly_roundup(weekdays):
+    """Over ten years of dates and any weekday set: a spotlight day's chain is never the lesson and never a weekly
+    Form 4 roundup (their key rolls with the date — a spotlight day would re-post Monday's), always ends in exactly
+    one SKIP with no duplicate, names only registered series; and each in-season week has exactly one 13F-led day —
+    its last spotlight day — whenever that day is in season, and none otherwise."""
+    leads: Dict[date, List[date]] = {}
+    d = date(2026, 1, 1)
+    while d < date(2036, 1, 1):
+        plan = sel.spotlight_plan_for(d, weekdays)
+        if d.weekday() not in weekdays:
+            assert plan == sel.DayPlan(True), d
+        else:
+            chain = plan.chain
+            assert not plan.rest_day and chain[-1] == sel.SKIP and chain.count(sel.SKIP) == 1, (d, plan)
+            assert sel.LESSON not in chain and not set(chain) & sel.WEEKLY_ROUNDUP_SERIES, (d, plan)
+            assert len(set(chain)) == len(chain) and set(chain[:-1]) <= set(sel.SERIES_BY_ID), (d, plan)
+            in_season = sel.thirteen_f_season(d) is not None
+            assert ("thirteen_f_spotlight" in chain) == in_season, (d, plan)
+            assert chain[0] in ("insider_spotlight", "thirteen_f_spotlight") and "money_map" in chain, (d, plan)
+            if chain[0] == "thirteen_f_spotlight":
+                assert plan.reason == "spotlight_13f_lead" and in_season and d.weekday() == max(weekdays), d
+                leads.setdefault(_week_monday(d), []).append(d)
+            else:
+                assert plan.reason == ("spotlight_13f" if in_season else "spotlight"), (d, plan)
+        d += timedelta(days=1)
+    assert leads, "the 13F lead never happened — the rule is vacuous"
+    assert all(len(days) == 1 for days in leads.values()), leads
+    last = max(weekdays)
+    monday = _week_monday(date(2026, 1, 1))
+    while monday < date(2035, 12, 24):
+        day = monday + timedelta(days=last)
+        expected = [day] if sel.thirteen_f_season(day) is not None and date(2026, 1, 1) <= day else []
+        assert leads.get(monday, []) == expected, (monday, leads.get(monday))
+        monday += timedelta(days=7)
+
+
+def test_spotlight_plan_reads_the_setting_and_an_empty_set_rests_every_day(fresh_spotlight_caches, monkeypatch):
+    sat, fri = date(2026, 11, 21), date(2026, 11, 20)
+    _lane(monkeypatch)
+    assert sel.spotlight_plan_for(sat).reason == "spotlight_13f_lead" and sel.spotlight_plan_for(fri).rest_day
+    monkeypatch.setattr(sel.settings, "MARKETING_SPOTLIGHT_WEEKDAYS", "tue,fri")      # read at call time
+    assert sel.spotlight_plan_for(fri).reason == "spotlight_13f_lead" and sel.spotlight_plan_for(sat).rest_day
+    for empty in ("", "funday", None):
+        monkeypatch.setattr(sel.settings, "MARKETING_SPOTLIGHT_WEEKDAYS", empty)
+        assert all(sel.spotlight_plan_for(sat + timedelta(i)) == sel.DayPlan(True) for i in range(7)), empty
+        assert not any(sel.is_spotlight_day(sat + timedelta(i)) for i in range(7)), empty
+    # an explicit EMPTY calendar is consistent: no spotlight day
+    assert sel.spotlight_plan_for(sat, ()) == sel.DayPlan(True)
+
+
+@pytest.mark.parametrize("junk", [[7], [-1], [True], ["sat"], [5.0], [5, None]])
+def test_spotlight_an_explicit_calendar_that_is_not_weekdays_is_refused(junk):
+    with pytest.raises(ValueError, match="date.weekday"):
+        sel.spotlight_plan_for(date(2026, 11, 21), junk)
+
+
+def test_spotlight_the_main_calendar_never_names_a_spotlight_series_or_skips():
+    """The main lane is untouched: for ten years `plan_for` never holds a spotlight series or the SKIP terminal, and
+    still ends in the lesson."""
+    d = date(2026, 1, 1)
+    while d < date(2036, 1, 1):
+        chain = sel.plan_for(d).chain
+        assert not set(chain) & (sel.SPOTLIGHT_SERIES | {sel.SKIP}), (d, chain)
+        assert not chain or chain[-1] == sel.LESSON, (d, chain)
+        d += timedelta(days=1)
+
+
+def test_spotlight_enabled_chain_keeps_skip_as_its_terminal(monkeypatch):
+    """SKIP is a terminal exactly like LESSON: kept whatever the classes say, nothing after it is kept (so a lesson can
+    never follow it), and the same class switch and per-series switch gate the spotlight lane as the main one."""
+    in_season = sel.spotlight_plan_for(date(2026, 11, 19), _SPOT_DEFAULT).chain
+    lead = sel.spotlight_plan_for(date(2026, 11, 21), _SPOT_DEFAULT).chain
+    off = sel.spotlight_plan_for(date(2026, 11, 14), _SPOT_DEFAULT).chain
+    skip = sel.SKIP
+    for chain in (in_season, lead, off):
+        assert sel.enabled_chain(chain, frozenset({"A"})) == (skip,)
+        # the pair NOT listed in the per-series switch (its default): a spotlight day's chain is Money Map, the skip
+        assert sel.enabled_chain(chain, _ACF, shipped=frozenset({"money_map"})) == ("money_map", skip)
+        assert sel.enabled_chain(chain, frozenset({"A", "C"}), shipped=frozenset({"money_map"})) == (skip,)
+        assert sel.enabled_chain(chain, _ACF, shipped=frozenset()) == (skip,)       # MARKETING_NEWS_SERIES ""
+        assert sel.LESSON not in sel.enabled_chain(chain, _ACF)
+    # shipped (news-v22) and listed, the pair runs in the calendar's order
+    assert sel.SPOTLIGHT_SERIES <= sel.SHIPPED_SERIES
+    assert sel.enabled_chain(lead, _ACF) == lead
+    assert sel.enabled_chain(in_season, _ACF, shipped=frozenset({"insider_spotlight", "money_map"})) == (
+        "insider_spotlight", "money_map", skip)
+    assert sel.enabled_chain(in_season, frozenset({"A", "C"})) == ("insider_spotlight", "thirteen_f_spotlight", skip)
+    assert sel.enabled_chain(in_season, frozenset({"A", "F"})) == ("theme_explainer", "money_map", skip)
+    # nothing after the first terminal, whichever it is
+    assert sel.enabled_chain(("money_map", skip, sel.LESSON), _ACF) == ("money_map", skip)
+    assert sel.enabled_chain((skip, sel.LESSON), _ACF) == (skip,)
+    assert sel.enabled_chain((sel.LESSON, skip), _ACF) == (sel.LESSON,)
+    assert sel.enabled_chain(("money_map", skip, "money_map", skip), _ACF) == ("money_map", skip)
+
+
+def test_spotlight_the_main_lane_never_moves_when_the_lane_opens(fresh_spotlight_caches, monkeypatch):
+    """The main lane's calendar and lesson rotation do not depend on the spotlight lane: for two years of posting days,
+    every plan, enabled chain and rotation pick is the same with the lane off (its default) and open — only the
+    ledger-read SIZE grows (240 → 420), so the main lane's day is byte for byte today's while the lane is off."""
+    pool = _pool(9) + _pool(6, "money_moves")
+    days = _posting_days(date(2026, 10, 12), 2 * 52 * 4)
+
+    def answers():
+        history: List[str] = []
+        out = []
+        for d in days:
+            plan = sel.plan_for(d)
+            assert plan.chain[-1] == sel.LESSON and sel.SKIP not in plan.chain
+            pick = choose(pool, d, list(reversed(history)), templates=sel.LESSON_TEMPLATE_IDS)
+            history.append(pick.source_ref)
+            out.append((plan, sel.enabled_chain(plan.chain, _ACF), sel.posting_ordinal(d), pick))
+        return out
+
+    off = answers()
+    assert sel.news_recent_limit() == 240
+    _lane(monkeypatch)
+    assert sel.spotlight_lane_open()
+    assert answers() == off
+    assert sel.news_recent_limit() == 420
+
+
+# ── C0 (2026-11-16): the spotlight never competes for a series the MAIN lane would use that day ────────────────
+# The second review's major: a spotlight Money Map sent the main lane's same-day Money Map (rule (c)) to the lesson —
+# a second weekly lesson. `spotlight_chain` now drops every series of the main lane's enabled chain that day, and a
+# spotlight chain left with no series is NO spotlight day (`spotlight_day_problem`): the claim gate, the kick and the
+# digest share that one predicate.
+
+_DEFAULT_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map"   # MARKETING_NEWS_SERIES' declared default
+_OFF_SEASON_THU = date(2026, 12, 3)     # earnings off season (64 days after Sep 30), inside the Q3 13F season
+
+
+def test_c0_the_dates_the_review_names():
+    assert _OFF_SEASON_THU.weekday() == 3 and not sel.in_earnings_season(_OFF_SEASON_THU)
+    assert sel.thirteen_f_season(_OFF_SEASON_THU) == (2026, 3)
+    assert sel.plan_for(_OFF_SEASON_THU, POST_WEEKDAYS).chain == ("money_map", sel.LESSON)
+
+
+@pytest.mark.parametrize("series, day, chain, dropped", [
+    # the review's case: an off-season Thursday, the 2a default — the main chain is Money Map → lesson, so the
+    # spotlight's only series leaves: no series, no spotlight day
+    (_DEFAULT_SERIES, _OFF_SEASON_THU, (sel.SKIP,), ("money_map",)),
+    # the spotlight pair listed: the Thursday keeps the pair, never Money Map
+    (_SPOT_SERIES, _OFF_SEASON_THU, ("insider_spotlight", "thirteen_f_spotlight", sel.SKIP), ("money_map",)),
+    # Tuesday: the main tail holds Money Map (stakes → theme → Money Map → lesson)
+    (_SPOT_SERIES, date(2026, 11, 17), ("insider_spotlight", "thirteen_f_spotlight", sel.SKIP), ("money_map",)),
+    # Saturday: the main day is the lesson alone — Money Map stays the spotlight's fallback
+    (_DEFAULT_SERIES, date(2026, 11, 21), ("money_map", sel.SKIP), ()),
+    (_SPOT_SERIES, date(2026, 11, 21),
+     ("thirteen_f_spotlight", "insider_spotlight", "money_map", sel.SKIP), ()),
+    # Money Map pulled from the switch: nothing to drop, nothing left but the pair
+    ("insider_spotlight", _OFF_SEASON_THU, ("insider_spotlight", sel.SKIP), ()),
+    ("ceo_buys,insider_buys", _OFF_SEASON_THU, (sel.SKIP,), ()),
+])
+def test_c0_the_spotlight_chain_leaves_out_the_main_lanes_series(series, day, chain, dropped):
+    news = sel.parse_news_series(series)
+    got = sel.spotlight_chain(day, classes=_ACF, news_series=news, weekdays=_SPOT_DEFAULT)
+    assert got.chain == chain and got.main_lane == dropped
+    assert got.has_series == any(s != sel.SKIP for s in chain)
+    assert not set(got.chain) & sel.main_lane_series(day, _ACF, news)
+    assert got.plan == sel.spotlight_plan_for(day, _SPOT_DEFAULT)
+
+
+def test_c0_a_main_rest_day_or_a_main_chain_without_money_map_leaves_it_to_the_spotlight(monkeypatch):
+    news = sel.parse_news_series(_DEFAULT_SERIES)
+    # Thursday not a main posting day: the main lane has no chain, so nothing leaves the spotlight's
+    monkeypatch.setattr(sel.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,sat")
+    assert sel.main_lane_series(_OFF_SEASON_THU, _ACF, news) == frozenset()
+    assert sel.spotlight_chain(_OFF_SEASON_THU, classes=_ACF, news_series=news,
+                               weekdays=_SPOT_DEFAULT).chain == ("money_map", sel.SKIP)
+    # no class F: neither lane holds Money Map
+    assert sel.spotlight_chain(_OFF_SEASON_THU, classes=frozenset({"A", "C"}), news_series=news,
+                               weekdays=_SPOT_DEFAULT).chain == (sel.SKIP,)
+    # a spotlight rest day stays one
+    assert sel.spotlight_chain(date(2026, 12, 2), classes=_ACF, news_series=news,
+                               weekdays=_SPOT_DEFAULT) == sel.SpotlightChain(sel.DayPlan(True), ())
+
+
+@pytest.mark.parametrize("series, day, problem", [
+    (_DEFAULT_SERIES, _OFF_SEASON_THU, sel.SPOTLIGHT_NO_SERIES),
+    (_DEFAULT_SERIES, date(2026, 11, 17), sel.SPOTLIGHT_NO_SERIES),     # Tuesday: Money Map is the main tail's
+    (_DEFAULT_SERIES, date(2026, 11, 21), None),                        # Saturday: Money Map is the spotlight's
+    (_SPOT_SERIES, _OFF_SEASON_THU, None),
+    (_SPOT_SERIES, date(2026, 12, 2), sel.SPOTLIGHT_WEEKDAY_NOT_LISTED),
+    ("", date(2026, 11, 21), sel.SPOTLIGHT_NO_SERIES),                  # no news series at all
+])
+def test_c0_the_shared_predicate_names_why_a_day_is_not_a_spotlight_day(fresh_spotlight_caches, monkeypatch,
+                                                                        series, day, problem):
+    _lane(monkeypatch, series=series)
+    assert sel.spotlight_day_problem(day) == problem
+    assert sel.is_spotlight_day(day) is (problem is None)
+    assert sel.spotlight_chain_now(day).has_series is (problem is None)
+    _lane(monkeypatch, on=False, series=series)
+    assert sel.spotlight_day_problem(day) == sel.SPOTLIGHT_LANE_CLOSED and not sel.is_spotlight_day(day)
+
+
+def test_c0_the_predicate_reads_the_switches_now_and_never_crowds_the_log(fresh_spotlight_caches, caplog, monkeypatch):
+    """The claim gate, the digest and the run-health checks ask the predicate for many dates: a bad per-series token
+    is logged ONCE (memoised on the value), the shipped set is part of the memo key, and a change of the switch is
+    read at the next call (nothing frozen)."""
+    _lane(monkeypatch, series=_DEFAULT_SERIES + ",nonsense")
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        for i in range(100):
+            sel.is_spotlight_day(date(2026, 11, 16) + timedelta(days=i % 14))
+    bad = [r for r in _spot_records(caplog) if "MARKETING_NEWS_SERIES" in r.getMessage()]
+    assert len(bad) == 1 and bad[0].levelno == logging.ERROR
+    assert not sel.is_spotlight_day(_OFF_SEASON_THU)
+    monkeypatch.setattr(sel.settings, "MARKETING_NEWS_SERIES", _DEFAULT_SERIES + ",insider_spotlight")
+    assert sel.is_spotlight_day(_OFF_SEASON_THU)
+    monkeypatch.setattr(sel, "SHIPPED_SERIES", sel.SHIPPED_SERIES - {"insider_spotlight"})
+    assert not sel.is_spotlight_day(_OFF_SEASON_THU)
+
+
+def test_c0_with_the_news_classes_off_the_series_switch_is_never_read(fresh_spotlight_caches, caplog, monkeypatch):
+    """Classes "A" alone close the lane first (`spotlight_lane_open`); the chain helper itself never reads the
+    per-series switch then, exactly like the kick."""
+    _lane(monkeypatch, classes="A", series="nonsense")
+    with caplog.at_level(logging.WARNING, logger=sel.logger.name):
+        assert sel.spotlight_chain_now(date(2026, 11, 21)).chain == (sel.SKIP,)
+    assert not [r for r in _spot_records(caplog) if "MARKETING_NEWS_SERIES" in r.getMessage()]
+
+
+def test_c0_over_two_years_no_spotlight_chain_holds_a_series_of_the_main_chain_that_day():
+    """For every date of two years, with the production switch (every series but theme_explainer, plus the pair) and
+    the 2a default: the spotlight chain and the main chain share no series — so rule (c) cannot fire between two runs
+    of one day under one set of settings — and a spotlight chain with no series is exactly a non-spotlight day."""
+    prod = sel.parse_news_series("ceo_buys,insider_buys,thirteen_f,money_map,congress_count,company_stakes,earnings,"
+                                 "insider_spotlight,thirteen_f_spotlight")
+    for news in (prod, sel.parse_news_series(_DEFAULT_SERIES)):
+        d = date(2026, 11, 1)
+        while d < date(2028, 11, 1):
+            spot = sel.spotlight_chain(d, classes=_ACF, news_series=news, weekdays=_SPOT_DEFAULT)
+            main = sel.main_lane_series(d, _ACF, news)
+            assert not set(spot.chain) & main, (d, spot, main)
+            assert not spot.chain or spot.chain[-1] == sel.SKIP
+            d += timedelta(days=1)
+
+
+# ── news-v23 phase 3 (owner 2026-11-19): the weekly theme post leads WEDNESDAY; owner decisions 2026-11-20: it is
+# Monday's fallback right after the Form 4 pair, and no other main-lane day holds it ───────────────────────────────
+
+from app.services.marketing import company_news_rules as _R  # noqa: E402
+
+_WEDS = ("mon,tue,wed,thu,sat", _ALL_DAYS, "wed,thu", "wed,thu,fri")
+
+
+@pytest.mark.parametrize("raw", _WEDS + ("mon,tue,thu,sat", "mon,wed,sat"))
+def test_phase3_the_theme_runs_on_wednesday_only_leading_it_and_earnings_follows_in_season(monkeypatch, raw):
+    """The owner's weekly theme post: on every posting day of ten years the theme explainer LEADS a WEDNESDAY, with
+    earnings right after it while in season, then the Money Map tail and the lesson; and (owner decisions 2026-11-20,
+    "if it's a quite week - if we don't have enough data, then use different topic like posting the theme") it is
+    MONDAY's fallback right after the Form 4 pair — no other main-lane day holds it. A Monday theme is a quiet Form 4
+    week's post; the 28-day rule keeps any two theme posts different themes. Mutation-checked by hand (2026-11-20):
+    putting theme_explainer back into the Tuesday or Thursday chain, behind the Money Map on Monday, or earnings ahead
+    of it on Wednesday, turned this red."""
+    _cadence(monkeypatch, raw)
+    weds = mons = 0
+    for d, plan in _plans(date(2026, 1, 1), date(2036, 1, 1)):
+        if plan.rest_day:
+            continue
+        if d.weekday() == sel.THEME_WEEKDAY:
+            weds += 1
+            season = sel.in_earnings_season(d)
+            assert plan.chain == ("theme_explainer",) + (("earnings",) if season else ()) + ("money_map", sel.LESSON), d
+        elif d.weekday() == 0:
+            mons += 1
+            assert plan.chain == ("ceo_buys", "insider_buys", "theme_explainer", "money_map", sel.LESSON), d
+        else:
+            assert "theme_explainer" not in plan.chain, (d, plan)
+    assert (weds > 500) == ("wed" in raw), weds          # ten years of Wednesdays when listed, none otherwise
+    assert (mons > 500) == ("mon" in raw), mons
+
+
+def _old_earnings_led(d: date, days) -> bool:
+    """The calendar BEFORE phase 3 (the legacy copy's rule, D16): earnings led every in-season Wed / Thu / Fri the
+    calendar lists, with a 7-day window."""
+    return d.weekday() in (2, 3, 4) and d.weekday() in days and sel.in_earnings_season(d)
+
+
+@pytest.mark.parametrize("raw", _WEDS)
+def test_phase3_no_reporting_day_is_lost_now_that_wednesday_posts_the_theme(monkeypatch, raw):
+    """THE PROOF the owner's brief asks for. An earnings post on run day r covers the report days [r − n, r − 1] (n =
+    `R.earnings_window_days(r)`). Before phase 3 a Wednesday in season LED with earnings ([W − 7, W − 1]); now it leads
+    with the theme, so its earnings is only a fallback. For every calendar that lists Wednesday AND Thursday, over two
+    years, every report day an earnings-LED run of the OLD calendar covered is covered by an earnings-LED run of the new
+    one: Thursday's eighth window day (W − 7) takes the first day of the Wednesday's window, and the Thursday right after
+    a season that ended on its Wednesday leads too (2026-11-25 is such a Wednesday — the season's last day).
+    Mutation-checked by hand (2026-11-20): with Thursday's window at 7 days, or without the post-season Thursday, days
+    are lost (red)."""
+    _cadence(monkeypatch, raw)
+    days = sel.post_weekdays()
+    assert 2 in days and 3 in days
+    old: set = set()
+    new: set = set()
+    d = date(2026, 1, 1)
+    while d < date(2028, 1, 1):
+        if _old_earnings_led(d, days):
+            old.update(d - timedelta(days=i) for i in range(1, 8))
+        plan = sel.plan_for(d)
+        if not plan.rest_day and plan.chain[0] == "earnings":
+            new.update(d - timedelta(days=i) for i in range(1, _R.earnings_window_days(d) + 1))
+        d += timedelta(days=1)
+    lost = sorted(x for x in old - new if date(2026, 1, 15) <= x < date(2027, 12, 1))
+    assert not lost, lost[:10]
+    assert len(old) > 300
+
+
+def test_phase3_the_thursday_window_and_the_post_season_thursday_are_both_needed(monkeypatch):
+    """Not vacuous: with the old 7-day Thursday window, or without the Thursday after a Wednesday season end, the 7-day
+    calendar loses report days (the proof above would be red)."""
+    _cadence(monkeypatch, _ALL_DAYS)
+    days = sel.post_weekdays()
+
+    def lost(window, extra: bool) -> int:
+        old, new = set(), set()
+        d = date(2026, 1, 1)
+        while d < date(2028, 1, 1):
+            if _old_earnings_led(d, days):
+                old.update(d - timedelta(days=i) for i in range(1, 8))
+            leads = d.weekday() in (3, 4) and (sel.in_earnings_season(d) or (
+                extra and d.weekday() == 3 and sel.in_earnings_season(d - timedelta(days=1))))
+            if leads:
+                new.update(d - timedelta(days=i) for i in range(1, window(d) + 1))
+            d += timedelta(days=1)
+        return len(old - new)
+
+    assert lost(_R.earnings_window_days, True) == 0
+    assert lost(lambda d: 7, True) > 0
+    assert lost(_R.earnings_window_days, False) > 0
+    assert sel.earnings_leads(date(2026, 11, 26)) and not sel.in_earnings_season(date(2026, 11, 26))
+    assert _R.earnings_window_days(date(2026, 11, 26)) == 8 and _R.earnings_window_days(date(2026, 11, 27)) == 7
+
+
+def test_phase3_the_post_season_thursday_needs_a_wednesday_in_the_calendar(monkeypatch):
+    """On a calendar WITHOUT Wednesday nothing moved (no Wednesday earnings run to replace): the Thursday after the
+    season keeps its Money Map day — the default calendar's plans are the legacy plans minus the theme."""
+    _cadence(monkeypatch, "mon,tue,thu,sat")
+    thu = date(2026, 11, 26)
+    assert sel.plan_for(thu) == sel.DayPlan(False, ("money_map", sel.LESSON), "thursday_off")
+    _cadence(monkeypatch, "mon,tue,wed,thu,sat")
+    assert sel.plan_for(thu) == sel.DayPlan(False, ("earnings", "money_map", sel.LESSON), "thursday_earnings")

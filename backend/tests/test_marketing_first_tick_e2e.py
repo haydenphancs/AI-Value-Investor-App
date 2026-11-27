@@ -37,10 +37,23 @@ REAL `render.produce_video` — real card PNGs, captions and timeline — with o
 the fix round (2026-10-20) the data card lands on the card the read-back's `data_card_slot` names (the kept
 hedge cards stay on screen), and a hook that passes only beside its first line never becomes a hook card.
 
-The Batch 3 days (the last tests) list facebook and linkedin in MARKETING_VIDEO_EXTRA_PLATFORMS: the REAL write
+The Batch 3 days list facebook and linkedin in MARKETING_VIDEO_EXTRA_PLATFORMS: the REAL write
 freezes the extra video posts, the UNCHANGED worker never sees them and names only the primary posts, and the real
 server's create_posts appends the two video posts itself; with the switch empty (pinned by `World`, as the other two
 Batch 3 switches) the day is the switch-on day minus exactly the extras.
+
+The spotlight days (migration 210, the last tests) drive the worker's tick plan on a frozen ET clock: with the lane's
+switch off (pinned by `World`) the second claim of a day answers `not_scheduled` and nothing more is written; with it
+on, a Monday's 10:15 tick runs the spotlight run (Money Map — the single-company pair, shipped in news-v22, is not
+listed in the per-series switch: its default) and the
+16:15 tick the main run (CEO Buys), each under its own lane's storage paths and post keys, never sharing one.
+
+The post-art days (workstream C, the very last tests) turn MARKETING_ART_ENABLED on with the post-art suite's fake art
+clients: the REAL build makes and stores the art, the REAL worker downloads it by its content address and draws it —
+on the spotlight's `feature` picture band AND its video cover, on a main-lane Money Map's cover only — and declares it;
+the REAL server accepts exactly that, refuses a forged declaration 422, and create_posts notes it (the review line
+reads the note). With the switch off the day is the day of before, byte for byte — also when it goes off between the
+build and the read-back the render keeps (a real kill switch).
 """
 
 from __future__ import annotations
@@ -54,6 +67,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -69,6 +83,7 @@ from test_marketing_run_service import FakeSupabase
 _PKG = Path(__file__).resolve().parents[1] / "marketing"
 _TOKEN = "e2e-worker-token"
 _BACKEND = "backend.test"
+_ET = ZoneInfo("America/New_York")
 
 _PACKAGE = {
     "hook": "Meet your moody business partner.",
@@ -142,6 +157,15 @@ class World:
         monkeypatch.setattr(settings, "MARKETING_VIDEO_EXTRA_PLATFORMS", "")
         monkeypatch.setattr(settings, "MARKETING_POST_WEEKDAYS", "mon,tue,thu,sat")
         monkeypatch.setattr(settings, "MARKETING_INSTAGRAM_TRIAL_MODE", "off")
+        # Migration 210: the spotlight lane at its declared defaults (off, so its claim answers not_scheduled), and
+        # the worker's lane variables unset (both lanes, the default spotlight hour), whatever this machine says.
+        monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+        monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_WEEKDAYS", "tue,thu,sat")
+        monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_HOUR_ET", 10)
+        monkeypatch.setattr(settings, "MARKETING_RUN_HOUR_ET", 16)
+        monkeypatch.delenv("MARKETING_RUN_LANE", raising=False)
+        monkeypatch.delenv("MARKETING_SPOTLIGHT_HOUR_ET", raising=False)
+        monkeypatch.delenv("MARKETING_RUN_HOUR_ET", raising=False)
         monkeypatch.setattr(mod, "get_marketing_run_service", lambda: self.ledger)
 
         async def _no_writer(*_a, **_k):  # the accepted package is seeded; the model is never reached
@@ -496,8 +520,9 @@ def test_an_image_day_goes_from_the_frozen_script_to_image_posts_carrying_the_ve
     # The pointers ride on the run (the rendered checkpoint), and the server verifies them.
     assert run["metadata"]["image_asset_id"] == card["id"] and run["metadata"]["video_asset_id"] == video["id"]
     # What the card declares it drew: the accepted title + paragraphs + the code-owned footer, verbatim.
+    # news-v23: then the kicker pill's word and the brand row's (the server's LESSON_BRAND_TEXT), once each.
     assert card["metadata"]["onscreen_text"] == [_IMAGE_POST["title"], *_IMAGE_POST["paragraphs"],
-                                                 frozen["image_footer"]]
+                                                 frozen["image_footer"], "INVESTING LESSON", "Caydex"]
     assert card["content_type"] == "image/jpeg" and card["storage_path"].endswith(".jpg")
     # The object in the bucket IS that row: its size, its sha256, a 1080×1350 baseline JPEG.
     data = world.stored[card["storage_path"]]
@@ -687,12 +712,14 @@ class _StubNews:
 
         self.week = R.InsiderBuysWeek(series="ceo_buys", window_start=start, window_end=end, rows=(
             row("LOW", "Lowe's", 2_300_000.0, 9_812.0, end - __import__("datetime").timedelta(days=3)),
-            row("SBUX", "Starbucks", 410_000.0, 4_850.0, end - __import__("datetime").timedelta(days=2))))
+            row("SBUX", "Starbucks", 410_000.0, 4_850.0, end - __import__("datetime").timedelta(days=2)),
+            # owner decisions 2026-11-20 ("3 - 5 companies at once"): a Form 4 week holds three companies at least
+            row("NKE", "Nike", 250_000.0, 3_500.0, end - __import__("datetime").timedelta(days=1))))
         self.answer = SimpleNamespace(series="ceo_buys", records=(self.week,), skip_reason=None, rejections={})
         self.calls: List[str] = []
         self.logo_calls: List[str] = []
 
-    async def candidates(self, series, *, run_date, exclude, limit, deadline):
+    async def candidates(self, series, *, run_date, exclude, limit, deadline, **_kw):
         self.calls.append(series)
         assert series == "ceo_buys", series
         return self.answer
@@ -700,6 +727,19 @@ class _StubNews:
     async def fetch_logo(self, symbol, *, max_bytes, timeout):
         self.logo_calls.append(symbol)
         return _logo_png(symbol), "image/png"
+
+
+def _noted_news() -> "_StubNews":
+    """The default CEO-buys stub with its second row held INDIRECTLY: the roundup's picture then carries a NOTE ("Some
+    of the shares …") that its video cover does not draw. Since 2026-11-20 a Form 4 roundup's cover IS its picture's
+    headline and rows, so only such a string still tells a drawn picture (a data card) from the cover."""
+    import dataclasses
+
+    news = _StubNews(mrs.run_date_et(datetime.now(timezone.utc)))
+    rows = (news.week.rows[0], dataclasses.replace(news.week.rows[1], holding="indirect"), *news.week.rows[2:])
+    news.week = dataclasses.replace(news.week, rows=rows)
+    news.answer.records = (news.week,)
+    return news
 
 
 def _logo_png(symbol: str) -> bytes:
@@ -778,6 +818,8 @@ class TemplateWorld(World):
         monkeypatch.setattr(mrs.settings, "MARKETING_IMAGE_POSTS", True)
         monkeypatch.setattr(mrs.settings, "MARKETING_X_IMAGES", False)
         monkeypatch.setattr(mrs.settings, "MARKETING_X_ALLOW_URLS", False)
+        # news-v22: the first-line prefixes at their declared default (off), whatever this machine's environment says
+        monkeypatch.setattr(mrs.settings, "MARKETING_FIRST_LINE_PREFIX", False)
         if run_date is None:
             # Today, whatever weekday the suite runs on, is a Monday: CEO Buys first, the lesson last.
             monkeypatch.setattr(selection, "plan_for", lambda d: selection.DayPlan(
@@ -826,7 +868,7 @@ def test_a_template_day_goes_from_the_build_to_posts_held_for_review_through_the
     # the run mirror: the script's class and series
     assert (run["content_class"], run["template_id"], run["metadata"]["series"]) == ("C", "ceo_buys", "ceo_buys")
     # logos: fetched once each, stored content-addressed, then downloaded by the worker by their sha
-    assert world.news.logo_calls == ["LOW", "SBUX"]
+    assert world.news.logo_calls == ["LOW", "SBUX", "NKE"]         # owner decisions 2026-11-20: three at least
     assert sorted(world.logo_uploads) == sorted(lg["url"].split("/marketing-media/", 1)[1] for lg in out["logos"])
     assert all(lg["url"] and lg["sha256"] for lg in out["logos"])
     assert sorted(u for u in world.downloads if "/logos/" in u) == sorted(lg["url"] for lg in out["logos"])
@@ -838,7 +880,8 @@ def test_a_template_day_goes_from_the_build_to_posts_held_for_review_through_the
     assert video_call["push_in"] is False and "video_features" not in out
     (video,) = _ready(world, "video")
     allowed_video = (set(tos.opening_strings(out["opening_card"], out["logos"]))
-                     | {c[k] for c in out["cards"] for k in ("title", "body")} | {out["disclaimer_card"]})
+                     | {c[k] for c in out["cards"] for k in ("title", "body")} | {out["disclaimer_card"]}
+                     | {out["image_footer"]})                # news-v23: each card's short footer line
     drawn_video = set(video["metadata"]["onscreen_text"])
     assert out["disclaimer_card"] in drawn_video and out["opening_card"]["headline"] in drawn_video
     assert drawn_video - allowed_video <= set(mrs.VIDEO_BRAND_TEXT)
@@ -847,7 +890,7 @@ def test_a_template_day_goes_from_the_build_to_posts_held_for_review_through_the
     drawn_image = set(card["metadata"]["onscreen_text"])
     assert out["image_footer"] in drawn_image
     allowed_image = set(tos.image_strings(out["image_spec"], out["logos"])) | {out["image_footer"]}
-    assert drawn_image <= allowed_image
+    assert drawn_image <= allowed_image | {"Caydex"}          # news-v23: + the brand row's word (PICTURE_BRAND_TEXT)
     alt_only = {out["image_post"]["title"], *out["image_post"]["paragraphs"]} - allowed_image
     assert alt_only and not drawn_image & alt_only          # the alt text's own sentences are never drawn
     # posts: each platform in its frozen format, every one held for review, carrying what it is
@@ -889,6 +932,42 @@ def test_a_template_day_switched_off_before_its_posts_is_skipped_template_refuse
     assert world.posts() == [] and len(posts_calls) == 1
 
 
+#: What a news-v21 Company Weekly row stored as its picture footer (the long one the restyle replaced).
+_NEWS_V21_FOOTER = ("Educational only · not investment advice · Source: SEC Form 4 filings · Filed Nov 9–15, 2026 · "
+                    "Caydex · Not affiliated with anyone named")
+
+
+def test_final_a_template_accepted_under_another_version_is_skipped_at_its_first_media_registration(monkeypatch):
+    """Final review 2026-11-20 — the deploy window: a Company Weekly day accepted under news-v21 (today's web) and
+    resumed after the news-v23 deploy, before `assets_ready`. Its picture drew the stored LONG footer, which the
+    on-screen check refused 422 — `_record_failure`, the run `failed`, re-claimed and re-rendered up to six times with
+    failed-run alerts — for a day create_posts' `template_changed` would skip anyway. Here the real worker meets the
+    real app with the stored row turned into that news-v21 row before its first media registration: the server
+    answers 409 MARKETING_TEMPLATE_REFUSED and the worker closes the day `skipped` (template_refused) after ONE
+    registration, nothing registered, no post. Mutation-checked by hand (2026-11-20): with the server's version
+    check removed the run ended `failed` (the 422), and with the worker's branch removed it ended `failed` too."""
+    pytest.importorskip("PIL")
+    world = TemplateWorld(monkeypatch)
+    media: List[str] = []
+
+    def the_row_was_accepted_by_news_v21(request):
+        if request.method == "POST" and request.url.path.endswith("/assets"):
+            kind = json.loads(request.content or b"{}").get("kind")
+            if kind in ("card", "video"):
+                media.append(kind)
+                (script,) = world.fake.tables[mrs.SCRIPTS].rows
+                script["output"]["template_version"] = "news-v21"
+                script["output"]["image_footer"] = _NEWS_V21_FOOTER
+        return None
+
+    world.before = the_row_was_accepted_by_news_v21
+    assert world.worker.main() == 0
+    run = world._run_row()
+    assert run["status"] == "skipped" and run["metadata"]["skip_reason"] == "template_refused", run
+    assert media == ["card"]                                  # one registration: deterministic, never retried
+    assert not world.assets("card") and not world.assets("video") and world.posts() == []
+
+
 # ══ Drop 2b: a 2b day — the real worker against the real app, on the real calendar ══════════════════
 #
 # Shipped in code, the four 2b series run only once MARKETING_NEWS_SERIES lists them (default: off). Each
@@ -911,7 +990,7 @@ class _StubNews2b:
         self.calls: List[str] = []
         self.logo_calls: List[str] = []
 
-    async def candidates(self, series, *, run_date, exclude, limit, deadline):
+    async def candidates(self, series, *, run_date, exclude, limit, deadline, **_kw):
         from types import SimpleNamespace
 
         self.calls.append(series)
@@ -933,24 +1012,44 @@ def _2b_day(series: str):
     co = R.CompanyRef
     if series == "congress_count":      # the December Congress Count Tuesday (in the 13F season)
         day = date(2026, 12, 8)
-        return (R.CongressCount(series=series, company=co(symbol="CTSO", name="Contoso"), month="2026-11", members=4,
-                                fetched_on=day), day, "C", "spotlight", ["congress_count"])
+        # news-v23 (the restyle, 2026-11-19): ONE list of the month's 2-3 companies
+        counts = tuple(R.CongressCount(series=series, company=co(symbol=sym, name=name), month="2026-11",
+                                       members=members, fetched_on=day)
+                       for sym, name, members in (("CTSO", "Contoso", 4), ("FBKM", "Fabrikam", 2)))
+        return (R.CongressMonth(series=series, month="2026-11", fetched_on=day, counts=counts), day, "C", "rows",
+                ["congress_count"])
     if series == "company_stakes":      # the first stakes Tuesday, after the 13F season
         day = date(2026, 12, 29)
-        return (R.CompanyStake(series=series, stake_id="0a1b2c3d-4e5f-4a6b-8c7d-0000000e2e01",
-                               investor=co(symbol="FBKM", name="Fabrikam"), investee_name="Relecloud", investee=None,
-                               kind="private", value_usd=640_000_000.0, value_basis="invested", ownership_pct=None,
-                               as_of=date(2026, 10, 15), verified_on=date(2026, 12, 15),
-                               source_title="Relecloud Form S-1", background=None, listed_since=None,
-                               local_listing=None, is_new=True), day, "F", "pair", ["company_stakes"])
+        # news-v23 (owner 2026-11-19, "public only" + "add 1-3 more companies"): ONE investor's stakes in public
+        # companies — a `rows` list, its cover the list
+        investor = co(symbol="FBKM", name="Fabrikam")
+        rows = (R.CompanyStake(series=series, stake_id="0a1b2c3d-4e5f-4a6b-8c7d-0000000e2e01", investor=investor,
+                               investee_name="Relecloud", investee=co(symbol="RLCD", name="Relecloud"),
+                               kind="us_listed_off_13f", value_usd=640_000_000.0, value_basis="invested",
+                               ownership_pct=None, as_of=date(2026, 10, 15), verified_on=date(2026, 12, 15),
+                               source_title="Relecloud 8-K", background=None, listed_since=None,
+                               local_listing=None, is_new=True),
+                R.CompanyStake(series=series, stake_id="0a1b2c3d-4e5f-4a6b-8c7d-0000000e2e02", investor=investor,
+                               investee_name="Proseware", investee=co(symbol="PRSW", name="Proseware"),
+                               kind="on_13f_note", value_usd=310_000_000.0, value_basis="fair_value",
+                               ownership_pct=None, as_of=date(2026, 9, 30), verified_on=date(2026, 12, 15),
+                               source_title="Fabrikam 10-Q (quarter ended Sep 30, 2026)", background=None,
+                               listed_since=None, local_listing=None, is_new=True))
+        return (R.CompanyStakes(series=series, investor=investor, stakes=rows), day, "F", "rows", ["company_stakes"])
     if series == "earnings":            # the first 2b-3 Thursday (the January season)
         day = date(2027, 1, 14)
-        return (R.EarningsReport(series=series, company=co(symbol="NWTR", name="Northwind Traders"),
-                                 report_date=date(2027, 1, 12), period_end=date(2026, 12, 31), eps_actual=-0.05,
-                                 eps_estimate=-0.12, revenue_actual=551_900_000.0, revenue_estimate=543_600_000.0),
-                day, "F", "rows", ["earnings"])
-    # theme_explainer: a Thursday out of the earnings season — Money Map comes up empty first
-    day = date(2026, 11, 26)
+        # news-v23 (the restyle, 2026-11-19): ONE table of 2-4 companies
+        reports = (R.EarningsReport(series=series, company=co(symbol="TSPN", name="Tailspin Toys"),
+                                    report_date=date(2027, 1, 11), period_end=date(2026, 12, 31), eps_actual=1.42,
+                                    eps_estimate=1.3, revenue_actual=1_284_600_000.0,
+                                    revenue_estimate=1_251_300_000.0),
+                   R.EarningsReport(series=series, company=co(symbol="NWTR", name="Northwind Traders"),
+                                    report_date=date(2027, 1, 12), period_end=date(2026, 12, 31), eps_actual=-0.05,
+                                    eps_estimate=-0.12, revenue_actual=551_900_000.0,
+                                    revenue_estimate=543_600_000.0))
+        return (R.EarningsDay(series=series, reports=reports), day, "F", "rows", ["earnings"])
+    # theme_explainer (news-v23 phase 3): a Wednesday out of the earnings season — the theme leads its chain
+    day = date(2026, 12, 2)
     rows = (("CTSO", "Contoso", "Robotics systems", 0.62), ("FBKM", "Fabrikam", "Automation software", 0.48),
             ("NWTR", "Northwind Traders", "Warehouse systems", 0.71), ("TSPN", "Tailspin Toys", "Drones", 0.39),
             ("ADVW", "Adventure Works", "Field services", 0.55), ("PRSW", "Proseware", "Sensors", None),
@@ -958,7 +1057,134 @@ def _2b_day(series: str):
     members = tuple(R.ThemeMember(company=co(symbol=sym, name=name), top_segment=seg, top_segment_share=share,
                                   fiscal_year="2025" if seg else None) for sym, name, seg, share in rows)
     return (R.ThemeExplainer(series=series, slug="warehouse-robots", title="Warehouse robots", members=members,
-                             tickers_as_of=date(2026, 11, 16)), day, "F", "grid", ["money_map", "theme_explainer"])
+                             tickers_as_of=date(2026, 11, 16), angle="make_money", posted_on=day),
+            day, "F", "grid", ["theme_explainer"])
+
+
+def _theme_calendar(monkeypatch, series: str) -> None:
+    """news-v23 phase 3: the weekly theme post runs on Wednesday only — a posting day of the owner's production
+    calendar (documents/OWNER_TASKS.md), which the declared default (mon,tue,thu,sat) rests."""
+    if series == "theme_explainer":
+        from app.services.marketing import selection
+
+        monkeypatch.setattr(selection.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,wed,thu,sat")
+
+
+def test_phase3_the_market_value_angle_goes_from_the_build_to_posts_through_the_real_app(monkeypatch):
+    """news-v23 phase 3, angle 2 ("who's biggest", theme_biggest_power.jpg) end to end: a Wednesday, the REAL worker
+    (it declares theme_angles) is handed the `ranked` picture and the list cover, draws them, and the REAL server
+    accepts what each declares — every drawn string the stored spec's, the footer naming its market-data source — and
+    the day's posts are held for review. Fictional companies, invented values."""
+    pytest.importorskip("PIL")
+    from datetime import date
+
+    from app.services.marketing import company_news_rules as R
+    from app.services.marketing import selection
+    from app.services.marketing import template_onscreen as tos
+
+    co = R.CompanyRef
+    day = date(2026, 12, 2)
+    rows = (("CTSO", "Contoso", 182e9), ("FBKM", "Fabrikam", 96.4e9), ("NWTR", "Northwind Traders", 41e9),
+            ("TSPN", "Tailspin Toys", 12.7e9), ("ADVW", "Adventure Works", 3.9e9), ("LTWR", "Litware", 820e6))
+    record = R.ThemeExplainer(series="theme_explainer", slug="grid-builders", title="Grid builders",
+                              members=tuple(R.ThemeMember(company=co(symbol=s_, name=n), top_segment=None,
+                                                          top_segment_share=None, fiscal_year=None,
+                                                          market_value_usd=v) for s_, n, v in rows),
+                              tickers_as_of=date(2026, 11, 20), theme_size=7, angle="biggest", posted_on=day,
+                              values_as_of=date(2026, 12, 1))
+    _theme_calendar(monkeypatch, "theme_explainer")
+    assert selection.plan_for(day).chain[0] == "theme_explainer"
+    world = TemplateWorld(monkeypatch, news=_StubNews2b("theme_explainer", record), run_date=day,
+                          news_series=_EVERY_SERIES)
+    _theme_calendar(monkeypatch, "theme_explainer")
+    assert world.worker.main() == 0
+    run = world._run_row()
+    assert run["status"] == "media_ready" and run["stage"] == "assets_ready"
+    (script,) = world.fake.tables[mrs.SCRIPTS].rows
+    out = script["output"]
+    assert script["source_ref"] == "news:theme_explainer:grid-builders:biggest:2026-12-02"
+    assert out["image_spec"]["layout"] == "ranked" and len(out["image_spec"]["rows"]) == 6
+    assert out["image_footer"] == "Not investment advice · Source: company filings and market data"
+    card = _the_card(world)
+    drawn_image = set(card["metadata"]["onscreen_text"])
+    assert drawn_image <= set(tos.image_strings(out["image_spec"], out["logos"])) | {out["image_footer"], "Caydex"}
+    assert {"$182B", "Contoso", "1", out["image_footer"]} <= drawn_image
+    (video,) = _ready(world, "video")
+    drawn_video = set(video["metadata"]["onscreen_text"])
+    assert out["opening_card"]["list"]["rows"][0]["cells"] == ["Contoso", "$182B"]
+    assert set(tos.opening_strings(out["opening_card"], out["logos"])) & drawn_video >= {"Contoso", "$182B"}
+    posts = world.posts()
+    assert posts and all(p["status"] == "pending_review" for p in posts)
+    assert {f for p in posts for f in [p["format"]]} >= {"image", "video"}
+
+
+def _phase3_table_record(angle: str, day):
+    """A table angle's record of fictional companies with invented figures (2026-11-20, angles 3-5)."""
+    from datetime import timedelta
+
+    from app.services.marketing import company_news_rules as R
+
+    cos = [R.CompanyRef(symbol=s_, name=n) for s_, n in (("CTSO", "Contoso"), ("FBKM", "Fabrikam"),
+                                                        ("NWTR", "Northwind Traders"), ("TSPN", "Tailspin Toys"),
+                                                        ("ADVW", "Adventure Works"))]
+    base = dict(series="theme_explainer", slug="grid-builders", title="Grid builders", tickers_as_of=day - timedelta(
+        days=12), theme_size=7, angle=angle, posted_on=day)
+    if angle == "growth_profit":
+        figs = ((4.2e9, 3.1e9, 0.61e9), (1.9e9, 1.8e9, -0.24e9), (9.6e9, 9.9e9, 1.4e9), (0.82e9, 0.55e9, 0.04e9),
+                (2.7e9, 2.2e9, 0.45e9))
+        members = tuple(R.ThemeMember(company=c, top_segment=None, top_segment_share=None, fiscal_year="2025",
+                                      revenue_usd=r, prior_revenue_usd=p, net_income_usd=n)
+                        for c, (r, p, n) in zip(cos, figs))
+        return R.ThemeExplainer(members=members, **base)
+    if angle == "insiders":
+        figs = ((1.3e6, 6.4e6), (0.42e6, 0.0), (0.0, 41.2e6), (0.0, 12.9e6), (0.0, 0.8e6))
+        members = tuple(R.ThemeMember(company=c, top_segment=None, top_segment_share=None, fiscal_year=None,
+                                      purchases_usd=b, sales_usd=sl) for c, (b, sl) in zip(cos, figs))
+        return R.ThemeExplainer(members=tuple(sorted(members, key=R.theme_insider_order_key)),
+                                window_start=day - timedelta(days=90), window_end=day - timedelta(days=1),
+                                companies_checked=6, **base)
+    members = tuple(R.ThemeMember(company=c, top_segment=None, top_segment_share=None, fiscal_year=None,
+                                  congress_members=n) for c, n in zip(cos, (5, 3, 2, 2, 2)))
+    return R.ThemeExplainer(members=tuple(sorted(members, key=R.theme_congress_order_key)), month="2026-11", **base)
+
+
+@pytest.mark.parametrize("angle, layout", [("growth_profit", "figures"), ("insiders", "ledger"), ("congress", "tally")])
+def test_phase3_a_table_angle_goes_from_the_build_to_posts_through_the_real_app(monkeypatch, angle, layout):
+    """2026-11-20, angles 3-5 end to end: a Wednesday, the REAL worker (it declares theme_angles) is handed the table
+    picture and its six-row table cover, draws them, and the REAL server accepts what each declares — every drawn
+    string the stored spec's (the cover's the stored list's), the footer its family's — and the day's posts are held
+    for review. Fictional companies, invented figures."""
+    pytest.importorskip("PIL")
+    from datetime import date
+
+    from app.services.marketing import selection
+    from app.services.marketing import template_onscreen as tos
+
+    day = date(2026, 12, 9)
+    record = _phase3_table_record(angle, day)
+    _theme_calendar(monkeypatch, "theme_explainer")
+    assert selection.plan_for(day).chain[0] == "theme_explainer"
+    world = TemplateWorld(monkeypatch, news=_StubNews2b("theme_explainer", record), run_date=day,
+                          news_series=_EVERY_SERIES)
+    _theme_calendar(monkeypatch, "theme_explainer")
+    assert world.worker.main() == 0
+    run = world._run_row()
+    assert run["status"] == "media_ready" and run["stage"] == "assets_ready"
+    (script,) = world.fake.tables[mrs.SCRIPTS].rows
+    out = script["output"]
+    assert script["source_ref"] == f"news:theme_explainer:grid-builders:{angle}:2026-12-09"
+    assert out["image_spec"]["layout"] == layout and out["opening_card"]["list"]["layout"] == layout
+    card = _the_card(world)
+    drawn_image = set(card["metadata"]["onscreen_text"])
+    assert drawn_image <= set(tos.image_strings(out["image_spec"], out["logos"])) | {out["image_footer"], "Caydex"}
+    assert {"Contoso", out["image_footer"], out["image_spec"]["note"]} <= drawn_image
+    (video,) = _ready(world, "video")
+    drawn_video = set(video["metadata"]["onscreen_text"])
+    assert set(tos.opening_strings(out["opening_card"], out["logos"])) & drawn_video >= {
+        "Contoso", out["opening_card"]["list"]["heading"]}
+    posts = world.posts()
+    assert posts and all(p["status"] == "pending_review" for p in posts)
+    assert {p["format"] for p in posts} >= {"image", "video"}
 
 
 @pytest.mark.parametrize("series", ["congress_count", "company_stakes", "earnings", "theme_explainer"])
@@ -968,8 +1194,10 @@ def test_a_2b_day_goes_from_the_build_to_posts_held_for_review_through_the_real_
     from app.services.marketing import template_onscreen as tos
 
     record, day, klass, layout, asked = _2b_day(series)
+    _theme_calendar(monkeypatch, series)
     assert series in selection.plan_for(day).chain                       # the real calendar reaches it
     world = TemplateWorld(monkeypatch, news=_StubNews2b(series, record), run_date=day, news_series=_EVERY_SERIES)
+    _theme_calendar(monkeypatch, series)                                 # the world pins the default calendar
     assert world.worker.main() == 0
     run = world._run_row()
     assert run["run_date"] == day.isoformat()
@@ -994,7 +1222,8 @@ def test_a_2b_day_goes_from_the_build_to_posts_held_for_review_through_the_real_
     assert video_call["kinds"] == ["opening", "text", "text", "text", "text", "disclaimer"]
     (video,) = _ready(world, "video")
     allowed_video = (set(tos.opening_strings(out["opening_card"], out["logos"]))
-                     | {c[k] for c in out["cards"] for k in ("title", "body")} | {out["disclaimer_card"]})
+                     | {c[k] for c in out["cards"] for k in ("title", "body")} | {out["disclaimer_card"]}
+                     | {out["image_footer"]})                # news-v23: each card's short footer line
     drawn_video = set(video["metadata"]["onscreen_text"])
     assert out["disclaimer_card"] in drawn_video and out["opening_card"]["headline"] in drawn_video
     assert drawn_video - allowed_video <= set(mrs.VIDEO_BRAND_TEXT)
@@ -1003,7 +1232,8 @@ def test_a_2b_day_goes_from_the_build_to_posts_held_for_review_through_the_real_
     card = _the_card(world)
     drawn_image = set(card["metadata"]["onscreen_text"])
     assert out["image_footer"] in drawn_image
-    assert drawn_image <= set(tos.image_strings(out["image_spec"], out["logos"])) | {out["image_footer"]}
+    assert drawn_image <= (set(tos.image_strings(out["image_spec"], out["logos"])) | {out["image_footer"]}
+                           | {"Caydex"})                     # news-v23: + the brand row's word (PICTURE_BRAND_TEXT)
     assert not drawn_image & ({out["image_post"]["title"], *out["image_post"]["paragraphs"]}
                               - set(tos.image_strings(out["image_spec"], out["logos"])))
     # posts: each platform in its frozen format, every one held for review, carrying what it is
@@ -1019,7 +1249,9 @@ def test_a_2b_day_goes_from_the_build_to_posts_held_for_review_through_the_real_
         assert p["asset_ids"] == ([card["id"]] if fmt == "image" else [video["id"]] if fmt == "video" else [])
     if series == "congress_count":
         # a count of members, "disclosed", never a dollar figure or a member — on every surface
-        assert out["image_spec"]["figure"] == "4" and "disclosed" in out["hook"]
+        # news-v23: ONE list of the month's companies — each row's count cell, most members first
+        assert [r["cells"][-1] for r in out["image_spec"]["sections"][0]["rows"]] == ["4", "2"]
+        assert "disclosed" in out["hook"]
         texts = [p["caption"] for p in posts.values()] + sorted(drawn_video | drawn_image)
         assert not [t for t in texts if "$" in t]
     assert news_templates.revalidate(out, fact_sheet=script["fact_sheet"], run_date=day) == []
@@ -1135,6 +1367,10 @@ def test_todays_lesson_day_records_all_eight_outlets_in_their_frozen_formats_thr
 _ALL_FEATURES = "hook_card,data_card,push_in"
 _STORE_CTA = "Search Caydex on the App Store"
 _LEGACY_CTA = "caydexinvest.com"
+#: news-v23 (restyle 2026-11-19): every LESSON video card also draws its kicker pill, the short footer line and the
+#: brand row's word — the server's LESSON_BRAND_TEXT + post_copy.IMAGE_FOOTER_HEAD. render.py declares each string
+#: once, in card order, so they follow the FIRST card's own strings.
+_LESSON_CHROME = ["INVESTING LESSON", "Not investment advice", "Caydex"]
 #: A valid App Store URL (the app's public listing): the store state at write time is then LIVE.
 _STORE_URL = "https://apps.apple.com/us/app/caydex/id6759525689"
 
@@ -1233,7 +1469,9 @@ def test_with_the_switch_off_a_lesson_day_is_todays_video_keyword_for_keyword(mo
     (video,) = _ready(world, "video")
     md = video["metadata"]
     assert md["video_features"] == [] and md["card_kinds"] == ["text", "text", "text", "disclaimer"]
-    assert md["onscreen_text"] == [*[c[k] for c in _LESSON["cards"] for k in ("title", "body")],
+    first, *rest = _LESSON["cards"]
+    assert md["onscreen_text"] == [first["title"], first["body"], *_LESSON_CHROME,
+                                   *[c[k] for c in rest for k in ("title", "body")],
                                    _LESSON["disclaimer_card"], _STORE_CTA]
 
 
@@ -1247,7 +1485,7 @@ def test_the_default_world_keeps_drop_1s_video_and_its_legacy_end_card(world):
     assert world.openings == [{}]
     (video,) = _ready(world, "video")
     assert video["metadata"]["onscreen_text"] == [
-        "The partner", "He names a price every day.", "The lesson", "His mood is not the business.",
+        "The partner", "He names a price every day.", *_LESSON_CHROME, "The lesson", "His mood is not the business.",
         _PACKAGE["disclaimer_card"], _LEGACY_CTA]
 
 
@@ -1290,9 +1528,10 @@ def test_a_lesson_day_with_every_feature_on_opens_on_its_hook_card_through_the_r
     md = video["metadata"]
     assert md["video_features"] == ["hook_card", "push_in"]
     assert md["card_kinds"] == ["hook", "text", "text", "text", "disclaimer"]
-    assert md["onscreen_text"] == [_LESSON["hook"], *[c[k] for c in _LESSON["cards"] for k in ("title", "body")],
+    assert md["onscreen_text"] == [_LESSON["hook"], *_LESSON_CHROME,
+                                   *[c[k] for c in _LESSON["cards"] for k in ("title", "body")],
                                    _LESSON["disclaimer_card"], _STORE_CTA]
-    assert md["render_version"] == "render/v5" and md["video_version"] == vd.VIDEO_RENDER_VERSION
+    assert md["render_version"] == "render/v7" and md["video_version"] == vd.VIDEO_RENDER_VERSION
     # What was APPLIED beside what was frozen: card 0 pushes in (no fallback), and a lesson has no data card.
     assert md["push_in"] is True and "push_in_fallback" not in md and md["data_card_slot"] is None
     assert not [r for r in caplog.records if "App Store end card" in r.getMessage()]   # on the store: no warning
@@ -1371,7 +1610,9 @@ def test_a_feature_card_the_run_did_not_freeze_is_refused_by_the_real_server(mon
         forced = ("hook_card", "push_in")
     else:
         pytest.importorskip("PIL")
-        world = TemplateWorld(monkeypatch)
+        # 2026-11-20: a roundup whose picture carries a note its list cover does not draw (`_noted_news`) — with the
+        # default two direct rows the picture's every string is also the cover's, and the rogue card would be allowed
+        world = TemplateWorld(monkeypatch, news=_noted_news())
         forced = ("data_card", "push_in")
         monkeypatch.setattr(cards, "data_card_slot", lambda script: 1)
     monkeypatch.setattr(cards, "video_features", lambda script: forced)
@@ -1459,7 +1700,8 @@ def test_a_template_day_with_every_feature_on_draws_its_data_card_through_the_re
     drawn = set(md["onscreen_text"])
     picture = set(tos.image_strings(out["image_spec"], out["logos"])) | {out["image_footer"]}
     allowed = (set(tos.opening_strings(out["opening_card"], out["logos"])) | picture
-               | {c[k] for c in out["cards"] for k in ("title", "body")} | {out["disclaimer_card"], _STORE_CTA})
+               | {c[k] for c in out["cards"] for k in ("title", "body")} | {out["disclaimer_card"], _STORE_CTA}
+               | {"Caydex"})                                  # news-v23: the brand row's word
     assert drawn <= allowed and out["image_footer"] in drawn and _STORE_CTA in drawn
     assert out["opening_card"]["headline"] in drawn and out["opening_card"]["kicker"] in drawn
     assert not drawn & ({out["image_post"]["title"], *out["image_post"]["paragraphs"]} - picture)
@@ -1489,9 +1731,11 @@ def test_every_2b_layout_with_every_feature_on_is_drawn_and_allowed_through_the_
     from app.services.marketing import template_onscreen as tos
 
     record, day, _klass, layout, _asked = _2b_day(series)
+    _theme_calendar(monkeypatch, series)
     monkeypatch.setattr(settings, "MARKETING_FIRST_COMMENT_PLATFORMS", "")
     world = TemplateWorld(monkeypatch, news=_StubNews2b(series, record), run_date=day, news_series=_EVERY_SERIES,
                           audio_seconds=7.0)
+    _theme_calendar(monkeypatch, series)                                 # the world pins the default calendar
     monkeypatch.setattr(settings, "MARKETING_VIDEO_FEATURES", _ALL_FEATURES)
     ffmpeg = _real_render(world, monkeypatch)
     readbacks = _readbacks(world)
@@ -1500,14 +1744,29 @@ def test_every_2b_layout_with_every_feature_on_is_drawn_and_allowed_through_the_
     assert run["status"] == "media_ready" and run["stage"] == "assets_ready"
     (script,) = world.fake.tables[mrs.SCRIPTS].rows
     out = script["output"]
+    if series in tos.NO_DATA_CARD_SERIES:
+        # news-v23 (the restyle, 2026-11-19): the Congress Count, earnings and company stakes are ONE list of several
+        # companies whose video COVER is that list — no data card is frozen, none is named on the wire, every card
+        # stays a text card
+        assert out["image_spec"]["layout"] == layout and out["video_features"] == ["push_in"]
+        assert all(r["data_card_slot"] is None for r in readbacks)
+        (video,) = _ready(world, "video")
+        assert video["metadata"]["card_kinds"] == ["opening"] + ["text"] * len(out["cards"]) + ["disclaimer"]
+        drawn = set(video["metadata"]["onscreen_text"])
+        # the list cover draws the picture's footer line under its list (the server's list-cover allowance)
+        allowed = (set(tos.opening_strings(out["opening_card"], out["logos"])) | set(mrs.VIDEO_BRAND_TEXT)
+                   | {c[k] for c in out["cards"] for k in ("title", "body")} | {out["disclaimer_card"]}
+                   | {out["image_footer"]})
+        assert drawn <= allowed and out["opening_card"]["headline"] in drawn
+        assert world.posts() and all(p["status"] == "pending_review" for p in world.posts())
+        return
     assert out["image_spec"]["layout"] == layout and out["video_features"] == ["data_card", "push_in"]
     # The slot on the wire is the server's choice from what it stored: the decided fact card per series.
     slot = readbacks[-1]["data_card_slot"]
     assert type(slot) is int and all(r["data_card_slot"] == slot for r in readbacks)
     assert slot == tos.data_card_slot(series, out["cards"], mrs.data_card_strings(out))
     # news-v21: an earnings post has no "Revenue" card (the revenue estimate's basis is unknown): its date card
-    decided = {"congress_count": "Counted once", "company_stakes": "As of", "earnings": "Quarter ended",
-               "theme_explainer": "Contoso and Fabrikam"}
+    decided = {"congress_count": "Counted once", "company_stakes": "As of", "earnings": "Quarter ended"}
     assert out["cards"][slot]["title"] == decided[series]
     (call,) = ffmpeg.calls
     assert call["push_in"] is True
@@ -1592,7 +1851,9 @@ def test_a_lesson_whose_hook_leans_on_its_first_line_opens_without_a_hook_card_t
     md = video["metadata"]
     assert md["video_features"] == ["push_in"] and md["push_in"] is True and md["data_card_slot"] is None
     assert md["card_kinds"] == ["text", "text", "text", "disclaimer"]
-    assert md["onscreen_text"] == [*[c[k] for c in _LESSON["cards"] for k in ("title", "body")],
+    first, *rest = _LESSON["cards"]
+    assert md["onscreen_text"] == [first["title"], first["body"], *_LESSON_CHROME,
+                                   *[c[k] for c in rest for k in ("title", "body")],
                                    _LESSON["disclaimer_card"], _STORE_CTA]
     # The posts, held for review; the video post's note is the run's FROZEN list (what the run asked for —
     # the video asset's own metadata says what was drawn).
@@ -1642,8 +1903,11 @@ def test_a_read_back_without_a_usable_slot_keeps_every_text_card_and_the_real_se
     text cards (push-in still on); the real server, which allows a frozen feature's strings but never requires
     them, accepts that video and records the posts."""
     pytest.importorskip("PIL")
+    from app.services.marketing import template_onscreen as tos
+
     monkeypatch.setattr(settings, "MARKETING_FIRST_COMMENT_PLATFORMS", "")
-    world = TemplateWorld(monkeypatch, audio_seconds=7.0)
+    # 2026-11-20: the noted roundup (`_noted_news`): its picture's note is the one string its list cover never draws
+    world = TemplateWorld(monkeypatch, audio_seconds=7.0, news=_noted_news())
     monkeypatch.setattr(settings, "MARKETING_VIDEO_FEATURES", _ALL_FEATURES)
     ffmpeg = _real_render(world, monkeypatch)
     tampered: List[Dict[str, Any]] = []
@@ -1673,7 +1937,12 @@ def test_a_read_back_without_a_usable_slot_keeps_every_text_card_and_the_real_se
     md = video["metadata"]
     assert md["card_kinds"] == ["opening", *["text"] * len(tampered[-1]["cards"]), "disclaimer"]
     assert md["data_card_slot"] is None and md["video_features"] == ["data_card", "push_in"]
-    assert tampered[-1]["image_footer"] not in md["onscreen_text"]          # no picture drawn
+    # no picture drawn: none of the picture's OWN strings (news-v23: its short footer is on every card, so the footer
+    # alone no longer tells)
+    picture_only = (set(tos.image_strings(tampered[-1]["image_spec"], tampered[-1]["logos"]))
+                    - set(tos.opening_strings(tampered[-1]["opening_card"], tampered[-1]["logos"]))
+                    - {tampered[-1]["image_footer"]})
+    assert picture_only and not picture_only & set(md["onscreen_text"])
     records = [r for r in caplog.records if r.name == "marketing.cards" and said in r.getMessage()]
     assert records and {r.levelno for r in records} == {level}
     assert world.posts() and all(p["status"] == "pending_review" for p in world.posts())
@@ -1811,3 +2080,583 @@ def test_batch3_switch_empty_unchanged(monkeypatch):
                                for s in specs]
     assert swap(on["request"], on["video"]["id"]) == swap(off["request"], off["video"]["id"])
     assert _b3_shape(on["answer"][:4], on["video"]["id"]) == _b3_shape(off["answer"], off["video"]["id"])
+
+
+# ══ The spotlight lane (migration 210, 2026-11-15): the real worker's tick plan against the real app ══════════════
+# The worker's ET clock is frozen (no MARKETING_FORCE, no MARKETING_RUN_DATE), so each tick is exactly the plan the
+# cron would run: yesterday's resumes before a lane's hour, then today's main, then today's spotlight — one pipeline
+# per tick. Everything behind the two claim routes is real (the router, the claim gate, the ledger, the build).
+
+
+def _claim_log(world, mark: int) -> List[tuple]:
+    """(lane route, run_date, resume_only) of every claim the worker sent since `mark`, as the server received it."""
+    out = []
+    for method, _host, path in world.calls[mark:]:
+        if method == "POST" and path.endswith("/claim"):
+            out.append(path.split("/internal/marketing/", 1)[1])
+    return out
+
+
+def _tick(world, monkeypatch, day, hour: int):
+    """One unforced worker tick at `hour`:15 ET on `day`; (exit code, the claim routes it called, their bodies)."""
+    bodies: List[Dict[str, Any]] = []
+    previous = world.before
+
+    def record(request):
+        if request.method == "POST" and request.url.path.endswith("/claim"):
+            bodies.append(json.loads(request.content))
+        return previous(request) if previous is not None else None
+
+    class Frozen(world.worker.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(day.year, day.month, day.day, hour, 15, tzinfo=_ET)
+
+    monkeypatch.setattr(world.worker, "datetime", Frozen)
+    world.before = record
+    mark = len(world.calls)
+    try:
+        code = world.worker.main()
+    finally:
+        world.before = previous
+    return code, _claim_log(world, mark), bodies
+
+
+def _rows_by_lane(world) -> Dict[str, Dict[str, Any]]:
+    rows = world.fake.tables[mrs.RUNS].rows
+    by = {mrs.run_lane(r): r for r in rows}
+    assert len(by) == len(rows), rows               # never two rows of one lane on one day
+    return by
+
+
+def test_spotlight_with_the_switch_off_the_second_claim_is_not_scheduled_and_writes_nothing(world):
+    """MARKETING_SPOTLIGHT_ENABLED off (its default, pinned by `World`): the first tick runs the main day; the next
+    finds it done, asks the spotlight lane through its own route — the real gate answers `not_scheduled` before any
+    read or write — and exits 0 with one run row on the day."""
+    assert world.worker.main() == 0
+    assert world._run_row()["status"] == "media_ready"
+    mark = len(world.calls)
+    assert world.worker.main() == 0
+    assert _claim_log(world, mark) == ["runs/claim", "lanes/spotlight/claim"]
+    assert [c for c in world.calls[mark:] if not c[2].endswith("/claim")] == []      # nothing after the two claims
+    (row,) = world.fake.tables[mrs.RUNS].rows
+    assert mrs.run_lane(row) == "main" and "lane" not in row      # the main INSERT never sends a lane
+
+
+class _StubNewsBySeries:
+    """The adapter's public surface: each series in `answers` answers its one record; every other comes up empty."""
+
+    MarketingNewsUnavailable = _StubNews.MarketingNewsUnavailable
+
+    def __init__(self, answers: Dict[str, Any]) -> None:
+        self.answers = answers
+        self.calls: List[str] = []
+        self.logo_calls: List[str] = []
+
+    async def candidates(self, series, *, run_date, exclude, limit, deadline, **kw):
+        # `kw`: the insider spotlight's ledger inputs (spotlight_checked_through, spotlight_recent) — that series only
+        from types import SimpleNamespace
+
+        self.calls.append(series)
+        record = self.answers.get(series)
+        if record is not None:
+            return SimpleNamespace(series=series, records=(record,), skip_reason=None, rejections={})
+        return SimpleNamespace(series=series, records=(), skip_reason=f"{series}_none_qualified", rejections={})
+
+    async def fetch_logo(self, symbol, *, max_bytes, timeout):
+        self.logo_calls.append(symbol)
+        return _logo_png(symbol), "image/png"
+
+
+def _costco_money_map():
+    from datetime import date
+
+    from app.services.marketing import company_news_rules as R
+
+    return R.MoneyMap(series="money_map", company=R.CompanyRef(symbol="COST", name="Costco"), fiscal_year="2025",
+                      period_end=date(2025, 8, 31),
+                      segments=(R.Segment("United States", 200_000_000_000.0), R.Segment("Canada", 38_500_000_000.0),
+                                R.Segment("Other International", 36_700_000_000.0)),
+                      other_usd=None, eliminations_usd=None, revenue_usd=275_200_000_000.0,
+                      gross_profit_usd=35_400_000_000.0, operating_profit_usd=10_400_000_000.0,
+                      net_income_usd=8_100_000_000.0)
+
+
+def test_spotlight_a_two_lane_day_runs_each_lane_at_its_hour_under_its_own_paths_and_keys(monkeypatch):
+    """A Thursday spotlight day (the default Tue/Thu/Sat), the lane on with the insider spotlight listed, the worker on
+    its real clock:
+
+    * 10:15 — yesterday's MAIN run is asked for a resume (none), then today's SPOTLIGHT run is claimed through its own
+      route and runs to media_ready: the insider spotlight (Contoso; Money Map is the MAIN lane's series that Thursday,
+      so it never enters the spotlight's chain — C0, 2026-11-16), its objects under `<date>/spotlight/`, its posts
+      keyed `<date>:spotlight:<platform>:<format>`, its manifest naming the lane;
+    * 16:15 — today's MAIN run is claimed and is the tick's only pipeline (the spotlight lane is not even asked):
+      Costco's Money Map, under the paths and keys the main lane always had, its INSERT and manifest without a lane;
+    * 17:15 — both runs are done: two claims, nothing else, no new row.
+    Two runs, two scripts, no shared storage path and no shared post key."""
+    pytest.importorskip("PIL")
+    import test_marketing_news_templates as NT
+
+    day = NT.SPOT_THU
+    assert day.weekday() == 3
+    news = _StubNewsBySeries({"insider_spotlight": NT.isp_cluster(), "money_map": _costco_money_map()})
+    world = TemplateWorld(monkeypatch, news=news, run_date=day,
+                          news_series="ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight")
+    for name, value in (("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "tue,thu,sat")):
+        monkeypatch.setattr(settings, name, value)
+    monkeypatch.delenv("MARKETING_FORCE")
+    monkeypatch.delenv("MARKETING_RUN_DATE")
+    d, y = day.isoformat(), "2026-11-18"
+
+    # ── 10:15 ET: the spotlight run ──
+    code, claims, bodies = _tick(world, monkeypatch, day, 10)
+    assert code == 0
+    assert claims == ["runs/claim", "lanes/spotlight/claim"]
+    assert [(b["run_date"], b["resume_only"]) for b in bodies] == [(y, True), (d, False)]
+    assert bodies[0]["claim_nonce"] != bodies[1]["claim_nonce"]
+    spot = _rows_by_lane(world)["spotlight"]
+    assert list(_rows_by_lane(world)) == ["spotlight"]
+    assert (spot["run_date"], spot["status"], spot["stage"]) == (d, "media_ready", "assets_ready")
+    (spot_script,) = world.fake.tables[mrs.SCRIPTS].rows
+    assert (spot_script["lane"], spot_script["status"], spot_script["template_id"]) == ("spotlight", "accepted",
+                                                                                         "insider_spotlight")
+    assert spot_script["fact_sheet"]["selection"]["plan"] == "spotlight_13f" and news.calls == ["insider_spotlight"]
+    assert "money_map" not in spot_script["fact_sheet"]["selection"]["chain"]
+    spot_assets = [a for a in world.assets() if a["run_id"] == spot["id"]]
+    assert {a["kind"] for a in spot_assets} >= {"manifest", "audio", "video", "card"}
+    assert all(a["storage_path"].startswith(f"{d}/spotlight/") for a in spot_assets), spot_assets
+    (manifest,) = [a for a in spot_assets if a["kind"] == "manifest"]
+    assert json.loads(world.stored[manifest["storage_path"]])["lane"] == "spotlight"
+    spot_posts = [p for p in world.posts() if p["run_id"] == spot["id"]]
+    assert spot_posts and all(p["idempotency_key"] == f"{d}:spotlight:{p['platform']}:{p['format']}"
+                              and p["status"] == "pending_review" and p["metadata"]["series"] == "insider_spotlight"
+                              for p in spot_posts)
+
+    # ── 16:15 ET: the main run, the tick's only pipeline ──
+    code, claims, bodies = _tick(world, monkeypatch, day, 16)
+    assert code == 0
+    assert claims == ["runs/claim"] and [(b["run_date"], b["resume_only"]) for b in bodies] == [(d, False)]
+    rows = _rows_by_lane(world)
+    main = rows["main"]
+    assert "lane" not in main                      # the main INSERT never sent a lane: the column default applies
+    assert (main["run_date"], main["status"], main["template_id"]) == (d, "media_ready", "money_map")
+    main_script = next(s for s in world.fake.tables[mrs.SCRIPTS].rows if s["run_id"] == main["id"])
+    assert "lane" not in main_script and main_script["template_id"] == "money_map"
+    assert news.calls == ["insider_spotlight", "money_map"]
+    main_assets = [a for a in world.assets() if a["run_id"] == main["id"]]
+    assert main_assets and all(a["storage_path"].startswith(f"{d}/") and "/spotlight/" not in a["storage_path"]
+                               for a in main_assets)
+    (main_manifest,) = [a for a in main_assets if a["kind"] == "manifest"]
+    assert "lane" not in json.loads(world.stored[main_manifest["storage_path"]])
+    main_posts = [p for p in world.posts() if p["run_id"] == main["id"]]
+    assert main_posts and all(p["idempotency_key"] == f"{d}:{p['platform']}:{p['format']}" for p in main_posts)
+    # the two runs of the day share no object and no post key
+    assert not {a["storage_path"] for a in spot_assets} & {a["storage_path"] for a in main_assets}
+    assert not {p["idempotency_key"] for p in spot_posts} & {p["idempotency_key"] for p in main_posts}
+
+    # ── 17:15 ET: both done ──
+    posts_before, rows_before = len(world.posts()), len(world.fake.tables[mrs.RUNS].rows)
+    mark = len(world.calls)
+    code, claims, _bodies = _tick(world, monkeypatch, day, 17)
+    assert code == 0 and claims == ["runs/claim", "lanes/spotlight/claim"]
+    assert [c for c in world.calls[mark:] if not c[2].endswith("/claim")] == []
+    assert (len(world.posts()), len(world.fake.tables[mrs.RUNS].rows)) == (posts_before, rows_before)
+
+
+def test_spotlight_a_manual_run_of_one_lane_never_claims_the_other(monkeypatch):
+    """MARKETING_RUN_LANE=spotlight with MARKETING_FORCE (a manual run): only the lane route is called, through the
+    real gate, and only the spotlight row exists afterwards."""
+    pytest.importorskip("PIL")
+    from datetime import date
+
+    day = date(2026, 11, 21)              # a Saturday: the main day is the lesson alone, so Money Map is the spotlight's
+    news = _StubNewsBySeries({"ceo_buys": _StubNews(day).week, "money_map": _costco_money_map()})
+    world = TemplateWorld(monkeypatch, news=news, run_date=day)
+    for name, value in (("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "sat")):
+        monkeypatch.setattr(settings, name, value)
+    monkeypatch.setenv("MARKETING_RUN_LANE", "spotlight")
+    assert world.worker.main() == 0
+    assert _claim_log(world, 0) == ["lanes/spotlight/claim"]
+    assert list(_rows_by_lane(world)) == ["spotlight"] and news.calls == ["money_map"]
+
+
+# ── workstream C (2026-11-16): per-post ART, the real build → the real worker → the real server ─────────────────────
+#
+# Owner decisions 2026-11-20 ("Drop it from insider posts (Recommended)"; "3 - 5 companies at once"): a Form 4 week —
+# three companies at least — gets NO art with MARKETING_ART_ENABLED on: the REAL build records `not_a_company_series`
+# before any spend (neither fake client is reached), nothing is stored or downloaded, the REAL worker draws its list
+# cover and picture without art and declares none, and create_posts notes the failed record (drawn nowhere, nothing
+# made with AI but the video). The one art series left, the Money Map's cover, is
+# test_post_art_a_main_lane_money_map_day_draws_its_art_on_the_cover_only below.
+
+
+class _StubNewsOne(_StubNews):
+    """`_StubNews` (the three-company CEO week) plus the adapter's `company_facts` (never read: no art)."""
+
+    def __init__(self, run_date) -> None:
+        super().__init__(run_date)
+        self.facts_calls: List[str] = []
+
+    async def company_facts(self, symbol, *, timeout):
+        self.facts_calls.append(symbol)
+        return {"sector": "Consumer Cyclical", "industry": "Home Improvement Retail"}
+
+
+def test_post_art_a_form4_week_draws_no_art_through_the_real_app(monkeypatch):
+    pytest.importorskip("PIL")
+    import test_marketing_post_art as PA
+
+    from app.services import llm_provider as lp
+    from app.services.marketing import post_art as pa
+    from app.services.marketing import template_onscreen as tos
+    from marketing import cards
+    from marketing import render as rd
+
+    lp.reset_breaker()
+    monkeypatch.setattr(lp, "_logged_once", set())
+    monkeypatch.setattr(pa, "_logged_once", set())
+    for name, value in {
+        "MARKETING_ART_ENABLED": True, "MARKETING_ART_MONTHLY_BUDGET_USD": 30.0, "MARKETING_ART_BUDGET_SECONDS": 180,
+        "MARKETING_ART_CLAUDE_MODEL": "claude-opus-5-5", "MARKETING_ART_IMAGE_MODEL": "gemini-3-pro-image",
+        "MARKETING_ART_IMAGE_MICROS": 134_000, "CAYDEX_ANTHROPIC_API_KEY": "sk-ant-test",
+        "CAYDEX_CLAUDE_MAX_TOKENS": 16000, "CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS": 120.0,
+        "CAYDEX_CLAUDE_BREAKER_SECONDS": 3600.0,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    world = TemplateWorld(monkeypatch, news=_StubNewsOne(mrs.run_date_et(datetime.now(timezone.utc))))
+    gemini, claude = PA.FakeGemini(), PA.FakeClaude()
+    world.scripts = ss.MarketingScriptService(world.ledger, writer=world._never_the_writer, news=world.news,
+                                              art_gemini=gemini, art_claude=claude)
+    covers: List[Any] = []
+    template_video = world._produce_template_video
+
+    def produce(**kw):
+        covers.append(kw["specs"][0].art)
+        # the cover really renders with its art (Pillow, no ffmpeg)
+        cards.render_card(kw["specs"][0], font_path=str(Path(kw["fonts_dir"]) / "Inter-Bold.ttf"),
+                          layout_engine=kw["layout_engine"])
+        return template_video(**kw)
+
+    monkeypatch.setattr(rd, "produce_video", produce)
+    try:
+        assert world.worker.main() == 0
+    finally:
+        lp.reset_breaker()
+    run = world._run_row()
+    assert run["status"] == "media_ready" and "post_art" in run["metadata"]["worker_capabilities"]
+    (script,) = world.fake.tables[mrs.SCRIPTS].rows
+    out = script["output"]
+    art = out["art"]
+    assert (art["status"], art["reason"]) == ("failed", "not_a_company_series") and out["series"] == "ceo_buys"
+    assert len(out["image_spec"]["sections"][0]["rows"]) == 3 and pa.estimated_micros(art["usage"]) == 0
+    assert world.news.facts_calls == [] and gemini.calls == [] and claude.calls == [] and gemini.text_calls == []
+    # nothing stored, nothing downloaded; the cover (the list) and the picture drew no art and declare none
+    assert not [k for k in world.stored if k.startswith("art/")]
+    assert [u for u in world.downloads if "/art/" in u] == []
+    (cover_art,) = covers
+    assert cover_art is None
+    (video,) = _ready(world, "video")
+    vmd = video["metadata"]
+    assert vmd["opening_art_sha256"] is None and cards.ART_LABEL not in vmd["onscreen_text"]
+    card = _the_card(world)
+    assert card["metadata"]["art_sha256"] is None and cards.ART_LABEL not in card["metadata"]["onscreen_text"]
+    assert mrs.art_surfaces(out) == () and tos.art_allowed(None) == []
+    # every post notes the failed record (drawn nowhere); only the video is made with AI
+    posts = world.posts()
+    assert posts and all(p["status"] == "pending_review" for p in posts)
+    for p in posts:
+        note = p["metadata"]["art"]
+        assert (note["status"], note["reason"]) == ("failed", "not_a_company_series"), p["platform"]
+        assert note["drawn"] == {"picture": False, "cover": False}, p["platform"]
+        assert p["metadata"]["made_with_ai"] is (p["format"] == "video")
+
+
+# ══ Post art (workstream C, slice C5, 2026-11-16): the REAL build → the REAL worker → the REAL server, per surface ══
+#
+# Owner decisions 2026-11-20 ("Drop it from insider posts (Recommended)"): the spotlight lane's insider LIST (3-5
+# companies) draws NO art on either surface; the main lane's Money Map draws it on the cover only ("Video cover now,
+# pictures later") — the one art surface left. The
+# only fakes beside the world's are the two art clients (tests/test_marketing_post_art.py's, bound to the real
+# clients' signatures). The REAL worker downloads the art from the fake bucket by its content address, draws it,
+# declares what it drew; the REAL server's declaration checks accept exactly that and refuse a forged declaration
+# (422); create_posts notes it on every post and marks the posts whose picture drew it as made with AI; the review
+# bundle's decision text carries the "Art:" line. With the switch off, the day is the day of before, byte for byte.
+
+_ART_SPOT_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"
+_ART_SHA_RE = r"[0-9a-f]{64}"
+
+
+def _art_settings(monkeypatch, *, enabled: bool = True) -> None:
+    from app.services import llm_provider as lp
+    from app.services.marketing import post_art as pa
+
+    lp.reset_breaker()
+    monkeypatch.setattr(lp, "_logged_once", set())
+    monkeypatch.setattr(pa, "_logged_once", set())
+    for name, value in {
+        "MARKETING_ART_ENABLED": enabled, "MARKETING_ART_MONTHLY_BUDGET_USD": 30.0, "MARKETING_ART_BUDGET_SECONDS": 180,
+        "MARKETING_ART_CLAUDE_MODEL": "claude-opus-5-5", "MARKETING_ART_IMAGE_MODEL": "gemini-3-pro-image",
+        "MARKETING_ART_IMAGE_MICROS": 134_000, "CAYDEX_ANTHROPIC_API_KEY": "sk-ant-test",
+        "CAYDEX_CLAUDE_MAX_TOKENS": 16000, "CAYDEX_CLAUDE_REQUEST_TIMEOUT_SECONDS": 120.0,
+        "CAYDEX_CLAUDE_BREAKER_SECONDS": 3600.0,
+    }.items():
+        monkeypatch.setattr(settings, name, value)
+    # owner decision 2026-11-20 ("use it nowhere for now"): no shipped series carries art — the kept art path is
+    # exercised end to end on the Money Map, put back into the art set for the test only
+    from test_marketing_post_art import keep_art_on_money_map
+    keep_art_on_money_map(monkeypatch)
+
+
+class _StubNewsArt(_StubNewsBySeries):
+    """`_StubNewsBySeries` plus the adapter's `company_facts` (the art brief's sector / industry)."""
+
+    def __init__(self, answers: Dict[str, Any]) -> None:
+        super().__init__(answers)
+        self.facts_calls: List[str] = []
+
+    async def company_facts(self, symbol, *, timeout):
+        self.facts_calls.append(symbol)
+        return {"sector": "Technology", "industry": "Software Infrastructure"}
+
+
+class _ArtDay:
+    """One art day's world: `which` = "spotlight" (Thu 2026-11-19, the spotlight lane alone — MARKETING_RUN_LANE —
+    answering the insider spotlight Contoso cluster) or "money_map" (Thu 2026-12-03, off-season: the main lane's
+    Money Map, Costco). The art clients are the post-art suite's fakes; the faked ffmpeg call records the opening
+    card's art and its REAL rendered PNG (Pillow) — the cover."""
+
+    def __init__(self, monkeypatch, which: str, *, enabled: bool = True) -> None:
+        from datetime import date
+
+        import test_marketing_news_templates as NT
+        import test_marketing_post_art as PA
+        from marketing import cards
+        from marketing import render as rd
+
+        if which == "spotlight":
+            self.day = NT.SPOT_THU
+            self.news = _StubNewsArt({"insider_spotlight": NT.isp_cluster()})
+            self.world = TemplateWorld(monkeypatch, news=self.news, run_date=self.day, news_series=_ART_SPOT_SERIES)
+            for name, value in (("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "tue,thu,sat")):
+                monkeypatch.setattr(settings, name, value)
+            monkeypatch.setenv("MARKETING_RUN_LANE", "spotlight")
+        else:
+            self.day = date(2026, 12, 3)
+            self.news = _StubNewsArt({"money_map": _costco_money_map()})
+            self.world = TemplateWorld(monkeypatch, news=self.news, run_date=self.day)
+        _art_settings(monkeypatch, enabled=enabled)
+        self.gemini, self.claude = PA.FakeGemini(), PA.FakeClaude()
+        w = self.world
+        w.scripts = ss.MarketingScriptService(w.ledger, writer=w._never_the_writer, news=self.news,
+                                              art_gemini=self.gemini, art_claude=self.claude)
+        self.covers: List[Dict[str, Any]] = []
+        template_video = w._produce_template_video
+
+        def produce(**kw):
+            cover = kw["specs"][0]
+            png = cards.render_card(cover, font_path=str(Path(kw["fonts_dir"]) / "Inter-Bold.ttf"),
+                                    layout_engine=kw["layout_engine"])
+            self.covers.append({"kind": cover.kind, "art": cover.art, "png": png})
+            return template_video(**kw)
+
+        monkeypatch.setattr(rd, "produce_video", produce)
+
+    def run(self) -> int:
+        from app.services import llm_provider as lp
+
+        try:
+            return self.world.worker.main()
+        finally:
+            lp.reset_breaker()
+
+    # ── views ──
+    def script(self) -> Dict[str, Any]:
+        (script,) = self.world.fake.tables[mrs.SCRIPTS].rows
+        return script
+
+    def picture(self) -> Dict[str, Any]:
+        return _the_card(self.world)
+
+    def video(self) -> Dict[str, Any]:
+        (video,) = _ready(self.world, "video")
+        return video
+
+    def art_downloads(self) -> List[str]:
+        return [u for u in self.world.downloads if "/marketing-media/art/" in u]
+
+
+def test_post_art_an_insider_list_day_draws_no_art_through_the_real_app(monkeypatch):
+    """Owner decisions 2026-11-20 ("Drop it from insider posts (Recommended)"): the spotlight lane's insider LIST, art
+    switch on — the REAL build records `not_a_company_series` before any spend, the REAL worker draws the list picture
+    and the compact list cover without art and declares none, the REAL server accepts that, every post notes the
+    failed record, only the videos are made with AI, and the review line says why there is no art."""
+    pytest.importorskip("PIL")
+    from app.services.marketing import post_art as pa
+    from app.services.marketing import review_service as rs
+    from app.services.marketing import template_onscreen as tos
+    from marketing import cards
+
+    day = _ArtDay(monkeypatch, "spotlight")
+    assert day.run() == 0
+    w = day.world
+    run = w._run_row()
+    assert (mrs.run_lane(run), run["status"], run["stage"]) == ("spotlight", "media_ready", "assets_ready")
+    assert "post_art" in run["metadata"]["worker_capabilities"]
+    out = day.script()["output"]
+    art = out["art"]
+    assert (out["series"], out["image_spec"]["layout"]) == ("insider_spotlight", "rows")
+    assert len(out["image_spec"]["sections"][0]["rows"]) >= 3
+    assert (art["status"], art["reason"]) == ("failed", "not_a_company_series")
+    assert pa.estimated_micros(art["usage"]) == 0 and mrs.art_surfaces(out) == ()
+    assert day.news.facts_calls == [] and day.gemini.calls == [] and day.claude.calls == []
+    assert day.art_downloads() == [] and not [k for k in w.stored if k.startswith("art/")]
+    pmd = day.picture()["metadata"]
+    assert pmd["art_sha256"] is None and tos.ART_LABEL not in pmd["onscreen_text"]
+    (cover,) = day.covers
+    assert cover["kind"] == "opening" and cover["art"] is None
+    vmd = day.video()["metadata"]
+    assert vmd["opening_art_sha256"] is None and cards.ART_LABEL not in vmd["onscreen_text"]
+    posts = [p for p in w.posts() if p["run_id"] == run["id"]]
+    assert posts and all(p["status"] == "pending_review" for p in posts)
+    for p in posts:
+        note = p["metadata"]["art"]
+        assert (note["status"], note["drawn"]) == ("failed", {"picture": False, "cover": False}), p["platform"]
+        assert p["metadata"]["made_with_ai"] is (p["format"] == "video"), (p["platform"], p["format"])
+    assert rs.art_line(posts) == "Art: none today — this post is not about a single company"
+
+
+def test_post_art_a_main_lane_money_map_day_draws_its_art_on_the_cover_only(monkeypatch):
+    """"Video cover now, pictures later": the main lane's single-company Money Map keeps its own picture layout, byte
+    for byte the no-art picture's, and carries the art on its video's opening card only."""
+    pytest.importorskip("PIL")
+    from app.services.marketing import review_service as rs
+    from marketing import cards
+
+    day = _ArtDay(monkeypatch, "money_map")
+    assert day.run() == 0
+    w = day.world
+    run = w._run_row()
+    assert (mrs.run_lane(run), run["status"], run["template_id"]) == ("main", "media_ready", "money_map")
+    out = day.script()["output"]
+    art = out["art"]
+    assert (art["status"], art["surfaces"], art["company"]["symbol"]) == ("ok", ["cover"], "COST")
+    assert out["image_spec"]["layout"] != "feature"
+    # the picture: never offered the art (not a feature picture) — no declaration, no label
+    pmd = day.picture()["metadata"]
+    assert pmd["art_sha256"] is None and cards.ART_LABEL not in pmd["onscreen_text"] and "art_skipped" not in pmd
+    # the cover drew it
+    (cover,) = day.covers
+    assert cover["art"] is not None and cover["art"].sha256 == art["sha256"]
+    vmd = day.video()["metadata"]
+    assert vmd["opening_art_sha256"] == art["sha256"] and cards.ART_LABEL in vmd["onscreen_text"]
+    assert day.art_downloads() == [art["url"]]
+    posts = w.posts()
+    for p in posts:
+        assert p["metadata"]["art"]["drawn"] == {"picture": False, "cover": True}, p["platform"]
+        assert p["metadata"]["made_with_ai"] is (p["format"] == "video"), (p["platform"], p["format"])
+    assert rs.art_line(posts).endswith(" · check passed · on: video cover")
+
+
+@pytest.mark.parametrize("which, kind, forge, problem", [
+    # owner decisions 2026-11-20: the Money Map's cover is the one art surface left — its VIDEO declarations
+    # a declaration of another picture than the accepted art (the label kept)
+    ("money_map", "video", lambda md: md.update(opening_art_sha256="f" * 64), "art_mismatch"),
+    # the label burned without a declaration, and a declaration without the label
+    ("money_map", "video", lambda md: md.update(opening_art_sha256=None), "art_label_without_art"),
+    ("money_map", "video", lambda md: md.update(onscreen_text=[s for s in md["onscreen_text"]
+                                                               if s != "AI illustration"]), "art_label_missing"),
+    # the main lane's picture never carries art, even the accepted art with its label
+    ("money_map", "card", "main_picture", "art_surface_not_allowed"),
+])
+def test_post_art_a_forged_declaration_is_refused_422_by_the_real_server(monkeypatch, which, kind, forge, problem):
+    """The worker is the least-trusted process: a declaration that is not the accepted output's art on a surface the
+    record allows — whatever the worker drew — is refused 422 by the real server, the run fails and nothing is
+    posted."""
+    pytest.importorskip("PIL")
+    from app.services.marketing import template_onscreen as tos
+
+    assert problem in tos.ART_DECLARATION_PROBLEMS or problem == "art_surface_not_allowed"
+    day = _ArtDay(monkeypatch, which)
+    w = day.world
+    answered: List[Dict[str, Any]] = []
+
+    def forged(request):
+        if not (request.method == "POST" and request.url.path.endswith("/assets")):
+            return None
+        body = json.loads(request.content)
+        md = body.get("metadata") or {}
+        if body.get("kind") != kind or (kind == "card" and md.get("image_role") != "post_image"):
+            return None
+        if forge == "main_picture":
+            accepted = day.script()["output"]["art"]["sha256"]
+            md.update(art_sha256=accepted, onscreen_text=list(md["onscreen_text"]) + [tos.ART_LABEL])
+        else:
+            forge(md)
+        r = w.server.request("POST", request.url.path, content=json.dumps(body),
+                             headers={k: v for k, v in request.headers.items()
+                                      if k.lower() not in ("host", "content-length")})
+        answered.append({"status": r.status_code, "body": r.json()})
+        return httpx.Response(r.status_code, content=r.content, headers={"content-type": "application/json"})
+
+    w.before = forged
+    assert day.run() == 1
+    run = w._run_row()
+    assert run["status"] == "failed" and "MARKETING_REQUEST_INVALID" in (run["last_error"] or "")
+    assert [a["status"] for a in answered] == [422]
+    assert problem in json.dumps(answered[0]["body"]), answered[0]["body"]
+    assert w.posts() == []
+    assert _ready(w, "video" if kind == "video" else "card") == []
+
+
+def test_post_art_with_the_switch_off_the_day_is_the_day_of_before_byte_for_byte(monkeypatch):
+    """MARKETING_ART_ENABLED off (its default): no art step (neither client is reached), no `art` key in the stored
+    output, no art read-back, no art download, no declaration, no label, no note on any post, the picture posts not
+    made with AI. And it is a real KILL switch: art made at build time, then the switch turned off before the worker
+    reads the script back, gives a picture and a cover byte for byte the switch-off day's."""
+    pytest.importorskip("PIL")
+    from marketing import cards
+
+    off = _ArtDay(monkeypatch, "money_map", enabled=False)   # owner decisions 2026-11-20: the one art series
+    assert off.run() == 0
+    out = off.script()["output"]
+    assert "art" not in out and off.gemini.calls == [] and off.claude.calls == []
+    assert off.art_downloads() == []
+    pmd, vmd = off.picture()["metadata"], off.video()["metadata"]
+    assert pmd["art_sha256"] is None and vmd["opening_art_sha256"] is None
+    assert cards.ART_LABEL not in pmd["onscreen_text"] + vmd["onscreen_text"]
+    (cover_off,) = off.covers
+    assert cover_off["art"] is None
+    posts = off.world.posts()
+    assert posts and not any("art" in p["metadata"] for p in posts)
+    assert all(p["metadata"]["made_with_ai"] is (p["format"] == "video") for p in posts)
+    picture_off = off.world.stored[off.picture()["storage_path"]]
+
+    # the kill switch: the build makes art (switch on — the selection kick's read-back carries it), then the switch
+    # goes off before the script stage's read-back, the one the worker keeps for its voice and render stages
+    monkeypatch.undo()
+    killed = _ArtDay(monkeypatch, "money_map", enabled=True)
+    reads: List[Any] = []
+
+    def switch_off_after_the_first_accepted_script(request, response):
+        if request.method == "POST" and request.url.path.endswith("/script") and response.status_code == 200:
+            body = json.loads(response.content)
+            if body.get("status") == "accepted":
+                reads.append(body["script"].get("art"))
+                monkeypatch.setattr(settings, "MARKETING_ART_ENABLED", False)
+        return response
+
+    killed.world.after = switch_off_after_the_first_accepted_script
+    assert killed.run() == 0
+    assert killed.script()["output"]["art"]["status"] == "ok" and len(killed.gemini.calls) == 1
+    assert len(reads) == 2 and reads[0] is not None and reads[0]["sha256"] == killed.script()["output"]["art"]["sha256"]
+    assert reads[1] is None                       # read at call time: the switch is a real kill switch
+    assert killed.art_downloads() == []
+    kpmd, kvmd = killed.picture()["metadata"], killed.video()["metadata"]
+    assert kpmd["art_sha256"] is None and kvmd["opening_art_sha256"] is None
+    assert killed.world.stored[killed.picture()["storage_path"]] == picture_off
+    (cover_killed,) = killed.covers
+    assert cover_killed["art"] is None and cover_killed["png"] == cover_off["png"]
+    # the note says the art was made but not drawn; nothing is marked made with AI for a picture without art
+    for p in killed.world.posts():
+        assert p["metadata"]["art"]["drawn"] == {"picture": False, "cover": False}
+        assert p["metadata"]["made_with_ai"] is (p["format"] == "video")

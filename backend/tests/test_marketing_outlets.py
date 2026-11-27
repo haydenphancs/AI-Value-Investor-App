@@ -865,6 +865,29 @@ def test_link_facets_use_utf8_byte_offsets():
     assert facet["features"] == [{"$type": "app.bsky.richtext.facet#link", "uri": SMART_LINK}]
 
 
+@pytest.mark.parametrize("pid", ["insider.breaking", "insider.alert", "thirteen_f.filing"])
+def test_news_v22_a_prefixed_template_caption_links_its_smart_link_at_its_byte_offset(pid):
+    """news-v22 (first-line prefixes): a template caption opening on "🚨 BREAKING: " (a 4-byte emoji) carries its /go
+    link facet at the link's UTF-8 BYTE offset — three bytes past its code-point index — so Bluesky makes exactly the
+    smart link clickable, not a span shifted into the text."""
+    from app.services.marketing import news_templates
+
+    prefix = news_templates.FIRST_LINE_PREFIXES[pid]
+    body = f"{prefix} Contoso's CEO and at least 2 other insiders disclosed buying the company's stock (CTSO)."
+    post = post_copy.compose("bluesky", {"bluesky": body}, category="news:insider_spotlight", run_date=RUN_DAY,
+                             store_state=post_copy.STORE_LIVE, authorship=post_copy.AUTHORSHIP_TEMPLATE)
+    assert post.caption.startswith(body) and SMART_LINK in post.caption
+    record = outlet_bluesky.build_record(post.caption, datetime(2026, 11, 19, 15, 0, tzinfo=timezone.utc))
+    (facet,) = record["facets"]
+    at = post.caption.index(SMART_LINK)
+    start, end = facet["index"]["byteStart"], facet["index"]["byteEnd"]
+    # the emoji is 1 code point and 4 bytes (+3); the value line's em dash 1 and 3 (+2)
+    assert start == len(post.caption[:at].encode("utf-8")) == at + 3 + 2 * post.caption[:at].count("\u2014")
+    assert post.caption[:at].count("\U0001F6A8") + post.caption[:at].count("\U0001F40B") == 1
+    assert post.caption.encode("utf-8")[start:end] == SMART_LINK.encode("utf-8")
+    assert facet["features"] == [{"$type": "app.bsky.richtext.facet#link", "uri": SMART_LINK}]
+
+
 def test_link_facets_two_links_each_get_their_own_offsets():
     text = f"\U0001F4C8 {SMART_LINK} and é {SMART_LINK}/more"
     facets = outlet_bluesky.link_facets(text)
@@ -2636,3 +2659,19 @@ def test_x_made_with_ai_tolerates_a_post_with_no_metadata_object(monkeypatch, x_
     monkeypatch.setattr(outlet_x.settings, "MARKETING_X_MADE_WITH_AI", True)
     for metadata in (None, "x", ["made_with_ai", False]):
         assert outlet_x.ADAPTER.prepare(_x_post(metadata=metadata)).payload["made_with_ai"] is True
+
+
+def test_tid_for_a_spotlight_key_is_deterministic_and_never_the_main_keys():
+    """Migration 210: the day's two runs post to the same Bluesky account; their keys differ, so their record keys
+    do too — and a spotlight key's run date (its first 10 characters) puts its TID inside the run day."""
+    from app.services.marketing.run_service import idempotency_key_for, post_run_date
+
+    main = idempotency_key_for(RUN_DAY, "bluesky", "text")
+    spot = idempotency_key_for(RUN_DAY, "bluesky", "text", lane="spotlight")
+    assert post_run_date({"idempotency_key": spot}) == RUN_DAY
+    a = outlet_bluesky.tid_for(spot, 0, RUN_DAY)
+    assert a == outlet_bluesky.tid_for(spot, 0, RUN_DAY) and outlet_bluesky.TID_RE.fullmatch(a)
+    assert a != outlet_bluesky.tid_for(main, 0, RUN_DAY)
+    micros, _clock, _v = _tid_parts(a)
+    day_start = int(datetime(RUN_DAY.year, RUN_DAY.month, RUN_DAY.day, tzinfo=timezone.utc).timestamp()) * 1_000_000
+    assert day_start <= micros < day_start + 86_400_000_000

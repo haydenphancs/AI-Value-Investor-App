@@ -24,6 +24,13 @@ call and its ffprobe gate), so what you watch is what the `rendered` stage would
     # address) instead of the bucket; a logo missing there draws its wordmark, as on a worker day.
     # --phonemes lists how Kokoro's G2P will speak every number, ticker and symbol (no voice model).
     # --out DIR writes there instead of marketing/out/<timestamp>.
+    ./venv_marketing/bin/python -m marketing.preview path/to/script.json --art-file ART.jpg [--logos-dir DIR]
+    # workstream C: draw a LOCAL JPEG as the run's per-post art (16:9, 1024-2752 px wide — the web's own
+    # bounds, checked with the worker's `art.decode_problem`): on the `feature` picture's band and on the
+    # opening card (one company), exactly as the rendered stage draws a verified read-back art. Spends
+    # nothing and fetches nothing; report.json says where it was drawn and, when not, why. The web-side
+    # generator makes such a file and passes it here itself: `scripts/marketing_news_preview.py --art --render`
+    # (that flag SPENDS MONEY — the brief, the drawing and the picture check).
 
 Needs ffmpeg with libass (Homebrew's and the image's both have it) and the Kokoro weights
 (downloaded to HF_HOME on first use locally; baked into the Railway image). A push-in render that fails
@@ -84,7 +91,10 @@ DEMO = {
                    "paragraphs": ["Every day, a moody partner offers a price for your share of the business.",
                                   "Some days he is gloomy, some days giddy. His price follows his mood.",
                                   "You never have to accept his offer. The business keeps doing its work."]},
-    "image_footer": "Educational only · not investment advice · Written with AI assistance · Preview · Caydex",
+    # news-v23: the lesson picture's code-owned short footer (cards.LESSON_FOOTER — "Educational only" and "Caydex"
+    # left the image), and the read-back's `look` a news-v23 web sends (the brand row's word and the kicker pill)
+    "image_footer": "Not investment advice",
+    "look": "news-v23",
 }
 
 
@@ -178,15 +188,46 @@ def template_logos(script: dict, logos_dir: "Path | None", out: Path) -> dict:
     return cards.logo_table(script, resolved)
 
 
-def preview_template_image(script: dict, table: dict, out: Path, font: str):
+def local_art(path: "Path | None"):
+    """(cards.ArtImage, None) for a local JPEG passed with --art-file — checked as the worker checks a downloaded
+    art (`art.entry_problem` on its size and bytes, `art.decode_problem` on its header and pixels) — or (None,
+    problem) when it is not drawable art; (None, None) without a file. Never raised: the preview records it."""
+    import hashlib
+    import io
+
+    from marketing import art as art_mod
+    from marketing import cards
+
+    if path is None:
+        return None, None
+    try:
+        from PIL import Image
+
+        data = Path(path).read_bytes()
+        with Image.open(io.BytesIO(data)) as im:
+            width, height = im.size
+    except Exception as e:  # noqa: BLE001 — recorded in the report, never raised
+        return None, f"{type(e).__name__}: {e}"
+    sha = hashlib.sha256(data).hexdigest()
+    problem = art_mod.entry_problem({"url": str(path), "sha256": sha, "bytes": len(data), "width": width,
+                                     "height": height}) or art_mod.decode_problem(data, width=width, height=height)
+    if problem is not None:
+        return None, problem
+    return cards.ArtImage(sha256=sha, path=str(Path(path).resolve()), width=width, height=height), None
+
+
+def preview_template_image(script: dict, table: dict, out: Path, font: str, art=None):
     """The template post image's entry in report.json (`post_image.jpg`), never raised — like
-    `preview_image`, for a template's closed `image_spec` drawn by `news_layouts`."""
-    from marketing import cards, news_layouts
+    `preview_image`, for a template's closed `image_spec` drawn by `news_layouts`. `art` (workstream C, a
+    cards.ArtImage) is offered only to a `feature` picture, as the rendered stage offers it; the entry says
+    whether it was drawn (`art_drawn`) and, when not, why (`art_skipped`)."""
+    from marketing import cards, news_layouts, render
 
     if not isinstance(script, dict) or script.get("image_spec") is None:
         return None
     try:
-        spec = news_layouts.template_image_for_script(script, table)
+        spec = news_layouts.template_image_for_script(
+            script, table, art=art if art is not None and render.picture_draws_art(script) else None)
         news_layouts.check_glyphs(spec, font)
         image = news_layouts.render_template_image(spec, font_path=font,
                                                    layout_engine=cards.resolve_layout_engine(None))
@@ -194,8 +235,9 @@ def preview_template_image(script: dict, table: dict, out: Path, font: str):
         return {"error": f"{type(e).__name__}: {e}"}
     (out / "post_image.jpg").write_bytes(image.data)
     return {"bytes": len(image.data), "quality": image.quality, "layout": spec.layout,
-            "onscreen_text": list(spec.strings),
-            "logos": {k: ("logo" if not art.wordmark else "wordmark") for k, art in table.items()}}
+            "onscreen_text": news_layouts.drawn_strings(spec, image.layout),
+            "logos": {k: ("logo" if not logo.wordmark else "wordmark") for k, logo in table.items()},
+            "art_drawn": image.layout.art is not None, "art_skipped": image.art_skipped}
 
 
 def phoneme_report(lines: list) -> list:
@@ -233,6 +275,9 @@ def main(argv: list) -> int:
     ap.add_argument("--logos-dir", type=Path, help="a template script's logos: <sha256[:32]>.<png|jpg> files")
     ap.add_argument("--phonemes", action="store_true", help="report how Kokoro speaks numbers, tickers, symbols")
     ap.add_argument("--out", type=Path, help="output directory (default: marketing/out/<timestamp>)")
+    ap.add_argument("--art-file", type=Path,
+                    help="a local 16:9 JPEG drawn as the per-post art (a template script: the feature picture's "
+                         "band and the opening card)")
     args = ap.parse_args(argv)
     script = json.loads(args.script.read_text(encoding="utf-8")) if args.script else DEMO
     template = is_template(script)
@@ -241,6 +286,10 @@ def main(argv: list) -> int:
     out = args.out or (_OUT / stamp)
     out.mkdir(parents=True, exist_ok=True)
     table = template_logos(script, args.logos_dir, out) if template else {}
+    art, art_problem = local_art(args.art_file)
+    art_report: dict = {}
+    if art is not None and not template:
+        art_problem, art = "a lesson draws no art (only a template script does) — ignored", None
     t0 = time.monotonic()
     narration = voice.synthesize_fitting(lines, voice=voice.DEFAULT_VOICE, speed=1.0, workdir=out,
                                          heartbeat=None, budget=voice.video_budget_seconds(),
@@ -255,7 +304,8 @@ def main(argv: list) -> int:
     # engine, as the rendered stage checks them — one that cannot be drawn is left out (a WARNING).
     features = cards.video_features(script)
     specs = cards.cards_for_script(script, logos=table if template else None, font_path=font,
-                                   layout_engine=engine)
+                                   layout_engine=engine,
+                                   **({"art": art, "report": art_report} if art is not None else {}))
     push_in = cards.VIDEO_FEATURE_PUSH_IN in features
     missing = []
     try:
@@ -278,7 +328,17 @@ def main(argv: list) -> int:
         for text in cards.onscreen_strings(specs[i]):
             if text not in onscreen:
                 onscreen.append(text)
-    image_report = preview_template_image(script, table, out, font) if template else preview_image(script, out, font)
+    image_report = (preview_template_image(script, table, out, font, art=art) if template
+                    else preview_image(script, out, font))
+    art_entry = None
+    if args.art_file is not None:
+        art_entry = {"file": str(args.art_file), "problem": art_problem}
+        if art is not None:
+            art_entry.update({"sha256": art.sha256, "width": art.width, "height": art.height,
+                              "cover": bool(specs) and specs[0].kind == "opening" and specs[0].art is not None,
+                              "cover_skipped": art_report.get("opening_art_skipped"),
+                              "picture": bool(image_report and image_report.get("art_drawn")),
+                              "picture_skipped": (image_report or {}).get("art_skipped")})
     report = {
         "out": str(out), "lines": len(lines), "exact_lines": narration.exact_lines,
         "words": len(words), "narration_s": round(duration, 2), "video_s": round(video_seconds, 2),
@@ -289,7 +349,7 @@ def main(argv: list) -> int:
         "onscreen_text": onscreen, "missing_glyphs": missing,
         "raqm": cards.raqm_available(), "render_wall_s": round(time.monotonic() - t_render, 1),
         "wall_s": round(time.monotonic() - t0, 1), "video": _ffprobe(out / "preview.mp4"),
-        "post_image": image_report, "template": template,
+        "post_image": image_report, "template": template, "art": art_entry,
         "phonemes": phoneme_report(lines) if args.phonemes else None,
     }
     (out / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")

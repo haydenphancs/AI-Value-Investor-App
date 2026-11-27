@@ -468,6 +468,113 @@ def _extract_segments(record: Dict[str, Any]) -> List[RevenueSourceSchema]:
     return result
 
 
+# ── Older fiscal years (marketing's weekly theme post, 2026-11-20) ────────────────────────
+# `get_revenue_breakdown` keeps ONE year: the newest segmentation year paired with that year's
+# income statement. The weekly theme post ("how they make money", `marketing/company_news_adapter`)
+# needs the years before it when that newest stack is GROSS — it includes intersegment sales (INTC
+# since its Intel Foundry reorganisation: segments ~134% of revenue), so no segment's share of revenue
+# can be stated from it. `get_segment_years` reads the SAME two licensed feeds the card reads
+# (revenue-product-segmentation, income-statement; never the calendar) and reconciles EVERY paired
+# year exactly as the card reconciles its one (`_extract_segments` + `_reconcile_segments`), so
+# "gross" means what it means on the card. In-memory tier + in-flight dedupe only: its one caller is
+# a weekly marketing build that memoises the answer again, and the Supabase row stays the card's
+# single year (widening it would change an app-facing cache payload).
+#: The income statement's rows read with the segmentation — the card's own `limit` (five fiscal years).
+SEGMENT_YEARS_INCOME_ROWS = 5
+_FISCAL_YEAR_RE = re.compile(r"[0-9]{4}")
+
+
+@dataclass(frozen=True)
+class SegmentYear:
+    """One fiscal year's product-segment stack, reconciled to THAT year's reported revenue the way the
+    card's newest year is (`outcome` is `_reconcile_segments`' own: "gross" carries
+    `intersegment_eliminations` > 0). Duck-compatible with `RevenueBreakdownResponse` for the fields a
+    segment reader uses (`symbol`, `fiscal_year`, `revenue_sources`, `reported_revenue`,
+    `intersegment_eliminations`, `degraded`). A year that could not be reconciled carries a reason in
+    `degraded` and no sources — never a guess."""
+
+    symbol: str
+    fiscal_year: str
+    revenue_sources: Tuple[RevenueSourceSchema, ...]
+    reported_revenue: Optional[float]
+    intersegment_eliminations: Optional[float]
+    outcome: str
+    degraded: Tuple[str, ...] = ()
+
+
+def _segment_items(record: Dict[str, Any]) -> Dict[str, Any]:
+    """A segmentation record's segment mapping (the nested ``data`` dict, else the top-level keys
+    minus metadata) — what two records of one fiscal year are compared on."""
+    data = record.get("data")
+    if isinstance(data, dict):
+        return {k: v for k, v in data.items() if k not in _SEGMENT_META_KEYS}
+    return {k: v for k, v in record.items() if k not in _SEGMENT_META_KEYS}
+
+
+def segment_years(ticker: str, seg_raw: Any, income_raw: Any) -> Tuple[SegmentYear, ...]:
+    """Pure. Every fiscal year the product segmentation holds, NEWEST first (one entry per year),
+    reconciled to that year's reported revenue — or marked degraded, with no sources:
+      * ``year_conflict`` — two segmentation records, or two income statements, of one fiscal year
+        that disagree (which one is the filing's is unknown);
+      * ``income_unpaired`` — no income statement of that fiscal year among the rows read;
+      * ``segments_empty`` — the record holds no positive segment.
+    A record without a readable four-digit fiscal year is skipped (logged)."""
+    income_by_year: Dict[str, Dict[str, Any]] = {}
+    conflict: set = set()
+    for rec in _as_list(income_raw):
+        yr = _record_year(rec)
+        if not _FISCAL_YEAR_RE.fullmatch(yr):
+            continue
+        prev = income_by_year.get(yr)
+        if prev is None:
+            income_by_year[yr] = rec
+        elif _safe_float_opt(prev, "revenue") != _safe_float_opt(rec, "revenue"):
+            conflict.add(yr)
+    seg_by_year: Dict[str, Dict[str, Any]] = {}
+    for rec in _as_list(seg_raw):
+        yr = _record_year(rec)
+        if not _FISCAL_YEAR_RE.fullmatch(yr):
+            logger.info("[revenue-seg-years] %s: a segmentation record without a readable fiscal year "
+                        "(%r) — skipped", ticker, str(yr)[:12])
+            continue
+        prev = seg_by_year.get(yr)
+        if prev is None:
+            seg_by_year[yr] = rec
+        elif _segment_items(prev) != _segment_items(rec):
+            conflict.add(yr)
+    out: List[SegmentYear] = []
+    for yr in sorted(seg_by_year, key=int, reverse=True):
+        rec = seg_by_year[yr]
+
+        def refused(reason: str, revenue: Optional[float] = None) -> SegmentYear:
+            return SegmentYear(symbol=ticker, fiscal_year=yr, revenue_sources=(), reported_revenue=revenue,
+                               intersegment_eliminations=None, outcome=reason, degraded=(reason,))
+
+        if yr in conflict:
+            logger.warning("[revenue-seg-years] %s FY%s: two records of one fiscal year disagree — "
+                           "that year is not used", ticker, yr)
+            out.append(refused("year_conflict"))
+            continue
+        income = income_by_year.get(yr)
+        if income is None:
+            out.append(refused("income_unpaired"))
+            continue
+        revenue = _safe_float_opt(income, "revenue")
+        sources = _extract_segments(rec)
+        if not sources:
+            out.append(refused("segments_empty", revenue))
+            continue
+        sources, eliminations, outcome = _reconcile_segments(
+            sources, revenue, _explicit_eliminations(rec), ticker=f"{ticker} FY{yr}",
+            interest_expense=_safe_float_opt(income, "interestExpense"),
+            interest_income=_safe_float_opt(income, "interestIncome"),
+        )
+        out.append(SegmentYear(symbol=ticker, fiscal_year=yr, revenue_sources=tuple(sources),
+                               reported_revenue=revenue, intersegment_eliminations=eliminations,
+                               outcome=outcome))
+    return tuple(out)
+
+
 def _find_next_earnings_date_simple(ec_records: List[Dict[str, Any]]) -> Optional[str]:
     """Next pending earnings date (yyyy-MM-dd) — includes TODAY's pending report and
     skips a stale reschedule row. Shared rule: ``_earnings_common.next_pending_earnings``."""
@@ -550,6 +657,50 @@ class RevenueBreakdownService:
             # whenever the LEADER is a cancellable caller: a report run hitting
             # RESEARCH_PIPELINE_TIMEOUT_SECONDS, or any pre-warm task cancelled at shutdown.
             # Hand waiters a normal exception so they fail fast through their own error path.
+            fail_shared_future(future, RuntimeError("in-flight fetch was cancelled"))
+            raise
+        except Exception as e:
+            fail_shared_future(future, e)
+            raise
+        finally:
+            _inflight.pop(cache_key, None)
+
+    async def get_segment_years(self, ticker: str) -> Tuple[SegmentYear, ...]:
+        """Every fiscal year's reconciled segment stack, newest first (`segment_years`) — for a caller
+        whose newest stack is GROSS and that needs the newest year that is not (the weekly theme post).
+        Two licensed calls, the card's own (product segmentation + the income statement's last
+        `SEGMENT_YEARS_INCOME_ROWS` years); in-memory tier (an empty answer kept only
+        `_DEGRADED_CACHE_TTL`: it may be a failure the client swallowed) + in-flight dedupe. A failed or
+        malformed leg RAISES (typed) — nothing is cached and the caller treats it as no older year."""
+        ticker = _validate_ticker(ticker)
+        cache_key = f"rev_segment_years:{ticker}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
+        if cache_key in _inflight:
+            return await asyncio.shield(_inflight[cache_key])
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        _inflight[cache_key] = future
+        try:
+            seg_raw, income_raw = await asyncio.gather(
+                self.fmp.get_revenue_product_segmentation(ticker, period="annual"),
+                self.fmp.get_income_statement(ticker, period="annual", limit=SEGMENT_YEARS_INCOME_ROWS),
+                return_exceptions=True,
+            )
+            for leg, raw in (("segmentation", seg_raw), ("income statement", income_raw)):
+                if isinstance(raw, BaseException):
+                    logger.warning("[revenue-seg-years] %s: %s fetch failed (%s: %s) — no older years",
+                                   ticker, leg, type(raw).__name__, raw)
+                    raise raw
+                if not isinstance(raw, list):
+                    raise FMPUnavailableException(
+                        f"{leg} for {ticker} returned {type(raw).__name__}, not a list")
+            years = segment_years(ticker, seg_raw, income_raw)
+            _cache_set(cache_key, years, ttl=None if years else _DEGRADED_CACHE_TTL)
+            if not future.done():
+                future.set_result(years)
+            return years
+        except asyncio.CancelledError:
             fail_shared_future(future, RuntimeError("in-flight fetch was cancelled"))
             raise
         except Exception as e:

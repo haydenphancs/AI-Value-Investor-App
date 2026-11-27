@@ -14,6 +14,7 @@ Hermetic: the breaker is replaced, `asyncio.sleep` is recorded instead of slept.
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 
@@ -166,3 +167,25 @@ def test_the_per_run_model_call_bound():
     assert ss.MAX_MODEL_CALLS_PER_RUN == (
         (ss.MAX_GENERATIONS + ss.MAX_WRITER_FAILURES - 1) * MODEL_CALLS_PER_GENERATION
     ) == 28
+
+
+def test_the_per_post_art_leaves_the_lease_and_the_owner_life_unchanged(monkeypatch):
+    """Per-post art (workstream C) runs inside a TEMPLATE build, which holds no lease, and its Claude calls are not an
+    llm_provider ROLE: with MARKETING_ART_ENABLED on and a Claude key set, no marketing role is on Claude, asking
+    Claude first adds nothing, and the lease / owner-life arithmetic — and the one holder read a generation counts —
+    are exactly what they are with the switch off."""
+    from app.services import llm_provider as lp
+
+    for role_setting in lp.MARKETING_SETTINGS:              # every marketing role on its default provider
+        monkeypatch.setattr(settings, role_setting, "gemini")
+    monkeypatch.setattr(settings, "MARKETING_ART_ENABLED", False)
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", "")
+    before = (ss.worst_case_model_call_seconds(), ss.worst_case_generation_seconds(), ss.claude_first_seconds())
+    monkeypatch.setattr(settings, "MARKETING_ART_ENABLED", True)
+    monkeypatch.setattr(settings, "CAYDEX_ANTHROPIC_API_KEY", "sk-ant-test")
+    assert not lp.any_marketing_role_on_claude()
+    assert ss.claude_first_seconds() == 0.0
+    assert (ss.worst_case_model_call_seconds(), ss.worst_case_generation_seconds(), ss.claude_first_seconds()) == before
+    assert ss._HOLDER_STATEMENTS == 1                  # the art gate reuses the freeze's read: never a second one
+    assert ss.LEASE_SECONDS == int(math.ceil(ss.worst_case_model_call_seconds() + ss.LEASE_MARGIN_SECONDS))
+    assert ss.OWNER_ALIVE_SECONDS == int(math.ceil(ss.worst_case_generation_seconds() + ss.LEASE_MARGIN_SECONDS))

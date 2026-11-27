@@ -844,6 +844,19 @@ enum AppError: Error, Identifiable, Equatable, Sendable {
             if code == "EMAIL_NOT_CONFIRMED" {
                 return .emailNotConfirmed(message: message)
             }
+            // 409 AUTH_EMAIL_ALREADY_REGISTERED, from `/auth/register` only: the address already
+            // has a confirmed account (owner decision 2026-11-26: say so right away, rather than
+            // open a code screen for a code that never comes). The person is on the sign-up form
+            // and the cure is to sign in (or Forgot password): `.validationFailed` keeps the
+            // server's wording, points at the form, is outside `isAuthError` (nothing touches
+            // the Keychain) and is never retryable — the same sign-up is refused every time.
+            if code == "AUTH_EMAIL_ALREADY_REGISTERED" {
+                return .validationFailed(
+                    message: message.isEmpty
+                        ? "This email is already in use. Please sign in instead, or use Forgot password on the sign-in screen."
+                        : message
+                )
+            }
             // 400 AUTH_CODE_INVALID: an emailed code — sign-up confirmation, password reset or
             // set-password — was wrong, expired or already used. The user fixes the field or asks
             // for a new code: `.validationFailed` points at the input, keeps the backend wording

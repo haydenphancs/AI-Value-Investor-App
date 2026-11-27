@@ -86,6 +86,10 @@ rewrites while the posts keep the flag `create_posts` stamped (Batch 1 review, 2
 re-claimed in dry run read "DRY RUN" over LIVE posts that Approve all then published). When the run's
 flag disagrees with the posts, or the members disagree among themselves, a ⚠️ line under the decision's
 header says so (`dry_run_lines`).
+Per-post art (workstream C, 2026-11-16): on a day whose accepted output carries an art record, both decision
+messages carry ONE "Art: …" line right after the models line (`art_line`, from the members' `metadata.art` note):
+the picture's subject (model text, scrubbed, folded, capped), its treatment, how the check went and where it was
+drawn — or "Art: none today — <owner words>". No model is named. A day without art has no such line.
 
 Quiet Telegram (2026-10-15, plan Batch 1 item 9): in the bundle flow only a DECISION makes the owner's
 phone ring — a bundle's decision message (it carries the buttons). What only SHOWS something — the
@@ -128,12 +132,14 @@ from app.schemas.marketing import (
     IMAGE_FALLBACK_REASONS,
     IMAGE_ROLE_POST,
     POST_FORMATS,
+    POST_METADATA_ART,
     POST_METADATA_FIRST_COMMENT,
     POST_METADATA_WRITTEN_BY,
     POST_METADATA_IMAGE_FALLBACK,
     is_extra_format,
 )
-from app.services.marketing import outlets, publisher_wake, telegram_pacing
+from app.services.marketing import outlets, post_art, publisher_wake, telegram_pacing
+from app.services.marketing.outlet_base import scrub
 # The first comment's SENDER rule (Batch 1 item 7). `outlets` imports this module already, so this adds
 # no import edge; the decision message then names exactly what the outlet will send.
 from app.services.marketing.outlet_upload_post import first_comment_of
@@ -146,8 +152,11 @@ from app.services.marketing.run_service import (
     _parse_ts,
     _ts_filter,
     get_marketing_run_service,
+    lane_label,
+    post_lane,
     review_bundle_of,
     review_caption_sha,
+    run_label,
 )
 from app.utils.market_hours import ET
 
@@ -474,10 +483,14 @@ def _notified(post: Dict[str, Any]) -> bool:
 
 
 def _run_date(run: Optional[Dict[str, Any]], post: Dict[str, Any]) -> str:
+    """The run as every review message names it ("… · run <this>"): its run date — the run row's, else the post
+    key's first part, "?" for a key with no ":" — plus " · spotlight" for the SPOTLIGHT lane (migration 210), from the
+    run row's lane (`run_service.run_label`; a lane that does not read back is named "?", never guessed) or, with no
+    run row, the post key (`run_service.post_lane`). A main run's label is byte for byte the date it always was."""
     if run and run.get("run_date"):
-        return str(run["run_date"])[:10]
+        return run_label(run)
     key = str(post.get("idempotency_key") or "")
-    return key.split(":", 1)[0][:10] if ":" in key else "?"
+    return lane_label(key.split(":", 1)[0][:10], post_lane(post)) if ":" in key else "?"
 
 
 class SendBlock(NamedTuple):
@@ -887,6 +900,105 @@ def written_by_line(members: List[Dict[str, Any]]) -> str:
     return ""
 
 
+# ── the per-post art line (workstream C, decision 13, 2026-11-16) ─────────────────────────────────
+
+#: The art line's subject cap — model text (the brief's subject sentence), folded onto one line.
+ART_LINE_SUBJECT_MAX_CHARS = 160
+#: The owner's words for a surface the art was drawn on (`post_art.SURFACES`).
+ART_SURFACE_WORDS: Dict[str, str] = {post_art.SURFACE_PICTURE: "picture", post_art.SURFACE_COVER: "video cover"}
+#: The line for a note that does not read back (a hand-edited row, or create_posts' own "unreadable" note).
+ART_LINE_UNREADABLE = "Art: none today — the art record could not be read (see the web logs)"
+#: The words for a failure reason the note carries that is not one of `post_art.ART_REASONS`.
+_ART_UNKNOWN_REASON = "a reason that could not be read (see the web logs)"
+_ART_WS_RE = re.compile(r"\s+")
+
+
+def _art_subject(text: Any) -> str:
+    """The note's subject (model text) as ONE Telegram line: secrets redacted (`outlet_base.scrub`, capped at 500),
+    every non-printable character — a line break, a control or format character — folded into a space, whitespace
+    collapsed, then capped at ART_LINE_SUBJECT_MAX_CHARS ("…" when cut). "" when there is none."""
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    s = "".join(ch if ch.isprintable() else " " for ch in scrub(text))
+    s = _ART_WS_RE.sub(" ", s).strip()
+    if len(s) > ART_LINE_SUBJECT_MAX_CHARS:
+        s = s[: ART_LINE_SUBJECT_MAX_CHARS - 1].rstrip() + "…"
+    return s
+
+
+def _art_flag_words(note: Dict[str, Any]) -> str:
+    """The owner's words for the check flags the note lists (`post_art.FLAG_WORDS`, distinct, in order) — "" for
+    none. A flag that is not a known code is left out (never the raw value)."""
+    flags = note.get("flags") if isinstance(note.get("flags"), list) else []
+    words: List[str] = []
+    for flag in flags:
+        entry = post_art.FLAG_WORDS.get(flag) if isinstance(flag, str) else None
+        if entry is not None and entry[1] not in words:
+            words.append(entry[1])
+    return ", ".join(words)
+
+
+def _art_text(note: Any) -> str:
+    """`art_line` for one note (`run_service.art_note`), without its safety net."""
+    if not isinstance(note, dict):
+        return ART_LINE_UNREADABLE
+    status = note.get("status")
+    redrawn = note.get("redrawn") is True
+    flags = _art_flag_words(note)
+    if status == post_art.STATUS_OK:
+        subject = _art_subject(note.get("subject")) or "(no subject recorded)"
+        treatment = note.get("treatment")
+        words = post_art.treatment_words(treatment) if treatment in post_art.MARKETING_TREATMENTS else ""
+        check = "check passed"
+        if redrawn:
+            check += " after one redraw" + (f" — first showed {flags}" if flags else "")
+        drawn = note.get("drawn") if isinstance(note.get("drawn"), dict) else {}
+        allowed = note.get("surfaces") if isinstance(note.get("surfaces"), list) else []
+        on = [ART_SURFACE_WORDS[s] for s in post_art.SURFACES if drawn.get(s) is True]
+        missed = [ART_SURFACE_WORDS[s] for s in post_art.SURFACES if s in allowed and drawn.get(s) is not True]
+        where = f"on: {', '.join(on)}" if on else "not drawn today (the media worker kept today's drawing)"
+        if on and missed:
+            where += f" (not on the {', '.join(missed)})"
+        return f"Art: {subject}" + (f" ({words})" if words else "") + f" · {check} · {where}"
+    if status == post_art.STATUS_FAILED:
+        reason = note.get("reason")
+        why = post_art.REASON_WORDS.get(reason, _ART_UNKNOWN_REASON) if isinstance(reason, str) \
+            else _ART_UNKNOWN_REASON
+        if reason == "check_failed":
+            why += (" after one redraw" if redrawn else "") + (f" ({flags})" if flags else "")
+        return f"Art: none today — {why}"
+    return ART_LINE_UNREADABLE
+
+
+def art_line(members: List[Dict[str, Any]]) -> str:
+    """The decision message's per-post ART line (workstream C, decision 13), from the members' `metadata.art` note
+    (`run_service.art_note`, stamped by `create_posts` on every post of a run whose accepted output carries an art
+    record) — "" when no member carries one, so a day without art (the switch off) reads exactly as before. The first
+    member that carries a note decides (every post of a run carries the same one):
+
+    * art drawn: "Art: <subject> (<treatment words>) · check passed[ after one redraw — first showed <flag words>] ·
+      on: picture, video cover" — the surfaces the run's VERIFIED media declared drawing; a surface the record allowed
+      but the worker did not draw is named "(not on the …)", and none drawn reads "not drawn today …";
+    * no art: "Art: none today — <owner words for the reason>" (`post_art.REASON_WORDS`; a failed check adds the
+      redraw and the flags' owner words).
+
+    No model or provider is ever named (identity rule: the note carries none). The subject is MODEL text, shown only
+    here, inside Telegram (rules/marketing.md §2): scrubbed, folded onto one line and capped
+    (ART_LINE_SUBJECT_MAX_CHARS). Best effort, like the series note: a raise here (a bug) is logged at ERROR with the
+    stack and costs only the line — never the decision message."""
+    try:
+        for post in members if isinstance(members, list) else []:
+            meta = post.get("metadata") if isinstance(post, dict) and isinstance(post.get("metadata"), dict) else {}
+            if meta.get(POST_METADATA_ART) is not None:
+                return _art_text(meta[POST_METADATA_ART])
+        return ""
+    except Exception as e:  # noqa: BLE001 — a note must never hold the day's decision
+        post_ids = [str(p.get("id")) for p in members if isinstance(p, dict)] if isinstance(members, list) else []
+        logger.error("marketing review: the art line could not be built for post_ids=%s (%s: %s) — the decision "
+                     "message goes out without it", post_ids, type(e).__name__, e, exc_info=True)
+        return ""
+
+
 def compose_bundle_decision_text(kind: str, members: List[Dict[str, Any]], previews: List[Dict[str, Any]],
                                  run_date: str, dry: bool, warnings: List[str], *, series_note: str = "",
                                  dry_notes: Optional[List[str]] = None,
@@ -902,7 +1014,8 @@ def compose_bundle_decision_text(kind: str, members: List[Dict[str, Any]], previ
     the run gives two posts, on which a drop rejects one post, not the platform; empty = the line of before.
     With ONE member — no ✂ drop, so no drop line — it ends with what its ❌ Reject all does to a paired platform's
     video (`released_video_lines`): rejecting the picture/text post releases it; [] when the member is not paired,
-    so the text of before."""
+    so the text of before. Workstream C (2026-11-16): the per-post art line (`art_line`) comes right after the
+    models line — only when a member carries the art note, so a day without art reads exactly as before."""
     lines = [f"DECISION · {'VIDEO' if kind == 'video' else 'POSTS'} · run {run_date}" + (" · DRY RUN" if dry else "")]
     lines += dry_notes or []
     if series_note:
@@ -910,6 +1023,9 @@ def compose_bundle_decision_text(kind: str, members: List[Dict[str, Any]], previ
     written = written_by_line(members)
     if written:
         lines.append(written)
+    art = art_line(members)
+    if art:
+        lines.append(art)
     lines.append("Approve all sends: " + ", ".join(_platform_label(p) for p in members))
     if previews:
         lines.append("Not sent: " + ", ".join(f"{_platform_name(p)} (preview — not wired yet)" for p in previews))

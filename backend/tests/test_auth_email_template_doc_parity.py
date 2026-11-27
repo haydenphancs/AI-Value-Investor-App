@@ -494,7 +494,10 @@ def test_owner_tasks_stuck_users_step_splits_by_app_version():
     assert "sends nothing" in new_build, "the new-build bullet must say sign-in sends no email"
     assert "re-sends the email" in old_build and "NEWEST" in old_build
     assert "FIRST registered" in old_build and "Forgot password" in old_build   # BE-AUTH-02
-    assert "at most 3 emails per address per hour" in flat
+    from app.api.v1.endpoints import auth as auth_ep
+    window_minutes = auth_ep.MAIL_SEND_WINDOW_SECONDS // 60
+    assert f"at most 3 emails per address every {window_minutes} minutes" in flat, (
+        "OWNER_TASKS states a different resend window from the code")
 
 
 def test_owner_tasks_rollback_restores_the_exact_secret_and_never_the_old_template():

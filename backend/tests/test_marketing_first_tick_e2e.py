@@ -2097,6 +2097,10 @@ def _claim_log(world, mark: int) -> List[tuple]:
     return out
 
 
+#: the real start-window rule, captured before any test patches it (`_tick` evaluates it at the tick's frozen time)
+_REAL_SPOTLIGHT_START_CLOSED = mrs.spotlight_start_closed
+
+
 def _tick(world, monkeypatch, day, hour: int):
     """One unforced worker tick at `hour`:15 ET on `day`; (exit code, the claim routes it called, their bodies)."""
     bodies: List[Dict[str, Any]] = []
@@ -2113,6 +2117,9 @@ def _tick(world, monkeypatch, day, hour: int):
             return datetime(day.year, day.month, day.day, hour, 15, tzinfo=_ET)
 
     monkeypatch.setattr(world.worker, "datetime", Frozen)
+    # the server's spotlight START window (2026-11-26) reads the same frozen ET time as the worker's tick
+    frozen = datetime(day.year, day.month, day.day, hour, 15, tzinfo=_ET)
+    monkeypatch.setattr(mrs, "spotlight_start_closed", lambda run_date, now: _REAL_SPOTLIGHT_START_CLOSED(run_date, frozen))
     world.before = record
     mark = len(world.calls)
     try:
@@ -2275,6 +2282,7 @@ def test_spotlight_a_manual_run_of_one_lane_never_claims_the_other(monkeypatch):
     for name, value in (("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "sat")):
         monkeypatch.setattr(settings, name, value)
     monkeypatch.setenv("MARKETING_RUN_LANE", "spotlight")
+    monkeypatch.setattr(mrs, "spotlight_start_closed", lambda run_date, now: False)   # a manual run on the real clock
     assert world.worker.main() == 0
     assert _claim_log(world, 0) == ["lanes/spotlight/claim"]
     assert list(_rows_by_lane(world)) == ["spotlight"] and news.calls == ["money_map"]
@@ -2440,6 +2448,7 @@ class _ArtDay:
             for name, value in (("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "tue,thu,sat")):
                 monkeypatch.setattr(settings, name, value)
             monkeypatch.setenv("MARKETING_RUN_LANE", "spotlight")
+            monkeypatch.setattr(mrs, "spotlight_start_closed", lambda run_date, now: False)   # a manual run on the real clock
         else:
             self.day = date(2026, 12, 3)
             self.news = _StubNewsArt({"money_map": _costco_money_map()})

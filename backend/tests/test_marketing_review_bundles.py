@@ -3308,6 +3308,11 @@ async def test_e2e_spotlight_two_runs_one_day_two_labelled_decisions_and_the_lan
 
     svc = bundles
     day = date(2026, 9, 17)                                  # a Thursday: a spotlight day of "tue,thu,sat"
+    # the claims read the REAL clock: the lane's start window (`spotlight_start_closed`, 2026-11-26) is held open here
+    # and pinned by tests/test_marketing_run_service.py::test_the_spotlight_start_window_*
+    from app.services.marketing import run_service as _mrs
+
+    monkeypatch.setattr(_mrs, "spotlight_start_closed", lambda run_date, now: False)
     for name, value in (("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "tue,thu,sat"),
                         ("MARKETING_SPOTLIGHT_HOUR_ET", 10), ("MARKETING_MAX_RUN_ATTEMPTS", 6),
                         ("MARKETING_RUN_HOUR_ET", 16), ("MARKETING_CONTENT_CLASSES", "A,C,F"),

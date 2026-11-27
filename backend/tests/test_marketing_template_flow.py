@@ -193,11 +193,19 @@ class FakeStorage:
         self.fail_upload: Optional[BaseException] = None
         self.fail_list: Optional[BaseException] = None
         self.race: Optional[tuple] = None     # (bytes, type) another writer lands just before our upload
+        # one-shot failures, oldest first (2026-11-26: a dropped connection is retried ONCE); `lost_answer`: the
+        # upload LANDS, then its answer is lost (raised once)
+        self.flaky: Dict[str, List[BaseException]] = {"list": [], "upload": []}
+        self.lost_answer: Optional[BaseException] = None
+        self.list_calls = 0
 
     def from_(self, _bucket):
         return self
 
     def list(self, prefix, options=None):
+        self.list_calls += 1
+        if self.flaky["list"]:
+            raise self.flaky["list"].pop(0)
         if self.fail_list is not None:
             raise self.fail_list
         name = (options or {}).get("search")
@@ -207,6 +215,8 @@ class FakeStorage:
 
     def upload(self, path, data, options=None):
         self.uploads.append((path, dict(options or {})))
+        if self.flaky["upload"]:
+            raise self.flaky["upload"].pop(0)
         if self.fail_upload is not None:
             raise self.fail_upload
         if self.race is not None:
@@ -214,6 +224,9 @@ class FakeStorage:
         if path in self.objects:
             raise StorageConflict()
         self.objects[path] = (bytes(data), (options or {}).get("content-type"))
+        if self.lost_answer is not None:
+            lost, self.lost_answer = self.lost_answer, None
+            raise lost
         return {"path": path}
 
     def remove(self, paths):
@@ -1482,6 +1495,115 @@ async def test_store_logo_refuses_what_it_cannot_vouch_for(tworld):
     sb.storage.fail_list = RuntimeError("storage list 503")
     assert await runs.store_logo(data, info) is None                            # cannot stat: never blind
     assert sb.storage.uploads == []
+
+
+
+# ── a dropped Storage connection is retried ONCE (2026-11-26: the first spotlight run's four logo calls failed in the
+#    same millisecond with "Server disconnected" and its picture drew five wordmarks) ─────────────────────────────────
+
+
+def _dropped() -> BaseException:
+    import httpx
+
+    return httpx.RemoteProtocolError("Server disconnected")
+
+
+@pytest.fixture
+def no_retry_wait(monkeypatch):
+    monkeypatch.setattr(mrs, "STORAGE_TRANSPORT_RETRY_DELAY_SECONDS", 0)
+
+
+@pytest.mark.asyncio
+async def test_a_logo_upload_that_lost_its_connection_is_retried_once(tworld, no_retry_wait, caplog):
+    sb, runs = tworld
+    data = png()
+    info = logo_check.inspect_logo(data, "image/png")
+    sb.storage.flaky["upload"] = [_dropped()]
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        entry = await runs.store_logo(data, info)
+    assert entry is not None and entry["sha256"] == info.sha256
+    assert len(sb.storage.uploads) == 2 and sb.storage.objects[entry["path"]] == (data, "image/png")
+    assert any("dropped connection" in r.getMessage() and "one retry" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_a_logo_listing_that_lost_its_connection_is_retried_once(tworld, no_retry_wait):
+    sb, runs = tworld
+    data = png()
+    info = logo_check.inspect_logo(data, "image/png")
+    sb.storage.flaky["list"] = [_dropped()]
+    entry = await runs.store_logo(data, info)
+    assert entry is not None and sb.storage.list_calls == 2 and len(sb.storage.uploads) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_second_dropped_connection_is_a_wordmark_never_a_third_try(tworld, no_retry_wait, caplog):
+    sb, runs = tworld
+    data = png()
+    info = logo_check.inspect_logo(data, "image/png")
+    sb.storage.flaky["upload"] = [_dropped(), _dropped(), _dropped()]
+    with caplog.at_level(logging.WARNING, logger=mrs.logger.name):
+        assert await runs.store_logo(data, info) is None
+    assert len(sb.storage.uploads) == 2 and sb.storage.flaky["upload"]       # exactly one retry; the third is unused
+    assert any("upload of" in r.getMessage() and "wordmark" in r.getMessage() for r in caplog.records)
+    sb.storage.flaky["list"] = [_dropped(), _dropped()]
+    assert await runs.store_logo(data, info) is None                           # a LIST that fails twice: never blind
+
+
+@pytest.mark.asyncio
+async def test_an_upload_that_landed_but_lost_its_answer_is_adopted_on_the_retry(tworld, no_retry_wait):
+    """The first try stored the bytes and the answer was lost: the retry is refused 409 (`x-upsert: false`), re-listed
+    and adopted — never a second object, never a wordmark."""
+    sb, runs = tworld
+    data = png()
+    info = logo_check.inspect_logo(data, "image/png")
+    sb.storage.lost_answer = _dropped()
+    entry = await runs.store_logo(data, info)
+    assert entry is not None and entry["sha256"] == info.sha256
+    assert len(sb.storage.uploads) == 2 and list(sb.storage.objects) == [entry["path"]]
+
+
+@pytest.mark.asyncio
+async def test_only_a_transport_failure_is_retried(tworld, no_retry_wait):
+    """An HTTP answer (a Storage 503, a refused request) is never retried; a dropped connection wrapped in another
+    exception (its cause) still is."""
+    import httpx
+
+    sb, runs = tworld
+    data = png()
+    info = logo_check.inspect_logo(data, "image/png")
+    sb.storage.flaky["upload"] = [RuntimeError("storage 503")]
+    assert await runs.store_logo(data, info) is None and len(sb.storage.uploads) == 1
+    sb.storage.uploads.clear()
+    try:
+        raise _dropped()
+    except httpx.TransportError as inner:
+        try:
+            raise RuntimeError("storage3 wrapper") from inner
+        except RuntimeError as wrapped:
+            sb.storage.flaky["upload"] = [wrapped]
+    assert (await runs.store_logo(data, info)) is not None and len(sb.storage.uploads) == 2
+    assert mrs._is_storage_transport_error(httpx.ConnectError("refused")) is True
+    assert mrs._is_storage_transport_error(httpx.ReadTimeout("slow")) is False        # a hang is never doubled
+    assert mrs._is_storage_transport_error(StorageConflict()) is False
+    assert mrs._is_storage_transport_error(ValueError("x")) is False
+
+
+
+@pytest.mark.asyncio
+async def test_a_storage_timeout_is_not_retried(tworld, no_retry_wait):
+    """Review of 2026-11-27: storage3 waits 20 s a call, so a hung upload or LIST is given up at once (a wordmark),
+    never waited out twice inside the template build's budget."""
+    import httpx
+
+    sb, runs = tworld
+    data = png()
+    info = logo_check.inspect_logo(data, "image/png")
+    sb.storage.flaky["upload"] = [httpx.WriteTimeout("slow")]
+    assert await runs.store_logo(data, info) is None and len(sb.storage.uploads) == 1
+    sb.storage.flaky["list"] = [httpx.ReadTimeout("slow")]
+    calls = sb.storage.list_calls
+    assert await runs.store_logo(data, info) is None and sb.storage.list_calls == calls + 1
 
 
 # ══ create_posts: the template branch, end to end on a real composed output ═════════════════════

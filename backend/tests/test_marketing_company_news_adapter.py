@@ -10768,6 +10768,88 @@ async def test_the_roundups_ignore_the_spotlight_inputs():
     assert dict(got.rejections) == dict(base.rejections)
 
 
+
+# ── one stock per company (2026-11-26: the first spotlight post printed Biglari Holdings as "about 32K shares ·
+#    $356.63–$1,823.63 a share, as filed" — its Class A (~$1,800) and Class B (~$360) lines, both filed under "BH",
+#    summed into one share count and one price range that are no single security's) ─────────────────────────────
+
+
+_BHX = "BHX"          # a two-class issuer whose Form 4 lines of BOTH classes reach one symbol, like Biglari's "BH"
+
+
+def _bhx_profile() -> Dict[str, Any]:
+    return {_BHX: prof(_BHX, "Biglari Holdings Inc.", price=360.0, cap=1e9, ceo="Mr. Sardar Biglari")}
+
+
+def _bhx(sec, shares, price, *, name="BIGLARI SARDAR", cik="0000000999", title="officer: Chief Executive Officer",
+         filed="2026-11-18", traded="2026-11-17"):
+    return irow(sym=_BHX, name=name, cik=cik, title=title, shares=shares, price=price, sec=sec, own="I",
+                filed=filed, traded=traded)
+
+
+@pytest.mark.asyncio
+async def test_a_spotlight_issuer_whose_lines_span_two_share_classes_is_refused(caplog):
+    rows = spot_rows() + [_bhx("Class A Common Stock", 900, 1823.63), _bhx("Class B Common Stock", 31_000, 356.63)]
+    with caplog.at_level(logging.INFO, logger=A.logger.name):
+        got = await spot(FakeFMP(insider=rows, profiles={**spot_profiles(), **_bhx_profile()}))
+    (rec,) = got.records
+    assert [c.company.symbol for c in rec.companies] == ["CTSO"]
+    assert got.rejections["share_class_overlap"] == 1
+    assert any("BHX refused" in r.getMessage() and "class-a, class-b" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_two_people_buying_different_classes_refuse_their_issuer_too():
+    """The list row sums every person's lines, so a CEO's Class B and a director's Class A are no one stock either."""
+    rows = spot_rows() + [_bhx("Class B Common Stock", 31_000, 356.63),
+                          _bhx("Class A Common Stock", 900, 1823.63, name="DOE JANE", cik="0000000998",
+                               title="director")]
+    got = await spot(FakeFMP(insider=rows, profiles={**spot_profiles(), **_bhx_profile()}))
+    assert [c.company.symbol for c in got.records[0].companies] == ["CTSO"]
+    assert got.rejections["share_class_overlap"] == 1
+
+
+@pytest.mark.parametrize("secs", [("Class B Common Stock", "Class B Common Stock"), ("Common Stock", "Common Stock")])
+@pytest.mark.asyncio
+async def test_lines_of_one_class_still_make_a_row_with_their_range(secs):
+    """Over-block guard: two lines of ONE class (labelled alike, or unclassed) at two prices are one stock's row."""
+    rows = spot_rows() + [_bhx(secs[0], 20_000, 356.63), _bhx(secs[1], 11_000, 362.10)]
+    got = await spot(FakeFMP(insider=rows, profiles={**spot_profiles(), **_bhx_profile()}))
+    (bhx,) = [c for c in got.records[0].companies if c.company.symbol == _BHX]
+    assert (bhx.cost_per_share_min_usd, bhx.cost_per_share_max_usd) == (356.63, 362.10)
+    assert round(bhx.shares) == 31_000 and "share_class_overlap" not in got.rejections
+
+
+@pytest.mark.asyncio
+async def test_a_roundup_refuses_a_two_class_issuer_the_same_way():
+    """ceo_buys reads the same per-company lines (`_issuer_lines`): a two-class CEO is no row there either — the week
+    keeps its other companies, and no row's narrated share total adds two classes."""
+    rows = week_rows() + [_bhx("Class A Common Stock", 900, 1823.63, filed="2026-11-12", traded="2026-11-10"),
+                          _bhx("Class B Common Stock", 31_000, 356.63, filed="2026-11-12", traded="2026-11-10")]
+    got = await run("ceo_buys", FakeFMP(insider=rows, profiles={**week_profiles(), **_bhx_profile()}))
+    syms = {row.company.symbol for rec in got.records for row in getattr(rec, "rows", ())}
+    assert _BHX not in syms and got.rejections["share_class_overlap"] >= 1
+
+
+
+@pytest.mark.parametrize("sec, refused", [("Class A Common Stock", True), ("Class B Common Stock", False),
+                                          ("Common Stock", False)])
+@pytest.mark.asyncio
+async def test_a_listed_two_class_symbol_keeps_only_its_own_class(sec, refused):
+    """Review of 2026-11-27: "BH" is Biglari's CLASS B (`_insider_common._SYMBOL_CLASS`). A purchase of only Class A
+    filed under it would print $1,823.63 a share beside the Class B ticker — refused; its own class (or an unclassed
+    line) is that symbol's row."""
+    price = 1823.63 if sec.startswith("Class A") else 356.63
+    rows = spot_rows() + [irow(sym="BH", name="BIGLARI SARDAR", cik="0000000999", shares=900, price=price, sec=sec,
+                               own="I", filed="2026-11-18", traded="2026-11-17")]
+    profiles = {**spot_profiles(), "BH": prof("BH", "Biglari Holdings Inc.", price=360.0, cap=1e9,
+                                              ceo="Mr. Sardar Biglari")}
+    got = await spot(FakeFMP(insider=rows, profiles=profiles))
+    syms = [c.company.symbol for c in got.records[0].companies]
+    assert ("BH" not in syms) is refused
+    assert (got.rejections.get("share_class_overlap", 0) == 1) is refused
+
+
 @pytest.mark.asyncio
 async def test_the_spotlight_issuer_check_caps_hold(monkeypatch):
     """The cluster variant checks at most `SPOTLIGHT_AMENDMENT_MAX_ISSUERS` issuers: with every check failing, the

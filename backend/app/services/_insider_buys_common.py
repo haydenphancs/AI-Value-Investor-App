@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Literal, NamedTuple, Optional, Tuple
 
 from app.services._insider_common import (
     _normalize_cik as normalize_cik,
+    _share_class_token as share_class_token,
     classify_insider_transaction,
     insider_reporter_key,
     is_ceo_role,
@@ -71,6 +72,12 @@ class InsiderBuy(NamedTuple):
     # carries its own ticker with that issuer's CIK; the marketing adapter checks it against
     # the profile. Extraction never reads it (the filters and supersession are unchanged).
     company_cik: Optional[str] = None
+    # The line's share class or series token from `securityName` ("class-a", "series-c", "" when it names none;
+    # `_insider_common._share_class_token`), appended after the parity-compared fields too. FMP files every class of
+    # an issuer under ONE symbol (Biglari's Class A ~$1,800 and Class B ~$360 both reach "BH"), so the marketing
+    # adapter refuses an issuer whose lines span two classes: their shares and prices are not one stock's
+    # (2026-11-26, the first spotlight post printed "$356.63–$1,823.63 a share"). Extraction never reads it.
+    share_class: str = ""
 
 
 def canonical_symbol(symbol: Any) -> str:
@@ -276,6 +283,7 @@ def extract_insider_buys(
             form_type=form_type,
             role=role,
             company_cik=normalize_cik(row.get("companyCik")),
+            share_class=share_class_token(row.get("securityName")),
         ))
 
     groups: Dict[Tuple[str, str, str, str], List[InsiderBuy]] = {}

@@ -23,6 +23,7 @@ from app.core.security import (
 )
 from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.services.auth_methods_service import auth_methods_service
+from app.services import apple_sign_in_service
 from app.schemas.auth import (
     SignInRequest, SignUpRequest, RefreshTokenRequest,
     TokenResponse, AuthUserResponse,
@@ -1479,6 +1480,111 @@ def _ensure_display_name(supabase: Client, user_id: str, display_name: Optional[
         )
 
 
+# ── SOC-08: a provider sign-in that confirmed an account somebody registered earlier ──────────
+#
+# Verified in GoTrue's source (supabase/auth master, 2026-11-26): an id_token sign-in whose
+# VERIFIED email matches an existing email/password user is LINKED to that user
+# (`DetermineAccountLinking` → LinkAccount, regardless of confirmation). When that user was never
+# confirmed, `createAccountFromExternalIdentity` then calls `RemoveUnconfirmedIdentities` — which
+# sets `encrypted_password` to NULL, deletes the email identity and OVERWRITES user_metadata with
+# the provider's identity data — and `Confirm()`s the address. That is GoTrue's pre-account-
+# takeover guard and it is right: whoever registered that address never proved the mailbox, and
+# might not be its owner. Two consequences reach us:
+#
+#   (a) the earlier password is gone. A person who registered, never confirmed, and then used
+#       Google/Apple finds email sign-in refused later. Not reversible and not ours to undo; the
+#       account shows "Set a Password" (no password), and Forgot Password works. Logged below.
+#   (b) `public.users.display_name` is NOT touched by GoTrue — our signup trigger copied it from
+#       the unverified registration at INSERT, and no trigger syncs later changes. So a squatter
+#       who registered the victim's address first chose the name the victim's account then wore.
+#       Fixed here: the name is reset to the provider's (or the placeholder).
+#
+# GoTrue's response gives no "just linked" flag, so the case is recognised by three signals that
+# must ALL hold, each ruling out a legitimate shape:
+#   * `email_confirmed_at` is from THIS request (within the window below of our clock) — rules
+#     out every account confirmed earlier, by email or by an earlier provider sign-in;
+#   * the account is older than that confirmation by more than a few seconds — rules out a
+#     brand-new provider account (created and confirmed in one transaction);
+#   * `user_metadata` carries no `display_name` — our register always writes it there, and GoTrue
+#     MERGES metadata when it links to a confirmed user but REPLACES it when it links to an
+#     unconfirmed one. This rules out an account confirmed by its emailed code a minute ago and
+#     then linked to Google, whose own chosen name must survive.
+# Any signal unreadable → no reset (the name is cosmetic; a wrong reset is the worse error).
+
+#: How far from our clock `email_confirmed_at` may be and still be THIS request's confirmation.
+_LINK_CONFIRMED_WITHIN_SECONDS = 120
+#: Clock skew tolerated the other way (Supabase's clock ahead of Railway's).
+_LINK_CONFIRMED_SKEW_SECONDS = 30
+#: An account must predate that confirmation by more than this to be an EARLIER registration.
+_LINK_ACCOUNT_OLDER_BY_SECONDS = 10
+
+
+def _as_utc(value: Any) -> Optional[datetime]:
+    """A GoTrue timestamp (datetime or ISO-8601 string, possibly with `Z`) as aware UTC, or None."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _confirmed_an_earlier_unconfirmed_account(user: Any, *, now: Optional[datetime] = None) -> bool:
+    """True when this provider sign-in is the one that LINKED to and CONFIRMED an account someone
+    registered earlier without confirming it (see the block comment above)."""
+    confirmed = _as_utc(getattr(user, "email_confirmed_at", None))
+    created = _as_utc(getattr(user, "created_at", None))
+    metadata = getattr(user, "user_metadata", None)
+    if confirmed is None or created is None or not isinstance(metadata, dict):
+        return False
+    age = ((now or datetime.now(timezone.utc)) - confirmed).total_seconds()
+    if not (-_LINK_CONFIRMED_SKEW_SECONDS <= age <= _LINK_CONFIRMED_WITHIN_SECONDS):
+        return False
+    if (confirmed - created).total_seconds() <= _LINK_ACCOUNT_OLDER_BY_SECONDS:
+        return False
+    return "display_name" not in metadata
+
+
+def _provider_name_for_reset(display_name: Optional[str], metadata: Any) -> Optional[str]:
+    """The name to give an account whose earlier name came from an unverified registration:
+    the one the app sent, else the provider's own (GoTrue just wrote the identity data into
+    user_metadata), capped like every other writer of the column."""
+    from app.schemas.user import DISPLAY_NAME_MAX_LENGTH
+
+    candidates = [display_name]
+    if isinstance(metadata, dict):
+        candidates += [metadata.get("full_name"), metadata.get("name")]
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:DISPLAY_NAME_MAX_LENGTH]
+    return None
+
+
+def _reset_name_from_unverified_registration(
+    supabase: Client, user_id: str, name: Optional[str], email: Optional[str],
+) -> bool:
+    """Replace the display name an unverified registration chose. Never raises (cosmetic).
+
+    Falls back to the email's local part — exactly the signup trigger's placeholder, which
+    `_ensure_display_name` treats as "unset", so a later Apple first-time name can still fill it."""
+    value = name or ((email or "").split("@")[0].strip() or None)
+    if not value:
+        return False
+    try:
+        supabase.table("users").update({"display_name": value}).eq("id", user_id).execute()
+        return True
+    except Exception as e:
+        logger.warning(
+            "OAuth: could not reset the display name an unverified registration chose for user=%s "
+            "(%s: %s)", user_id, type(e).__name__, e,
+        )
+        return False
+
+
 @router.post("/oauth", response_model=TokenResponse)
 async def oauth_sign_in(
     request: OAuthSignInRequest,
@@ -1550,7 +1656,42 @@ async def oauth_sign_in(
             user_message="Your account isn't ready yet. Please try again.",
         )
 
+    # SOC-08: this sign-in confirmed an account someone registered earlier and never confirmed.
+    # GoTrue already removed that registration's password and email identity; the name it chose
+    # is ours to drop (see the block comment above `_confirmed_an_earlier_unconfirmed_account`).
+    if _confirmed_an_earlier_unconfirmed_account(user):
+        reset = await asyncio.to_thread(
+            _reset_name_from_unverified_registration, supabase, user_id,
+            _provider_name_for_reset(request.display_name, getattr(user, "user_metadata", None)),
+            getattr(user, "email", None),
+        )
+        logger.warning(
+            "OAuth: provider=%s sign-in confirmed user=%s, an account registered earlier and never "
+            "confirmed — GoTrue removed its unconfirmed password and email identity (pre-account-"
+            "takeover guard); the display name its registration chose was %s",
+            request.provider, user_id, "reset" if reset else "NOT reset (write failed)",
+        )
+
     (await asyncio.to_thread(_ensure_display_name, supabase, user_id, request.display_name))
+
+    # Sign in with Apple: keep a token account deletion can REVOKE (SOC-04). The code is
+    # single-use and lives ~5 minutes, so it is exchanged here or never. Best-effort and
+    # bounded — the service never raises, and a failure only means this grant cannot be revoked
+    # later. AFTER the row check, so only a real account's grant is stored. Google's grant is
+    # revoked on-device (GIDSignIn `disconnect`); a code sent with provider "google" is ignored.
+    if request.provider == "apple" and request.authorization_code:
+        try:
+            apple_grant = await apple_sign_in_service.store_grant_from_authorization_code(
+                supabase, user_id=user_id, authorization_code=request.authorization_code,
+                identity_token=request.id_token,
+            )
+            logger.info("OAuth: Apple grant for user=%s: %s", user_id, apple_grant)
+        except Exception as e:  # noqa: BLE001 — the service never raises; never fail a sign-in on it
+            logger.error(
+                "OAuth: Apple grant step raised for user=%s (%s) — signing in without it",
+                user_id, type(e).__name__, exc_info=True,
+            )
+
     logger.info("OAuth sign-in succeeded provider=%s user=%s", request.provider, user_id)
     return _issue_app_tokens_for(user_id, getattr(user, "email", None))
 

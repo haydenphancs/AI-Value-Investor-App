@@ -31,6 +31,7 @@ from app.services.agents.investor_profile_prompt import may_apply_profile
 from app.services.entitlements import required_tier_for_signals
 from app.services.auth_methods_service import auth_methods_service
 from app.services import avatar_service
+from app.services import apple_sign_in_service
 from app.services.avatar_service import (
     AvatarError,
     AvatarInvalidImageError,
@@ -1513,20 +1514,21 @@ async def delete_account(
 ):
     """Permanently delete the CALLER'S OWN account and all of their data.
 
-    Three steps, in this order:
+    Four steps, in this order:
 
     1. Storage — remove `research-pdfs/reports/<user_id>/*`. Done FIRST because the
        object path is the only remaining handle on those files; if the auth row went
-       first and step 3 then failed, the PDFs would be orphaned with no way to find them.
+       first and step 4 then failed, the PDFs would be orphaned with no way to find them.
     2. Un-FK'd tables — `_UNLINKED_USER_TABLES`. These have no foreign key to
-       `public.users`, so the cascade in step 3 does not reach them.
-    3. `auth.users` — cascades to `public.users` and every FK-linked child table
-       (user_credits, subscriptions,
+       `public.users`, so the cascade in step 4 does not reach them.
+    3. Sign in with Apple — revoke the stored Apple grant (SOC-04, best-effort, never blocks).
+    4. `auth.users` — cascades to `public.users` and every FK-linked child table
+       (user_credits, subscriptions, apple_sign_in_grants,
        user_settings, device_tokens, whale_follows, …). NOT chat_sessions: migration 111
        dropped its FK, so it is purged explicitly in step 2 via _UNLINKED_USER_TABLES
        (chat_messages still cascades from chat_sessions(id)).
 
-    The previous implementation did step 3 only, and its docstring claimed that removed
+    The previous implementation did step 4 only, and its docstring claimed that removed
     "all of the user's data in one call". It did not: four tables and every generated PDF
     survived. Promising deletion and not delivering it is both an App Review 5.1.1 problem
     and a straightforwardly false statement to the user.
@@ -1588,7 +1590,23 @@ async def delete_account(
             details={"failed": ", ".join(sorted(failures))},
         )
 
-    # 3. Identity row + every FK-linked child table.
+    # 3. Sign in with Apple (SOC-04): revoke the account's Apple grant, as Apple's account-deletion
+    # guidance asks. BEFORE the auth row goes — `apple_sign_in_grants` cascades from public.users,
+    # so afterwards the token needed to revoke is gone too. AFTER the purge check above, so a
+    # deletion that aborts (and can be retried) never revokes first. Best-effort: a failure is
+    # logged and the deletion proceeds — an account the user cannot delete is a 5.1.1(v) break,
+    # a grant left authorised is the smaller harm. The service never raises; the guard below is
+    # belt and braces on the one path the App Store requires to work.
+    try:
+        apple_revoke = await apple_sign_in_service.revoke_for_account(supabase, user_id)
+        logger.info("Account deletion: Apple grant for user=%s: %s", user_id, apple_revoke)
+    except Exception as e:  # noqa: BLE001 — never block a deletion on the Apple revoke
+        logger.error(
+            "Account deletion: Apple revoke step raised for user=%s (%s) — deleting anyway",
+            user_id, type(e).__name__, exc_info=True,
+        )
+
+    # 4. Identity row + every FK-linked child table.
     try:
         # ADMIN client — the one nothing ever signs in on. `admin.*` does not emit SIGNED_IN
         # itself, which is what made this look safe, but it READS the same headers dict a

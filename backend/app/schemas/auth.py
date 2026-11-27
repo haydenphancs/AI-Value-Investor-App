@@ -50,6 +50,12 @@ SIGN_IN_SECRET_MAX_LENGTH = 1024
 # Provider / session tokens: an Apple id_token is ~1 KiB, a Supabase JWT ~1 KiB, a refresh
 # token a few dozen bytes. 8 KiB leaves room for any claim set without admitting a payload.
 TOKEN_MAX_LENGTH = 8192
+# Sign in with Apple's authorization code is a short opaque string (~65 characters today);
+# 1 KiB leaves room for a format change without admitting a payload.
+AUTHORIZATION_CODE_MAX_LENGTH = 1024
+# The provider name a social sign-in carries is TRUNCATED to DISPLAY_NAME_MAX_LENGTH, not refused
+# (OAuthSignInRequest); this raw bound only stops a payload.
+OAUTH_DISPLAY_NAME_RAW_MAX_LENGTH = 512
 
 # One-time codes (signup confirmation, password recovery). The live project sends 8 digits; the
 # range is deliberately wider so a dashboard change to the OTP length never 422s every user.
@@ -359,9 +365,27 @@ class OAuthSignInRequest(BaseModel):
     # client generated one; Supabase verifies the pairing.
     nonce: Optional[str] = Field(default=None, max_length=TOKEN_MAX_LENGTH, repr=False)
     # Apple only returns the display name on the FIRST authorization, so the client passes
-    # it through for us to persist. Never used as an identity claim. Same bound as the
-    # column's other writers: `get_current_user` re-reads this row on every request.
-    display_name: Optional[str] = Field(default=None, max_length=DISPLAY_NAME_MAX_LENGTH)
+    # it through for us to persist. Never used as an identity claim. Same STORED bound as the
+    # column's other writers (`get_current_user` re-reads this row on every request) — but
+    # TRUNCATED to it, not refused: a provider name over 64 characters used to 422 the whole
+    # sign-in, and the retry carried no name (Apple sends it once), so the user could neither get
+    # in on that tap nor keep their name. The raw bound only stops a payload.
+    display_name: Optional[str] = Field(default=None, max_length=OAUTH_DISPLAY_NAME_RAW_MAX_LENGTH)
+    # Sign in with Apple's single-use authorization code (~5 minutes), OPTIONAL: builds 1.0–1.03
+    # never send it and must keep decoding. Exchanged inside the same request for a refresh token
+    # that account deletion can revoke (SOC-04, `services/apple_sign_in_service.py`). Ignored for
+    # Google. A credential: repr=False, and `log_redaction` redacts the key by name.
+    authorization_code: Optional[str] = Field(
+        default=None, max_length=AUTHORIZATION_CODE_MAX_LENGTH, repr=False,
+    )
+
+    @field_validator("display_name")
+    @classmethod
+    def _cap_display_name(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        trimmed = value.strip()[:DISPLAY_NAME_MAX_LENGTH].strip()
+        return trimmed or None
 
 
 class SessionExchangeRequest(BaseModel):

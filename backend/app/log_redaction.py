@@ -294,6 +294,10 @@ _WEB_VALUE_REPRS = ("WebPage(", "'origin': 'web'", '"origin": "web"', "'kind': '
 _CREDENTIAL_FRAME_MODULES = frozenset({
     "app.api.v1.endpoints.auth",
     "app.api.email_confirm_page",
+    # Sign in with Apple (SOC-04): the authorization code, the refresh token, the ES256 client
+    # secret and the .p8 key itself are locals in these two.
+    "app.integrations.apple_id",
+    "app.services.apple_sign_in_service",
 })
 _CREDENTIAL_VARS_DROPPED = {
     "auth_handler": "[locals dropped: auth handler frames hold passwords, codes and tokens]",
@@ -327,7 +331,10 @@ _REDACTED_VALUE = "'[redacted]'"
 
 def _is_secret_field_name(name: str) -> bool:
     low = name.lower()
-    return low == "code" or any(seg in _SECRET_NAME_SEGMENTS for seg in low.split("_"))
+    # `authorization_code` (Sign in with Apple, SOC-04) as a whole name, like a bare `code`: the
+    # `code` segment alone must not count (`error_code`, `status_code`).
+    return low in ("code", "authorization_code") or any(
+        seg in _SECRET_NAME_SEGMENTS for seg in low.split("_"))
 
 
 def _redact_secret_fields(text: str, _depth: int = 0) -> str:
@@ -552,6 +559,9 @@ _CREDENTIAL_KEYS = {
     "token", "access_token", "refresh_token", "id_token", "identity_token",
     "code", "otp", "secret", "api_key", "apikey", "authorization", "nonce",
     "supabase_access_token", "signed_transaction", "signed_payload",
+    # Sign in with Apple's single-use code (`/auth/oauth`, SOC-04). Neither `authorization` nor
+    # `code` matches it as a WHOLE key, and no credential substring is in it.
+    "authorization_code",
 }
 # `jwt`: Bluesky's session fields are `accessJwt` / `refreshJwt` (a frame local holding the
 # session dict must not carry them in the clear, even though the JWT pattern catches the value).

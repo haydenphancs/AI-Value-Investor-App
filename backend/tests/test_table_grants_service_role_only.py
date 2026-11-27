@@ -159,6 +159,9 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # earnings figure nor reads the filing again. Public SEC data, but read only by the backend
     # (earnings_live_service).
     "209": ("earnings_filing_cache",),
+    # 213: Sign in with Apple refresh tokens, kept only so account deletion can revoke the grant
+    # (SOC-04). A credential; read and written only by the backend, as service_role.
+    "213": ("apple_sign_in_grants",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

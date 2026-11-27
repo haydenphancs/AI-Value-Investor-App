@@ -862,7 +862,8 @@ struct AppSettingsView: View {
             defer { isDeleting = false }
             do {
                 try await appState.apiClient.request(endpoint: .deleteAccount)
-                appState.signOut()
+                // Revokes this device's Google grant, then signs out (SOC-04).
+                appState.signOutAfterAccountDeletion()
             } catch {
                 deleteError = AppError.from(error).message
             }

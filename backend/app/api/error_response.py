@@ -1240,6 +1240,15 @@ def classify_exception(exc: BaseException) -> Tuple[ErrorCode, int]:
     if cls in _SEC_EDGAR_EXCEPTION_NAMES or cls.startswith("secedgar"):
         return ErrorCode.FMP_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.FMP_UNAVAILABLE]
 
+    # ── Sign in with Apple REST API (app/integrations/apple_id.py — the account-deletion revoke) ──
+    # By NAME, ahead of the heuristics: a 429/5xx message says "HTTP 503" and a timeout's says
+    # "timed out" (→ FMP_* below), and neither is the market-data provider. The service turns
+    # every one into a logged outcome — sign-in and deletion never fail on it — so none should
+    # reach a door; if one does, it is our identity provider being unavailable, which the shipped
+    # app already maps (`.authUnavailable`, no credential cleared). No new ErrorCode.
+    if cls.startswith("appleid"):
+        return ErrorCode.AUTH_UNAVAILABLE, _DEFAULT_STATUS[ErrorCode.AUTH_UNAVAILABLE]
+
     # ── Watchlist datastore unreadable (tracking_service) ─────────────
     # Checked BEFORE the generic heuristics below: a PostgREST read timeout
     # carries "timeout" in its message and would otherwise be mislabelled

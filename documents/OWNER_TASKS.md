@@ -237,6 +237,39 @@ admin recomputes, and marketing script generation (Marketing v2 also ships per-p
   - **IP Address Forwarding** can stay ON: an old backend sends no address, so Supabase falls back to Railway's one address by itself. If you lowered step 2's limits in step 3, raise them again before the redeploy.
   - **What breaks:** a rolled-back backend has no `/auth/confirm` page, so the email's link fails and new email sign-ups dead-end again until this change is redeployed. The new build's code screen cannot confirm against it either.
 
+- [ ] **Sign in with Apple and Google: migration 213, deploy, a Sign in with Apple key, then app 1.04** (2026-11-26, the Apple/Google part of the sign-in audit; your decision "Own sessions (Recommended)"). Branch `claude/social-signin-hardening` (worktree `.claude/worktrees/social-signin`, built on `claude/signin-confirmation-fix`), **not committed yet**. ⚠️ Claude cannot sign in with Apple or Google on the local stack or the Simulator: Supabase must verify a real Apple/Google token. Every check below is yours, on a phone.
+  - **What it changes:**
+    - Deleting an account now also revokes its Sign in with Apple grant (Apple's account-deletion guidance; a review risk until now). Before this, Caydex stayed authorised on the person's Apple ID after deletion, so a later "Continue with Apple" was a returning sign-in: no name, and the new account was named after the relay address.
+    - The app signs out when someone turns off Sign in with Apple for Caydex in iOS Settings.
+    - Google sign-in now sends a nonce (replay protection).
+    - Every sign-out signs Google's own SDK out; deleting an account also revokes the device's Google grant.
+    - Apple's first-time name survives a failed first sign-in.
+    - A provider name over 64 characters no longer fails the sign-in.
+    - A Google/Apple sign-in that confirms an account somebody else registered earlier with that address (never confirmed) no longer keeps the name they chose. Supabase itself removes that registration's password; the account then shows "Set a Password".
+  - **Until step 4, the revocation is OFF.** Sign-in and deletion work exactly as before. Railway's log says so: one WARNING per process ("Sign in with Apple REST API is NOT configured") and one per deletion ("Sign in with Apple revocation is OFF").
+
+  In this order:
+  1. **Apply migration `backend/database/migrations/213_apple_sign_in_grants.sql`** in Studio, then run the VERIFY query at its end: one row, `t | t | t | t | t`. Before or after step 2 both work: the code logs a missing table and carries on.
+  2. **Deploy the backend** (Claude pushes only when you ask). It carries the sign-up confirmation work too, so do that item's step 1 checks as well. An older app ignores the change.
+  3. **Create the key.** Apple Developer → Certificates, IDs & Profiles → **Keys** → **+**:
+     1. Name it `Caydex Sign in with Apple`.
+     2. Tick **Sign in with Apple** → **Configure** → Primary App ID `com.phan.caydex` → **Save** → **Continue** → **Register**.
+     3. **Download** the `.p8` (Apple lets you do this ONCE; keep it in your password manager) and note the **Key ID**.
+     4. Never paste it into a chat or git. A new key is needed: an existing key (the APNs one) cannot gain a service.
+  4. **Railway → web service → Variables:**
+     - `APPLE_SIGN_IN_KEY_ID` = the Key ID.
+     - `APPLE_SIGN_IN_PRIVATE_KEY` = the whole contents of the `.p8`, from `-----BEGIN PRIVATE KEY-----` to `-----END PRIVATE KEY-----`. Multi-line paste, or one line with `\n` between the lines.
+     - `APPLE_TEAM_ID` (`WG697LVCS9`) and `APPLE_BUNDLE_ID` (`com.phan.caydex`) keep their defaults; nothing to set.
+     - **Check** after the redeploy: no "NOT configured" WARNING after the next Apple sign-in on 1.04 (step 6a). A wrong key shows as an ERROR with `invalid_client` instead.
+  5. **Archive app 1.04** (or whatever the next build is). It is the first build that sends Apple's code and Google's nonce. Apple users who signed in on 1.0–1.03 have no stored grant until they sign in with Apple once more on 1.04 or later. Until then, deleting their account logs "no stored Sign in with Apple grant" and revokes nothing; they can still remove Caydex in iOS Settings → Apple Account → Sign in with Apple.
+  6. **Checks on your phone with 1.04, after step 4:**
+     1. **Apple, first time.** iOS Settings → Apple Account → Sign in with Apple → Caydex → **Stop Using** (this makes the next sign-in a first one). Then in Caydex: Continue with Apple, sharing your name. Profile shows your name. Railway logs `OAuth: Apple grant for user=…: stored`.
+     2. **Apple, revoked from Settings.** Do **Stop Using** again while signed in, then return to Caydex. You are signed out with "Sign in with Apple was turned off for Caydex…".
+     3. **Apple, account deletion.** Sign in with Apple again, then Settings → Delete Account. Railway logs `Account deletion: revoked user=…'s Sign in with Apple grant`. iOS Settings → Sign in with Apple no longer lists Caydex (allow a minute).
+     4. **Google.** Continue with Google works. Then delete that test account: Google Account → Security → **Your connections to third-party apps** no longer lists Caydex.
+  7. **LATER, not now: switch Supabase's Google "Skip nonce check" OFF.** Supabase → Authentication → Sign In / Providers → Google → **Skip nonce check** → OFF. Do it **only once a minimum-version gate forces every install to 1.04 or newer.** No such gate exists today. Builds 1.0–1.03 send no nonce while Google's SDK adds its own, so with the switch OFF their Google sign-in fails ("Passed nonce and nonce in id_token should either both exist or not"). Then tell Claude, so it corrects `documents/legal/LAUNCH_CHECKLIST.md` §5b(e).
+  - **Rolling back the backend** is safe: an older backend ignores the new `authorization_code` field, and the table stays (unused). Rows already stored keep working when the code returns.
+
 - [x] **Crypto snapshots: refresh LINK, TRX and MATIC once the launch-date fix is live** — ✅ done 2026-11-19: the fix shipped as PR #78 (`a5459498`, Railway `e13c99ee`); your read-only check found only MATIC stored, giving its April 26, 2019 token sale as the mainnet launch, and you deleted MATIC's rows (LINK and TRX had none). It rebuilds on the next MATIC view. Original entry (2026-11-19, branch `claude/index-crypto-fact-fixes`): Their profiles' `launch_date` held a token-sale date (LINK's September 2017 ICO; Chainlink's mainnet is May 30, 2019). The AI snapshot prompt reads that field and `crypto_snapshots` keeps the answer forever, so rows written before the fix keep the wrong year. Only AFTER the fix is deployed (earlier, they regenerate from the old date):
   1. In Studio, read-only: `SELECT symbol, paragraphs FROM public.crypto_snapshots WHERE symbol IN ('LINK', 'TRX', 'MATIC') AND category = 'Origin and Technology';` No rows → nothing to do.
   2. For each symbol whose text gives the sale as its launch (LINK or TRX in 2017, MATIC in April 2019), delete that symbol's rows, e.g. `DELETE FROM public.crypto_snapshots WHERE symbol = 'LINK';`. The next view of that coin writes new ones (one Gemini call per coin).

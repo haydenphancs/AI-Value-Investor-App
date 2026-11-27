@@ -118,8 +118,13 @@ enum APIEndpoint: Sendable {
     /// Confirm a new account's address with the emailed code and sign in with the password
     /// (`POST /auth/confirm-email` → TokenResponse). Pre-session, so `.public`.
     case confirmEmail(email: String, code: String, password: String)
-    /// Native social sign-in with a provider identity token (Sign in with Apple).
-    case oauthSignIn(provider: String, idToken: String, nonce: String?, displayName: String?)
+    /// Native social sign-in with a provider identity token (Sign in with Apple, native Google).
+    /// `authorizationCode`: Apple's single-use code, exchanged server-side for a token account
+    /// deletion can revoke (SOC-04); nil for Google, and omitted from the body when nil.
+    case oauthSignIn(
+        provider: String, idToken: String, nonce: String?, displayName: String?,
+        authorizationCode: String?
+    )
     /// Exchange a Supabase access token for app tokens (web OAuth flow, e.g. Google).
     case sessionExchange(supabaseAccessToken: String)
 
@@ -1059,9 +1064,10 @@ enum APIEndpoint: Sendable {
         case .confirmEmail(let email, let code, let password):
             return ConfirmEmailRequest(email: email, code: code, password: password)
 
-        case .oauthSignIn(let provider, let idToken, let nonce, let displayName):
+        case .oauthSignIn(let provider, let idToken, let nonce, let displayName, let authorizationCode):
             return OAuthSignInRequest(
-                provider: provider, idToken: idToken, nonce: nonce, displayName: displayName
+                provider: provider, idToken: idToken, nonce: nonce, displayName: displayName,
+                authorizationCode: authorizationCode
             )
 
         case .sessionExchange(let supabaseAccessToken):
@@ -1579,6 +1585,9 @@ nonisolated struct OAuthSignInRequest: Encodable, Sendable {
     let idToken: String
     let nonce: String?
     let displayName: String?
+    /// → `authorization_code`. The synthesized encoder skips a nil optional, so a Google
+    /// sign-in's body is exactly what it was before.
+    let authorizationCode: String?
 }
 
 nonisolated struct SessionExchangeRequest: Encodable, Sendable {

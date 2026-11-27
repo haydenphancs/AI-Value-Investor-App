@@ -200,6 +200,13 @@ CURATION: dict[str, TableDoc] = {
         note="Guest-writable, so no FK to users. Drives pedagogy only — never analysis."),
     "public.user_memory_facts": T("identity", key=("user_id", "fact_key", "fact_value", "hit_count"),
         note="Derived from conversation, never extracted verbatim."),
+    "public.apple_sign_in_grants": T("identity",
+        purpose="Sign in with Apple refresh token per user, kept ONLY so account deletion can "
+                "revoke the Apple grant (Apple's account-deletion guidance; SOC-04).",
+        key=("user_id", "apple_sub", "client_id", "refresh_token"),
+        note="Written by /auth/oauth from the sign-in's single-use authorization code (app "
+             ">= 1.04); read once by DELETE /users/me BEFORE admin.delete_user, then cascades. "
+             "A credential — never logged; unusable without the .p8-signed client secret."),
     "public.device_tokens": T("identity",
         purpose="APNs device tokens for push. One row per install per user; `environment` "
                 "separates sandbox from production so a TestFlight token never gets a prod push.",

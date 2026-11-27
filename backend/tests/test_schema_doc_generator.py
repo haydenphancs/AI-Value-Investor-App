@@ -670,9 +670,10 @@ def test_every_public_table_is_curated():
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
 # Empty is the healthy steady state.
-_PENDING_MIGRATION_TABLES: set[str] = set()
 # 2026-11-13: 209's live earnings filing cache (earnings_filing_cache) was applied and re-dumped,
 # so it left the list.
+# 213 (2026-11-26): Sign in with Apple refresh tokens for the account-deletion revoke (SOC-04).
+_PENDING_MIGRATION_TABLES: set[str] = {"public.apple_sign_in_grants"}
 # 2026-10-29: 205's Trillion Club stake-finder ledger (trillion_club_stake_findings) was applied
 # and re-dumped, so it left the list.
 # 2026-10-23: 204's two Wiser weekly tables (learn_weekly_pieces, learn_narration_jobs) were

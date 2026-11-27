@@ -169,7 +169,7 @@ is shown for at most 96 h, and is replaced by the live answer as soon as that la
 └─────────────────┘        └─────────────────┘        └─────────────────┘
 ```
 
-**Integrations** (`backend/app/integrations/`, **19** modules): `fmp`, `gemini`, `anthropic_client` (Claude,
+**Integrations** (`backend/app/integrations/`, **20** modules): `fmp`, `gemini`, `anthropic_client` (Claude,
 for marketing and Learn weekly work only, reached only through `app/services/llm_provider.py`: there it is the
 SECOND provider for the marketing and Learn weekly writer/judge roles, behind per-role switches that default to
 Gemini, with the same Gemini call as the fallback on any Claude failure, 2026-10-30; and, through
@@ -209,6 +209,13 @@ throttle, parks every ticker for SEC's Retry-After. The same service is a new **
 temperature 0, which 3.x models ignore), whose answer is data only: a figure reaches a user only as the
 number printed in a quote verified against the release, and the outlook only as that quote, never
 in the model's words.
+
+And `apple_id` (Sign in with Apple's REST API, 2026-11-26, SOC-04): `/auth/token` to exchange the
+single-use authorization code an app ≥ 1.04 sends with `/auth/oauth`, and `/auth/revoke` at account
+deletion — called only by `app/services/apple_sign_in_service.py`, which keeps the refresh token in
+`apple_sign_in_grants` (migration 213, service-role-only). Each call is authenticated by an ES256
+client secret signed with a Sign in with Apple `.p8` key (`APPLE_SIGN_IN_KEY_ID` /
+`APPLE_SIGN_IN_PRIVATE_KEY`); with either unset the feature is off and logs that it is (§9.1).
 **No Google Search grounding** (retired 2026-10-02). Gemini's `google_search` tool is not used
 anywhere: the Gemini API Additional Terms let a grounded answer be shown only to the end user who
 sent the prompt, together with Google's Search Suggestions, unmodified, and never cached, stored or
@@ -2696,6 +2703,61 @@ change-password fails **open** (the current password is still demanded, so falli
 worse than before), while set-password fails **closed** with `AUTH_UNAVAILABLE` (nothing else
 stands between the caller and the write, so proceeding could overwrite an existing password with
 no proof of the current one). Pinned by `tests/test_set_password_oauth.py`.
+
+**Sign in with Apple and Google: revoked at deletion, re-checked on foreground (2026-11-26).**
+Both providers sign in natively and post an identity token to `/auth/oauth`, which Supabase
+verifies (`sign_in_with_id_token`). Four things sit around that (sign-in audit SOC-04/05/07/08):
+
+- **Apple grant revocation (SOC-04).** Apple's account-deletion guidance asks for the user's Sign
+  in with Apple tokens to be revoked through its REST API. GoTrue's id_token grant holds no Apple
+  token, so from app 1.04 the request also carries Apple's single-use `authorization_code`
+  (optional: 1.0–1.03 never send it). `/auth/oauth` exchanges it at Apple's token endpoint
+  (https://appleid.apple.com/auth/token) inside the same request (`services/apple_sign_in_service.py` → `integrations/apple_id.py`,
+  bounded at 6 s, never fails the sign-in) and keeps the refresh token in `apple_sign_in_grants`
+  (migration 213, service-role-only, cascades from `public.users`) — only when the subject of the
+  id_token Apple returns equals the subject of the identity token Supabase verified, so nobody
+  can attach another person's code to their own account. `DELETE /users/me` revokes it at
+  `/auth/revoke` after the purge check and BEFORE `admin.delete_user` (bounded at 8 s; a failure
+  is logged and the deletion goes ahead — 5.1.1(v) outranks it). Both calls authenticate with an
+  ES256 client secret minted per call from a Sign in with Apple `.p8` key
+  (`APPLE_SIGN_IN_KEY_ID` / `APPLE_SIGN_IN_PRIVATE_KEY`, team `APPLE_TEAM_ID`, client
+  `APPLE_BUNDLE_ID`). With either secret unset the feature is OFF: sign-in stores nothing (one
+  WARNING per process) and every deletion logs a WARNING that the grant was not revoked. Shipped
+  builds' Apple users have no stored grant until they sign in with Apple again on ≥ 1.04.
+  The app also asks `getCredentialState(forUserID:)` on foreground, on iOS's
+  `credentialRevokedNotification` and when a session is established, for a session that came in
+  WITH Apple (the Keychain account link `AppleSignInStore` records at sign-in, cleared with the
+  session tokens and by every non-Apple sign-in), and signs out through `AppState.signOut()` on
+  `.revoked` only — `.notFound` / `.transferred` keep the session.
+- **Google grant (SOC-04).** GoogleSignIn keeps its own state in the Keychain: every sign-out
+  signs it out (`AuthService.finishSignOut`), and an account deletion `disconnect`s it first —
+  revoking the device's grant — before the sign-out (`AppState.signOutAfterAccountDeletion`).
+- **Google nonce (SOC-07).** The native Google path now binds a nonce exactly like Apple: GIDSignIn
+  gets the SHA-256 hex of a fresh raw nonce (it copies what it is given into the ID token's claim)
+  and `/auth/oauth` gets the raw value (GoTrue compares `sha256(raw)` with the claim). Supabase's
+  project-wide "Skip nonce check" must nevertheless stay ON while builds 1.0–1.03 are in use —
+  they send no nonce while the SDK mints its own claim, which GoTrue rejects once the skip is off
+  — so turning it off waits for a minimum-version gate (OWNER_TASKS).
+- **Apple's first-time name (SOC-05).** Apple sends the name only on the first authorization. The
+  app keeps it in the Keychain, keyed by Apple's user id, from that moment until an `/auth/oauth`
+  succeeds, resends it on every attempt in between, and clears it on success and at session end.
+  The backend TRUNCATES a provider name to the column's 64 characters instead of refusing it (a
+  longer name used to 422 the whole sign-in, losing both the tap and the name).
+- **A provider sign-in that confirms an older, unconfirmed account (SOC-08).** GoTrue links a
+  verified provider email to an existing email/password user regardless of confirmation; for an
+  unconfirmed one it then NULLs the password, deletes the email identity, REPLACES user_metadata
+  with the provider's identity data and confirms the address (`RemoveUnconfirmedIdentities`, its
+  pre-account-takeover guard — verified in supabase/auth's source; the local stack cannot mint a
+  Google or Apple token). The password loss is GoTrue's and correct (whoever registered never
+  proved the mailbox); the account then shows "Set a Password". What GoTrue leaves is
+  `public.users.display_name`, copied from that unverified registration by the signup trigger and
+  never synced. `/auth/oauth` recognises the sign-in — `email_confirmed_at` from this request, an
+  account more than 10 s older than that, and no `display_name` left in user_metadata (GoTrue
+  merges on a confirmed link, replaces on an unconfirmed one) — and resets the name to the
+  provider's (or the email placeholder), logging a WARNING. Any unreadable signal: no reset.
+
+Pinned by `tests/test_apple_sign_in_revocation.py`, `tests/test_oauth_unconfirmed_account_link.py`
+and `tests/test_ios_social_signin_hardening.py` (source scans, each guard mutation-tested).
 
 *Both generation doors must stay gated or the gate is cosmetic* — they cost the same on a cache miss.
 

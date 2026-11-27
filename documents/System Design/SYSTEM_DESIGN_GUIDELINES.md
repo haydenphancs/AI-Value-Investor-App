@@ -2478,7 +2478,7 @@ found Forgot password.
     emails per IP an hour across all three routes (the project's mail budget is 100). One inbox
     can get at most ~22 Caydex emails an hour (11 before), one IP at most 30. Supabase's 60 s
     "minimum interval per user" is kept per email TYPE and does not lower these. The code-ENTRY
-    routes (`/confirm-email`, `/reset-password`) keep 10 per address per hour: they limit
+    routes (`/auth/confirm-email`, `/auth/reset-password`) keep 10 per address per hour: they limit
     guesses, not mail. Residuals: everyone behind one NAT address shares the IP buckets (an 11th
     sign-up in 15 minutes from one campus address waits up to 15 minutes); IPv6 clients are
     keyed per address, not per /64; and 1.0–1.03 word every 429 as "wait a minute" (or "900

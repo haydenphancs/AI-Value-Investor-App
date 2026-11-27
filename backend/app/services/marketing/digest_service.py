@@ -358,6 +358,8 @@ _SERIES_OUTCOME_WORDS: Dict[str, str] = {
     "budget": "out of time",
     # the spotlight lane (2026-11-15): the other lane used the series that day, or drew every candidate's company
     "other_lane": "the other lane posted it or its company",
+    # owner decision 2026-11-27 ("1 backup theme a week"): a quiet week's backup theme was already made that week
+    "week_cap": "this week's one backup theme was already used",
 }
 #: The fallback outcomes that are about the data source or the machinery, not about the week's content
 #: (OBS-1, 2026-10-15): `_series_note` never lets one hide behind a content outcome ("nothing qualified").

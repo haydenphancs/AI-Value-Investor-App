@@ -383,7 +383,17 @@ logger = logging.getLogger(__name__)
 #: one-issuer `feature` post (`ins.open.head`, `ins.img.spot.*`, `ins.img.flag.*`, `ins.alt.spot.*`, `isp.fact.*`,
 #: `isp.h.cluster.*`, `isp.p.cluster`, `isp.p.revenue` …) are gone; the covers are the compact all-rows lists (no
 #: detail line — the cost per share never reaches the video).
-TEMPLATE_VERSION = "news-v23"
+#: news-v24 (owner decision 2026-11-27, '"Costs, after other items" (Recommended)' — "The label matches the figure
+#: exactly, so a reader checking the 10-K finds no mismatch. A small copy change (new template version)."; news-v23
+#: SHIPPED, so a new version): a Money Map LOSS year whose interest, tax and other items were INCOME big enough to
+#: show labels its costs bar "Costs, after other items" (`mm.cost.total.after`) and its alt text "costs after other
+#: items" (`mm.alt.costs.after`, `.bare`) — the bar is revenue − net income, below the statement's own costs and
+#: expenses by that income (Rivian: $9.7B against $9.8B). Every other entry, caption, card, narration line and string
+#: is unchanged byte for byte; lexicon re-pinned with the three entries added. The worker draws the label from the
+#: spec (no worker change); READBACK_LOOK stays news-v23 (it moves only with the look's own strings). A run accepted
+#: under news-v23 and not yet through create_posts when this web deploys is skipped `template_changed` — deploy the
+#: web outside a lane's build-to-posts window.
+TEMPLATE_VERSION = "news-v24"
 AUTHORSHIP = post_copy.AUTHORSHIP_TEMPLATE
 NEWS_SCRIPT_LINES = 4
 HOOK_WORDS: Tuple[int, int] = (5, 14)
@@ -1006,6 +1016,13 @@ LEXICON: Dict[str, str] = {
     # much they made the loss smaller (`_money_map_costs`). The callout is one subtraction: costs per $100 − $100 = the
     # net loss per $100 (its figure is 100 + the net loss's, so the picture's arithmetic is exact).
     "mm.cost.total": "Costs and expenses",
+    # news-v24 (owner decision 2026-11-27, '"Costs, after other items" (Recommended)': "The label matches the figure
+    # exactly, so a reader checking the 10-K finds no mismatch"): the costs bar's label when interest, tax and other
+    # items were INCOME, of any size — the bar (revenue − net income) is then BELOW the statement's own costs and
+    # expenses (revenue − operating income) by that income (Rivian: $9.7B against $9.8B; even a sliver too small for the
+    # note can move that total across a rounding step, review of 2026-11-27). "Costs and expenses" stays where nothing
+    # nets against the bar: other items a COST, zero, or no operating line to tell (`_money_map_costs`).
+    "mm.cost.total.after": "Costs, after other items",
     "mm.cost.sales": "Cost of sales",
     "mm.cost.opex": "Operating expenses",
     "mm.cost.other": "Interest, tax and other items",
@@ -1014,6 +1031,11 @@ LEXICON: Dict[str, str] = {
     "mm.cost.callout.net": "so the net loss was {per100}",
     "mm.alt.costs": "A second set of bars compares revenue, {rev_s}, with costs and expenses, {costs_s}: {items}.",
     "mm.alt.costs.bare": "A second set of bars compares revenue, {rev_s}, with costs and expenses, {costs_s}.",
+    # news-v24: the alt text says what the bar's label says (`mm.cost.total.after`)
+    "mm.alt.costs.after": "A second set of bars compares revenue, {rev_s}, with costs after other items, {costs_s}: "
+                          "{items}.",
+    "mm.alt.costs.after.bare": "A second set of bars compares revenue, {rev_s}, with costs after other items, "
+                               "{costs_s}.",
     "mm.alt.costs.net": "The part of the costs bar past revenue is the net loss, {ni_s}.",
     # Congress Count (2b-1). A count of ≥ 2 distinct members who DISCLOSED purchases (never "bought"),
     # dated by the disclosure month; no member is named or narrowed (no chamber, party, state,
@@ -3575,8 +3597,14 @@ def _money_map_costs(rev: Decimal, gp: Optional[Decimal], op: Optional[Decimal],
     * interest, tax and other items = net income − operating income: when a COST, a third part (maroon); when INCOME,
       no part — the bar's last stretch, the costs it covered, is hatched and ONE note says "+$X from interest, tax and
       other items made the loss smaller" (the parts then add up to costs + X, exactly what the note states); zero, or
-      under half the costs figure's last shown digit (it cannot move a shown total), it is omitted and operating
+      under half the costs figure's last shown digit (too small to change the drawn costs figure), it is omitted and operating
       expenses' BAR (never its value) absorbs it, so the bar still ends where costs do.
+    * the bar's LABEL (news-v24, owner decision 2026-11-27, "Costs, after other items"): "Costs, after other items"
+      whenever interest, tax and other items were INCOME, of any size — the bar is then below the statement's own costs
+      and expenses (revenue − operating income) by that income, and even an amount too small for the note can move that
+      total across a rounding step — whether or not the bar has parts; "Costs and expenses" otherwise (other items a
+      cost — the named third part when the bar has parts, else folded into the undivided bar —, zero, or no operating
+      line to tell). The alt text names the bar the same way.
 
     Figures at one decimal, else two (`MONEY_MAP_COSTS_PLACES`, `_lands`: parts ± other = costs, costs − revenue = the
     net loss). Every ratio on ONE scale (the longest bar = 1): the template's `implausible_figures` refuses a net,
@@ -3625,18 +3653,24 @@ def _money_map_costs(rev: Decimal, gp: Optional[Decimal], op: Optional[Decimal],
             part_ratios = [_ratio(cos / scale), _ratio((costs - cos) / scale)]
         terms = [(1, f) for _id, _v, f in parts] + ([(-1, note_t)] if note_t is not None else [])
         adds_up = _lands([(1, costs_t), (-1, rev_t)], net_t) and (not parts or _lands(terms, costs_t))
+        # news-v24 (owner 2026-11-27): ANY other INCOME nets into the bar, so the bar is no longer the statement's own
+        # costs and expenses — even an amount too small to draw as a note can move that total across a rounding step
+        # (review of 2026-11-27: $9.7B against a 10-K's $9.8B) — and its label says so
+        after = other is not None and other > 0
         block: Dict[str, Any] = {
             "revenue": {"label": _t("mm.flow.revenue"), "value": rev_t[0], "ratio": _ratio(rev / scale)},
             "net": {"label": _t("mm.flow.net.loss"), "value": net_t[0]},
-            "total": {"label": _t("mm.cost.total"), "value": costs_t[0], "ratio": _ratio(costs / scale)},
+            "total": {"label": _t("mm.cost.total.after" if after else "mm.cost.total"), "value": costs_t[0],
+                      "ratio": _ratio(costs / scale)},
             "parts": [{"label": _t(pid), "value": f[0], "ratio": r} for (pid, _v, f), r in zip(parts, part_ratios)],
         }
         if note_t is not None:
             block["note"] = _t("mm.cost.note", other_s=note_t[0])
         block["callout"] = [_t("mm.cost.callout.lead", c100=c100), _t("mm.cost.callout.net", per100=per100)]
         items = "; ".join(_t("mm.alt.item", label=p["label"], value=p["value"]) for p in block["parts"])
-        alt = (_t("mm.alt.costs", rev_s=rev_t[0], costs_s=costs_t[0], items=items) if items
-               else _t("mm.alt.costs.bare", rev_s=rev_t[0], costs_s=costs_t[0]))
+        alt_id = (("mm.alt.costs.after" if items else "mm.alt.costs.after.bare") if after
+                  else ("mm.alt.costs" if items else "mm.alt.costs.bare"))
+        alt = _t(alt_id, rev_s=rev_t[0], costs_s=costs_t[0], items=items)
         if note_t is not None:
             alt += f" {block['note']}."
         alt += " " + _t("mm.alt.costs.net", ni_s=net_t[0])

@@ -5401,6 +5401,9 @@ class EarningsFilingWatcher:
     _round_started: Optional[float] = None
     _round_ended: Optional[float] = None
     _parked_until: float = 0.0
+    # The accessions a late read's model call was cut on (`_Watch.cut_on`) and nothing has settled
+    # since: a late twin reaching one in a busy round waits with it, with no call of its own.
+    _cut: Set[str] = field(default_factory=set)
     calls: int = 0
     # Model calls made, each one's read's (`_extract`).
     model_calls: int = 0
@@ -5408,6 +5411,7 @@ class EarningsFilingWatcher:
     def reset(self) -> None:
         self._watch.clear()
         self._extracted.clear()
+        self._cut.clear()
         self._habits.clear()
         self._order.clear()
         self._reads.clear()
@@ -5425,6 +5429,8 @@ class EarningsFilingWatcher:
             self._order.pop(day, None)
         if len(self._extracted) > 512:
             self._extracted.clear()
+        if len(self._cut) > 512:
+            self._cut.clear()
         mono = time.monotonic()
         for symbol in [s for s, held in self._habits.items() if mono >= held.until]:
             self._habits.pop(symbol, None)
@@ -5487,11 +5493,15 @@ class EarningsFilingWatcher:
 
     def restore(self, symbol: str, day: date, figures: FilingFigures) -> None:
         """Take back a filing an earlier process verified, as if this one had read it. Its watch
-        ends, so a report it left incomplete stays pending with no SEC read, and its accession
-        is known, so the same 8-K under another date costs no model call."""
+        ends, so a report it left incomplete stays pending with no SEC read. A row holding a figure
+        is known by its accession too, so the same 8-K under another date costs no model call. A
+        row with none is not: a late read's row (LATE READS: its figures dropped before they
+        reach the record) would serve a twin still waiting a release with no figures, which a read
+        of its own gives it, and a release that verified nothing costs that twin one more call."""
         w = self._watch.setdefault((symbol.upper(), day), _Watch())
         w.done, w.figures = True, figures
-        self._extracted[figures.accession] = figures
+        if figures.has_figures:
+            self._extracted[figures.accession] = figures
 
     def _mark_late(self, placed: Sequence[str], late: Sequence[str],
                    report_day: date) -> List[str]:
@@ -5517,7 +5527,8 @@ class EarningsFilingWatcher:
 
     def _busy_during(self, wanted: Sequence[str], report_day: date, start_et: datetime,
                      mono: float) -> bool:
-        """Would a waiting ticker of `wanted` (foreign filers aside) read at the fast cadence at
+        """Would a waiting ticker of `wanted` (foreign filers aside, and one whose watch has ended,
+        earlier in the round included) read at the fast cadence at
         any moment of a late model call starting at `start_et` and running to the read's whole
         deadline? Sampled at the start, the end, and every moment the cadence can change in
         between, each release window's opening and EDGAR's last minute (an end past EDGAR's close
@@ -5529,7 +5540,10 @@ class EarningsFilingWatcher:
             if start_et < at < end:
                 moments.append(at)
         for symbol in wanted:
-            if self._watch.get((symbol, report_day), _Watch()).foreign:
+            key = (symbol, report_day)
+            if self._watch.get(key, _Watch()).foreign or self._finished(key):
+                # A watch ended earlier in this round (its release found, or no CIK) reads no more:
+                # nothing left to wait for the late call.
                 continue
             if any(self._interval(symbol, at, mono) == _FAST_POLL_SECONDS for at in moments):
                 return True
@@ -5976,6 +5990,13 @@ class EarningsFilingWatcher:
                 return w.figures
             if acc in w.skipped:
                 continue
+            if late and busy is not None and acc in self._cut and busy():
+                # A twin's late call on this filing was cut and nothing has settled it: this round is
+                # as busy, so the same call would be cut again, paid for. It waits with the filing
+                # for a calm round, or for the twin's read, with no call and no attempt spent.
+                w.cut_on = acc
+                w.checked_mono = time.monotonic()
+                return None
             calls_before = self.model_calls
             outcome, figures = await self._extract(
                 client, gemini, symbol, cik, report_day, filing, sleep,
@@ -5983,7 +6004,9 @@ class EarningsFilingWatcher:
             if outcome is _Read.CUT:
                 w.cut_on = acc
                 w.checked_mono = time.monotonic()
+                self._cut.add(acc)
                 return None
+            self._cut.discard(acc)
             if outcome is _Read.RELEASE:
                 # Nothing verified, yet the release is found: its link is still worth keeping. The
                 # memo keeps "nothing verified" (None), so no ticker reads it twice.

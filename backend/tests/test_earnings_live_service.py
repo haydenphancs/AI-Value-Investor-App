@@ -3579,12 +3579,16 @@ def test_the_sheets_poll_follows_the_report_it_reads_as():
 
 
 def test_the_rows_own_figure_replaces_the_report_it_read_as():
+    """Its figures are its own once one shows. It is still FMP's leftover, though: the seventh
+    2026-11-26 review found it `live` while the rest filled, and the badge reads the status, so it
+    read LIVE all day after the report. It reads `reported`, no label, and keeps its poll."""
     svc, at = _svc(), _et(REPORT, 8)
     _leftover_beside_a_report(svc, at)
     svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.50)], at)
     snap = svc.snapshot("INTC", REPORT, at)
     assert (snap.eps.actual, snap.revenue.actual) == (0.50, None)
-    assert snap.status == els.STATUS_LIVE
+    assert (snap.status, snap.live_label) == (els.STATUS_REPORTED, False)
+    assert snap.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS
 
 
 def test_the_rows_own_filing_replaces_the_report_it_read_as():
@@ -9801,3 +9805,116 @@ def test_a_release_with_no_figure_lands_alike_read_now_or_restored(release, eps_
         svc.observe_rows(REPORT, [_bke(eps=0.94)], _et(REPORT, 16, 30), fetched=True)
         landed[way] = [s.symbol for s in svc.landed_snapshots(_et(REPORT, 16, 31))]
     assert landed == {"read": ["BKE"], "restored": ["BKE"]}
+
+
+# ── The seventh 2026-11-26 review ───────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("leftover_rev", [None, 40e9], ids=["revenue_not_out", "revenue_held"])
+@pytest.mark.parametrize("first_seen", ["empty", "partly_filled"])
+def test_fmps_leftover_filling_the_day_after_the_report_is_never_live(leftover_rev, first_seen):
+    """The seventh 2026-11-26 review (medium): FMP's leftover row, dated the day after INTC's
+    report, holding part of its figures (its revenue not out, or held by the guard), read `live`
+    all day with its label off, and iOS draws the badge from the status too: LIVE and "INTC is
+    reporting" to midnight on the day after the report, whether it noted the report (first seen
+    empty) or not (first seen in one answer with it). It reads `reported` now, keeps its figures
+    and its poll while they fill, and stays on the SEC watch: a true report on that date must
+    still land."""
+    svc = _svc()
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], _et(PREV, 16, 30))
+    if first_seen == "empty":
+        svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 7))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=leftover_rev)],
+                     _et(REPORT, 8, 10), fetched=True)
+    for hour in (9, 14, 23):
+        snap = svc.snapshot("INTC", REPORT, _et(REPORT, hour))
+        assert (snap.eps.actual, snap.revenue.actual) == (0.44, None)
+        assert snap.revenue.checking is (leftover_rev is not None)
+        assert (snap.status, snap.live_label) == (els.STATUS_REPORTED, False)
+        assert snap.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS
+        card = els.card_fields(snap, REPORT)
+        assert (card["earnings_status"], card["earnings_live_label"]) == ("reported", False)
+    assert svc.pending_symbols(REPORT, ["INTC"]) == ["INTC"]
+
+
+def test_a_true_report_beside_a_stale_row_stays_live_while_its_figures_fill():
+    """The control: a stale Friday row whose EPS landed on Monday, outside its window, is not the
+    report before (`_the_report_before`), so Monday's row is the report and reads LIVE, labelled,
+    while its figures fill."""
+    friday, monday = date(2026, 10, 30), date(2026, 11, 2)
+    svc = _svc()
+    svc.observe_rows(friday, [_row("INTC", friday, rev=17.1e9)], _et(friday, 16))
+    svc.observe_rows(monday, [_row("INTC", monday)], _et(monday, 8))
+    svc.observe_rows(friday, [_row("INTC", friday, eps=0.44, rev=17.1e9)], _et(monday, 9, 5),
+                     fetched=True)
+    svc.observe_rows(monday, [_row("INTC", monday, eps=0.44)], _et(monday, 9, 5), fetched=True)
+    snap = svc.snapshot("INTC", monday, _et(monday, 9, 6))
+    assert (snap.status, snap.live_label) == (els.STATUS_LIVE, True)
+    assert snap.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS
+
+
+def test_an_eps_on_a_report_that_never_landed_is_logged_as_no_landing(caplog):
+    """The seventh 2026-11-26 review: a record first seen holding a revenue reads a release out
+    before then, with an EPS: nothing lands, yet the line said `eps_after_landing`."""
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, rev=17.1e9)], _et(REPORT, 15))
+        svc.absorb_filing("INTC", REPORT, _morning_filing(), _et(REPORT, 15, 1))
+    lines = [line for _, line in _log_lines(caplog, "EARNINGS_LIVE_LANDING")]
+    assert len(lines) == 2, lines
+    assert " first_seen_with_figure via=memo " in lines[0]
+    assert " eps_no_landing via=filing " in lines[1]
+    assert svc.landed_snapshots(_et(REPORT, 15, 2)) == []
+
+
+def test_fmps_first_figures_on_a_report_that_never_landed_say_no_landing(caplog):
+    """The seventh 2026-11-26 review: after a restart, a restored release with no EPS, then FMP's
+    first answer with its EPS and revenue: no landing (the restored release closed the first one),
+    yet the lines said `eps_after_landing` and "(after the landing)"."""
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    svc.restore_filing("INTC", REPORT, _morning_filing(eps_adjusted=None), _et(REPORT, 9))
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)],
+                         _et(REPORT, 9, 1), fetched=True)
+    ((_, landing),) = _log_lines(caplog, "EARNINGS_LIVE_LANDING")
+    assert " eps_no_landing via=own_fetch " in landing
+    ((_, first),) = _log_lines(caplog, "EARNINGS_LIVE_FMP_FIRST")
+    assert first.endswith("(no landing)"), first
+    assert svc.landed_snapshots(_et(REPORT, 9, 2)) == []
+
+
+def test_fmps_first_revenue_after_a_landing_still_says_after_the_landing(caplog):
+    """The other half: an EPS-only landing, then FMP's first revenue."""
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 6))
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45)], _et(REPORT, 7), fetched=True)
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)], _et(REPORT, 8),
+                         fetched=True)
+    ((_, first),) = _log_lines(caplog, "EARNINGS_LIVE_FMP_FIRST")
+    assert first.endswith("(after the landing)"), first
+
+
+@pytest.mark.parametrize("watched", [True, False], ids=["watched", "unwatched"])
+def test_fmps_later_figures_are_logged_for_a_watched_report_only(caplog, watched):
+    """The seventh 2026-11-26 review: only the LANDING line's watched filter was pinned, so logging
+    every restatement in the market passed the suite. The fold runs for the whole market, and the
+    lines are for the reports that reached a phone."""
+    svc = _svc()
+    svc.note_watched(["INTC"] if watched else ["BKE"])
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 6))
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], _et(REPORT, 7), fetched=True)
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 8),
+                         fetched=True)
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.40, rev=17.1e9)], _et(REPORT, 9),
+                         fetched=True)
+    changed = _log_lines(caplog, "EARNINGS_LIVE_CHANGED")
+    first = _log_lines(caplog, "EARNINGS_LIVE_FMP_FIRST")
+    if watched:
+        assert len(changed) == 1 and "eps=0.44->0.4" in changed[0][1], changed
+        assert len(first) == 1 and "rev=17100000000.0" in first[0][1], first
+    else:
+        assert changed == [] and first == []

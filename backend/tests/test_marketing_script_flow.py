@@ -6586,8 +6586,9 @@ def test_r5_a_pre_v23_holder_gets_the_form4_roundup_cover_without_its_list(caplo
 
 
 @pytest.mark.parametrize("posted_lane, posted_day, run_lane, run_day", [
-    # Monday's quiet Form 4 week posted a theme; Thursday's spotlight (its insider list too few) must not repeat it
-    ("main", date(2026, 11, 16), "spotlight", SPOT_THU),
+    # a Monday's quiet Form 4 week posted a theme; the NEXT week's Thursday spotlight (its insider list too few) must
+    # not repeat it (owner decision 2026-11-27: the same week's Thursday never asks — one backup theme a week)
+    ("main", date(2026, 11, 9), "spotlight", SPOT_THU),
     # the spotlight posted it on Saturday; the next Monday's main lane (a quiet week again) must not repeat it
     ("spotlight", SPOT_SAT, "main", date(2026, 11, 23)),
     # 26 days before: a Monday main-lane theme, then a Saturday spotlight inside the four weeks
@@ -6596,10 +6597,10 @@ def test_r5_a_pre_v23_holder_gets_the_form4_roundup_cover_without_its_list(caplo
 @pytest.mark.asyncio
 async def test_theme_fallback_never_posts_one_theme_twice_inside_28_days_across_lanes(
         spot_world, monkeypatch, posted_lane, posted_day, run_lane, run_day):
-    """The build hands the theme collector the theme ledger of BOTH lanes (`theme_refs_between`, THEME_HISTORY_DAYS
+    """The build hands the theme collector the theme ledger of BOTH lanes (`theme_scripts_between`, THEME_HISTORY_DAYS
     back, the run day included), and the REAL collector refuses the theme the other lane posted fewer than 28 days
     before (`already_posted`, before any read) — fed exactly what this build passed. Mutation-checked by hand
-    (2026-11-20): `theme_refs_between` reading the caller's lane only turned this red."""
+    (2026-11-20): `theme_scripts_between` reading the caller's lane only turned this red."""
     import importlib
 
     TA = importlib.import_module("test_marketing_company_news_adapter")
@@ -6657,3 +6658,183 @@ def test_theme_fallback_the_two_lanes_never_both_ask_for_the_theme_on_one_day(mo
             seen["spotlight"] += 1
         d += timedelta(days=1)
     assert seen["main"] > 900 and seen["spotlight"] > 2000, seen
+
+
+# ── owner decision 2026-11-27: ONE quiet-week backup theme a week, across both lanes ─────────────────────────────────────
+# "1 backup theme a week (Recommended)" — "At most one quiet-week theme per week across both daily posts, so Wednesday
+# almost always keeps a theme." Every theme post but the MAIN lane's Wednesday lead is a backup
+# (`selection.theme_is_fallback`); a backup step in an ET week (Monday..Sunday) that already holds one, in either lane,
+# falls back `week_cap` before the source is asked (`script_service.theme_week_fallbacks`, from the build's ONE theme
+# read). The posts counted are the ones made before this run, plus — for a main run built the next day — the next day's
+# spotlight pick (`_cross_lane`'s forward day).
+
+#: The week of 2026-11-16 (Mon) .. 2026-11-22 (Sun), and the next Monday / Tuesday.
+CAP_MON, CAP_TUE, CAP_WED, CAP_THU = date(2026, 11, 16), date(2026, 11, 17), date(2026, 11, 18), date(2026, 11, 19)
+CAP_SUN, CAP_NEXT_MON, CAP_NEXT_TUE = date(2026, 11, 22), date(2026, 11, 23), date(2026, 11, 24)
+_WEEK_CAP_ENTRY = {"series": "theme_explainer", "outcome": "week_cap", "reason": "theme_fallback_week_used"}
+
+
+def _theme_pick(sb: FakeSB, lane: str, day: date, slug: str = "ai-chips") -> str:
+    """A theme script another run of `lane` picked on `day` (an accepted theme post's ledger row)."""
+    ref = f"news:theme_explainer:{slug}:make_money:{day.isoformat()}"
+    _accepted(sb, day, "theme_explainer", ref, None, None, lane=lane)
+    return ref
+
+
+async def _theme_cap_day(spot_world, monkeypatch, run_lane: str, run_day: date, picks=(), *, today=None,
+                         spotlight_days: str = "tue,thu,sat"):
+    """Build `run_lane`'s `run_day` (seen from `today`, the run day by default) with the theme picks `picks` ((lane,
+    day) pairs) in the ledger and every series quiet: (the series asked, the day's trail)."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(ss, "_today_et", lambda: today or run_day)
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES",
+                        "ceo_buys,insider_buys,money_map,insider_spotlight,theme_explainer")
+    monkeypatch.setattr(mrs.settings, "MARKETING_POST_WEEKDAYS", "mon,tue,wed,thu,fri,sat,sun")
+    monkeypatch.setattr(mrs.settings, "MARKETING_SPOTLIGHT_WEEKDAYS", spotlight_days)
+    selection._parse_spotlight_weekdays_text.cache_clear()
+    for lane, day in picks:
+        _theme_pick(sb, lane, day, slug=f"theme-{lane}-{day.isoformat()}")
+    news = TF.FakeNews({})                                    # every series quiet: each chain reaches its theme step
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, run_day, lane=run_lane)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    row = _script_row(sb, rid)
+    trail = ((row.get("fact_sheet") or {}).get("selection") or {}).get("trail") or []
+    return [c["series"] for c in news.calls], trail
+
+
+def test_week_cap_the_constants_and_the_owner_words():
+    from app.services.marketing import digest_service as ds
+
+    assert selection.THEME_FALLBACKS_PER_WEEK == 1
+    assert ss.THEME_WEEK_CAP == "week_cap" and ss.THEME_WEEK_CAP in ss.SERIES_OUTCOMES
+    assert len(ss.THEME_FALLBACK_WEEK_USED) <= 60                                   # a trail reason is cut at 60
+    # a content outcome: a spotlight day that skips behind it is a QUIET day, never an alert
+    assert ss.THEME_WEEK_CAP in ds._CONTENT_OUTCOMES and ss.THEME_WEEK_CAP not in ds._INFRA_OUTCOMES
+    run = {"metadata": {"series": selection.SKIP, "series_trail": [
+        {"series": "insider_spotlight", "outcome": "no_candidates"}, _WEEK_CAP_ENTRY,
+        {"series": "skip", "outcome": "no_candidates"}]}}
+    assert ds._quiet_nothing_qualified(run)
+    assert "this week's one backup theme was already used" in ds._series_note(run)
+
+
+@pytest.mark.parametrize("picks, run_lane, run_day, today", [
+    # Monday's main lane used the week's backup: Thursday's spotlight (the other lane) asks no theme
+    ([("main", CAP_MON)], "spotlight", CAP_THU, None),
+    # Tuesday's spotlight used it: Thursday's spotlight (the same lane) asks no theme
+    ([("spotlight", CAP_TUE)], "spotlight", CAP_THU, None),
+    # Monday's main lane used it: Sunday's spotlight is still that week (Monday..Sunday, ET)
+    ([("main", CAP_MON)], "spotlight", CAP_SUN, None),
+    # order: Monday's main run, resumed on Tuesday after Tuesday's spotlight took the backup, counts that pick too
+    ([("spotlight", CAP_TUE)], "main", CAP_MON, CAP_TUE),
+], ids=["other_lane", "same_lane", "sunday_same_week", "main_resumed_after_the_spotlight"])
+@pytest.mark.asyncio
+async def test_week_cap_a_second_backup_in_one_week_is_never_asked(spot_world, monkeypatch, caplog, picks, run_lane,
+                                                                    run_day, today):
+    """The week already holds a backup theme: the theme step falls back `week_cap` (reason
+    `theme_fallback_week_used`) WITHOUT asking the source — nothing reaches its refusal memo — and the chain goes on to
+    its next series. Mutation-checked by hand (2026-11-27): with the cap check removed every case asked the theme; with
+    the main run's read ending on its run date (no forward day) the last case asked it."""
+    with caplog.at_level(logging.INFO, logger=ss.logger.name):
+        asked, trail = await _theme_cap_day(spot_world, monkeypatch, run_lane, run_day, picks, today=today,
+                                            spotlight_days="tue,thu,sat,sun")
+    assert "theme_explainer" not in asked, asked
+    assert _WEEK_CAP_ENTRY in trail, trail
+    nxt = trail[trail.index(_WEEK_CAP_ENTRY) + 1]["series"]
+    if run_lane == "main":
+        assert asked == ["ceo_buys", "insider_buys", "money_map"] and nxt == "money_map"   # the chain went on
+    else:
+        assert asked[0] == "insider_spotlight" and nxt in ("money_map", "skip"), (asked, trail)
+    assert any("this week's backup theme was already made" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("picks, run_lane, run_day, first", [
+    # last week's backups never cap this week's first: Monday main, and a Tuesday spotlight
+    ([("main", CAP_MON), ("spotlight", CAP_THU)], "main", CAP_NEXT_MON, False),
+    ([("spotlight", CAP_SUN)], "main", CAP_NEXT_MON, False),            # Sunday → Monday is a new week
+    ([("main", CAP_MON), ("spotlight", CAP_SUN)], "spotlight", CAP_NEXT_TUE, False),
+    # Wednesday's main lead is never capped, whatever backups the week made …
+    ([("main", CAP_MON), ("spotlight", CAP_TUE)], "main", CAP_WED, True),
+    # … and is no backup itself: Thursday's spotlight may still take the week's one backup
+    ([("main", CAP_WED)], "spotlight", CAP_THU, False),
+    # a Monday main run built ON Monday cannot see a pick made after it (the week's first backup)
+    ([], "main", CAP_MON, False),
+], ids=["next_week_after_two", "sunday_then_monday", "next_tuesday", "wednesday_lead_after_backups",
+        "the_lead_is_no_backup", "first_backup"])
+@pytest.mark.asyncio
+async def test_week_cap_the_weeks_first_backup_and_the_wednesday_lead_are_asked(spot_world, monkeypatch, picks,
+                                                                                 run_lane, run_day, first):
+    """The cap never touches the week's FIRST backup nor Wednesday's main lead: the theme is asked (the lead first in
+    its chain), and no `week_cap` step is on the trail. Mutation-checked by hand (2026-11-27): `theme_is_fallback`
+    answering True for the Wednesday lead turned "wednesday_lead_after_backups" and "the_lead_is_no_backup" red; a
+    rolling seven-day window in place of the Monday..Sunday week turned "sunday_then_monday" and "next_tuesday" red."""
+    asked, trail = await _theme_cap_day(spot_world, monkeypatch, run_lane, run_day, picks,
+                                        spotlight_days="tue,thu,sat,sun")
+    assert "theme_explainer" in asked, (asked, trail)
+    assert (asked[0] == "theme_explainer") is first, asked
+    assert all(t.get("outcome") != "week_cap" for t in trail), trail
+
+
+@pytest.mark.asyncio
+async def test_week_cap_an_unreadable_theme_ledger_stops_a_backup_day_never_a_guess(spot_world, monkeypatch, caplog):
+    """Fail closed, as the 28-day rule does (one read serves both): a failed theme read on a BACKUP day (Thursday's
+    spotlight) raises out of the build (ERROR with the run id) — no backup allowed, no script written, the source never
+    asked — and the next kick builds the day afresh."""
+    TF = _tf()
+    sb, runs = spot_world
+    monkeypatch.setattr(mrs.settings, "MARKETING_NEWS_SERIES", "money_map,insider_spotlight,theme_explainer")
+    real = runs.theme_scripts_between
+    fail = {"n": 1}
+
+    async def flaky(*a, **kw):
+        if fail["n"]:
+            fail["n"] -= 1
+            raise mrs.MarketingRunError("theme_scripts_between failed: 520")
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(runs, "theme_scripts_between", flaky)
+    news = TF.FakeNews({})
+    svc = ss.MarketingScriptService(runs, writer=FakeWriter(["accepted"]), news=news)
+    rid = _lane_run(sb, SPOT_THU)
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        with pytest.raises(mrs.MarketingRunError):
+            await svc.kick(rid, claim=_holder(svc, rid))
+    assert news.calls == [] and not [r for r in sb.tables[mrs.SCRIPTS].rows if r.get("run_id") == rid]
+    assert any("theme rotation's ledger read failed" in r.getMessage() and rid in r.getMessage()
+               for r in caplog.records)
+    for _ in range(50):
+        if not svc._builds:
+            break
+        await asyncio.sleep(0)
+    await svc.kick(rid, claim=_holder(svc, rid))
+    await _drain(svc)
+    assert "theme_explainer" in [c["series"] for c in news.calls]
+
+
+def test_week_cap_theme_week_fallbacks_counts_only_this_weeks_backups(caplog):
+    """The pure count: in the week, not this run's own row, a backup (never the main lane's Wednesday lead), dated on or
+    before the run day — or after it in the OTHER lane only — and a row whose day does not read back counts (fail
+    closed, ERROR). Mutation-checked by hand (2026-11-27): `continue` on an unreadable day turned the last assertion
+    red; dropping the own-row check turned the first red."""
+    def row(day, lane=None, rid="other", ref=None):
+        return {"run_id": rid, "run_date": day if isinstance(day, str) else day.isoformat(), "lane": lane,
+                "source_ref": ref or f"news:theme_explainer:x:make_money:{day}"}
+
+    fb = ss.theme_week_fallbacks
+    assert fb([row(CAP_TUE, "spotlight", rid="me")], CAP_THU, "spotlight", run_id="me") == []         # its own row
+    assert fb([row(CAP_WED)], CAP_THU, "spotlight", run_id="me") == []                # the main lane's Wednesday lead
+    assert [b["lane"] for b in fb([row(CAP_WED, "spotlight")], CAP_THU, "spotlight", run_id="me")] == ["spotlight"]
+    assert fb([row(CAP_MON - timedelta(days=1), "spotlight")], CAP_THU, "spotlight", run_id="me") == []  # last week
+    assert fb([row(CAP_NEXT_MON)], CAP_SUN, "spotlight", run_id="me") == []                              # next week
+    # a row dated after the run day counts only from the OTHER lane (a main run built the next day)
+    assert fb([row(CAP_TUE, "main")], CAP_MON, "main", run_id="me") == []
+    assert [b["run_date"] for b in fb([row(CAP_TUE, "spotlight")], CAP_MON, "main", run_id="me")] == ["2026-11-17"]
+    # no lane is the main lane (a Monday main pick: a backup); a lane the code does not know is a backup
+    assert [b["lane"] for b in fb([row(CAP_MON), row(CAP_WED, "odd")], CAP_THU, "spotlight", run_id="me")] == [
+        "main", "odd"]
+    with caplog.at_level(logging.ERROR, logger=ss.logger.name):
+        got = fb([row("not-a-date", "spotlight")], CAP_THU, "spotlight", run_id="me")
+    assert [b["run_date"] for b in got] == ["not-a-date"]
+    assert any("does not read back" in r.getMessage() and "fail closed" in r.getMessage() for r in caplog.records)

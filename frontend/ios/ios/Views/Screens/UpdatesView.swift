@@ -23,9 +23,10 @@ struct UpdatesView: View {
     /// the Market chip and scrolls back to the top, where the Market Insight card leads.
     var marketFocusSeq: Int = 0
     /// `ContentView.updatesTickerFocus`: set on every card-backed Holdings widget tap
-    /// (`caydex://updates/<SYMBOL>`). A change selects that ticker's chip and scrolls to the top,
-    /// where its Insights card leads; a ticker that is not an openable chip goes back through
-    /// `onTickerFocusMissed` (the link's fallback, its detail screen).
+    /// (`caydex://updates/<SYMBOL>`) and every price move's "Read the news". A change selects
+    /// that ticker's chip and scrolls to the top, where its Insights card leads; a chip the plan
+    /// locks opens the upgrade sheet; a ticker that is not a chip at all goes back through
+    /// `onTickerFocusMissed` (the focus's fallback, its detail screen).
     var tickerFocus: UpdatesTickerFocus? = nil
     var onTickerFocusMissed: ((UpdatesTickerFocus) -> Void)? = nil
     @State private var showManageAssetsSheet = false
@@ -291,11 +292,12 @@ struct UpdatesView: View {
                             viewModel.focusMarket()
                             scrollProxy.scrollTo(Self.feedTopID, anchor: .top)
                         }
-                        // A card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`): that
-                        // ticker's chip, from the top, where its Insights card and sources are.
-                        // The chip list may still be loading (a cold launch), so `focusTicker`
-                        // waits for it; a ticker that is not an openable chip falls back, and a
-                        // focus the user moved on from meanwhile does nothing at all.
+                        // A card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`) or a price
+                        // move's "Read the news": that ticker's chip, from the top, where its
+                        // Insights card and sources are. The chip list may still be loading (a
+                        // cold launch), so `focusTicker` waits for it; a chip the plan locks opens
+                        // the upgrade sheet, a ticker that is not a chip at all falls back to its
+                        // detail screen, and a focus the user moved on from meanwhile does nothing.
                         .onChange(of: tickerFocus) { _, focus in
                             guard let focus else { return }
                             Task { @MainActor in
@@ -304,6 +306,19 @@ struct UpdatesView: View {
                                     scrollProxy.scrollTo(Self.feedTopID, anchor: .top)
                                 case .notAChip:
                                     onTickerFocusMissed?(focus)
+                                case .locked:
+                                    // The plan hides this ticker: the same upgrade sheet the
+                                    // "+N more" chip opens, over the Updates tab, no new words —
+                                    // but only while the user is still HERE. The chips may take
+                                    // seconds; a sheet requested after they left the tab or opened
+                                    // something else would be queued and pop up out of nowhere.
+                                    // Both read live: the binding and UIKit, never a captured
+                                    // `isActiveTab`.
+                                    viewModel.openPaywallForLockedFocus(
+                                        focus.symbol,
+                                        stillHere: selectedTab == .updates
+                                            && !ModalPresentationProbe.isAnythingPresented
+                                    )
                                 case .dropped:
                                     break
                                 }

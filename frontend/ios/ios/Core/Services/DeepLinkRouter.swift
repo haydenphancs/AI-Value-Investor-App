@@ -54,14 +54,19 @@ struct PendingDeepLink: Equatable {
     }
 }
 
-/// A request for the Updates tab to select one ticker's chip (`caydex://updates/<SYMBOL>`),
-/// handed from `ContentView` to `UpdatesView`. A fresh `id` per tap, so a repeat tap on the same
-/// ticker is still a change the tab observes (the `updatesMarketFocusSeq` rule).
+/// A request for the Updates tab to select one ticker's chip, handed from `ContentView` to
+/// `UpdatesView`: a card-backed widget tap (`caydex://updates/<SYMBOL>`) or a price move's
+/// "Read the news" (`AlertDestination.updatesFocus`, via `AppState.pendingUpdatesFocus`). A fresh
+/// `id` per tap, so a repeat tap on the same ticker is still a change the tab observes (the
+/// `updatesMarketFocusSeq` rule).
 struct UpdatesTickerFocus: Equatable {
     let id = UUID()
     let symbol: String
     /// The fallback detail screen's class, when the ticker is not one of the user's chips.
     let assetType: MarketTickerType
+    /// Where on that fallback screen: the default for a widget tap, the News tab for an alert's
+    /// "Read the news" (its news must still be one tap away).
+    var fallback: TickerDestination = .default
 }
 
 enum DeepLinkRouter {

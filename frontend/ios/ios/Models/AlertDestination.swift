@@ -29,6 +29,12 @@ struct AlertDestination: Identifiable, Hashable {
         /// One report's live results (`EarningsLiveScreen`). `reportDate` is "YYYY-MM-DD".
         /// `destinations(for:)` offers this only for a row with a date the endpoint still serves.
         case earningsLive(ticker: String, reportDate: String?)
+        /// The Updates TAB on this ticker's chip — a price move's "Read the news" (owner,
+        /// 2026-11-27). Never presented in a cover: `AlertDestinationCover` hands it to the shell
+        /// (`AppState.pendingUpdatesFocus`), which switches tabs the way a widget tap does. A
+        /// ticker the plan locks opens the Updates upgrade sheet; one that is not a chip at all
+        /// falls back to its detail screen (`UpdatesTickerFocus.fallback`).
+        case updates(symbol: String, assetType: MarketTickerType)
     }
 
     var id: String { "\(label)|\(systemImage)|\(String(describing: target))" }
@@ -44,9 +50,23 @@ struct AlertDestination: Identifiable, Hashable {
             return .ticker(symbol: symbol, assetType: assetType, destination: destination)
         case .report(let ticker, let persona, let reportId):
             return .report(id: reportId ?? "", ticker: ticker, persona: persona)
-        case .whale, .earningsLive:
+        case .whale, .earningsLive, .updates:
             return nil
         }
+    }
+
+    /// The Updates focus this destination asks for, or nil for one that opens in a cover.
+    ///
+    /// The fallback is where a ticker that is not one of the user's chips lands: the stock
+    /// screen on its News tab (what "Read the news" opened before), any other asset's own
+    /// screen (only `TickerDetailView` has tabs).
+    var updatesFocus: UpdatesTickerFocus? {
+        guard case .updates(let symbol, let assetType) = target else { return nil }
+        return UpdatesTickerFocus(
+            symbol: symbol,
+            assetType: assetType,
+            fallback: assetType == .stock ? TickerDestination(tab: .news, section: nil) : .default
+        )
     }
 }
 
@@ -149,6 +169,18 @@ extension AlertDestination {
             target: .ticker(symbol: symbol, assetType: assetType, destination: .default)
         ))
 
+        // A price move's news lives on the Updates tab, on that ticker's chip, where its
+        // Insights card and coverage are (owner, 2026-11-27) — not on the ticker screen's News
+        // tab, which is where this row used to go. Every asset type: Updates chips are not
+        // stock-only, and a ticker that is not a chip falls back to its own detail screen.
+        if item.kind == "ticker_move" {
+            out.append(AlertDestination(
+                label: "Read the news",
+                systemImage: "newspaper",
+                target: .updates(symbol: symbol, assetType: assetType)
+            ))
+        }
+
         // ⚠️ STOCK ONLY. Only `TickerDetailView` accepts a `TickerDestination`; the crypto, ETF,
         // index and commodity screens take a bare symbol and silently ignore a tab they do not
         // have. Offering "Financials" on a BTC alert would be a control that lies — it would open
@@ -192,7 +224,9 @@ extension AlertDestination {
     ) -> (label: String, systemImage: String, destination: TickerDestination)? {
         switch kind {
         case "ticker_move":
-            return ("Read the news", "newspaper", TickerDestination(tab: .news, section: nil))
+            // No ticker TAB: its "Read the news" opens the Updates tab instead, added in
+            // `destinations(for:)` (owner, 2026-11-27).
+            return nil
         case "earnings_upcoming", "earnings_result", "earnings_live":
             return ("See the numbers", "chart.bar.doc.horizontal",
                     TickerDestination(tab: .financials, section: nil))

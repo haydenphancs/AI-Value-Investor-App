@@ -134,6 +134,18 @@ final class AppState {
     /// never run for the next account.
     var pendingResearchRerun: ResearchRerunRequest?
 
+    /// A price move's "Read the news" (`AlertDestination.Target.updates`), parked by
+    /// `AlertDestinationCover` and consumed by `ContentView`, which switches to the Updates tab on
+    /// that ticker's chip — the widget's `openUpdatesTicker` path (owner, 2026-11-27).
+    ///
+    /// Parked for `pendingResearchTicker`'s reason: the alert detail sheets live on other tabs
+    /// (Alerts) and in the shell (a tapped push), and none of them can reach the tab selection.
+    /// Consume-and-clear, one owner.
+    ///
+    /// Device-global, so it is cleared in `discardDataForEndedSession()`: one left behind must
+    /// never move the next account onto the ended account's ticker.
+    var pendingUpdatesFocus: UpdatesTickerFocus?
+
     /// A Home Screen widget tap (`caydex://ticker/<SYMBOL>` or `caydex://updates/market`),
     /// parked by `iosApp`'s `.onOpenURL` and consumed by `ContentView`, which opens that
     /// asset's detail screen or the Updates tab's Market chip.
@@ -1732,6 +1744,7 @@ final class AppState {
         pendingPushNotification = nil
         pendingResearchTicker = nil
         pendingResearchRerun = nil
+        pendingUpdatesFocus = nil
         // `presentationResetToken` is deliberately NOT reset here — see its declaration.
         PortfolioStore.shared.reset()
         // Same reason: the price alerts in this store are the signed-out user's own

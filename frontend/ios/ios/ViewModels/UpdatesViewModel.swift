@@ -843,8 +843,13 @@ final class UpdatesViewModel: ObservableObject {
     enum TickerFocusOutcome: Equatable {
         /// The ticker's chip is selected (or already was).
         case focused
-        /// Not a chip this plan can OPEN: the caller falls back to the ticker's detail screen.
+        /// Not one of the user's chips at all (or locked with no plan left to buy): the caller
+        /// falls back to the ticker's detail screen.
         case notAChip
+        /// One of the user's chips, but the PLAN locks it and an upgrade would reveal it: the
+        /// caller opens the Updates upgrade sheet, the one the "+N more" chip opens (owner,
+        /// 2026-11-27: a Free account lands on Updates, locked, rather than on the ticker).
+        case locked
         /// The user moved on while the chips were loading — picked another chip, tapped the
         /// widget again, or the load outlasted `tickerFocusPatience`. Do NOTHING: neither the
         /// chip nor the fallback may land over what the user did meanwhile.
@@ -860,7 +865,9 @@ final class UpdatesViewModel: ObservableObject {
     private var tickerFocusGeneration = 0
 
     /// One ticker's chip — a card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`,
-    /// 2026-11-12), where that ticker's Insights card and its sources are.
+    /// 2026-11-12) or a price move's "Read the news" (2026-11-27), where that ticker's Insights
+    /// card and its sources are. A chip the plan LOCKS answers `.locked` (the caller opens the
+    /// upgrade sheet), not `.notAChip`. The log lines say "widget focus" for both doors.
     ///
     /// Waits for the tab's first load (`loadIfNeeded` joins one in flight), because a cold launch
     /// from the widget delivers the tap before /tabs has answered — but the result is DROPPED when
@@ -891,6 +898,16 @@ final class UpdatesViewModel: ObservableObject {
             Self.log.info("updates: widget focus \(wanted, privacy: .public) dropped — the chip changed while the chips loaded")
             return .dropped
         }
+        // A LOCKED chip of a live list, with a plan that would reveal it (`showsUpgradeChip`,
+        // so a top-tier account over its ceiling is never shown a sheet offering only a
+        // downgrade): the upgrade sheet, never the ticker screen. The selection is not moved —
+        // nothing the plan hides is ever selected.
+        if tabsAreLive, showsUpgradeChip,
+           filterTabs.contains(where: { !$0.isMarketTab && $0.isLocked && $0.scope.uppercased() == wanted }),
+           !openableTabs.contains(where: { !$0.isMarketTab && $0.scope.uppercased() == wanted }) {
+            Self.log.info("updates: widget focus \(wanted, privacy: .public) is a locked chip — opening the upgrade sheet")
+            return .locked
+        }
         guard tabsAreLive,
               let tab = openableTabs.first(where: { !$0.isMarketTab && $0.scope.uppercased() == wanted })
         else {
@@ -917,6 +934,18 @@ final class UpdatesViewModel: ObservableObject {
         }
         selectedTab = tab
         return .focused
+    }
+
+    /// A `.locked` focus's upgrade sheet (`PaywallView(context: .updatesTickers)`), or nothing
+    /// when the user is no longer on the Updates tab with nothing on top (`stillHere`, decided by
+    /// the view from live state). Dropped, not deferred: a sheet SwiftUI queued behind another
+    /// presentation would appear long after the tap, over whatever the user went to.
+    func openPaywallForLockedFocus(_ symbol: String, stillHere: Bool) {
+        guard stillHere else {
+            Self.log.info("updates: locked focus \(symbol.uppercased(), privacy: .public) — the user left Updates or opened something meanwhile; upgrade sheet dropped")
+            return
+        }
+        showPaywall = true
     }
 
     func openFilterOptions() {

@@ -5,6 +5,7 @@
 //  Opens an alert's chosen destination the way the rest of the app opens a ticker.
 //
 
+import OSLog
 import SwiftUI
 
 /// Presents an `AlertDestination` in a `.fullScreenCover` that writes its **own**
@@ -56,7 +57,7 @@ struct AlertDestinationCover: ViewModifier {
     @Binding var destination: AlertDestination?
 
     func body(content: Content) -> some View {
-        content.fullScreenCover(item: $destination) { destination in
+        content.fullScreenCover(item: coverDestination) { destination in
             NavigationStack {
                 destinationView(destination)
             }
@@ -67,6 +68,29 @@ struct AlertDestinationCover: ViewModifier {
             .environment(appState)
             .environment(\.appState, appState)
         }
+        // An Updates destination ("Read the news" on a price move) is a TAB, not a screen: it
+        // is handed to the shell, which switches to Updates on that ticker's chip the way a
+        // widget tap does (`ContentView.openUpdatesTicker`). Handled HERE, the one place all
+        // three owners hand a destination to, so no owner can present it as a cover. Cleared
+        // first, then parked: the owner's binding never keeps a value no cover will show.
+        .onChange(of: destination) { _, chosen in
+            guard let focus = chosen?.updatesFocus else { return }
+            destination = nil
+            Self.log.info("alert destination: Updates tab on \(focus.symbol, privacy: .public) (fallback type=\(focus.assetType.rawValue, privacy: .public))")
+            appState.pendingUpdatesFocus = focus
+        }
+    }
+
+    private static let log = Logger(subsystem: "com.phan.caydex", category: "notifications")
+
+    /// The cover's item: every destination but an Updates one, which never opens a cover
+    /// (see the `.onChange` above). Filtering the GET is what keeps the cover from flashing up
+    /// in the frame before that hand-off clears the binding.
+    private var coverDestination: Binding<AlertDestination?> {
+        Binding(
+            get: { destination?.updatesFocus == nil ? destination : nil },
+            set: { destination = $0 }
+        )
     }
 
     /// The ONE five-way dispatch. Deliberately here rather than in the two detail screens that
@@ -80,6 +104,10 @@ struct AlertDestinationCover: ViewModifier {
             WhaleProfileView(whaleId: whaleId)
         case .earningsLive(let ticker, let reportDate):
             EarningsLiveScreen(ticker: ticker, reportDate: reportDate)
+        case .updates:
+            // Unreachable: `coverDestination` never yields one, and `.onChange` hands it to the
+            // shell. Explicit so the `default:` below cannot quietly swallow it.
+            EmptyView()
         default:
             if let route = destination.route {
                 NotificationRouteContent(route: route)

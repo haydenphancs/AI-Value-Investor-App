@@ -87,7 +87,10 @@ struct ContentView: View {
                 marketFocusSeq: updatesMarketFocusSeq,
                 tickerFocus: updatesTickerFocus,
                 onTickerFocusMissed: { missed in
-                    presentTickerLink(symbol: missed.symbol, assetType: missed.assetType)
+                    presentTickerLink(
+                        symbol: missed.symbol, assetType: missed.assetType,
+                        destination: missed.fallback
+                    )
                 }
             )
                 .opacity(selectedTab == .updates ? 1 : 0)
@@ -186,6 +189,17 @@ struct ContentView: View {
             researchHandoffSeq &+= 1
             selectedTab = .research
             appState.pendingResearchTicker = nil
+        }
+        // A price move's "Read the news", from an Alerts row or a tapped push's detail
+        // (`AlertDestinationCover` parks it): the Updates tab on that ticker's chip, through the
+        // widget's own `openUpdatesTicker` — the same teardown, the same focus, the same
+        // fallbacks (a locked ticker → the Updates upgrade sheet; not a chip → its News tab).
+        //
+        // ONE OWNER, consume-and-clear, `initial: true`: the research handoff's rules above.
+        .onChange(of: appState.pendingUpdatesFocus, initial: true) { _, focus in
+            guard let focus else { return }
+            appState.pendingUpdatesFocus = nil
+            openUpdatesTicker(focus)
         }
         // A Home Screen widget tap, parked by `iosApp.onOpenURL`: `caydex://ticker/<SYMBOL>` →
         // that asset's detail screen, in the SAME destination cover a push uses (its own
@@ -307,7 +321,7 @@ struct ContentView: View {
         case .updatesMarket:
             openUpdatesMarket()
         case .updatesTicker(let symbol, let assetType):
-            openUpdatesTicker(symbol: symbol, assetType: assetType)
+            openUpdatesTicker(UpdatesTickerFocus(symbol: symbol, assetType: assetType))
         }
     }
 
@@ -318,11 +332,16 @@ struct ContentView: View {
     /// the user is three covers deep would otherwise appear only after they closed everything
     /// by hand. Assigning only after the wait matters too: this view's own
     /// `.onPresentationReset` nils `openedPushDestination` on the bump.
-    private func presentTickerLink(symbol: String, assetType: MarketTickerType) {
+    ///
+    /// `tab` is where on the screen: the default for a widget tap, the News tab when an alert's
+    /// "Read the news" fell back here (`UpdatesTickerFocus.fallback`).
+    private func presentTickerLink(
+        symbol: String, assetType: MarketTickerType, destination tab: TickerDestination = .default
+    ) {
         let destination = AlertDestination(
             label: "Open \(symbol)",
             systemImage: "chart.line.uptrend.xyaxis",
-            target: .ticker(symbol: symbol, assetType: assetType, destination: .default)
+            target: .ticker(symbol: symbol, assetType: assetType, destination: tab)
         )
         guard ModalPresentationProbe.isAnythingPresented else {
             openedPushDestination = destination
@@ -368,20 +387,22 @@ struct ContentView: View {
         }
     }
 
-    /// A card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`, 2026-11-12): the Updates
-    /// tab on that ticker's chip, where its Insights card and the card's sources are.
+    /// A card-backed Holdings widget tap (`caydex://updates/<SYMBOL>`, 2026-11-12) or a price
+    /// move's "Read the news" (`appState.pendingUpdatesFocus`, 2026-11-27): the Updates tab on
+    /// that ticker's chip, where its Insights card and the card's sources are.
     ///
     /// `openUpdatesMarket`'s teardown, for its reasons (the expanded player first, then the
     /// stack). The tab cannot know whether the ticker is a chip until its tabs load, so it decides:
-    /// a ticker that is not an openable chip comes back through `onTickerFocusMissed` and opens
-    /// its detail screen, the link's fallback.
-    private func openUpdatesTicker(symbol: String, assetType: MarketTickerType) {
+    /// a ticker the plan locks opens the Updates upgrade sheet there, and one that is not a chip
+    /// at all comes back through `onTickerFocusMissed` and opens its detail screen, the focus's
+    /// fallback.
+    private func openUpdatesTicker(_ focus: UpdatesTickerFocus) {
         if AudioManager.shared.showFullScreenPlayer {
             AudioManager.shared.collapsePlayer()
         }
         let open = {
             selectedTab = .updates
-            updatesTickerFocus = UpdatesTickerFocus(symbol: symbol, assetType: assetType)
+            updatesTickerFocus = focus
         }
         guard ModalPresentationProbe.isAnythingPresented else {
             open()

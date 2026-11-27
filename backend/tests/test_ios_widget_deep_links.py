@@ -628,7 +628,7 @@ _PRESENT_DEEP_LINK = """
     case .updatesMarket:
         openUpdatesMarket()
     case .updatesTicker(let symbol, let assetType):
-        openUpdatesTicker(symbol: symbol, assetType: assetType)
+        openUpdatesTicker(UpdatesTickerFocus(symbol: symbol, assetType: assetType))
     }
 }
 """
@@ -643,8 +643,15 @@ def test_present_dispatches_every_destination_exhaustively():
 
 
 def test_present_tears_down_then_opens_a_ticker_destination():
-    body = _block(_read(_CONTENT), "private func presentTickerLink(symbol: String, assetType: MarketTickerType)")
-    assert "destination: .default" in body and "target: .ticker(" in body, (
+    content = _read(_CONTENT)
+    opener = "private func presentTickerLink("
+    body = _block(content, opener)
+    signature = _squash(content[content.index(opener):content.index(body)])
+    assert "destinationtab:TickerDestination=.default" in signature, (
+        "presentTickerLink no longer defaults to the ticker screen's own tab: a widget tap would "
+        "land on a tab it never asked for"
+    )
+    assert "target: .ticker(symbol: symbol, assetType: assetType, destination: tab)" in body, (
         "a widget tap opens something other than the ticker detail"
     )
     assert ".report(" not in body, "a deep link must never reach a report (the paid surface)"
@@ -717,7 +724,10 @@ selectedTab: $selectedTab,
 marketFocusSeq: updatesMarketFocusSeq,
 tickerFocus: updatesTickerFocus,
 onTickerFocusMissed: { missed in
-    presentTickerLink(symbol: missed.symbol, assetType: missed.assetType)
+    presentTickerLink(
+        symbol: missed.symbol, assetType: missed.assetType,
+        destination: missed.fallback
+    )
 }
 """
 
@@ -729,7 +739,7 @@ _OPEN_UPDATES_TICKER = """
     }
     let OPEN = {
         selectedTab = .updates
-        updatesTickerFocus = UpdatesTickerFocus(symbol: symbol, assetType: assetType)
+        updatesTickerFocus = focus
     }
     guard ModalPresentationProbe.isAnythingPresented else {
         OPEN()
@@ -752,6 +762,12 @@ _TICKER_FOCUS_HANDLER = """
             scrollProxy.scrollTo(Self.feedTopID, anchor: .top)
         case .notAChip:
             onTickerFocusMissed?(focus)
+        case .locked:
+            viewModel.openPaywallForLockedFocus(
+                focus.symbol,
+                stillHere: selectedTab == .updates
+                    && !ModalPresentationProbe.isAnythingPresented
+            )
         case .dropped:
             break
         }
@@ -781,6 +797,12 @@ _FOCUS_TICKER = """
         Self.log.info("updates: widget focus \\(wanted, privacy: .public) dropped — the chip changed while the chips loaded")
         return .dropped
     }
+    if tabsAreLive, showsUpgradeChip,
+       filterTabs.contains(where: { !$0.isMarketTab && $0.isLocked && $0.scope.uppercased() == wanted }),
+       !openableTabs.contains(where: { !$0.isMarketTab && $0.scope.uppercased() == wanted }) {
+        Self.log.info("updates: widget focus \\(wanted, privacy: .public) is a locked chip — opening the upgrade sheet")
+        return .locked
+    }
     guard tabsAreLive,
           let tab = openableTabs.first(where: { !$0.isMarketTab && $0.scope.uppercased() == wanted })
     else {
@@ -808,7 +830,7 @@ def test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail(
     with a fresh request for THAT chip; the tab selects it once its chips have loaded, or hands it
     back for the detail screen."""
     content = _read(_CONTENT)
-    body = _block(content, "private func openUpdatesTicker(symbol: String, assetType: MarketTickerType)")
+    body = _block(content, "private func openUpdatesTicker(_ focus: UpdatesTickerFocus)")
     name = re.search(r"\blet (\w+) = \{", body)
     assert name, "openUpdatesTicker no longer opens through one local closure"
     _assert_pinned(
@@ -830,24 +852,32 @@ def test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail(
         _block(after_feed, ".onChange(of: tickerFocus)"), _TICKER_FOCUS_HANDLER,
         "a ticker focus request no longer: selects the chip through focusTicker (which waits for "
         "the chips) and scrolls to the top where its Insights card leads; when the ticker is not "
-        "an openable chip, hands the request back for the detail screen; and when the user moved "
-        "on meanwhile (`.dropped`), does nothing at all",
+        "an openable chip, hands the request back for the detail screen; when the plan LOCKS the "
+        "chip, opens the Updates upgrade sheet (owner 2026-11-27, never the ticker screen); and "
+        "when the user moved on meanwhile (`.dropped`), does nothing at all",
     )
     _assert_pinned(
         _block(_read(_UPDATES_VM), "func focusTicker(_ symbol: String) async -> TickerFocusOutcome"),
         _FOCUS_TICKER,
         "focusTicker no longer (1) waits for the first load, (2) DROPS the focus when a newer one "
         "arrived, the wait outlasted tickerFocusPatience, or the selected chip's scope changed "
-        "under it, (3) answers notAChip unless the symbol is an OPENABLE ticker chip from a LIVE "
-        "/tabs answer (never the seeded Market chip, never a locked ticker), (4) re-points a "
+        "under it, (3) answers `locked` for a chip of a LIVE /tabs answer that the plan locks while an "
+        "upgrade would reveal it (showsUpgradeChip — never a downgrade-only sheet), (4) answers "
+        "notAChip unless the symbol is an OPENABLE ticker chip from a LIVE /tabs answer (never "
+        "the seeded Market chip, never a locked ticker), (4b) re-points a "
         "session-heal stash to that chip, (5) drops that chip's cached feed (no TTL: a card written "
         "since must reach the widget tap, 2026-11-13) and (6) selects it, or reloads it through "
         "selectTab when it already is the open chip",
     )
     vm = _read(_UPDATES_VM)
+    sheet = _squash(_block(vm, "func openPaywallForLockedFocus(_ symbol: String, stillHere: Bool)"))
+    assert sheet.startswith("{guardstillHereelse{") and sheet.endswith("return}showPaywall=true}"), (
+        "openPaywallForLockedFocus no longer drops the upgrade sheet when the user left Updates or "
+        "opened something meanwhile: SwiftUI would queue it and pop it up long after the tap"
+    )
     outcome = _block(vm, "enum TickerFocusOutcome: Equatable")
-    assert _enum_cases(outcome) == ["focused", "notAChip", "dropped"], (
-        "TickerFocusOutcome is no longer exactly focused / notAChip / dropped"
+    assert _enum_cases(outcome) == ["focused", "notAChip", "locked", "dropped"], (
+        "TickerFocusOutcome is no longer exactly focused / notAChip / locked / dropped"
     )
     patience = re.search(r"static let tickerFocusPatience: Duration = \.seconds\((\d+)\)", vm)
     assert patience and 2 <= int(patience.group(1)) <= 10, (
@@ -1944,7 +1974,7 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
      _drop_line("                marketFocusSeq: updatesMarketFocusSeq,"),
      "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip", "its one Updates tab"),
     ("updates-tab-loses-the-ticker-fallback", _CONTENT,
-     _replace("presentTickerLink(symbol: missed.symbol, assetType: missed.assetType)", "_ = missed"),
+     _resub(r"presentTickerLink\(\s*symbol: missed\.symbol.*?missed\.fallback\s*\)", "_ = missed"),
      "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip", "its one Updates tab"),
     # ── the updates/<SYMBOL> link (2026-11-12) ──
     ("parse-updates-symbol-repaired", _GRAMMAR,
@@ -2022,17 +2052,17 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
               "        components.path = \"/\" + normalized\n"),
      "test_links_are_built_only_by_the_grammar", "updatesTickerURL no longer builds"),
     ("present-updates-ticker-opens-market", _CONTENT,
-     _resub(r"(case \.updatesTicker\(let symbol, let assetType\):\s*)openUpdatesTicker\(symbol: symbol, assetType: assetType\)",
+     _resub(r"(case \.updatesTicker\(let symbol, let assetType\):\s*)openUpdatesTicker\(UpdatesTickerFocus\(symbol: symbol, assetType: assetType\)\)",
             r"\1openUpdatesMarket()"),
      "test_present_dispatches_every_destination_exhaustively", "presentDeepLink no longer"),
     ("ticker-open-without-the-wait", _CONTENT,
-     _resub(r"(private func openUpdatesTicker\(symbol: String, assetType: MarketTickerType\).*?)"
+     _resub(r"(private func openUpdatesTicker\(_ focus: UpdatesTickerFocus\).*?)"
             r"            _ = await ModalPresentationProbe\.waitUntilNothingPresented\(\)\n", r"\1"),
      "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "no longer runs"),
     ("ticker-focus-reused", _CONTENT,
-     _replace("            updatesTickerFocus = UpdatesTickerFocus(symbol: symbol, assetType: assetType)\n",
-              "            if updatesTickerFocus?.symbol != symbol {\n"
-              "                updatesTickerFocus = UpdatesTickerFocus(symbol: symbol, assetType: assetType)\n"
+     _replace("            updatesTickerFocus = focus\n",
+              "            if updatesTickerFocus?.symbol != focus.symbol {\n"
+              "                updatesTickerFocus = focus\n"
               "            }\n"),
      "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "no longer runs"),
     ("ticker-focus-never-falls-back", _UPDATES_VIEW,
@@ -2067,6 +2097,28 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
     ("focus-dropped-opens-the-detail", _UPDATES_VIEW,
      _resub(r"(case \.dropped:\s*)break", r"\1onTickerFocusMissed?(focus)"),
      "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "a ticker focus request no longer"),
+    # ── a locked chip opens the upgrade sheet; a missed alert keeps its News tab (2026-11-27) ──
+    ("locked-focus-opens-the-detail", _UPDATES_VIEW,
+     _resub(r"(case \.locked:.*?)viewModel\.openPaywallForLockedFocus\(.*?\)\n", r"\1onTickerFocusMissed?(focus)\n"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "a ticker focus request no longer"),
+    ("locked-focus-sheet-after-the-user-left", _UPDATES_VIEW,
+     _replace("stillHere: selectedTab == .updates", "stillHere: true"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "a ticker focus request no longer"),
+    ("locked-sheet-ignores-still-here", _UPDATES_VM,
+     _replace("        guard stillHere else {", "        guard stillHere || true else {"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "openPaywallForLockedFocus no longer"),
+    ("locked-focus-sheet-for-a-downgrade", _UPDATES_VM,
+     _replace("        if tabsAreLive, showsUpgradeChip,\n", "        if tabsAreLive,\n"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
+    ("locked-focus-on-seeded-tabs", _UPDATES_VM,
+     _replace("        if tabsAreLive, showsUpgradeChip,\n", "        if showsUpgradeChip,\n"),
+     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
+    ("missed-focus-loses-the-news-tab", _CONTENT,
+     _replace("destination: missed.fallback", "destination: .default"),
+     "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip", "its one Updates tab"),
+    ("ticker-link-lands-on-the-news-tab", _CONTENT,
+     _replace("destination tab: TickerDestination = .default", "destination tab: TickerDestination = TickerDestination(tab: .news, section: nil)"),
+     "test_present_tears_down_then_opens_a_ticker_destination", "own tab"),
     ("card-row-links-the-detail", _WIDGET,
      _replace("if cardLinksLive, linksToInsightCard,", "if false, linksToInsightCard,"),
      "test_a_card_backed_row_links_to_its_updates_card", "no longer links"),

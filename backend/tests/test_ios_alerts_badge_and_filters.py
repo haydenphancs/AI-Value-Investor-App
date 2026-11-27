@@ -1080,3 +1080,101 @@ def test_both_tracking_copies_were_updated():
         f"{src.count('.alertDestinationCover(')}"
     )
     assert src.count("AlertDetailView(alert: alert) { destination in") == 2
+
+
+# ── "Read the news" on a price move opens the Updates TAB (owner, 2026-11-27) ──────────────
+#
+# It used to open the ticker screen on its News tab. The owner: open "the Updates screen for that
+# ticker"; a Free account still lands on Updates, its ticker locked behind the upgrade sheet
+# (that half is `focusTicker`'s `.locked`, pinned in test_ios_widget_deep_links.py).
+
+_CONTENT_VIEW = _IOS / "ContentView.swift"
+
+
+def _squashed(src: str) -> str:
+    return re.sub(r"\s+", "", src)
+
+
+def test_a_price_move_reads_its_news_on_the_updates_tab():
+    src = _read(_DESTINATIONS)
+    target = _balanced(src, "    enum Target: Hashable {")
+    assert "case updates(symbol: String, assetType: MarketTickerType)" in target, (
+        "AlertDestination.Target has no Updates destination: 'Read the news' cannot reach the tab."
+    )
+    body = _balanced(
+        src, "static func destinations(for item: NotificationEventDTO) -> [AlertDestination] {"
+    )
+    row = _balanced(body, 'if item.kind == "ticker_move" {')
+    assert 'label: "Read the news"' in row and "target: .updates(symbol: symbol, assetType: assetType)" in row, (
+        "A price move's 'Read the news' no longer opens the Updates tab on its ticker."
+    )
+    stock_gate = body.index("if assetType == .stock")
+    assert body.index('if item.kind == "ticker_move" {') < stock_gate, (
+        "'Read the news' moved under the stock-only gate: Updates chips are not stock-only, so a "
+        "crypto or ETF price move would lose its news row."
+    )
+    tabs = _balanced(
+        src,
+        "static func tabDestination(\n        forKind kind: String\n    ) -> (label: String, systemImage: String, destination: TickerDestination)? {",
+    )
+    arm = tabs[tabs.index('case "ticker_move":'):]
+    arm = arm[:re.search(r"\n\s*case ", arm[1:]).start() + 1]
+    assert "return nil" in arm and ".news" not in arm, (
+        "ticker_move offers a ticker TAB again: a second 'Read the news' row to the ticker screen "
+        "beside the Updates one."
+    )
+    focus = _balanced(src, "var updatesFocus: UpdatesTickerFocus? {")
+    assert "fallback: assetType == .stock ? TickerDestination(tab: .news, section: nil) : .default" in focus, (
+        "A ticker that is not one of the user's chips no longer falls back to its News tab "
+        "(owner, 2026-11-27: 'Ticker's News tab')."
+    )
+
+
+def test_the_cover_hands_an_updates_destination_to_the_shell():
+    """An Updates destination is a TAB: never a cover (a second UpdatesView, nested in the cover's
+    stack, with a tab bar and no Done), and never a flash of an empty cover before the hand-off."""
+    cover = _read(_DEST_COVER)
+    body = _balanced(cover, "func body(content: Content) -> some View {")
+    assert "content.fullScreenCover(item: coverDestination)" in body, (
+        "The cover presents its binding unfiltered: an Updates destination would open a cover."
+    )
+    getter = _squashed(_balanced(cover, "private var coverDestination: Binding<AlertDestination?> {"))
+    assert "get:{destination?.updatesFocus==nil?destination:nil}" in getter and "set:{destination=$0}" in getter, (
+        "coverDestination no longer hides an Updates destination from the cover."
+    )
+    hand_off = _squashed(_balanced(body, ".onChange(of: destination) {"))
+    guard = hand_off.find("guardletfocus=chosen?.updatesFocuselse{return}")
+    cleared = hand_off.find("destination=nil")
+    parked = hand_off.find("appState.pendingUpdatesFocus=focus")
+    assert -1 < guard < cleared < parked, (
+        "The cover no longer hands an Updates destination to the shell — clear the binding, then "
+        "park it on appState.pendingUpdatesFocus."
+    )
+
+
+def test_the_shell_consumes_the_updates_focus_once():
+    content = _read(_CONTENT_VIEW)
+    opener = ".onChange(of: appState.pendingUpdatesFocus, initial: true) {"
+    assert content.count(".onChange(of: appState.pendingUpdatesFocus") == 1, (
+        "ContentView must observe the parked Updates focus exactly once, with initial: true (a "
+        "cold launch from a push parks it before the shell renders)."
+    )
+    handler = _squashed(_balanced(content, opener))
+    guard = handler.find("guardletfocuselse{return}")
+    cleared = handler.find("appState.pendingUpdatesFocus=nil")
+    opened = handler.find("openUpdatesTicker(focus)")
+    assert -1 < guard < cleared < opened, (
+        "The parked Updates focus is no longer consumed once — cleared before it opens the tab "
+        "through openUpdatesTicker (the widget's teardown + focus path)."
+    )
+    readers = [
+        p.relative_to(_IOS).as_posix()
+        for p in _IOS.rglob("*.swift")
+        if ".onChange(of: appState.pendingUpdatesFocus" in _code_only(p.read_text(encoding="utf-8"))
+    ]
+    assert readers == ["ContentView.swift"], f"the parked Updates focus has other consumers: {readers}"
+    reset = _balanced(_read(_APP_STATE), "private func discardDataForEndedSession() {")
+    assert "pendingUpdatesFocus = nil" in reset, (
+        "A session end no longer clears the parked Updates focus: the next account could be "
+        "moved onto the ended account's ticker."
+    )

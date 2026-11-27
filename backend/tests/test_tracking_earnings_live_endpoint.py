@@ -29,7 +29,7 @@ PREV = date(2026, 10, 28)
 
 EXPECTED_KEYS = {
     "ticker", "company_name", "report_date", "status", "checked_at", "preliminary", "eps",
-    "revenue", "filing", "guidance", "year_ago", "last_quarters", "poll_seconds",
+    "revenue", "filing", "guidance", "year_ago", "last_quarters", "poll_seconds", "live_label",
 }
 METRIC_KEYS = {"estimate", "actual", "surprise_pct", "source", "basis", "checking"}
 
@@ -559,6 +559,7 @@ def test_live_off_answers_estimates_only(live_off, monkeypatch, extras_calls, fi
     assert body["poll_seconds"] is None and body["preliminary"] is False
     assert body["checked_at"] is None and body["guidance"] is None
     assert body["filing"] is None and body["year_ago"] is None and body["last_quarters"] == []
+    assert body["live_label"] is False, "with the feature off there is no LIVE"
     assert extras_calls == [], "the spend the switch stops"
     assert els.get_earnings_live_service()._records == {}, "records made here are never pruned"
 
@@ -566,7 +567,9 @@ def test_live_off_answers_estimates_only(live_off, monkeypatch, extras_calls, fi
 @pytest.mark.parametrize("figures,status,poll", [
     (_MEMO_ROWS["pending"], "live", 30),
     (_MEMO_ROWS["eps_in"], "live", 30),
-    (_MEMO_ROWS["both_in"], "reported", None),
+    # Its results all in at 16:30 ET, the report keeps its LIVE label to midnight, and the sheet
+    # asks once just after it (7.5 h + 1 s + the 5 s slack), so the label ends with the day.
+    (_MEMO_ROWS["both_in"], "reported", 27006),
 ], ids=_MEMO_ROWS)
 def test_the_same_read_with_live_on_answers_from_the_record(
         client, monkeypatch, extras_calls, figures, status, poll):
@@ -576,6 +579,7 @@ def test_the_same_read_with_live_on_answers_from_the_record(
     ts.get_fmp_client().rows[:] = [_row("INTC", REPORT, **figures)]
     body = client.get("/api/v1/tracking/earnings/INTC/live").json()
     assert (body["status"], body["poll_seconds"]) == (status, poll)
+    assert body["live_label"] is True, "its own day: LIVE, results in or not"
     assert body["eps"]["actual"] == figures.get("epsActual")
     assert extras_calls == [("INTC", REPORT)]
     assert ("INTC", REPORT) in els.get_earnings_live_service()._records

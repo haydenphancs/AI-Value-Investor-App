@@ -122,6 +122,18 @@ def test_the_repo_root_railway_toml_cannot_start_a_different_server():
     assert "--workers" not in toml
 
 
+def test_the_backend_redeploys_only_when_the_backend_changes():
+    """Owner, 2026-11-20: "Backend only". Every push to main used to redeploy the web, an iOS- or
+    docs-only one too, and a restart forgets which earnings pushes went out, so their inbox rows
+    can no longer be corrected, and can drop a push due in a release window. Both deploy files
+    say so, whichever Railway applies."""
+    for path in (_BACKEND / "railway.toml", _BACKEND.parent / "railway.toml"):
+        if not path.exists():
+            continue
+        build = tomllib.loads(path.read_text()).get("build", {})
+        assert build.get("watchPatterns") == ["/backend/**"], path
+
+
 def _healthcheck_timeout(toml_path: Path) -> int:
     m = re.search(r'^healthcheckTimeout\s*=\s*(\d+)\s*$', toml_path.read_text(), re.M)
     assert m, f"{toml_path}: no healthcheckTimeout — Railway's default would apply"

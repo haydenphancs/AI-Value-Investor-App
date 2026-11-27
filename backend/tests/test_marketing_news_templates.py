@@ -1494,7 +1494,9 @@ GOLDEN = {
                       'subtitle': 'Fiscal 2025 · annual results',
                       'costs': {'revenue': {'label': 'Revenue', 'value': '$5.8B', 'ratio': 0.5943},
                                 'net': {'label': 'Net loss', 'value': '$3.9B'},
-                                'total': {'label': 'Costs and expenses', 'value': '$9.7B', 'ratio': 0.9887},
+                                # news-v24 (owner 2026-11-27, "Costs, after other items"): other items were INCOME
+                                # (+$110M) — the bar is below the statement's $9.8B of costs and expenses
+                                'total': {'label': 'Costs, after other items', 'value': '$9.7B', 'ratio': 0.9887},
                                 'parts': [{'label': 'Cost of sales', 'value': '$5.9B', 'ratio': 0.6025},
                                           {'label': 'Operating expenses', 'value': '$3.9B', 'ratio': 0.3975}],
                                 'note': '+$110M from interest, tax and other items made the loss smaller',
@@ -4834,7 +4836,7 @@ def test_every_sample_composes_a_valid_deterministic_json_package(name, factory,
                                         "detail": "BREAKING needs its record: its freshness cannot be shown"}]
                                       if breaking else [])
     assert a["authorship"] == "template" and a["video_layout"] == "per_line"
-    assert a["template_version"] == T.TEMPLATE_VERSION == "news-v23"
+    assert a["template_version"] == T.TEMPLATE_VERSION == "news-v24"
     assert a["content_class"] == R.SERIES_CLASS[a["series"]] == selection.SERIES_BY_ID[a["series"]].content_class
     assert a["source_ref"] == R.ledger_key(factory())
     assert a["carousel_slides"] == [] and a["dropped_outlets"] == {}
@@ -4850,7 +4852,7 @@ def test_the_lexicon_is_pinned_verbatim_and_versioned():
     # news-v22: the closed first-line prefixes are pinned beside the lexicon, under their own key (kept out of
     # LEXICON, so the lexicon's word scan needs no exemption for "BREAKING" / "alert" / an emoji)
     assert set(doc) == {"_about", "version", "entries", "first_line_prefixes"}
-    assert doc["version"] == T.TEMPLATE_VERSION == "news-v23"
+    assert doc["version"] == T.TEMPLATE_VERSION == "news-v24"
     assert doc["entries"] == T.LEXICON
     assert list(doc["entries"]) == list(T.LEXICON)
     assert doc["first_line_prefixes"] == T.FIRST_LINE_PREFIXES
@@ -12808,7 +12810,8 @@ def test_loss_the_costs_card_derives_every_part_from_the_statement_lines():
     c = _costs(rivian())
     assert c["revenue"] == {"label": "Revenue", "value": "$5.8B", "ratio": c["revenue"]["ratio"]}
     assert c["net"] == {"label": "Net loss", "value": "$3.9B"}
-    assert (c["total"]["label"], c["total"]["value"]) == ("Costs and expenses", "$9.7B")
+    # news-v24 (owner 2026-11-27): the other income nets into the bar — "Costs, after other items"
+    assert (c["total"]["label"], c["total"]["value"]) == ("Costs, after other items", "$9.7B")
     assert [(p["label"], p["value"]) for p in c["parts"]] == [("Cost of sales", "$5.9B"),
                                                               ("Operating expenses", "$3.9B")]
     assert c["note"] == "+$110M from interest, tax and other items made the loss smaller"
@@ -13047,18 +13050,120 @@ def test_loss_the_costs_bar_is_at_most_twice_revenue_and_a_bigger_loss_is_refuse
     assert e.value.code == "implausible_figures"
 
 
-@pytest.mark.parametrize("kw", [dict(gross_profit_usd=None), dict(operating_profit_usd=None),
-                                dict(gross_profit_usd=None, operating_profit_usd=None)],
-                         ids=["no_gross", "no_operating", "neither"])
-def test_loss_without_both_statement_lines_the_costs_bar_is_one_undivided_piece(kw):
+@pytest.mark.parametrize("kw, label, named", [
+    # news-v24 (owner 2026-11-27): the operating line is there, so the +$110M of other INCOME is known — the undivided
+    # bar is below the statement's costs and expenses too, and says so (no note: a note explains a hatched part)
+    (dict(gross_profit_usd=None), "Costs, after other items", "costs after other items"),
+    # no operating line: nothing tells whether other items were income — the approved label stays
+    (dict(operating_profit_usd=None), "Costs and expenses", "costs and expenses"),
+    (dict(gross_profit_usd=None, operating_profit_usd=None), "Costs and expenses", "costs and expenses"),
+], ids=["no_gross", "no_operating", "neither"])
+def test_loss_without_both_statement_lines_the_costs_bar_is_one_undivided_piece(kw, label, named):
     out = compose(rivian(**kw), THU)
     c = out["image_spec"]["costs"]
-    assert c["parts"] == [] and "note" not in c and c["total"] == {"label": "Costs and expenses", "value": "$9.7B",
-                                                                  "ratio": 1.0}
-    assert out["image_post"]["paragraphs"][1] == ("A second set of bars compares revenue, $5.8B, with costs and "
-                                                  "expenses, $9.7B. The part of the costs bar past revenue is the net "
-                                                  "loss, $3.9B.")
+    assert c["parts"] == [] and "note" not in c and c["total"] == {"label": label, "value": "$9.7B", "ratio": 1.0}
+    assert out["image_post"]["paragraphs"][1] == (f"A second set of bars compares revenue, $5.8B, with {named}, "
+                                                  "$9.7B. The part of the costs bar past revenue is the net loss, $3.9B.")
+    assert out["opening_card"]["costs"] == c
     assert T.validate_package(out, record=rivian(**kw)) == []
+
+
+# ── news-v24 (owner decision 2026-11-27): the costs bar's label on an other-INCOME year ─────────────────────────────
+#
+# The open call (RELEASE_NOTES, OWNER_TASKS §2.1): Rivian's red bar read "Costs and expenses $9.7B" while the
+# statement's own total of costs and expenses is $9.8B (the +$110M of other income nets into the bar). The owner chose
+# '"Costs, after other items" (Recommended)' — "The label matches the figure exactly, so a reader checking the 10-K finds
+# no mismatch." The label is the new one whenever other INCOME nets into the bar, of any size (review of 2026-11-27);
+# the note is drawn only for income big enough to show. Other items that were a COST keep "Costs and expenses".
+
+
+@pytest.mark.parametrize("make, after", [
+    (rivian, True),                                                              # +$110M of other income: the note
+    (_two_decimal_loss, True),                                                   # +$80M at two decimals
+    (lambda: rivian(gross_profit_usd=1_000_000_000.0, operating_profit_usd=-900_000_000.0,
+                    net_income_usd=-10_000_000.0), True),                         # other income far above the loss
+    (coherent, False),                                                           # a −$100M COST: the third part
+    (lambda: rivian(net_income_usd=-3_960_000_000.0), False),                    # exactly zero
+    (lambda: rivian(net_income_usd=-3_950_000_000.0), True),                     # +$10M: no note, still not the 10-K's
+    (lambda: rivian(net_income_usd=-5_800_000_000.0, operating_profit_usd=-5_800_000_000.0), False),
+    # review of 2026-11-27: with no gross line (one undivided bar, no parts check) +$40M is drawn at one decimal and
+    # the bar reads $9.7B while the statement's own costs and expenses ($9.76B) round to $9.8B — the new label
+    (lambda: rivian(gross_profit_usd=None, net_income_usd=-3_920_000_000.0), True),
+], ids=["rivian", "two_decimals", "tiny_loss", "other_cost", "other_zero", "other_small", "loss_equals_revenue",
+        "no_gross_40m"])
+def test_v24_the_costs_label_says_after_other_items_exactly_when_other_income_nets_into_the_bar(make, after):
+    """The label and the alt text's name for the bar move together: "Costs, after other items" (and "costs after
+    other items" in the alt text) whenever other INCOME nets into the bar, of any size (review of 2026-11-27: a sliver
+    too small for the note can still move the 10-K's own total across a rounding step); "Costs and expenses" on every
+    other loss year. The note is drawn only for income big enough to show. The picture, the cover and the data
+    card carry the same block; every string is allowed, drawable and clean, and the package validates.
+    Mutation-checked by hand (2026-11-27): the label always "Costs and expenses" fails the three income cases; the label
+    keyed on `other != 0` (not its sign) fails other_cost; the alt text left on "costs and expenses" fails rivian."""
+    rec = make()
+    out = compose(rec, THU)
+    c, alt = out["image_spec"]["costs"], out["image_post"]["paragraphs"][1]
+    want = "Costs, after other items" if after else "Costs and expenses"
+    assert c["total"]["label"] == want and out["opening_card"]["costs"]["total"]["label"] == want
+    assert ("with costs after other items, " in alt) is after and ("with costs and expenses, " in alt) is not after
+    if c["parts"] and not after:
+        assert "note" not in c
+    assert "Costs and expenses" not in json.dumps(out) if after else "after other items" not in json.dumps(out)
+    assert T.validate_package(out, record=rec) == []
+    keys = onscreen.logo_keys(out["logo_refs"])
+    assert onscreen.validate_image_spec(out["image_spec"], keys, footer=out["image_footer"]) is None
+    assert onscreen.validate_opening_card(out["opening_card"], keys) is None
+    assert want in onscreen.image_strings(out["image_spec"], out["logo_refs"])
+    assert want in onscreen.opening_strings(out["opening_card"], out["logo_refs"])
+    assert onscreen.drawable_problem(want) is None and clean(want) == want
+
+
+def test_v24_the_label_follows_the_shown_precision_like_the_note():
+    """The NOTE's threshold is half the costs figure's last SHOWN digit, at the precision the post is DRAWN; the LABEL
+    is the new one for any other income (review of 2026-11-27). Rivian's lines with other income of: +$10M — under half
+    of $0.1B and one decimal adds up: no note, yet the new label; +$40M — under half of $0.1B too, but one decimal does
+    not add up ("$5.9B + $3.9B" against "$9.7B"), so the post is drawn at two decimals where $40M shows: the note and the
+    new label; +$60M — over half of $0.1B at one decimal: the note and the new label. Straight through
+    `_money_map_costs`, no composition."""
+    rev, gp, op = Decimal("5.8e9"), Decimal("-0.08e9"), Decimal("-3.96e9")
+    tiny = T._money_map_costs(rev, gp, op, op + Decimal("0.01e9"))
+    two = T._money_map_costs(rev, gp, op, op + Decimal("0.04e9"))
+    big = T._money_map_costs(rev, gp, op, op + Decimal("0.06e9"))
+    assert (tiny.places, two.places, big.places) == (1, 2, 1)
+    # +$10M: no note (too small to show), but the bar is still not the statement's own total — the new label
+    assert tiny.block["total"]["label"] == "Costs, after other items" and "note" not in tiny.block
+    assert "costs after other items" in tiny.alt and "costs and expenses" not in tiny.alt
+    for plan, other in ((two, "+$40M "), (big, "+$60M ")):
+        assert plan.block["total"]["label"] == "Costs, after other items" and plan.block["note"].startswith(other)
+        assert "costs after other items" in plan.alt and "costs and expenses" not in plan.alt
+    # the boundary: exactly half of $0.1B ($50M) shows at one decimal — the note and the label together (">=" on both)
+    edge = T._money_map_costs(rev, gp, op, op + Decimal("0.05e9"))
+    assert edge.places == 1 and edge.block["note"].startswith("+$50M ")
+    assert edge.block["total"]["label"] == "Costs, after other items"
+    # the cost twin of the big case: the same $60M as a COST — the bar's named third part, the approved label
+    cost = T._money_map_costs(rev, gp, op, op - Decimal("0.06e9"))
+    assert cost.block["total"]["label"] == "Costs and expenses" and cost.block["parts"][2]["value"] == "$60M"
+    assert "note" not in cost.block and "costs and expenses" in cost.alt
+
+
+def test_v24_a_profit_year_never_says_costs_after_other_items():
+    """A PROFIT year has no costs card at all: neither label anywhere in its package (its goldens pin it byte for
+    byte)."""
+    for rec in (costco(), comcast()):
+        blob = json.dumps(compose(rec, THU))
+        assert "after other items" not in blob and "Costs and expenses" not in blob
+
+
+def test_v24_the_lexicon_carries_the_new_label_and_its_alt_twins_and_the_version_moved():
+    assert T.TEMPLATE_VERSION == "news-v24"
+    assert T.LEXICON["mm.cost.total"] == "Costs and expenses"                      # unchanged: still the default
+    assert T.LEXICON["mm.cost.total.after"] == "Costs, after other items"
+    assert T.LEXICON["mm.alt.costs.after"].replace("costs after other items", "costs and expenses") == T.LEXICON[
+        "mm.alt.costs"]
+    assert T.LEXICON["mm.alt.costs.after.bare"].replace("costs after other items", "costs and expenses") == T.LEXICON[
+        "mm.alt.costs.bare"]
+    doc = json.loads(LEXICON_PATH.read_text(encoding="utf-8"))
+    assert {k: doc["entries"][k] for k in ("mm.cost.total.after", "mm.alt.costs.after", "mm.alt.costs.after.bare")} \
+        == {k: T.LEXICON[k] for k in ("mm.cost.total.after", "mm.alt.costs.after", "mm.alt.costs.after.bare")}
 
 
 def test_loss_a_profit_year_carries_no_costs_card_anywhere():

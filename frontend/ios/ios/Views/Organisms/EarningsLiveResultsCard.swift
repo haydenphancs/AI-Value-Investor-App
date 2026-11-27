@@ -70,6 +70,17 @@ struct EarningsLiveResultsCard: View {
     /// `status` alone: once the device stops asking, nothing on screen can change.
     private var isLiveNow: Bool { status == .live && !viewModel.pollEnded }
 
+    /// The server's LIVE label (`live_label`, 2026-11-20 "LIVE all day until midnight"): the
+    /// report's own day to midnight ET, its results in or not. Only the badge reads it; nothing
+    /// that says "waiting" or "checking" does, so a finished report reads finished beside it.
+    private var liveLabel: Bool {
+        if let live { return live.liveLabel ?? false }
+        return fallback?.liveLabel ?? false
+    }
+
+    /// The red badge: LIVE, or wearing its LIVE label today, and this device still asking.
+    private var showsLiveBadge: Bool { (status == .live || liveLabel) && !viewModel.pollEnded }
+
     private var eps: EarningsMetricOutcome {
         live?.epsOutcome ?? fallback?.epsOutcome
             ?? EarningsMetricOutcome(estimate: nil, actual: nil, surprisePct: nil)
@@ -132,6 +143,7 @@ struct EarningsLiveResultsCard: View {
                     lastQuartersBlock(quarters)
                 }
                 if let guidance = live?.guidance, !guidance.isEmpty { guidanceBlock(guidance) }
+                if !isPreliminary, let url = live?.filingURL { filingLink(url) }
 
                 footnote
             }
@@ -169,7 +181,7 @@ struct EarningsLiveResultsCard: View {
                     .font(AppTypography.bodyEmphasis)
                     .foregroundColor(AppColors.textPrimary)
                 Spacer(minLength: 0)
-                if isLiveNow {
+                if showsLiveBadge {
                     LiveBadge()
                 }
             }
@@ -298,18 +310,23 @@ struct EarningsLiveResultsCard: View {
                     .font(AppTypography.caption)
                     .foregroundColor(AppColors.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if let url = live?.filingURL {
-                    Button {
-                        openExternal(url, into: &browserLink)
-                    } label: {
-                        Text("View the filing")
-                            .font(AppTypography.captionEmphasis)
-                            .foregroundColor(AppColors.primaryBlue)
-                    }
-                    .buttonStyle(.plain)
-                }
+                if let url = live?.filingURL { filingLink(url) }
             }
         }
+    }
+
+    /// "View the filing": the company's own release (its SEC 8-K) in the in-app browser. In the
+    /// preliminary note while its figures stand, and after the Outlook once FMP has confirmed them
+    /// (a release read after FMP's figures came first, 2026-11-20 "Yes, read it once").
+    private func filingLink(_ url: URL) -> some View {
+        Button {
+            openExternal(url, into: &browserLink)
+        } label: {
+            Text("View the filing")
+                .font(AppTypography.captionEmphasis)
+                .foregroundColor(AppColors.primaryBlue)
+        }
+        .buttonStyle(.plain)
     }
 
     private var preliminaryText: String {

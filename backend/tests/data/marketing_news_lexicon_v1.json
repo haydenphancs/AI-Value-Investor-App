@@ -1,6 +1,6 @@
 {
   "_about": "Company Weekly news templates, pinned verbatim (contract D7). Every sentence a news post can say. Changing ANY entry requires the same edit in app/services/marketing/news_templates.py LEXICON and a TEMPLATE_VERSION bump; tests/test_marketing_news_templates.py fails otherwise.",
-  "version": "news-v23",
+  "version": "news-v24",
   "entries": {
     "list.1": "{a}",
     "list.2": "{a} and {b}",
@@ -252,6 +252,7 @@
     "mm.alt.item": "{label} {value}",
     "mm.alt.callout": "{callout}.",
     "mm.cost.total": "Costs and expenses",
+    "mm.cost.total.after": "Costs, after other items",
     "mm.cost.sales": "Cost of sales",
     "mm.cost.opex": "Operating expenses",
     "mm.cost.other": "Interest, tax and other items",
@@ -260,6 +261,8 @@
     "mm.cost.callout.net": "so the net loss was {per100}",
     "mm.alt.costs": "A second set of bars compares revenue, {rev_s}, with costs and expenses, {costs_s}: {items}.",
     "mm.alt.costs.bare": "A second set of bars compares revenue, {rev_s}, with costs and expenses, {costs_s}.",
+    "mm.alt.costs.after": "A second set of bars compares revenue, {rev_s}, with costs after other items, {costs_s}: {items}.",
+    "mm.alt.costs.after.bare": "A second set of bars compares revenue, {rev_s}, with costs after other items, {costs_s}.",
     "mm.alt.costs.net": "The part of the costs bar past revenue is the net loss, {ni_s}.",
     "cg.kicker": "CONGRESS \u00b7 DISCLOSED IN {month_upper}",
     "cg.asof": "{month_long} \u00b7 as of {as_of_img}",

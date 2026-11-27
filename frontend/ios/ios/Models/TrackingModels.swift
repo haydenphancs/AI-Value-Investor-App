@@ -356,6 +356,11 @@ enum AppAlert: Identifiable {
         /// confirmed. The actual above stays nil.
         var epsChecking: Bool = false
         var revenueChecking: Bool = false
+        /// The server's LIVE label (`earnings_live_label`): the report's own day, LIVE or in, to
+        /// midnight ET (owner 2026-11-20, "LIVE all day until midnight"). Only the badge reads it;
+        /// every sentence, chip and poll reads `status`, so a report whose results are all in says
+        /// so beside the label. False from a backend that sends none: the badge follows `status`.
+        var liveLabel: Bool = false
         /// The sheet's own poll gave up, so nothing is checking this report from here and the
         /// sentence must not wait on it. Set by `AlertDetailView.headerAlert`, never by the wire.
         var liveCheckEnded: Bool = false
@@ -619,10 +624,18 @@ enum AppAlert: Identifiable {
         return parts.compactMap { $0 }.joined(separator: " · ")
     }
 
-    /// True while the report is LIVE — the card draws the red label, and the Tracking poll
-    /// keeps asking about it, through its own route, once no price on the tab can move.
+    /// True while the report is LIVE, its results still to come — the Tracking poll keeps asking
+    /// about it, through its own route, once no price on the tab can move.
     var isLiveEarnings: Bool {
         if case .earnings(let data) = self { return data.status == .live }
+        return false
+    }
+
+    /// True while the card wears the red LIVE label: its results still to come, or its own day
+    /// to midnight ET with them in (the server's `earnings_live_label`). Never from the device
+    /// clock; the poll reads `isLiveEarnings`, never this.
+    var showsLiveLabel: Bool {
+        if case .earnings(let data) = self { return data.status == .live || data.liveLabel }
         return false
     }
 
@@ -1037,6 +1050,7 @@ struct AlertDTO: Codable, Identifiable {
     let resultsCheckedAt: String?
     let epsChecking: Bool?
     let revenueChecking: Bool?
+    let earningsLiveLabel: Bool?
 
     // shared rollup
     let action: String?
@@ -1066,6 +1080,7 @@ struct AlertDTO: Codable, Identifiable {
         case resultsCheckedAt = "results_checked_at"
         case epsChecking = "eps_checking"
         case revenueChecking = "revenue_checking"
+        case earningsLiveLabel = "earnings_live_label"
         case action
         case totalAmount = "total_amount"
         case timeWindowLabel = "time_window_label"
@@ -1106,7 +1121,8 @@ struct AlertDTO: Codable, Identifiable {
                 isPreliminary: resultsPreliminary ?? false,
                 checkedAt: EarningsLiveDates.parse(resultsCheckedAt),
                 epsChecking: epsChecking ?? false,
-                revenueChecking: revenueChecking ?? false
+                revenueChecking: revenueChecking ?? false,
+                liveLabel: earningsLiveLabel ?? false
             ))
         case "whale_trade":
             let items = (whaleTradeItems ?? []).map { $0.toItem() }

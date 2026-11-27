@@ -9,11 +9,11 @@
 //  Red TEXT (`AppColors.loss`, text-safe) on an OPAQUE `cardBackgroundLight` capsule — never
 //  red on its own tint, which no text token survives in light mode (`TintedTagBadge` header).
 //  The pulsing dot is `LiveIndicator`, the one `LiveNewsHeader` uses; with Reduce Motion it is
-//  a still dot. Shown ONLY for `EarningsLiveStatus.live`, which the server sets from 03:00 ET
-//  (earlier once a figure is in) to midnight ET on the report day until the results are
-//  complete (owner, 2026-11-14: "make the
-//  'live' all day long, the day that company report earning", then "3 AM New York"), never from
-//  a clock on the device.
+//  a still dot. Shown ONLY for `EarningsLiveStatus.live` or the server's LIVE label: from 03:00 ET
+//  (earlier once a figure is in) to midnight ET on the report day, its results in or not (owner,
+//  2026-11-14: "make the 'live' all day long, the day that company report earning", then "3 AM
+//  New York"; 2026-11-20: "LIVE all day until midnight", `earnings_live_label` / `live_label`),
+//  never from a clock on the device.
 //
 
 import SwiftUI

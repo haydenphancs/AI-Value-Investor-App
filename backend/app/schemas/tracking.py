@@ -182,6 +182,9 @@ class AlertResponse(BaseModel):
     #   results_checked_at   ISO-8601 UTC of the last refresh of this report's sources
     #   *_checking           True while a sanity guard holds that metric's figure: its
     #                        `*_actual` is None, and it reads "being confirmed", not "not out"
+    #   earnings_live_label  True on the report's own day while it is LIVE or in, to midnight ET
+    #                        (owner 2026-11-20, "LIVE all day until midnight"): the badge reads
+    #                        this, everything else `earnings_status`
     earnings_status: Optional[str] = None
     report_date: Optional[str] = None
     eps_actual: Optional[float] = None
@@ -193,6 +196,7 @@ class AlertResponse(BaseModel):
     results_checked_at: Optional[str] = None
     eps_checking: Optional[bool] = None
     revenue_checking: Optional[bool] = None
+    earnings_live_label: Optional[bool] = None
 
     # shared rollup fields (whale_trade, insider_transaction)
     action: Optional[str] = None  # "bought" | "sold"
@@ -272,10 +276,16 @@ class EarningsLiveResponse(BaseModel):
     guidance: Optional[str] = None
     year_ago: Optional[EarningsLiveYearAgoResponse] = None
     last_quarters: List[EarningsLiveQuarterResponse] = Field(default_factory=list)
-    # How often the client should ask again: 30 while `status == "live"`, and on an `upcoming` or
-    # `awaiting` answer for a day nobody has read yet, 120 while a reported report's preliminary
-    # figures can still be confirmed by FMP, null otherwise.
+    # How often the client should ask again: 30 while `status == "live"`, on an `upcoming` or
+    # `awaiting` answer for a day nobody has read yet, on a report that still wants FMP's answer
+    # while its day awaits its first load, and on FMP's leftover row that reads `reported` while
+    # its own figures fill; 120 while a reported report's preliminary figures can still be
+    # confirmed by FMP; once just after midnight ET for a report in on its own day (that ask
+    # takes its LIVE label off); null otherwise.
     poll_seconds: Optional[int] = None
+    # The LIVE label: the report's own day, LIVE or in, to midnight ET (`live_label`); never on
+    # FMP's leftover row dated the day after a report.
+    live_label: bool = False
 
 
 # ── Portfolio Holdings CRUD ─────────────────────────────────────────

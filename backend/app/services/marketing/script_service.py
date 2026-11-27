@@ -405,7 +405,14 @@ NEWS_RECENT_LIMIT = RECENT_LIMIT * len(selection.POST_WEEKDAYS)
 #: (the spotlight lane, 2026-11-15): the other lane already used the series that day, or drew the lead company of
 #: every candidate it offered (`_cross_lane`) — an exclusion, never a refusal.
 SERIES_OUTCOMES = ("chosen", "no_candidates", "all_recent", "all_refused", "unavailable", "timeout",
-                   "error", "budget", "other_lane")
+                   "error", "budget", "other_lane", "week_cap")
+#: Owner decision 2026-11-27 ("1 backup theme a week (Recommended)": "At most one quiet-week theme per week across both
+#: daily posts, so Wednesday almost always keeps a theme."): the trail outcome of a theme BACKUP step (any theme step but
+#: the main lane's Wednesday lead, `selection.theme_is_fallback`) in an ET week whose backup was already made, in either
+#: lane (`theme_week_fallbacks`) — the series is never asked, so nothing reaches the source's refusal memo (a content
+#: outcome: a spotlight day that skips behind it is a quiet day). Its reason is THEME_FALLBACK_WEEK_USED.
+THEME_WEEK_CAP = "week_cap"
+THEME_FALLBACK_WEEK_USED = "theme_fallback_week_used"
 #: The trail outcome of a series the cross-lane rules kept out (`SERIES_OUTCOMES`).
 OTHER_LANE = "other_lane"
 #: Its reason when the series ran but the other lane had drawn the lead company of every candidate it offered.
@@ -1567,6 +1574,41 @@ def narrow_other_lane_lead(record: Any, avoid_leads: FrozenSet[str]) -> Tuple[Op
     return dataclasses.replace(record, **{field_: tuple(rows)}), dropped
 
 
+def theme_week_fallbacks(rows: Iterable[Any], run_date: date, lane: str, *, run_id: str) -> List[Dict[str, str]]:
+    """The quiet-week BACKUP theme posts the ledger already holds in `run_date`'s ET week (owner decision 2026-11-27:
+    "1 backup theme a week (Recommended)" — "At most one quiet-week theme per week across both daily posts, so Wednesday
+    almost always keeps a theme."), as `{run_date, lane, source_ref}`, oldest first — from `rows`, the build's theme
+    read (`_theme_ledger`: every theme pick of BOTH lanes, any status, through run_date + 1 for a main run).
+
+    A row counts when it is in the week (`selection.theme_week`, Monday..Sunday), is not this run's own (`run_id`), is
+    dated on or before `run_date` — or after it in the OTHER lane only (a main run built the next day, after that
+    day's spotlight: the post was made before this run, `_cross_lane`'s forward day) — and is a backup
+    (`selection.theme_is_fallback`: anything but the MAIN lane's Wednesday lead; no lane is the main lane, a lane the
+    code does not know is a backup). FAIL CLOSED: a row whose day does not read back counts as this week's backup
+    (logged at ERROR) — the cap never lets a second backup through on an unreadable row. Pure but for that log."""
+    week_start, week_end = selection.theme_week(run_date)
+    out: List[Dict[str, str]] = []
+    for r in rows:
+        if not isinstance(r, Mapping) or str(r.get("run_id")) == run_id:
+            continue
+        row_lane = r.get("lane") or RUN_LANE_MAIN
+        ref = r.get("source_ref") if isinstance(r.get("source_ref"), str) else ""
+        raw_day = r.get("run_date")
+        try:
+            day = date.fromisoformat(str(raw_day)[:10])
+        except ValueError:
+            logger.error("marketing template day: a theme script's run_date %r does not read back (lane=%s source=%s) "
+                         "run_id=%s — counted as this week's backup theme (fail closed)", str(raw_day)[:40],
+                         str(row_lane)[:20], ref[:80], run_id)
+            out.append({"run_date": str(raw_day)[:40], "lane": str(row_lane)[:20], "source_ref": ref})
+            continue
+        if not week_start <= day <= week_end or (day > run_date and row_lane == lane):
+            continue
+        if selection.theme_is_fallback(day, main_lane=row_lane == RUN_LANE_MAIN):
+            out.append({"run_date": day.isoformat(), "lane": str(row_lane)[:20], "source_ref": ref})
+    return out
+
+
 def _without_feature_series(chain: Tuple[str, ...], run: Dict[str, Any], *, lane: str) -> Tuple[str, ...]:
     """`chain` without the series whose post image is the `feature` layout (FEATURE_LAYOUT_SERIES) when the worker
     holding `run` did not declare WORKER_CAPABILITY_LAYOUT_FEATURE on its claim — the LAYOUTS_2B rule, for the
@@ -2150,9 +2192,15 @@ class MarketingScriptService:
         spotlight_kw = (await self._spotlight_source_kw(run, run_date)
                         if SPOTLIGHT_CONTEXT_SERIES in chain else {})
         # news-v23 phase 3 (the weekly theme post): its rotation's own ledger read and the holder's drawable angles —
-        # read only when the day's chain holds the theme series (Wednesdays), so every other build is unchanged
-        theme_kw = (await self._theme_source_kw(run, run_date)
-                    if THEME_CONTEXT_SERIES in chain else {})
+        # read only when the day's chain holds the theme series (Wednesday's lead, a quiet week's backup), so every
+        # other build is unchanged. The same ONE read gives the week's backups (owner decision 2026-11-27: "1 backup
+        # theme a week"): a backup step whose week already made one, in either lane, falls back `week_cap` unasked.
+        theme_rows = (await self._theme_ledger(run, run_date, lane)
+                      if THEME_CONTEXT_SERIES in chain else None)
+        theme_kw = self._theme_source_kw(run, theme_rows) if theme_rows is not None else {}
+        week_backups = (theme_week_fallbacks(theme_rows, run_date, lane, run_id=run_id)
+                        if theme_rows is not None
+                        and selection.theme_is_fallback(run_date, main_lane=lane == RUN_LANE_MAIN) else [])
         spotlight = lane == RUN_LANE_SPOTLIGHT
         end_of_chain = "the skip (nothing_qualified)" if spotlight else "the lesson"
         try:
@@ -2204,6 +2252,16 @@ class MarketingScriptService:
             if series in taken_today:
                 # Rule (c): the other lane already used this series today — never asked, never a refusal.
                 self._fell_back(run_id, trail, series, OTHER_LANE, OTHER_LANE_SERIES, nxt)
+                continue
+            if series == THEME_CONTEXT_SERIES and len(week_backups) >= selection.THEME_FALLBACKS_PER_WEEK:
+                # Owner decision 2026-11-27: the week's one quiet-week backup theme is spent — never asked, never a
+                # refusal (no memo), so a later week offers the same themes as before.
+                logger.info("marketing template day: run_id=%s lane=%s run_date=%s — this week's backup theme was "
+                            "already made (%s); the theme step falls back %s (owner 2026-11-27: one backup theme a "
+                            "week, Wednesday's lead never capped)", run_id, lane, run_date,
+                            "; ".join(f"{b['lane']} {b['run_date']} {b['source_ref'][:80]}" for b in week_backups[:3]),
+                            THEME_WEEK_CAP)
+                self._fell_back(run_id, trail, series, THEME_WEEK_CAP, THEME_FALLBACK_WEEK_USED, nxt)
                 continue
             if news is None:
                 self._fell_back(run_id, trail, series, "error", "news_source_unavailable", nxt)
@@ -2364,12 +2422,30 @@ class MarketingScriptService:
                         last, sorted(refs)[:10], sorted(taken)[:10], CROSS_LANE_COMPANY_DAYS, sorted(leads)[:20])
         return frozenset(refs), frozenset(taken), frozenset(leads)
 
-    async def _theme_source_kw(self, run: Dict[str, Any], run_date: date) -> Dict[str, Any]:
-        """The weekly theme post's two inputs, for its `candidates()` call only (news-v23 phase 3):
+    async def _theme_ledger(self, run: Dict[str, Any], run_date: date, lane: str) -> List[Dict[str, Any]]:
+        """The theme scripts of BOTH lanes dated [run_date − THEME_HISTORY_DAYS, run_date] — through run_date + 1 for a
+        MAIN run, as `_cross_lane` reads (a main run resumed the next day may be built after that day's spotlight) —
+        `runs.theme_scripts_between`: the build's ONE theme read, the rotation's keys (`_theme_source_kw`) and the
+        week's backups (`theme_week_fallbacks`, owner decision 2026-11-27). A failed or over-bound read RAISES (logged
+        at ERROR with the run id), like the build's other ledger reads: the build crashes into the kick, the worker
+        retries, and no theme is chosen — nor a backup allowed — on a guess about the ledger."""
+        through = run_date + timedelta(days=1) if lane == RUN_LANE_MAIN else run_date
+        try:
+            return await self.runs.theme_scripts_between(run_date - timedelta(days=news_rules.THEME_HISTORY_DAYS),
+                                                         through)
+        except Exception as e:
+            logger.error("marketing template day: the theme rotation's ledger read failed run_id=%s run_date=%s "
+                         "(%s: %s) — the build stops; the next kick builds the day afresh", run.get("id"), run_date,
+                         type(e).__name__, e)
+            raise
 
-        * ``theme_history`` — the `source_ref` of every theme script dated [run_date − THEME_HISTORY_DAYS, run_date]
-          (`runs.theme_refs_between`: its OWN bounded read, so the rotation sees twelve weeks of theme keys whatever
-          the other series posted — the general `recent` read is sized by row count, not by days);
+    def _theme_source_kw(self, run: Dict[str, Any], rows: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        """The weekly theme post's inputs, for its `candidates()` call only (news-v23 phase 3), from `rows` (the build's
+        `_theme_ledger` read):
+
+        * ``theme_history`` — the `source_ref` of every theme script of `rows`, oldest first (its OWN bounded read, so
+          the rotation sees twelve weeks of theme keys whatever the other series posted — the general `recent` read is
+          sized by row count, not by days; a main run's next-day key is the other lane's, already in its `exclude`);
         * ``theme_angles`` — the angles the worker holding the run can draw: every angle with
           WORKER_CAPABILITY_THEME_ANGLES, else "how they make money" only (THEME_ANGLES_WITHOUT_CAPABILITY: the `grid`
           it already draws). The adapter skips the others (``theme_angle_unsupported``), never a picture the worker
@@ -2378,17 +2454,9 @@ class MarketingScriptService:
           filings (`news_rules.THEME_ANGLE_CLASSES`: the insider scorecard and Congress, class C) is skipped with no read
           while class C is off (``theme_angle_class_off``); create_posts re-checks it (`record_content_classes`).
 
-        A failed or over-bound read RAISES (logged at ERROR with the run id), like the build's other ledger reads: the
-        build crashes into the kick, the worker retries, and no theme is chosen on a guess about its last post."""
+        Pure but for its logging: the read (and its fail-closed raise) is `_theme_ledger`'s."""
         run_id = str(run["id"])
-        try:
-            refs = await self.runs.theme_refs_between(run_date - timedelta(days=news_rules.THEME_HISTORY_DAYS),
-                                                      run_date)
-        except Exception as e:
-            logger.error("marketing template day: the theme rotation's ledger read failed run_id=%s run_date=%s "
-                         "(%s: %s) — the build stops; the next kick builds the day afresh", run_id, run_date,
-                         type(e).__name__, e)
-            raise
+        refs = [str(r["source_ref"]) for r in rows if isinstance(r.get("source_ref"), str) and r["source_ref"]]
         caps = run_worker_capabilities(run)
         angles = (news_rules.THEME_ANGLES if WORKER_CAPABILITY_THEME_ANGLES in caps
                   else THEME_ANGLES_WITHOUT_CAPABILITY)

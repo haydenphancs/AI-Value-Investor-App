@@ -155,6 +155,12 @@ class TrackingViewModel: ObservableObject {
     /// The report-day cards drawn `upcoming` that the round's asks at the LIVE label's start have
     /// settled for the day and identity in `labelStartScope`.
     private var labelStartAnswered: Set<String> = []
+    /// The identity (`loadGeneration`) `labelEndNotBefore` belongs to.
+    private var labelEndScope = -1
+    /// Cards whose ask at the LIVE label's end came back still labelled (a phone clock ahead of
+    /// the server's midnight), each with when it may be asked again: the answer's own
+    /// `poll_seconds`, the server's time to its midnight (`labelEndReports`).
+    private var labelEndNotBefore: [String: Date] = [:]
 
     // Whales Tab
     @Published var selectedWhaleCategory: WhaleCategory = .investors
@@ -1754,9 +1760,21 @@ class TrackingViewModel: ObservableObject {
                     assetTypes: assets.map(\.assetType),
                     symbols: assets.map(\.ticker)
                 ) {
-                    await self.loadTrackingFeed()
+                    // A feed build that fails leaves every card as it was for as long as the
+                    // feed keeps failing, one still saying LIVE from an earlier day included, by
+                    // its label or its status, and a report-day card still drawn `upcoming`
+                    // (2026-11-26 reviews): those cards are then asked about through their own
+                    // routes, as outside price hours, never handed back to the feed that just
+                    // failed (`refreshLiveEarningsCards`).
+                    let built: Bool = await self.loadTrackingFeed()
+                    if !built, self.filteredAlerts.contains(where: \.isLiveEarnings)
+                                || !self.labelStartReports().isEmpty
+                                || !self.labelEndReports().isEmpty {
+                        await self.refreshLiveEarningsCards(afterAFailedFeed: true)
+                    }
                 } else if self.filteredAlerts.contains(where: \.isLiveEarnings)
-                            || !self.labelStartReports().isEmpty {
+                            || !self.labelStartReports().isEmpty
+                            || !self.labelEndReports().isEmpty {
                     await self.refreshLiveEarningsCards()
                 }
             }
@@ -1826,6 +1844,56 @@ class TrackingViewModel: ObservableObject {
         if starting.contains(report.id) { labelStartAnswered.insert(report.id) }
     }
 
+    /// The report of an earnings card still wearing the server's LIVE label after its own day
+    /// (`today` is New York's date), or nil. A card still `live` is the LIVE rotation's.
+    private static func labelEndReport(_ alert: AppAlert, today: String) -> LiveCardReport? {
+        guard case .earnings(let data) = alert, data.liveLabel, data.status != .live,
+              let date = data.reportDate, !date.isEmpty, date < today,
+              !data.ticker.isEmpty else { return nil }
+        return LiveCardReport(id: alert.id, ticker: data.ticker, reportDate: date)
+    }
+
+    /// Cards still wearing the LIVE label once New York is past midnight (2026-11-20, "LIVE all
+    /// day until midnight"). The label stays on a report whose results are in until midnight ET,
+    /// and the round asks only about cards whose results are still to come, with no feed build
+    /// before 04:00 (and none on a closed day), so a resumed tab would keep a Friday card LIVE
+    /// until Monday's first build. In price hours the feed build takes the label off, and while
+    /// that build keeps failing the timer asks these cards too, those the route still answers
+    /// (`refreshLiveEarningsCards(afterAFailedFeed:)`): a failed build leaves the list as it was.
+    /// Each is asked about until an answer takes the label off: that
+    /// answer is written onto the card, which leaves this list. The phone's clock only picks when
+    /// to ask (`MarketHoursUtil.liveLabelEndAskDayKey`); the answer says whether the label stands.
+    /// An answer still labelled (a phone clock running ahead of the server's) holds that card
+    /// until the answer's own `poll_seconds`, the server's time to its midnight
+    /// (`noteLabelEndAnswer`), so a fast clock costs one ask, not one every 30 s.
+    private func labelEndReports(at now: Date = Date()) -> [LiveCardReport] {
+        guard let today = MarketHoursUtil.liveLabelEndAskDayKey(at: now) else { return [] }
+        if labelEndScope != loadGeneration {
+            labelEndScope = loadGeneration
+            labelEndNotBefore = [:]
+        }
+        return filteredAlerts
+            .compactMap { Self.labelEndReport($0, today: today) }
+            .filter { labelEndNotBefore[$0.id].map { now >= $0 } ?? true }
+    }
+
+    /// How long a card asked about at the LIVE label's end waits when the answer still carries the
+    /// label and no `poll_seconds`, which the server never sends with it: a floor, not a cadence.
+    private static let labelEndFallbackSeconds: Int = 300
+
+    /// `answer`, about a card asked at the LIVE label's end, still says LIVE: that card waits for
+    /// the server's own midnight before it is asked again. An answer with the label off clears it.
+    private func noteLabelEndAnswer(_ answer: EarningsLiveResponse, for report: LiveCardReport,
+                                    among ending: Set<String>, at now: Date = Date()) {
+        guard ending.contains(report.id) else { return }
+        guard answer.liveLabel == true else {
+            labelEndNotBefore[report.id] = nil
+            return
+        }
+        let seconds: Int = max(answer.pollSeconds ?? Self.labelEndFallbackSeconds, 1)
+        labelEndNotBefore[report.id] = now.addingTimeInterval(TimeInterval(seconds))
+    }
+
     /// What one answer about a LIVE card's report does to the card (`liveCardStep`).
     private enum LiveCardStep {
         /// The answer says how the card's own report stands: the card takes it.
@@ -1876,16 +1944,33 @@ class TrackingViewModel: ObservableObject {
     /// a backend without the route, a 400 for a date outside its window) hands the round to the
     /// feed, which says how the card stands. Any other failure keeps the card as it is, logged,
     /// and the next round asks again.
-    private func refreshLiveEarningsCards() async {
+    ///
+    /// `afterAFailedFeed`: the round after a feed build that failed in price hours (the timer).
+    /// It asks only reports the route still answers (one dated before its window, two trading
+    /// days back, waits for the feed: `MarketHoursUtil.liveResultsFloorKey`), and leaves a refusal
+    /// or a moved report as it is for the feed, never building the feed that just failed again in
+    /// the same tick (2026-11-26 review).
+    private func refreshLiveEarningsCards(afterAFailedFeed: Bool = false) async {
         let generation = loadGeneration
         let revision = alertsRevision
+        let floor: String? = afterAFailedFeed ? MarketHoursUtil.liveResultsFloorKey() : nil
+        let answerable: (LiveCardReport) -> Bool = { report in
+            floor.map { report.reportDate >= $0 } ?? true
+        }
         let reports: [LiveCardReport] = filteredAlerts.compactMap { Self.liveCardReport($0) }
+            .filter(answerable)
         // The LIVE label's start first; the LIVE cards take turns in the room left.
         let starting: [LiveCardReport] = Array(
-            labelStartReports().prefix(Self.maxLiveCardsPerRound)
+            labelStartReports().filter(answerable).prefix(Self.maxLiveCardsPerRound)
         )
         let startingIds: Set<String> = Set(starting.map(\.id))
         var batch: [LiveCardReport] = starting
+        // Then the LIVE label's end, in the room the start leaves.
+        let ending: [LiveCardReport] = Array(
+            labelEndReports().filter(answerable).prefix(Self.maxLiveCardsPerRound - batch.count)
+        )
+        let endingIds: Set<String> = Set(ending.map(\.id))
+        batch += ending
         if !reports.isEmpty {
             let start: Int = liveCardCursor % reports.count
             let rotated: [LiveCardReport] = Array(reports[start...]) + Array(reports[..<start])
@@ -1908,6 +1993,7 @@ class TrackingViewModel: ObservableObject {
                 // A `keep` answer (the server could not tell yet) and a passing failure leave
                 // the card to be asked again next round, as a LIVE card is.
                 if step != .keep { settleLabelStart(report, among: startingIds) }
+                noteLabelEndAnswer(answer, for: report, among: endingIds)
                 switch step {
                 case .write:
                     guard let index = alerts.firstIndex(where: { $0.id == report.id }),
@@ -1917,6 +2003,7 @@ class TrackingViewModel: ObservableObject {
                     continue
                 case .askTheFeed:
                     logLiveCardHandedToTheFeed(answer, report: report)
+                    if afterAFailedFeed { continue }
                     await loadTrackingFeed()
                     return
                 }
@@ -1929,11 +2016,13 @@ class TrackingViewModel: ObservableObject {
                 logLiveCardFailure(error, as: appError, report: report)
                 if case .notFound = appError {
                     settleLabelStart(report, among: startingIds)
+                    if afterAFailedFeed { continue }
                     await loadTrackingFeed()
                     return
                 }
                 if case .validationFailed = appError {
                     settleLabelStart(report, among: startingIds)
+                    if afterAFailedFeed { continue }
                     await loadTrackingFeed()
                     return
                 }

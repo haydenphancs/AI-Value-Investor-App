@@ -1,6 +1,13 @@
 [build]
 builder = "dockerfile"
 dockerfilePath = "Dockerfile"
+# Redeploy only when the backend changes (owner, 2026-11-20: "Backend only"). The image is built
+# from /backend alone, so nothing outside it can change what runs, and every redeploy restarts the
+# process: it forgets which earnings pushes went out (their inbox text can no longer be corrected)
+# and can drop a push due in a release window. Patterns are gitignore-style from the REPO root
+# even with a Root Directory set (marketing/railway.toml), hence /backend/. Set the same Watch
+# Paths in the dashboard before Railway stops reading this file (OWNER_TASKS).
+watchPatterns = ["/backend/**"]
 
 [deploy]
 # /health/pdf 503s when WeasyPrint can't load -> a broken native stack FAILS the deploy

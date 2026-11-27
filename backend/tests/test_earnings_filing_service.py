@@ -11049,7 +11049,7 @@ async def test_a_superscript_the_verifier_cannot_recognise_is_refused_as_an_eps(
     found = await watcher.run_once(_AT_16, ["INTC"], REPORT, gemini=gem, cik_map=_CIKS,
                                    sec=_SEC(filings={"0000050863": [_8K]}, release=release),
                                    sleep=_no_sleep)
-    assert found == {}
+    _assert_link_only(found)
 
 
 @pytest.mark.asyncio
@@ -11464,7 +11464,8 @@ async def test_a_scale_header_past_the_models_cut_still_refuses_whole_dollars(wa
     gem = _Gemini(answer=_WHOLE_ANSWER)
     found = await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
                                    sleep=_no_sleep)
-    assert found == {} and gem.calls == 1
+    _assert_link_only(found)
+    assert gem.calls == 1
     assert "In thousands" not in gem.prompt, "the model still reads the cut text only"
 
 
@@ -11490,7 +11491,7 @@ async def test_a_quote_past_the_models_cut_never_verifies(watcher, monkeypatch):
               "revenue": {"value": 17.1, "unit": "billion", "quote": late}}
     found = await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec,
                                    gemini=_Gemini(answer=answer), cik_map=_CIKS, sleep=_no_sleep)
-    assert found == {}
+    _assert_link_only(found)
 
 
 @pytest.mark.asyncio
@@ -11532,8 +11533,8 @@ async def test_a_verifier_that_raises_costs_one_read_and_names_the_filing(watche
     sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
     gem = _Gemini()
     with caplog.at_level(logging.WARNING, logger=efs.__name__):
-        assert await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem,
-                                      cik_map=_CIKS, sleep=_no_sleep) == {}
+        _assert_link_only(await watcher.run_once(_AT_16, ["INTC"], REPORT, sec=sec, gemini=gem,
+                                                 cik_map=_CIKS, sleep=_no_sleep))
     watcher._watch[("INTC", REPORT)].checked_mono = 0.0      # the 60 s cadence has passed
     later = datetime(2026, 10, 29, 16, 5, tzinfo=ET).astimezone(timezone.utc)
     assert await watcher.run_once(later, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
@@ -13202,6 +13203,14 @@ async def _next_round(watcher, sec, gem):
                                   sleep=_no_sleep)
 
 
+def _assert_link_only(found, symbol: str = "INTC", acc: str = ACC) -> None:
+    """Nothing verified: the found release answers with its link alone, no figure, no outlook."""
+    assert list(found) == [symbol], found
+    figures = found[symbol]
+    assert not figures.has_figures and figures.guidance is None
+    assert figures.accession == acc and figures.url == efs.filing_index_url(_CIKS[symbol], acc)
+
+
 async def _two_rounds(watcher, sec, gem):
     assert await _first_round(watcher, sec, gem) == {}
     return await _next_round(watcher, sec, gem)
@@ -13392,9 +13401,10 @@ async def test_a_filing_that_is_not_the_release_is_skipped_and_the_watch_goes_on
 ], ids=["foreign_currency", "no_currency", "every_figure_refused"])
 async def test_a_results_release_with_no_figure_in_it_ends_the_watch(watcher, answer):
     sec, gem = _SEC(filings={"0000050863": [_8K]}), _Gemini(answer)
-    assert await _two_rounds(watcher, sec, gem) == {}
+    _assert_link_only(await _first_round(watcher, sec, gem))
+    assert await _next_round(watcher, sec, gem) == {}
     w = watcher._watch[("INTC", REPORT)]
-    assert w.done and w.found.accession == ACC and w.figures is None
+    assert w.done and w.found.accession == ACC and not w.figures.has_figures
     assert watcher._extracted == {ACC: None} and not w.skipped
     assert gem.calls == 1 and sec.calls.count("sub:0000050863") == 1
 
@@ -13410,7 +13420,8 @@ async def test_an_oversized_exhibit_is_final_for_its_accession(watcher, caplog, 
     22:00 ET would buy nothing."""
     sec, gem = _ScriptedSEC(suffix, refusal, refusal, filings={"0000050863": [_8K]}), _Gemini()
     with caplog.at_level(logging.WARNING, logger=efs.__name__):
-        assert await _two_rounds(watcher, sec, gem) == {}
+        _assert_link_only(await _first_round(watcher, sec, gem))
+        assert await _next_round(watcher, sec, gem) == {}
     w = watcher._watch[("INTC", REPORT)]
     assert w.done and w.found.accession == ACC
     assert watcher._extracted == {ACC: None} and gem.calls == 0
@@ -13968,7 +13979,7 @@ async def test_the_tick_keeps_a_weekend_report_on_its_list_and_asks_sec_nothing(
     # The ticker map is SEC's too, and the fixture's stub never touches `sec`.
     monkeypatch.setattr(signals, "ticker_cik_map", _map)
     stats = await els.earnings_filing_tick(noon, watched=["INTC"], sec=sec, gemini=_Gemini())
-    assert stats == {"watched": 1, "pending": 1, "filings": 0}, "FMP can still land it"
+    assert stats == {"watched": 1, "pending": 1, "late": 0, "filings": 0}, "FMP can still land it"
     assert sec.calls == [] and map_reads == []
 
 
@@ -13985,7 +13996,7 @@ async def test_a_record_left_open_by_its_release_gives_the_next_ticker_its_slot(
     for filings_read in (1, 0):
         stats = await els.earnings_filing_tick(_AT_16, watched=["INTC", "AAPL"], sec=sec,
                                                gemini=_Gemini(answer=answer))
-        assert stats == {"watched": 2, "pending": 2, "filings": filings_read}
+        assert stats == {"watched": 2, "pending": 2, "late": 0, "filings": filings_read}
         clock.at += 60
     assert [c for c in sec.calls if c.startswith("sub:")] == ["sub:0000050863", "sub:0000320193"]
 
@@ -14034,10 +14045,10 @@ async def test_a_figure_the_round_could_not_store_is_logged_and_the_round_goes_o
     live.observe_rows(REPORT, [_pending("INTC"), _pending("AAPL")], _AT_16)
     real = live.absorb_filing
 
-    def _absorb(symbol, day, figures, now):
+    def _absorb(symbol, day, figures, now, **kw):
         if symbol == "INTC":
             raise RuntimeError("record refused")
-        real(symbol, day, figures, now)
+        real(symbol, day, figures, now, **kw)
 
     monkeypatch.setattr(live, "absorb_filing", _absorb)
     sec = _SEC(filings={_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]})
@@ -14221,7 +14232,7 @@ async def test_a_restored_filing_is_never_read_again_while_its_report_stays_inco
     live.observe_rows(REPORT, [_pending("INTC")], _LATER)
     stats = await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
 
-    assert stats == {"watched": 1, "pending": 1, "filings": 0}
+    assert stats == {"watched": 1, "pending": 1, "late": 0, "filings": 0}
     assert sec.calls == read, "no SEC read at all, the submissions included"
     assert gem.calls == 1
     snap = live.snapshot("INTC", REPORT, _LATER)
@@ -14406,20 +14417,30 @@ async def test_a_release_the_fixed_verifier_refuses_whole_shows_nothing_and_stay
 
 
 @pytest.mark.asyncio
-async def test_a_report_fmp_completed_goes_without_an_older_verifiers_outlook(live, cache):
-    """A complete report is off the SEC watch, so nothing reads its filing again, and a sentence
-    no fix can reach is worth less than none. FMP's figures stand, and no SEC or model call is
-    made for it."""
+async def test_a_report_fmp_completed_gets_its_outlook_back_from_a_late_read(live, cache):
+    """An older verifier's row is no row (a sentence no fix can reach is worth less than none), and
+    FMP has completed the report, so it is read late (LATE READS, owner 2026-11-20: "Yes, read it
+    once"): one submissions read, its index and exhibit, one model call. The outlook and the link
+    come back, FMP's figures stand, nothing is preliminary, and the table holds the release again
+    at today's verifier."""
     cache.hold(_kept_by_an_older_verifier())
     sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
     gem = _Gemini()
     done = dict(_pending("INTC"), epsActual=0.46, revenueActual=17.2e9)
     live.observe_rows(REPORT, [done], _LATER, fetched=True)
     stats = await els.earnings_filing_tick(_LATER, watched=["INTC"], sec=sec, gemini=gem)
-    assert stats == {"watched": 1, "pending": 0, "filings": 0}
-    assert sec.calls == [] and gem.calls == 0
+    assert stats == {"watched": 1, "pending": 0, "late": 1, "filings": 1}
+    assert [c.split(":")[0] for c in sec.calls] == ["sub", "doc", "doc"] and gem.calls == 1
     snap = live.snapshot("INTC", REPORT, _LATER)
-    assert (snap.eps.actual, snap.revenue.actual, snap.filing) == (0.46, 17.2e9, None)
+    assert (snap.eps.actual, snap.eps.source) == (0.46, els.SOURCE_FMP)
+    assert (snap.revenue.actual, snap.revenue.source) == (17.2e9, els.SOURCE_FMP)
+    assert snap.filing is not None and snap.filing.guidance and snap.preliminary is False
+    (row,) = cache.rows.values()
+    assert row["verifier_version"] == efs.FILING_VERIFIER_VERSION
+    assert await els.earnings_filing_tick(_LATER + timedelta(minutes=6), watched=["INTC"],
+                                          sec=sec, gemini=gem) == {
+        "watched": 1, "pending": 0, "late": 0, "filings": 0}, "read once, never again"
+    assert gem.calls == 1
 
 
 def _on_the_report_day(hour: int, minute: int = 0) -> datetime:
@@ -14878,3 +14899,697 @@ async def test_no_filing_is_read_ahead_of_its_own_rest_however_the_others_fail(
         for rest, read, later in zip(efs._EXTRACT_RETRY_GAPS, reads, reads[1:]):
             assert later - (read + stall) >= rest - efs._DUE_SLACK_SECONDS, (symbol, reads)
         assert reads[-1] - reads[0] >= 1800, (symbol, reads)
+
+
+# ── LATE READS (owner, 2026-11-20: "Yes, read it once") ──────────────────────────
+# FMP completed a report before its release was read (BJ by 13 min, IESC by 39 s on 2026-11-20),
+# so no sheet showed its outlook or its link. The release is still read, once, after every waiting
+# ticker, in the slots and the minute's room they leave.
+
+
+@pytest.mark.asyncio
+async def test_a_late_ticker_is_read_after_the_waiting_ones_in_the_room_they_leave(
+        watcher, monkeypatch, clock):
+    """At noon, between the windows: inside a waiting ticker's window no late read goes at all
+    (`test_no_late_read_while_a_waiting_ticker_reads_at_the_fast_cadence`)."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 3)
+    sec = _SEC()
+    await watcher.run_once(_AT_NOON, ["AAPL", "MSFT"], REPORT, sec=sec, cik_map=_CIKS,
+                           sleep=_no_sleep, late=["INTC"])
+    assert _subs(sec) == ["sub:0000320193", "sub:0000789019", "sub:0000050863"]
+    tight = efs.EarningsFilingWatcher()
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    sec = _SEC()
+    await tight.run_once(_AT_NOON, ["AAPL", "MSFT"], REPORT, sec=sec, cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"])
+    assert _subs(sec) == ["sub:0000320193", "sub:0000789019"], "no room left: the late one waits"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("start,minutes,reads", [
+    ((16, 3), 16, [0, 5, 10, 15]),
+    ((12, 0), 31, [0, 15, 30]),
+], ids=["in_its_window_every_5_min", "between_the_windows_every_15"])
+async def test_a_late_ticker_keeps_its_own_slower_cadence(watcher, clock, start, minutes, reads):
+    """Speed no longer buys a figure, so a late read takes no slot's minute: every 5 min inside
+    its company's windows, the slow 15 min outside them."""
+    sec = _SEC()
+    first = datetime(2026, 10, 29, *start, tzinfo=ET).astimezone(timezone.utc)
+    got = []
+    for minute in range(minutes):
+        clock.at = 1_000_000.0 + minute * 60
+        before = len(_subs(sec))
+        await watcher.run_once(first + timedelta(minutes=minute), [], REPORT, sec=sec,
+                               cik_map=_CIKS, sleep=_no_sleep, late=["INTC"])
+        if len(_subs(sec)) > before:
+            got.append(minute)
+    assert got == reads
+
+
+@pytest.mark.asyncio
+async def test_a_late_ticker_is_never_read_after_22_or_at_a_weekend(watcher, clock):
+    sec = _SEC()
+    await watcher.run_once(datetime(2026, 10, 29, 22, 0, tzinfo=ET).astimezone(timezone.utc), [],
+                           REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep, late=["INTC"])
+    saturday = date(2026, 10, 31)
+    await watcher.run_once(datetime(2026, 10, 31, 12, tzinfo=ET).astimezone(timezone.utc), [],
+                           saturday, sec=sec, cik_map=_CIKS, sleep=_no_sleep, late=["INTC"])
+    assert sec.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_late_release_is_read_once_and_never_again(watcher, clock, caplog):
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    delivered: List[str] = []
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        found = await watcher.run_once(_AT_16, [], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                                       sleep=_no_sleep, late=["INTC"],
+                                       on_figures=_collect(delivered))
+    assert set(found) == {"INTC"} and delivered == ["INTC"] and gem.calls == 1
+    assert found["INTC"].guidance, "the outlook is what the late read is for"
+    (line,) = [r.getMessage() for r in caplog.records if "result=late" in r.getMessage()]
+    assert "sym=INTC" in line
+    calls = list(sec.calls)
+    for minute in (5, 10, 60):
+        clock.at = 1_000_000.0 + minute * 60
+        await watcher.run_once(_AT_16 + timedelta(minutes=minute), [], REPORT, sec=sec,
+                               gemini=gem, cik_map=_CIKS, sleep=_no_sleep, late=["INTC"])
+    assert sec.calls == calls and gem.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_late_ticker_on_foreign_forms_is_read_once_and_never_again(watcher, clock):
+    """A 6-K filer has no 8-K to read: one read learns it, and no rest brings it back."""
+    sec = _SEC(filings={_ASML_CIK: [_6K]})
+    for minute in range(0, 90, 5):
+        clock.at = 1_000_000.0 + minute * 60
+        await watcher.run_once(_AT_16 + timedelta(minutes=minute), [], REPORT, sec=sec,
+                               cik_map=_FOREIGN_CIKS, sleep=_no_sleep, late=["ASML"])
+    assert sec.calls == [f"sub:{_ASML_CIK}"]
+
+
+@pytest.mark.asyncio
+async def test_a_late_ticker_takes_no_place_among_the_days_tickers(watcher, clock):
+    sec = _SEC()
+    await watcher.run_once(_AT_16, ["AAPL"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep,
+                           late=["INTC"])
+    clock.at += 60
+    await watcher.run_once(_AT_16 + timedelta(minutes=1), ["MSFT", "AAPL"], REPORT, sec=sec,
+                           cik_map=_CIKS, sleep=_no_sleep, late=["INTC"])
+    assert watcher._order[REPORT] == ["MSFT", "AAPL"], "never placed, so never ahead of anyone"
+
+
+@pytest.mark.asyncio
+async def test_a_report_back_on_the_waiting_list_is_read_at_its_own_minute_again(watcher, clock):
+    sec = _SEC()
+    await watcher.run_once(_AT_16, [], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep,
+                           late=["INTC"])
+    assert watcher._watch[("INTC", REPORT)].late
+    clock.at += 60
+    await watcher.run_once(_AT_16 + timedelta(minutes=1), ["INTC"], REPORT, sec=sec,
+                           cik_map=_CIKS, sleep=_no_sleep)
+    assert not watcher._watch[("INTC", REPORT)].late
+    assert len(_subs(sec)) == 2, "read a minute on, not five"
+
+
+@pytest.mark.asyncio
+async def test_a_round_makes_at_most_one_late_model_call(watcher, clock):
+    """A burst of releases FMP beat cannot stretch a round, nor crowd the model shared with chat
+    and reports: the one left keeps its stamp and is read next round."""
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K], _CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])]})
+    gem = _Gemini()
+    found = await watcher.run_once(_AT_16, [], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                                   sleep=_no_sleep, late=["INTC", "AAPL"])
+    assert list(found) == ["INTC"] and gem.calls == 1
+    clock.at += 60
+    found = await watcher.run_once(_AT_16 + timedelta(minutes=1), [], REPORT, sec=sec,
+                                   gemini=gem, cik_map=_CIKS, sleep=_no_sleep,
+                                   late=["INTC", "AAPL"])
+    assert list(found) == ["AAPL"] and gem.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_late_reads_count_in_the_minutes_cap(watcher, monkeypatch, clock):
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    sec = _SEC()
+    await watcher.run_once(_AT_NOON, ["AAPL"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep,
+                           late=["INTC", "MSFT"])
+    assert len(_subs(sec)) == 2, "one waiting and one late: the cap's two"
+    clock.at += 30
+    await watcher.run_once(_AT_NOON + timedelta(seconds=30), ["AAPL"], REPORT, sec=sec,
+                           cik_map=_CIKS, sleep=_no_sleep, late=["INTC", "MSFT"])
+    assert len(_subs(sec)) == 2, "a round in the same minute finds no room"
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 0)
+    zero = efs.EarningsFilingWatcher()
+    sec = _SEC()
+    await zero.run_once(_AT_16, [], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep,
+                        late=["INTC"])
+    assert sec.calls == []
+
+
+@pytest.mark.asyncio
+async def test_late_reads_never_take_a_slot_a_waiting_ticker_holds(watcher, monkeypatch, clock):
+    """The cap counts tickers at a time on SEC's shared circuit, not only reads a minute: AAPL and
+    MSFT, read at 12:00 and waiting for their next 15 min read, keep their slots at 12:05 though
+    the minute's room is free again, so the late INTC is not read."""
+    monkeypatch.setattr(settings, "EARNINGS_LIVE_SEC_MAX_SYMBOLS", 2)
+    sec = _SEC()
+    await watcher.run_once(_AT_NOON, ["AAPL", "MSFT"], REPORT, sec=sec, cik_map=_CIKS,
+                           sleep=_no_sleep)
+    clock.at += 300
+    await watcher.run_once(_AT_NOON + timedelta(minutes=5), ["AAPL", "MSFT"], REPORT, sec=sec,
+                           cik_map=_CIKS, sleep=_no_sleep, late=["INTC"])
+    assert _subs(sec) == ["sub:0000320193", "sub:0000789019"]
+
+
+@pytest.mark.asyncio
+async def test_a_late_read_goes_in_a_waiting_tickers_window_too(watcher, clock):
+    """Read after the waiting ticker, in the same round: Guidance must not wait for a busy window
+    to end (on a full report day that would be 09:35 or 18:30 ET)."""
+    sec = _SEC()
+    await watcher.run_once(_AT_16, ["AAPL"], REPORT, sec=sec, cik_map=_CIKS, sleep=_no_sleep,
+                           late=["INTC"])
+    assert _subs(sec) == ["sub:0000320193", "sub:0000050863"]
+
+
+class _SlowGemini(_Gemini):
+    """A model that answers well, after `delay` seconds."""
+
+    def __init__(self, delay: float, answer=None):
+        super().__init__(answer)
+        self.delay = delay
+
+    async def generate_json(self, prompt, **kwargs):
+        await asyncio.sleep(self.delay)
+        return await super().generate_json(prompt, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_late_model_call_ends_by_its_short_deadline_while_a_ticker_waits_in_its_window(
+        watcher, monkeypatch, clock, caplog):
+    """A late read can win no figure, and the waiting tickers' next reads, which can, wait for its
+    model call (in the 2026-11-20 review a 100 s one held a figure back 41 s). While one reads at
+    the fast cadence, the late call ends by `_LATE_MODEL_DEADLINE_SECONDS`, spends no attempt, and
+    its filing waits for a calm round; the waiting ticker's own read keeps its whole deadline.
+    MSFT still waits when the call starts (no release of its own yet): AAPL's watch ends in the
+    round, so on its own it would leave nothing to wait for (the next test)."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])], _CIKS["INTC"]: [_8K]})
+    gem = _SlowGemini(0.2)
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        found = await asyncio.wait_for(
+            watcher.run_once(_AT_16, ["AAPL", "MSFT"], REPORT, sec=sec, gemini=gem,
+                             cik_map=_CIKS, sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert list(found) == ["AAPL"] and watcher.model_calls == 2, "the late call was cut, not skipped"
+    w = watcher._watch[("INTC", REPORT)]
+    assert w.attempts == {} and w.wait_calm, "a cut spends no attempt"
+    (line,) = [r.getMessage() for r in caplog.records if "result=late_cut" in r.getMessage()]
+    assert "sym=INTC" in line and "0.05s deadline" in line
+    assert not [r for r in caplog.records if "result=gemini_failed" in r.getMessage()]
+
+
+@pytest.mark.asyncio
+async def test_a_late_call_keeps_its_whole_deadline_once_the_waiting_ticker_has_found_its_release(
+        watcher, monkeypatch, clock):
+    """The seventh 2026-11-26 review: AAPL, the only waiting ticker, reads its release first in the
+    round, and its watch ends there. The late call that follows was still judged busy by the
+    round's list, cut (paid for, wasted) with nothing left to protect, and read whole 5 min later:
+    three calls for two releases. A finished ticker reads no more, so the call keeps its deadline."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])], _CIKS["INTC"]: [_8K]})
+    found = await asyncio.wait_for(
+        watcher.run_once(_AT_16, ["AAPL"], REPORT, sec=sec, gemini=_SlowGemini(0.2),
+                         cik_map=_CIKS, sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert sorted(found) == ["AAPL", "INTC"] and watcher.model_calls == 2
+    assert not watcher._watch[("INTC", REPORT)].wait_calm
+
+
+@pytest.mark.asyncio
+async def test_a_late_call_is_cut_short_whatever_its_filing_spent_before(watcher, monkeypatch,
+                                                                         clock):
+    """The third 2026-11-20 review: a deadline grown with the filing's failed reads let a late
+    call run its whole 105 s behind a waiting ticker. Failed reads made while waiting change
+    nothing now: a busy round cuts it short."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    watcher._watch[("INTC", REPORT)] = efs._Watch(attempts={ACC: 3})
+    await asyncio.wait_for(
+        watcher.run_once(_AT_16, ["AAPL"], REPORT, sec=sec, gemini=_SlowGemini(0.2),
+                         cik_map=_CIKS, sleep=_no_sleep, late=["INTC"]), 5.0)
+    w = watcher._watch[("INTC", REPORT)]
+    assert w.attempts == {ACC: 3} and w.wait_calm
+
+
+@pytest.mark.asyncio
+async def test_a_window_about_to_open_makes_a_round_busy(watcher, monkeypatch, clock):
+    """At 15:54:30 no window is open yet, but one opens before a whole call could end."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    at = datetime(2026, 10, 29, 15, 54, 30, tzinfo=ET).astimezone(timezone.utc)
+    await asyncio.wait_for(
+        watcher.run_once(at, ["AAPL"], REPORT, sec=sec, gemini=_SlowGemini(0.2), cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert watcher._watch[("INTC", REPORT)].wait_calm
+
+
+@pytest.mark.asyncio
+async def test_a_slow_release_cut_in_a_busy_round_is_read_whole_in_the_first_calm_one(
+        watcher, monkeypatch, clock):
+    """Cut while AAPL waits in its window, INTC's release is not tried again while it waits (each
+    try would be paid for and cut again), and is read with the whole deadline once the window
+    closes: its outlook and link still come, with no attempt spent."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _SlowGemini(0.2)
+    start = datetime(2026, 10, 29, 16, 3, tzinfo=ET).astimezone(timezone.utc)
+    found = await asyncio.wait_for(
+        watcher.run_once(start, ["AAPL"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert found == {} and watcher.model_calls == 1
+    for minutes in (10, 60, 140):
+        clock.at = 1_000_000.0 + minutes * 60
+        await asyncio.wait_for(
+            watcher.run_once(start + timedelta(minutes=minutes), ["AAPL"], REPORT, sec=sec,
+                             gemini=gem, cik_map=_CIKS, sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert watcher.model_calls == 1, "never retried while AAPL waits in its window"
+    clock.at = 1_000_000.0 + 150 * 60
+    found = await asyncio.wait_for(
+        watcher.run_once(start + timedelta(minutes=150), ["AAPL"], REPORT, sec=sec, gemini=gem,
+                         cik_map=_CIKS, sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert list(found) == ["INTC"] and watcher.model_calls == 2
+    assert watcher._watch[("INTC", REPORT)].attempts == {}
+
+
+@pytest.mark.asyncio
+async def test_a_late_read_in_a_calm_round_keeps_the_whole_deadline(watcher, monkeypatch, clock):
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    found = await asyncio.wait_for(
+        watcher.run_once(_AT_NOON, ["AAPL"], REPORT, sec=sec, gemini=_SlowGemini(0.2),
+                         cik_map=_CIKS, sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert list(found) == ["INTC"], "AAPL waits, but between its windows: nobody is held up"
+
+
+@pytest.mark.asyncio
+async def test_a_late_read_whose_figures_all_fail_still_keeps_the_link(watcher, clock):
+    """The link is what a late read is for: a release whose figures all fail verification, with no
+    outlook, still answers with the filing's address (the third 2026-11-20 review)."""
+    answer = _good_answer(revenue=None, eps_gaap_diluted=None, guidance=None,
+                          eps_adjusted_diluted={"value": 9.99, "quote": "a quote it never printed"})
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    found = await watcher.run_once(_AT_NOON, [], REPORT, sec=sec, gemini=_Gemini(answer),
+                                   cik_map=_CIKS, sleep=_no_sleep, late=["INTC"])
+    figures = found["INTC"]
+    assert not figures.has_figures and figures.guidance is None
+    assert figures.url == efs.filing_index_url(_CIKS["INTC"], ACC) and figures.accession == ACC
+    assert watcher._extracted[ACC] is None, "the memo still says nothing verified"
+    waiting = efs.EarningsFilingWatcher()
+    found = await waiting.run_once(_AT_NOON, ["INTC"], REPORT, sec=_SEC(filings={_CIKS["INTC"]: [_8K]}),
+                                   gemini=_Gemini(answer), cik_map=_CIKS, sleep=_no_sleep)
+    _assert_link_only(found)    # a waiting read keeps the link too (the fourth review)
+
+
+@pytest.mark.asyncio
+async def test_a_late_ticker_makes_one_model_call_a_round_down_its_own_filings(watcher, clock):
+    """Two Item 2.02 8-Ks on its day, the newer one not the release (a slide deck): the late read
+    asks the model about the newer one, and the older waits for the next late read."""
+    deck = dict(_8K, accessionNumber="0000050863-26-000200",
+                acceptanceDateTime="2026-10-29T20:30:00.000Z")
+    sec = _SEC(filings={_CIKS["INTC"]: [deck, _8K]})
+    gem = _Scripted(_NOT_RESULTS)
+    at = datetime(2026, 10, 29, 17, 0, tzinfo=ET).astimezone(timezone.utc)
+    found = await watcher.run_once(at, [], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                                   sleep=_no_sleep, late=["INTC"])
+    assert found == {} and gem.calls == 1
+    assert watcher._watch[("INTC", REPORT)].skipped == {"0000050863-26-000200"}
+    clock.at += 300
+    found = await watcher.run_once(at + timedelta(minutes=5), [], REPORT, sec=sec, gemini=gem,
+                                   cik_map=_CIKS, sleep=_no_sleep, late=["INTC"])
+    assert list(found) == ["INTC"] and gem.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_ticker_still_walks_every_filing_in_one_round(watcher, clock):
+    """The one-call stop is the late read's alone: a waiting ticker's figure is worth the second
+    call in the same round."""
+    deck = dict(_8K, accessionNumber="0000050863-26-000200",
+                acceptanceDateTime="2026-10-29T20:30:00.000Z")
+    sec = _SEC(filings={_CIKS["INTC"]: [deck, _8K]})
+    gem = _Scripted(_NOT_RESULTS)
+    at = datetime(2026, 10, 29, 17, 0, tzinfo=ET).astimezone(timezone.utc)
+    found = await watcher.run_once(at, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                                   sleep=_no_sleep)
+    assert list(found) == ["INTC"] and gem.calls == 2
+
+
+
+@pytest.mark.asyncio
+async def test_a_late_call_that_would_run_into_edgars_last_minute_is_cut(watcher, monkeypatch,
+                                                                          clock):
+    """At 21:58:30 no waiting ticker reads fast yet, and a whole call would end past EDGAR's close,
+    where no cadence reads at all: only sampling 21:59 between them finds the last minute (the
+    fourth 2026-11-20 review: a slow late call used it up and the waiting AAPL was never read)."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    at = datetime(2026, 10, 29, 21, 58, 30, tzinfo=ET).astimezone(timezone.utc)
+    await asyncio.wait_for(
+        watcher.run_once(at, ["AAPL"], REPORT, sec=sec, gemini=_SlowGemini(0.2), cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert watcher._watch[("INTC", REPORT)].wait_calm
+
+
+@pytest.mark.asyncio
+async def test_a_foreign_filer_never_makes_a_round_busy(watcher, monkeypatch, clock):
+    """A 6-K filer rests with no read coming: it waits on nobody's minute, so a late call beside it
+    keeps its whole deadline."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_ASML_CIK: [_6K], _CIKS["INTC"]: [_8K]})
+    early = datetime(2026, 10, 29, 15, 30, tzinfo=ET).astimezone(timezone.utc)
+    await watcher.run_once(early, ["ASML"], REPORT, sec=sec, cik_map=_FOREIGN_CIKS,
+                           sleep=_no_sleep)
+    assert watcher._watch[("ASML", REPORT)].foreign
+    clock.at += 33 * 60
+    found = await asyncio.wait_for(
+        watcher.run_once(_AT_16, ["ASML"], REPORT, sec=sec, gemini=_SlowGemini(0.2),
+                         cik_map=_FOREIGN_CIKS, sleep=_no_sleep, late=["INTC"]), 5.0)
+    w = watcher._watch[("INTC", REPORT)]
+    assert list(found) == ["INTC"] and not w.wait_calm and w.attempts == {}
+
+
+_AT_1553 = datetime(2026, 10, 29, 15, 53, tzinfo=ET).astimezone(timezone.utc)
+
+
+class _ClockGemini(_Gemini):
+    """A model whose answer for some tickers takes `advance` seconds on the watcher's own clock
+    (a slow read), and for others `sleep` real seconds (so a short deadline can cut it)."""
+
+    def __init__(self, clock, *, advance=None, sleep=None):
+        super().__init__()
+        self.clock = clock
+        self.advance = advance or {}
+        self.sleep = sleep or {}
+
+    async def generate_json(self, prompt, **kwargs):
+        symbol = prompt.split("Company ticker: ", 1)[1].split(".", 1)[0]
+        self.clock.at += self.advance.get(symbol, 0.0)
+        if symbol in self.sleep:
+            await asyncio.sleep(self.sleep[symbol])
+        return await super().generate_json(prompt, **kwargs)
+
+
+def _waits_for_the_close(watcher, clock, symbol="MSFT"):
+    """`symbol` waits and was read 7.5 min ago: between windows its next read is 15 min off, and
+    from 15:55 it reads every minute."""
+    watcher._watch[(symbol, REPORT)] = efs._Watch(checked_mono=clock.at - 450)
+
+
+@pytest.mark.asyncio
+async def test_a_late_call_is_judged_as_it_starts_after_a_slow_waiting_read(watcher, monkeypatch,
+                                                                         clock):
+    """The fifth 2026-11-20 review: the round starts calm at 15:53:00, but AAPL's waiting read
+    takes 30 s, so INTC's late call starts at 15:53:30 and its whole deadline would run past
+    15:55, when MSFT reads every minute. Judged at the round's start, it kept that deadline."""
+    monkeypatch.setattr(settings, "GEMINI_REQUEST_TIMEOUT_SECONDS", 90)
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    _waits_for_the_close(watcher, clock)
+    assert not watcher._busy_during(["AAPL", "MSFT"], REPORT, _AT_1553.astimezone(ET), clock.at)
+    sec = _SEC(filings={_CIKS["AAPL"]: [_later_filing(_CIKS["AAPL"])], _CIKS["INTC"]: [_8K]})
+    gem = _ClockGemini(clock, advance={"AAPL": 30.0}, sleep={"INTC": 0.2})
+    found = await asyncio.wait_for(
+        watcher.run_once(_AT_1553, ["AAPL", "MSFT"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"]), 5.0)
+    w = watcher._watch[("INTC", REPORT)]
+    assert list(found) == ["AAPL"] and watcher.model_calls == 2, "INTC's call made, and cut"
+    assert w.wait_calm and w.cut_on == ACC and w.attempts == {}
+
+
+class _SlowDocuments(_SEC):
+    """SEC answering `cik`'s documents in `seconds` each, on the watcher's own clock."""
+
+    def __init__(self, clock, cik, seconds, **kw):
+        super().__init__(**kw)
+        self.clock, self.cik, self.seconds = clock, cik, seconds
+
+    async def get_filing_document(self, cik, acc, document):
+        if cik == self.cik:
+            self.clock.at += self.seconds
+        return await super().get_filing_document(cik, acc, document)
+
+
+@pytest.mark.asyncio
+async def test_a_late_call_is_judged_after_its_own_slow_sec_reads(watcher, monkeypatch, clock):
+    """The fifth 2026-11-20 review (critic): judged when the read starts, the call was calm at
+    15:53:00, then started at 15:53:40 after 40 s of SEC reads and could run past 15:55. Judged as
+    the call starts, it is busy, and cut."""
+    monkeypatch.setattr(settings, "GEMINI_REQUEST_TIMEOUT_SECONDS", 90)
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    _waits_for_the_close(watcher, clock)
+    sec = _SlowDocuments(clock, _CIKS["INTC"], 20.0, filings={_CIKS["INTC"]: [_8K]})
+    gem = _ClockGemini(clock, sleep={"INTC": 0.2})
+    found = await asyncio.wait_for(
+        watcher.run_once(_AT_1553, ["MSFT"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert found == {} and watcher.model_calls == 1
+    assert watcher._watch[("INTC", REPORT)].wait_calm
+
+
+@pytest.mark.asyncio
+async def test_a_late_call_judged_calm_as_it_starts_keeps_the_whole_deadline(watcher, monkeypatch,
+                                                                          clock):
+    """The converse, so the two above cannot pass on a round that is busy however it is judged:
+    SEC reads of 1 s each start the call at 15:53:02, and its whole deadline ends by 15:54:47,
+    before MSFT's window opens."""
+    monkeypatch.setattr(settings, "GEMINI_REQUEST_TIMEOUT_SECONDS", 90)
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    _waits_for_the_close(watcher, clock)
+    sec = _SlowDocuments(clock, _CIKS["INTC"], 1.0, filings={_CIKS["INTC"]: [_8K]})
+    found = await asyncio.wait_for(
+        watcher.run_once(_AT_1553, ["MSFT"], REPORT, sec=sec,
+                         gemini=_ClockGemini(clock, sleep={"INTC": 0.2}), cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert list(found) == ["INTC"] and not watcher._watch[("INTC", REPORT)].wait_calm
+
+
+@pytest.mark.asyncio
+async def test_a_late_twin_cut_in_a_busy_round_is_served_once_its_twin_reads_the_release(
+        watcher, monkeypatch, clock):
+    """The fifth 2026-11-20 review (critic): INTCB's late call is cut while AAPL waits in its
+    window, then INTC, still waiting, reads the release. INTCB waited for a round that started
+    calm, 18:30 on a busy evening, for a read that costs no call: it is served at its next late
+    read, from the memo."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    ciks = dict(_CIKS, INTCB=_CIKS["INTC"])
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _ClockGemini(clock, sleep={"INTCB": 0.2})
+    found_at: Dict[str, int] = {}
+    served: Dict[str, efs.FilingFigures] = {}
+    for minute in range(8):
+        clock.at = 1_000_000.0 + minute * 60
+        waiting = ["AAPL"] + (["INTC"] if minute >= 1 and "INTC" not in found_at else [])
+        found = await asyncio.wait_for(
+            watcher.run_once(_AT_16 + timedelta(minutes=minute), waiting, REPORT, sec=sec,
+                             gemini=gem, cik_map=ciks, sleep=_no_sleep,
+                             late=[] if "INTCB" in found_at else ["INTCB"]), 5.0)
+        for symbol, figures in found.items():
+            found_at.setdefault(symbol, minute)
+            served.setdefault(symbol, figures)
+        if minute == 0:
+            assert watcher._watch[("INTCB", REPORT)].cut_on == ACC
+    assert found_at == {"INTC": 1, "INTCB": 5}, "INTCB's next late read, five minutes on"
+    assert watcher.model_calls == 2, "INTCB's cut call and INTC's read: the memo served INTCB"
+    assert served["INTCB"] is served["INTC"], "the release INTC read"
+
+
+class _SlowThen(_Gemini):
+    """Its first answer takes `delay` seconds (so a short deadline cuts it); later answers are
+    `then` (an exception is raised), at once."""
+
+    def __init__(self, delay: float, then):
+        super().__init__()
+        self.delay, self.then, self.asked = delay, then, 0
+
+    async def generate_json(self, prompt, **kwargs):
+        self.asked += 1
+        if self.asked == 1:
+            await asyncio.sleep(self.delay)
+            return await super().generate_json(prompt, **kwargs)
+        if isinstance(self.then, Exception):
+            raise self.then
+        return self.then
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settled", ["not_the_release", "out_of_attempts"])
+async def test_a_cut_filing_settled_another_way_leaves_nothing_waiting(watcher, monkeypatch,
+                                                                       clock, settled):
+    """The sixth 2026-11-20 review: a cut whose filing a calm read then settled as not the release
+    (or gave up on) left the cut standing, so the ticker waited for calm rounds, and for a twin's
+    read, of a filing nobody would read again."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    then = _NOT_RESULTS if settled == "not_the_release" else RuntimeError("gemini 503")
+    gem = _SlowThen(0.2, then)
+    await asyncio.wait_for(
+        watcher.run_once(_AT_16, ["AAPL"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"]), 5.0)
+    w = watcher._watch[("INTC", REPORT)]
+    assert w.cut_on == ACC and w.wait_calm
+    if settled == "out_of_attempts":
+        w.attempts[ACC] = len(efs._EXTRACT_RETRY_GAPS)
+    clock.at += 900                     # a late read's slow cadence, between its windows
+    await asyncio.wait_for(
+        watcher.run_once(_AT_NOON, ["AAPL"], REPORT, sec=sec, gemini=gem, cik_map=_CIKS,
+                         sleep=_no_sleep, late=["INTC"]), 5.0)
+    assert ACC in w.skipped, "settled: never read again"
+    assert w.cut_on is None and not w.wait_calm
+
+
+@pytest.mark.asyncio
+async def test_a_late_twin_served_from_the_memo_keeps_the_link(watcher, clock):
+    """Two tickers of one issuer share an accession. When the first read verified nothing, the
+    second (late) is served from the memo with no model call, and still keeps the link."""
+    answer = _good_answer(revenue=None, eps_gaap_diluted=None, guidance=None,
+                          eps_adjusted_diluted={"value": 9.99, "quote": "a quote it never printed"})
+    ciks = dict(_CIKS, INTCB=_CIKS["INTC"])
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini(answer)
+    await watcher.run_once(_AT_NOON, ["INTC"], REPORT, sec=sec, gemini=gem, cik_map=ciks,
+                           sleep=_no_sleep)
+    found = await watcher.run_once(_AT_NOON, [], REPORT, sec=sec, gemini=gem, cik_map=ciks,
+                                   sleep=_no_sleep, late=["INTCB"])
+    assert gem.calls == 1, "the memo answers the twin"
+    assert not found["INTCB"].has_figures and found["INTCB"].url == efs.filing_index_url(
+        _CIKS["INTC"], ACC)
+
+
+# ── The seventh 2026-11-26 review ───────────────────────────────────────────────────────────────
+
+async def _intc_and_its_twin(*, sec=None):
+    return dict(_CIKS, INTCB=_CIKS["INTC"])
+
+
+class _ReleaseAfterTheFirstRead(_SEC):
+    """The release is accepted between INTC's waiting read and INTCB's late read."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.subs = 0
+
+    async def get_submissions(self, cik):
+        self.subs += 1
+        self.calls.append(f"sub:{cik}")
+        return _submissions(self.filings.get(cik, []) if self.subs > 1 else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restart", [False, True], ids=["same_process", "restart"])
+async def test_a_late_twins_row_with_no_figures_never_serves_a_waiting_twin_after_a_restart(
+        live, watcher, cache, clock, monkeypatch, restart):
+    """The seventh 2026-11-26 review: INTCB, which FMP had completed, read its issuer's release
+    late, so its figures were dropped and its row stored with none. A restart took that row back
+    into the memo, and INTC, still waiting for the release, was served it: no EPS, no revenue, no
+    push until FMP filled it. A restored row with no figure is never memoised: INTC reads the
+    release whole, one more model call."""
+    monkeypatch.setattr(signals, "ticker_cik_map", _intc_and_its_twin)
+    sec = _ReleaseAfterTheFirstRead(filings={_CIKS["INTC"]: [_8K]})
+    gem = _Gemini()
+    done = dict(_pending("INTCB"), epsActual=0.46, revenueActual=17.2e9)
+    live.observe_rows(REPORT, [_pending("INTC"), done], _AT_16, fetched=True)
+    await els.earnings_filing_tick(_AT_16, watched=["INTC", "INTCB"], sec=sec, gemini=gem)
+    assert live.snapshot("INTCB", REPORT, _AT_16).filing.has_figures is False
+    assert live.snapshot("INTC", REPORT, _AT_16).eps.actual is None
+    later = _AT_16 + timedelta(minutes=1)
+    clock.at += 60
+    if restart:
+        _deploy(live, watcher)
+        live.observe_rows(REPORT, [_pending("INTC"), done], later, fetched=True)
+    await els.earnings_filing_tick(later, watched=["INTC", "INTCB"], sec=sec, gemini=gem)
+    snap = live.snapshot("INTC", REPORT, later)
+    assert (snap.eps.actual, snap.revenue.actual, snap.preliminary) == (0.44, 17.1e9, True)
+    assert snap.filing.has_figures
+    assert gem.calls == (2 if restart else 1)
+
+
+@pytest.mark.asyncio
+async def test_a_late_twin_waits_with_the_filing_its_twins_call_was_cut_on(watcher, monkeypatch,
+                                                                           clock):
+    """The seventh 2026-11-26 review: a cut was kept per ticker, so through a busy evening INTCB,
+    never cut itself, paid a short call of its own on the release INTC's call was cut on, cut again:
+    three calls for one release, one more for each share class. It waits with the filing now,
+    with no call: one cut call, the whole read in the first calm round, the twin from its memo."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    ciks = dict(_CIKS, INTCB=_CIKS["INTC"])
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _ClockGemini(clock, sleep={"INTC": 0.2, "INTCB": 0.2})
+    start = datetime(2026, 10, 29, 16, 3, tzinfo=ET).astimezone(timezone.utc)
+    # AAPL waits all evening with no release, so every round in the close window is busy.
+    watcher._watch[("AAPL", REPORT)] = efs._Watch()
+    found_at: Dict[str, str] = {}
+    for minute in range(160):
+        clock.at = 1_000_000.0 + minute * 60
+        late = [s for s in ("INTC", "INTCB") if s not in found_at]
+        found = await asyncio.wait_for(
+            watcher.run_once(start + timedelta(minutes=minute), ["AAPL"], REPORT, sec=sec,
+                             gemini=gem, cik_map=ciks, sleep=_no_sleep, late=late), 5.0)
+        for symbol in found:
+            found_at.setdefault(
+                symbol, (start + timedelta(minutes=minute)).astimezone(ET).strftime("%H:%M"))
+    assert set(found_at) == {"INTC", "INTCB"}
+    assert watcher.model_calls == 2, "one cut call, then one whole read"
+    assert found_at["INTC"] >= "18:30" and found_at["INTCB"] >= found_at["INTC"]
+    assert not watcher._cut, "a settled filing leaves nothing cut"
+
+
+class _ScriptedModel(_Gemini):
+    """Each model call does what the script says next: `slow` (outlasts a 0.05 s late deadline),
+    `fail` (a 503) or `ok`."""
+
+    def __init__(self, script):
+        super().__init__()
+        self.script = list(script)
+        self.seen: List[Tuple[str, str]] = []
+
+    async def generate_json(self, prompt, **kwargs):
+        symbol = prompt.split("Company ticker: ", 1)[1].split(".", 1)[0]
+        what = self.script.pop(0)
+        self.seen.append((symbol, what))
+        if what == "slow":
+            await asyncio.sleep(0.2)
+        if what == "fail":
+            self.calls += 1
+            raise RuntimeError("gemini 503")
+        return await super().generate_json(prompt, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_whole_read_keeps_the_cut_so_a_twin_still_waits(watcher, monkeypatch,
+                                                                        clock, caplog):
+    """The eighth review: any outcome but a cut forgot the cut, a failed read (RETRY) included,
+    though that ticker still waits on it. INTC's late call is cut at 16:03; its whole read in a
+    calm round fails at 16:08; at 16:20 a busy round brings INTCB, which then paid a cut call of its
+    own. It waits with the filing now, with no call, and says so in the log."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    ciks = dict(_CIKS, INTCB=_CIKS["INTC"])
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _ScriptedModel(["slow", "fail"])
+    start = datetime(2026, 10, 29, 16, 3, tzinfo=ET).astimezone(timezone.utc)
+
+    async def _round(minute, waiting, late):
+        clock.at = 1_000_000.0 + minute * 60
+        return await asyncio.wait_for(watcher.run_once(
+            start + timedelta(minutes=minute), waiting, REPORT, sec=sec, gemini=gem,
+            cik_map=ciks, sleep=_no_sleep, late=late), 5.0)
+
+    await _round(0, ["AAPL"], ["INTC"])
+    assert watcher._cut == {ACC}
+    watcher._watch[("AAPL", REPORT)].done = True          # nothing waits at 16:08: a calm round
+    await _round(5, ["AAPL"], ["INTC"])
+    w = watcher._watch[("INTC", REPORT)]
+    assert w.attempts == {ACC: 1} and w.cut_on == ACC and watcher._cut == {ACC}
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        await _round(17, ["MSFT"], ["INTC", "INTCB"])        # MSFT waits in its window: busy
+    assert gem.seen == [("INTC", "slow"), ("INTC", "fail")], "INTCB paid no call"
+    assert watcher._watch[("INTCB", REPORT)].cut_on == ACC
+    (line,) = [r.getMessage() for r in caplog.records if "result=late_wait" in r.getMessage()]
+    assert "sym=INTCB" in line and ACC in line

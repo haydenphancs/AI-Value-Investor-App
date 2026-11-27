@@ -2135,6 +2135,46 @@ class PushDispatchService:
             return False
         return True
 
+    def revise_sent_text(self, dedup_key: str, kind: str, title: str, body: str,
+                         from_bodies: Sequence[str]) -> int:
+        """New text on the rows of `kind` under `dedup_key` past their buzz (sent, failed, no
+        device) that still hold one of `from_bodies`: the inbox draws the ledger row, and the
+        phone keeps what it showed. No push, no claim, no state change (`earnings_live_sender`, A
+        RESULT FMP CHANGES). `from_bodies` are texts the caller knows those rows to have held, so
+        a row holding anything else (words the caller never saw) is left as it is, and so is a
+        held one (deferred, or mid-delivery): its wake reads the record again. Returns the rows
+        changed. A failed write RAISES, for the caller to log and try again."""
+        text = truncate_for_banner(body, LEDGER_BODY_LIMIT)
+        changed = 0
+        for was in dict.fromkeys(truncate_for_banner(b, LEDGER_BODY_LIMIT) for b in from_bodies):
+            if was == text:
+                continue
+            res = (
+                self.supabase.table(TABLE)
+                .update({"title": title, "body": text})
+                .eq("dedup_key", dedup_key)
+                .eq("kind", kind)
+                .in_("push_state", [STATE_SENT, STATE_FAILED, STATE_NO_DEVICE])
+                .eq("body", was)
+                .execute()
+            )
+            changed += len(res.data or [])
+        return changed
+
+    def holds_rows(self, dedup_key: str, kind: str) -> bool:
+        """Is any row of `kind` under `dedup_key` still held (deferred, or mid-delivery)? A
+        correction is owed again once its wake has ended it (`earnings_live_sender`)."""
+        res = (
+            self.supabase.table(TABLE)
+            .select("id")
+            .eq("dedup_key", dedup_key)
+            .eq("kind", kind)
+            .in_("push_state", [STATE_DEFERRED, STATE_PENDING])
+            .limit(1)
+            .execute()
+        )
+        return bool(res.data)
+
     def _rewrite_text(self, user_id: str, dedup_key: str, title: str, body: str) -> None:
         """Put a held row's new text on its ledger row, which is what the inbox draws. Best-effort
         like `mark_state`, and the phone gets the new text either way."""

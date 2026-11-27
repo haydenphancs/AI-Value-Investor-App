@@ -4609,33 +4609,37 @@ class MarketingRunService:
         rows.sort(key=lambda r: (str(r["run_date"]), _lane_rank(r)))
         return rows
 
-    async def theme_refs_between(self, start_date: Any, end_date: Any) -> List[str]:
-        """The `source_ref` of every THEME script (`template_id` = theme_explainer, any status: a pick is a pick, as in
-        `recent_source_refs`) dated `start_date`..`end_date` INCLUSIVE (ET days), oldest first — the weekly theme
-        post's rotation read (news-v23 phase 3: which theme, which angle, when — `company_news_rules.theme_ref_items`),
-        `company_news_rules.THEME_HISTORY_DAYS` back. Its own bounded read, so the rotation sees its whole window
-        whatever the other series post and however the posting days changed: at most one script per (day, lane) — the
-        bound; one row past it (a hand edit) RAISES (MarketingRunError), as does a failed read — never a silent
-        empty. An inverted window reads nothing."""
+    async def theme_scripts_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
+        """`{run_id, run_date, lane, source_ref}` of every THEME script (`template_id` = theme_explainer, any status: a
+        pick is a pick, as in `recent_source_refs`) with a ledger key, dated `start_date`..`end_date` INCLUSIVE (ET
+        days), oldest first — the weekly theme post's ONE ledger read (`script_service._theme_ledger`), both lanes:
+        the rotation's keys (news-v23 phase 3, `company_news_rules.THEME_HISTORY_DAYS` back) and, from each row's
+        day and lane, the quiet-week backups the week already made (owner decision 2026-11-27: one a week,
+        `selection.THEME_FALLBACKS_PER_WEEK`). A row with no lane is the main lane's (the column default). Its own
+        bounded read, so the rotation sees its whole window whatever the other series post and however the posting days
+        changed: at most one script per (day, lane) — the bound; one row past it (a hand edit) RAISES
+        (MarketingRunError), as does a failed read — never a silent empty. An inverted window reads nothing."""
         start, end = _as_date(start_date, "start_date"), _as_date(end_date, "end_date")
         if start > end:
             return []
         bound = ((end - start).days + 1) * len(RUN_LANES)
         res = await _exec(
-            self.sb.table(SCRIPTS).select("run_date,source_ref")
+            self.sb.table(SCRIPTS).select("run_id,run_date,lane,source_ref")
             .eq("template_id", "theme_explainer")
             .gte("run_date", start.isoformat()).lte("run_date", end.isoformat())
             .not_.is_("source_ref", "null")
             .order("run_date").limit(bound + 1),
-            op="theme_refs_between", start=start, end=end,
+            op="theme_scripts_between", start=start, end=end,
         )
         rows = [r for r in (getattr(res, "data", None) or []) if isinstance(r, dict)]
         if len(rows) > bound:
             raise MarketingRunError(
-                f"theme_refs_between: more than {bound} theme scripts for {start}..{end} — one run per (day, lane) "
+                f"theme_scripts_between: more than {bound} theme scripts for {start}..{end} — one run per (day, lane) "
                 "cannot hold that many; refusing a list that may not be the whole window")
         rows.sort(key=lambda r: str(r.get("run_date") or ""))
-        return [str(r["source_ref"]) for r in rows if isinstance(r.get("source_ref"), str) and r["source_ref"]]
+        return [{"run_id": r.get("run_id"), "run_date": r.get("run_date"), "lane": r.get("lane") or RUN_LANE_MAIN,
+                 "source_ref": str(r["source_ref"])}
+                for r in rows if isinstance(r.get("source_ref"), str) and r["source_ref"]]
 
     async def art_usage_between(self, start_date: Any, end_date: Any) -> List[Dict[str, Any]]:
         """`{run_date, lane, art}` of EVERY script dated `start_date`..`end_date` INCLUSIVE (ET days), whatever its

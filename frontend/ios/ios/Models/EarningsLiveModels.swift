@@ -281,6 +281,9 @@ struct EarningsLiveResponse: Codable, Equatable {
     let yearAgo: EarningsLiveYearAgoDTO?
     let lastQuarters: [EarningsLiveQuarterDTO]?
     let pollSeconds: Int?
+    /// The LIVE label (2026-11-20): the report's own day, LIVE or in, to midnight ET. Optional:
+    /// the route shipped without it, and nil reads as no label beyond the status.
+    let liveLabel: Bool?
 
     enum CodingKeys: String, CodingKey {
         case ticker, status, preliminary, eps, revenue, filing, guidance
@@ -290,6 +293,7 @@ struct EarningsLiveResponse: Codable, Equatable {
         case yearAgo = "year_ago"
         case lastQuarters = "last_quarters"
         case pollSeconds = "poll_seconds"
+        case liveLabel = "live_label"
     }
 }
 
@@ -350,7 +354,8 @@ extension EarningsLiveResponse {
         guidance: nil,
         yearAgo: nil,
         lastQuarters: nil,
-        pollSeconds: 30
+        pollSeconds: 30,
+        liveLabel: true
     )
 }
 #endif
@@ -426,7 +431,8 @@ extension AppAlert.EarningsData {
             isPreliminary: live.preliminary ?? isPreliminary,
             checkedAt: live.checkedDate ?? checkedAt,
             epsChecking: eps.isChecking,
-            revenueChecking: revenue.isChecking
+            revenueChecking: revenue.isChecking,
+            liveLabel: live.liveLabel ?? false
         )
     }
 

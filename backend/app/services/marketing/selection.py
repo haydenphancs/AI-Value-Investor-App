@@ -527,8 +527,28 @@ _EARNINGS_DAYS = {2: "wednesday", 3: "thursday", 4: "friday"}
 #: chain. Owner decisions 2026-11-20 (the quiet-week fallback): it also runs right after the insider series — Monday's
 #: ceo_buys → insider_buys → theme_explainer, and the spotlight lane's insider_spotlight → theme_explainer — so a theme
 #: may post on a Monday or a spotlight day too; the per-theme 28-day rule (`company_news_rules.THEME_REPEAT_DAYS`, read
-#: over BOTH lanes' theme keys: `run_service.theme_refs_between`) keeps any one theme to one post in four weeks.
+#: over BOTH lanes' theme keys: `run_service.theme_scripts_between`) keeps any one theme to one post in four weeks, and
+#: the weekly backup cap (THEME_FALLBACKS_PER_WEEK, owner 2026-11-27) keeps the quiet-week fallbacks to one a week.
 THEME_WEEKDAY = 2
+#: Owner decision 2026-11-27 ("1 backup theme a week (Recommended)": "At most one quiet-week theme per week across both
+#: daily posts, so Wednesday almost always keeps a theme."): every theme post but the MAIN lane's Wednesday lead is a
+#: quiet-week BACKUP (`theme_is_fallback`), and one ET week (`theme_week`, Monday..Sunday) holds at most this many
+#: across BOTH lanes — a later backup step of that week falls back `week_cap` before the source is asked
+#: (`script_service.theme_week_fallbacks`). The Wednesday lead is never capped.
+THEME_FALLBACKS_PER_WEEK = 1
+
+
+def theme_is_fallback(d: date, *, main_lane: bool) -> bool:
+    """Is a theme post dated `d` a quiet-week BACKUP (owner decision 2026-11-27)? Every theme post is, except the MAIN
+    lane's Wednesday lead (THEME_WEEKDAY: `plan_for` puts the theme first there). Pure."""
+    return not (main_lane and d.weekday() == THEME_WEEKDAY)
+
+
+def theme_week(d: date) -> Tuple[date, date]:
+    """(Monday, Sunday) of the week holding `d` — the backup cap's window (owner decision 2026-11-27). Run dates are ET
+    days, so this is the ET week; both ends inclusive. Pure."""
+    start = d - timedelta(days=d.weekday())
+    return start, start + timedelta(days=6)
 
 
 def earnings_leads(d: date, weekdays: Optional[Iterable[int]] = None) -> bool:
@@ -558,7 +578,8 @@ def plan_for(d: date, weekdays: Optional[Iterable[int]] = None) -> DayPlan:
     Sat: the lesson — the week's one lesson-only day.
     Sun: Money Map → lesson; never earnings (it leads Thu/Fri only).
     The theme explainer LEADS on Wednesday (THEME_WEEKDAY) and is Monday's fallback after the insider series (owner
-    2026-11-20); the spotlight lane's chains hold it too (`spotlight_plan_for`)."""
+    2026-11-20); the spotlight lane's chains hold it too (`spotlight_plan_for`). The chains stay as they are: the build
+    caps the BACKUPS at THEME_FALLBACKS_PER_WEEK a week across both lanes (owner 2026-11-27)."""
     if not is_posting_day(d, weekdays):
         return DayPlan(rest_day=True)
     weekday = d.weekday()

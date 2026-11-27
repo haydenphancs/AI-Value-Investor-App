@@ -148,6 +148,26 @@ enum MarketHoursUtil {
         return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
     }
 
+    /// 00:01 New York time as a minute of the day: from then the Tracking round asks about a card
+    /// still wearing the LIVE label from an earlier day (`TrackingViewModel.labelEndReports`),
+    /// until an answer takes it off. The label runs to midnight ET on the report day, its results
+    /// in or not (2026-11-20); one minute after it, so a phone clock a little ahead of the
+    /// server's never spends its ask on an answer still labelled, and one further ahead waits
+    /// for the server's midnight. The phone only picks when to ask: the answer says the label.
+    nonisolated static let liveLabelEndAskMinuteOfDay: Int = 1
+
+    /// `instant`'s New York date as "yyyy-MM-dd" once it is past `liveLabelEndAskMinuteOfDay`,
+    /// else nil: a card whose report date is before it is asked about at the LIVE label's end.
+    nonisolated static func liveLabelEndAskDayKey(at instant: Date = Date()) -> String? {
+        let calendar: Calendar = etCalendar
+        let parts: DateComponents = calendar.dateComponents(
+            [.year, .month, .day, .hour, .minute], from: instant
+        )
+        let minuteOfDay: Int = (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
+        guard minuteOfDay >= liveLabelEndAskMinuteOfDay else { return nil }
+        return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+    }
+
     /// Check if US markets are in an active trading session.
     ///
     /// Returns `true` during:

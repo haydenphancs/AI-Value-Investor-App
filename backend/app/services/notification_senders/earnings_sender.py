@@ -420,7 +420,7 @@ def _fold_into_live_records(
         if not in_result_window(day, today):
             continue
         try:
-            took = live.observe_rows(day, rows, at, fetched=True)
+            took = live.observe_rows(day, rows, at, fetched=True, via="daily_pass")
         except Exception as e:
             logger.warning(
                 "earnings notifications: could not fold %d calendar row(s) for %s into the live "

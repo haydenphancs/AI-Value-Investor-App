@@ -739,6 +739,20 @@ class Settings(BaseSettings):
     EARNINGS_LIVE_FILINGS_ENABLED: bool = True
     EARNINGS_LIVE_PUSH_ENABLED: bool = False
     EARNINGS_LIVE_RESULT_PUSH_ENABLED: bool = False
+    # Three levers on what came in on 2026-11-20, on by default, each off without touching the rest:
+    #   * EARNINGS_LIVE_INBOX_CORRECTIONS_ENABLED — a push's inbox rows take the record's words,
+    #     marked "Updated: ", once FMP contradicts what the push said (A RESULT FMP CHANGES in
+    #     `earnings_live_sender`). Off = a row keeps the words its push went out with.
+    #   * EARNINGS_LIVE_LATE_READS_ENABLED — the release of a report FMP completed first is still
+    #     read once, for its outlook and its link (LATE READS in `earnings_filing_service`). Off =
+    #     that report shows FMP's figures alone; the release-first figures are untouched.
+    #   * EARNINGS_LIVE_REVENUE_CHECK_ENABLED — a Live Results push tells a revenue 25%+ off a
+    #     $100M+ consensus with no beat or miss when its EPS does not bear it out
+    #     (`earnings_live_sender._revenue_in_doubt`). Off = every revenue verdict goes out as FMP
+    #     gives it; the card and the sheet are the same either way.
+    EARNINGS_LIVE_INBOX_CORRECTIONS_ENABLED: bool = True
+    EARNINGS_LIVE_LATE_READS_ENABLED: bool = True
+    EARNINGS_LIVE_REVENUE_CHECK_ENABLED: bool = True
     # Loop cadence, 15-300 s: anything else fails the deploy. The loop is cheap when nothing
     # reports (one memoised calendar read); the FMP and SEC cadences below are what cost
     # anything. Past 60 s the SEC watch loses its one-minute release windows. FMP is read only on

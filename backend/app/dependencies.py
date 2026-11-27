@@ -300,16 +300,49 @@ async def get_widget_caller(
     )
 
 
+def _latest_eviction_stamp(user_row: dict) -> tuple[Optional[str], Optional[str]]:
+    """(the stamp to compare against, which column it came from) — the LATER of
+    `password_changed_at` (105) and `sessions_revoked_at` (214), or (None, None) when neither is
+    set. Unparsable values are returned as they are; the caller's parse decides."""
+    stamps = [
+        (user_row.get("sessions_revoked_at"), "sessions_revoked_at"),
+        (user_row.get("password_changed_at"), "password_changed_at"),
+    ]
+    present = [(v, k) for v, k in stamps if v]
+    if not present:
+        return None, None
+    if len(present) == 1:
+        return present[0]
+
+    def _key(item):
+        dt = datetime.fromisoformat(str(item[0]).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    try:
+        return max(present, key=_key)
+    except (TypeError, ValueError):
+        # One of the two is unreadable. Prefer the readable one so the eviction still applies.
+        for value, column in present:
+            try:
+                _key((value, column))
+                return value, column
+            except (TypeError, ValueError):
+                continue
+        return present[0]
+
+
 def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
-    """401 when `token` predates `user_row["password_changed_at"]`.
+    """401 when `token` predates `password_changed_at` OR `sessions_revoked_at`.
 
     The app mints its own JWTs and validates them on signature + expiry alone, so without
-    this a password reset would leave a thief's tokens working (migration 105). The `iat`
-    claim already present in every token is the comparison point.
+    this a password reset (migration 105) or a "sign out of all devices" (214) would leave a
+    thief's tokens working. The `iat` claim already present in every token is the comparison
+    point; the later of the two stamps is the boundary. Kept under its 105-era name.
 
     Fails OPEN on anything unexpected — a parse quirk must not lock out a legitimate user.
+    (The REFRESH path fails closed instead; there a quirk would mint, here it only reads.)
     """
-    changed_at = user_row.get("password_changed_at")
+    changed_at, column = _latest_eviction_stamp(user_row)
     if not changed_at:
         return
     try:
@@ -319,7 +352,7 @@ def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
             # Unreachable for a token that got this far: `create_access_token` always stamps
             # `iat`, and no Supabase token is accepted as a bearer any more.
             logger.warning(
-                "access token for user=%s carries no iat — password-change eviction skipped",
+                "access token for user=%s carries no iat — eviction check skipped",
                 user_row.get("id"),
             )
             return
@@ -331,8 +364,8 @@ def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
         raise
     except Exception as e:
         logger.warning(
-            "password_changed_at comparison failed (%s: %s) — allowing the token",
-            type(e).__name__, e,
+            "%s comparison failed (%s: %s) — allowing the token",
+            column, type(e).__name__, e,
         )
         return
 
@@ -351,16 +384,41 @@ def _reject_if_password_changed_since_issue(token: str, user_row: dict) -> None:
     # evicted, which is the property this control exists to provide.
     if issued_dt < changed_dt.replace(microsecond=0):
         logger.info(
-            "Rejecting token for user=%s: issued %s, password changed %s",
-            user_row.get("id"), issued_dt.isoformat(), changed_dt.isoformat(),
+            "Rejecting token for user=%s: issued %s, %s %s",
+            user_row.get("id"), issued_dt.isoformat(), column, changed_dt.isoformat(),
         )
+        signed_out_everywhere = column == "sessions_revoked_at"
         raise auth_error(
             ErrorCode.AUTH_SESSION_EXPIRED,
             message=(
-                f"Token issued {issued_dt.isoformat()} predates the password change at "
+                f"Token issued {issued_dt.isoformat()} predates "
+                f"{'the sign-out-all' if signed_out_everywhere else 'the password change'} at "
                 f"{changed_dt.isoformat()} for user={user_row.get('id')}"
             ),
+            user_message=(
+                "You were signed out on all devices. Please sign in again."
+                if signed_out_everywhere else None
+            ),
         )
+
+
+async def get_access_token_claims(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    """The caller's verified access-token claims (`sid`, `auth_time`, …), or {}.
+
+    For a route that ALSO depends on a strict dependency (which is what rejects a bad token);
+    this one never raises, so it can only ever add information. Used by account deletion to read
+    `auth_time` (SEC-11).
+    """
+    token = credentials.credentials.strip() if isinstance(credentials, HTTPAuthorizationCredentials) else None
+    if not token:
+        return {}
+    try:
+        payload = _decode_access_token(token)
+    except Exception:  # noqa: BLE001 — the strict dependency on the route already answered
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 async def get_current_user(

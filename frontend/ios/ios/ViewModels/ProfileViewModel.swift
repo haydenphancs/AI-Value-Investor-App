@@ -245,7 +245,9 @@ class ProfileViewModel: BaseViewModel {
         performTask("deleteAccount") { [weak self] in
             // Actually delete the account (cascades all data), THEN sign out.
             // performTask surfaces any failure via errorMessage instead of signing out.
-            try await self?.apiClient.request(endpoint: .deleteAccount)
+            // No caller today (Settings › Delete Account owns deletion, with re-authentication).
+            // Without a proof this works only while ACCOUNT_DELETE_REQUIRE_REAUTH is off.
+            try await self?.apiClient.request(endpoint: .deleteAccount(reauthToken: nil))
             self?.isDeleting = false
             self?.appState?.signOut()
         }

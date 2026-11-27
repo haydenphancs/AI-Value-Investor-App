@@ -1829,8 +1829,11 @@ def test_the_preflight_skew_is_small_against_the_access_token_life():
 
     skew = _swift_seconds(_sources()["api"], "proactiveRefreshSkew")
     life = settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60
-    assert 10 <= skew <= life / 100, (
-        f"proactiveRefreshSkew {skew}s is outside [10 s, 1% of the {life}s access token life]"
+    # 1/30, not the 1/100 this used while tokens lived 24 h: CC-10 (2026-11-26) cut the access
+    # token to 60 min, and 60 s is 1.7% of that. Still a sliver — the pre-flight judges each
+    # token ONCE, so the skew only moves its single refresh a minute earlier, never multiplies it.
+    assert 10 <= skew <= life / 30, (
+        f"proactiveRefreshSkew {skew}s is outside [10 s, 1/30 of the {life}s access token life]"
     )
 
 

@@ -1028,6 +1028,12 @@ actor APIClient {
             request.setValue(proof, forHTTPHeaderField: "X-Device-Token")
         }
 
+        // Account deletion's re-authentication proof (SEC-11): a five-minute, single-purpose token
+        // from `POST /auth/reauthenticate`. Only `.deleteAccount(reauthToken:)` carries one.
+        if let proof = endpoint.reauthProof, !proof.isEmpty {
+            request.setValue(proof, forHTTPHeaderField: "X-Caydex-Reauth")
+        }
+
         // Body
         if let body = endpoint.body {
             request.httpBody = try encoder.encode(body)

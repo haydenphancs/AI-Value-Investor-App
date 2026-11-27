@@ -155,6 +155,10 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # Only the backend reads or writes it, as service_role. 205 also adds the origin / finding
     # columns to trillion_club_stakes, whose grants (175) it does not touch.
     "205": ("trillion_club_stake_findings",),
+    # 214: server-side app sessions — one row per session (refresh-token family) and one per
+    # refresh token. Credential state: a client grant would let any holder of a user JWT plus
+    # the shipped anon key read or revoke sessions. Only the backend's RPCs touch them.
+    "214": ("auth_refresh_families", "auth_refresh_tokens"),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

@@ -1501,6 +1501,22 @@ final class AppState {
         discardDataForEndedSession()
     }
 
+    /// "Sign out of all devices" (migration 214): the server ends EVERY session of the account —
+    /// this one included — then this device signs out locally exactly like `signOut()`.
+    ///
+    /// Throws (and changes nothing locally) when the server could not do it, so the caller can say
+    /// so: a sign-out-everywhere that silently only signed out here would leave the user believing
+    /// a thief was evicted. On success the local half runs in the same main-actor turn as the
+    /// `noteSessionsEndedByServer()` mark, so `finishSignOut` skips the detach and the logout —
+    /// both would 401 against the token the server just evicted, and the server already detached
+    /// every device.
+    func signOutEverywhere() async throws {
+        guard let authService else { throw APIError.authRequired }
+        try await authService.signOutAllDevices()
+        authService.noteSessionsEndedByServer()
+        signOut()
+    }
+
     /// Drop this device's Learn progress + bookmarks because the session that owned them ended.
     ///
     /// Learn state is DEVICE-GLOBAL — the four stores' UserDefaults keys carry no user id — so

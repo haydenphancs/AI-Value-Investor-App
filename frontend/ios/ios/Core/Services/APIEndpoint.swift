@@ -103,7 +103,15 @@ enum APIEndpoint: Sendable {
     case signIn(email: String, password: String)
     case signUp(email: String, password: String, displayName: String)
     case refreshToken(refreshToken: String)
-    case signOut
+    /// `POST /auth/logout`. Carries the device's REFRESH token (migration 214) so the server can
+    /// end exactly this session; nil sends no body (the server then uses the bearer's `sid`).
+    case signOut(refreshToken: String?)
+    /// "Sign out of all devices" (`POST /auth/sign-out-all`) — every session of the account,
+    /// THIS device's included. The caller then runs the local sign-out.
+    case signOutAllDevices
+    /// Re-enter a credential before deleting the account (`POST /auth/reauthenticate`): returns
+    /// a five-minute proof for `.deleteAccount(reauthToken:)`. Never replaces the session.
+    case reauthenticate(ReauthenticateRequestBody)
     /// Start a password reset — sends a one-time code to the address.
     case forgotPassword(email: String)
     /// Finish a password reset with the emailed code.
@@ -136,7 +144,8 @@ enum APIEndpoint: Sendable {
     case updateAvatar(imageBase64: String)
     /// Clear the profile picture, reverting to the placeholder glyph.
     case deleteAvatar
-    case deleteAccount
+    /// `DELETE /users/me`. `reauthToken` (from `.reauthenticate`) travels in `X-Caydex-Reauth`.
+    case deleteAccount(reauthToken: String?)
     /// Move this install's guest watchlist + portfolios onto the account that just signed in.
     /// Migration 108 partitions guests per install, so without this call the guest-first funnel
     /// silently costs the user their work: they add tickers during onboarding, create an account,
@@ -469,6 +478,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/auth/refresh"
         case .signOut:
             return "/api/v1/auth/logout"
+        case .signOutAllDevices:
+            return "/api/v1/auth/sign-out-all"
+        case .reauthenticate:
+            return "/api/v1/auth/reauthenticate"
         case .forgotPassword:
             return "/api/v1/auth/forgot-password"
         case .resetPassword:
@@ -822,7 +835,7 @@ enum APIEndpoint: Sendable {
     nonisolated var method: HTTPMethod {
         switch self {
         case .trackEvents,
-             .signIn, .signUp, .refreshToken, .signOut,
+             .signIn, .signUp, .refreshToken, .signOut, .signOutAllDevices, .reauthenticate,
              .forgotPassword, .resetPassword, .changePassword, .setPassword,
              .resendConfirmation, .confirmEmail, .oauthSignIn, .sessionExchange, .verifyPurchase,
              .addToWatchlist, .generateResearch, .rateReport,
@@ -1023,6 +1036,13 @@ enum APIEndpoint: Sendable {
         case .refreshToken(let refreshToken):
             return RefreshTokenRequest(refreshToken: refreshToken)
 
+        case .signOut(let refreshToken):
+            // No body at all when there is nothing to send: the server reads the bearer's `sid`.
+            return refreshToken.map { LogoutRequest(refreshToken: $0) }
+
+        case .reauthenticate(let body):
+            return body
+
         case .forgotPassword(let email):
             return ForgotPasswordRequest(email: email)
 
@@ -1212,6 +1232,13 @@ enum APIEndpoint: Sendable {
     ///
     /// `.confirmEmail` is limited per email too, but deliberately WITHOUT the proof relaxation:
     /// its secret is an emailed code, and a proof would widen the guessing budget for it.
+    /// The account-deletion re-authentication proof, sent as `X-Caydex-Reauth` (SEC-11). Only
+    /// `.deleteAccount` carries one; nil everywhere else and when the caller has none.
+    nonisolated var reauthProof: String? {
+        if case .deleteAccount(let token) = self { return token }
+        return nil
+    }
+
     nonisolated var deviceProofEmail: String? {
         switch self {
         case .signIn(let email, _), .forgotPassword(let email), .resetPassword(let email, _, _):
@@ -1457,6 +1484,11 @@ enum APIEndpoint: Sendable {
         // its only caller already ignores the result — and saves a guaranteed-401 round trip.
         case .signOut, .changePassword, .setPassword:
             return .signInRequired
+
+        // Both take `get_current_user` (2026-11-26, migration 214): sign-out-all and the
+        // re-authentication before account deletion act on the caller's own account.
+        case .signOutAllDevices, .reauthenticate:
+            return .signInRequired
         }
     }
 
@@ -1518,6 +1550,31 @@ nonisolated struct SignUpRequest: Encodable, Sendable {
 
 nonisolated struct RefreshTokenRequest: Encodable, Sendable {
     let refreshToken: String
+}
+
+nonisolated struct LogoutRequest: Encodable, Sendable {
+    let refreshToken: String
+}
+
+/// Exactly ONE credential: `password`; or `provider` + `idToken` (+ `nonce` for Apple), as for
+/// `/auth/oauth`; or `supabaseAccessToken` (the web Google flow). nil fields are omitted on the
+/// wire (`encodeIfPresent`), which is what the server's "exactly one" check reads.
+nonisolated struct ReauthenticateRequestBody: Encodable, Sendable {
+    var password: String?
+    var provider: String?
+    var idToken: String?
+    var nonce: String?
+    var supabaseAccessToken: String?
+}
+
+nonisolated struct ReauthenticateResponse: Decodable, Sendable {
+    let reauthToken: String
+    let expiresIn: Int
+
+    enum CodingKeys: String, CodingKey {
+        case reauthToken = "reauth_token"
+        case expiresIn = "expires_in"
+    }
 }
 
 // Password recovery. Property names are camelCase; the encoder's convertToSnakeCase maps

@@ -36,6 +36,7 @@ with warnings.catch_warnings():
 
 from app.api.v1.endpoints import auth as auth_ep
 from app.core.security import create_access_token, create_refresh_token, rate_limiter
+from _refresh_session_fake import SessionStoreFake
 from app.schemas.auth import (
     ChangePasswordRequest,
     ConfirmEmailRequest,
@@ -215,9 +216,15 @@ class FakeSupabase:
         self._row = row if row is not None else {"id": _USER_ID, "email": _EMAIL}
         self._fail = set(fail)
         self.auth = _FakeAuth(self.log, self._fail, otp_user_id)
+        # Migration 214's session RPCs. They read the SAME row the table reads do, so a stamp a
+        # test puts on the row is what the in-transaction eviction check sees too.
+        self.sessions = SessionStoreFake(users={self._row.get("id", _USER_ID): self._row} if self._row else {})
 
     def table(self, name):
         return _FakeQuery(self.log, name, self._row, self._fail)
+
+    def rpc(self, name, params):
+        return self.sessions.rpc(name, params)
 
 
 # ── 1. No account enumeration ─────────────────────────────────────────────────

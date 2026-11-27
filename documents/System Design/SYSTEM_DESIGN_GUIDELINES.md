@@ -1412,7 +1412,7 @@ owner id and save time, because `HomeDashboardData` holds `Color`s and is not Co
   lapses too. Every read, write and delete runs in order on one detached task chain, so a delete
   always lands after a late write.
 - **Shown for at most 96 h** (`maxDisplayAge`, owner decision 2026-10-01). That stays below the
-  refresh token's 7 d minus the access token's 24 h, so a provably dead session's dashboard never
+  refresh token's 7 d minus the access token's life (60 min since 2026-11-26), so a provably dead session's dashboard never
   shows; `tests/test_ios_home_instant_paint_guards.py` pins it. The pulse header reads
   "Updated <time>" until a live load replaces the snapshot, and the seed never counts as a load,
   so the live request still goes out at once. A snapshot whose numbers describe an earlier US
@@ -2303,19 +2303,73 @@ These routes return them:
 - `/auth/register`, but only while Supabase's *Confirm email* is OFF. It is ON in production, so
   register returns no tokens there.
 
-There is no `POST /auth/token`. Access tokens last 24 h, refresh tokens 7 d. The JWT carries `sub`,
-`email`, `iat`, `exp` — **not** a `tier` claim; tier is read from `public.users`, so a plan change
-takes effect without waiting for a token to turn over.
+There is no `POST /auth/token`. Access tokens last **60 minutes** (CC-10, 2026-11-26: they were
+24 h; `config._cap_access_token_life` clamps a higher environment value to 60 with a WARNING
+rather than failing the deploy), refresh tokens 7 d, sliding. The JWT carries `sub`, `email`,
+`iat`, `exp`, and since migration 214 `sid` (the session) and `auth_time` (when the credential that
+started the session was verified) — **not** a `tier` claim; tier is read from `public.users`, so a
+plan change takes effect without waiting for a token to turn over.
 
-**Refresh tokens are re-issued, not rotated.** Each `/auth/refresh` returns a new refresh token but
-never retires the one it was given:
-- refresh tokens carry no `jti`, and there is no reuse detection;
-- `/auth/logout` only logs.
+**Server-side sessions (migration 214, 2026-11-26; SEC-3 / AUTH-BE-10).** Until then refresh
+tokens were re-issued, never retired, and `/auth/logout` only logged, so a leaked refresh token
+was a permanent session. Now (`services/auth_session_service.py`, tables `auth_refresh_families`
+and `auth_refresh_tokens`, four SECURITY DEFINER RPCs that each take a per-user advisory lock):
+- **A session is a family.** Every token-minting sign-in (`/auth/login`, `/auth/oauth`,
+  `/auth/session-exchange`, `/auth/confirm-email`, the two password routes, `/auth/register` with
+  confirmation off) starts one (`start_refresh_family`). Its id is the `sid` claim of every access
+  and refresh token it rotates through.
+- **A refresh token is single-use.** `/auth/refresh` retires the presented `jti` and inserts its
+  successor in ONE transaction (`rotate_refresh_token`), re-checking the eviction stamps under the
+  lock. A retired token presented again is REUSE: the whole session is revoked and both holders
+  must sign in again — except inside a grace window (`REFRESH_TOKEN_REUSE_GRACE_SECONDS`, 120 s),
+  which issues a SIBLING instead, at most `REFRESH_TOKEN_MAX_CHILDREN` (3) successors per token. The
+  window exists because the app's restore loop and its pre-flight refresh are not single-flighted
+  together, and a refresh whose response was lost is re-sent by the failover path.
+- **Legacy tokens** (pre-214, no `jti`) keep working until their own `exp`, so the deploy signs
+  nobody out; the first refresh records them under an id derived from a hash of the token's
+  SIGNING INPUT (`legacy_jti`: `header.payload` — the signature segment is malleable, python-jose
+  accepts it with `=` padding appended, which once let one token open six sessions), so they are
+  single-use from then on, and moves them onto a tracked session.
+- **Logout ends the session**: `/auth/logout` revokes the family named by the refresh token in its
+  body (builds after 1.03, from an in-memory mirror — never a main-thread Keychain read) and by
+  the bearer's `sid` (every build whose tokens a 214 backend minted). A pre-214 token names no
+  session; that logout revokes nothing and still answers 200.
+- **Sign out of all devices** (`POST /auth/sign-out-all`, a Settings row) stamps
+  `users.sessions_revoked_at` — the NEXT whole second, read after the lock, because every check
+  floors the stamp to whole seconds and a stamp inside second S would spare tokens minted earlier
+  in S — revokes every family and detaches every device token. It signs out
+  the calling device TOO: a thief who calls it with a stolen access token loses their own session
+  with everyone else's, where a variant that returned fresh tokens would let them evict the owner.
+  It is the lever an Apple/Google account had none of.
+- **Fail open or closed, per call.** `/auth/refresh` (rotation) fails CLOSED: any store error is a
+  503 `AUTH_UNAVAILABLE`. Starting a session fails OPEN to an untracked (legacy-shaped) token after
+  one retry, logged at ERROR (a retry whose first attempt committed reuses that session): the
+  credential was just verified, and the token's first refresh records it. The one exception is
+  the migration NOT APPLIED YET — PostgREST's `PGRST202`/`PGRST205` for the RPC, nothing else
+  (42P01/42883/42703 can come from inside a function body): a session start then mints an
+  untracked token and a LEGACY token refreshes statelessly, with a throttled ERROR, so a backend
+  deployed before 214 signs nobody out. A token that carries a `jti` or `sid` was minted by a live
+  214, so for it a missing function is a rollback or a signature drift: refresh and logout answer
+  503, never a quiet stateless success.
+- **Not revoked per request:** an access token outlives its session by at most its 60 minutes. No
+  route reads the session row per request (that would be a second database read on every
+  authenticated call); the short access token is the bound. Expired rows are pruned per account by
+  the RPCs themselves, no job.
 
-So a leaked refresh token keeps refreshing until the account's password changes or `SECRET_KEY` is
-rotated. An Apple/Google account can stop it only by setting a password. This is a recorded gap:
-server-side sessions (rotation with reuse detection, revocation on logout, "sign out of all
-devices") are a planned follow-up, not shipped behaviour.
+**Re-authentication before account deletion (SEC-11, 2026-11-26).** `POST /auth/reauthenticate`
+checks a FRESH credential of the caller's own account — the password (on the isolated auth
+client), or an Apple/Google id token whose subject `account_has_identity` finds already linked
+BEFORE GoTrue sees it (GoTrue's id-token sign-in would create an account for an unknown subject),
+or a Supabase token whose SIGN-IN (`amr` timestamp, never `iat`: a GoTrue refresh mints a fresh
+`iat` and keeps `amr`) is under 10 minutes old — and returns a five-minute, single-purpose JWT
+(`type=reauth`, `purpose=account_delete`). It never mints or replaces a session. `DELETE /users/me`
+reads it from `X-Caydex-Reauth`: a proof that is present but wrong is 403 `AUTH_REAUTH_REQUIRED`
+before anything is deleted; a session whose `auth_time` is within
+`ACCOUNT_DELETE_RECENT_AUTH_SECONDS` (10 min) counts as re-authenticated; a request with neither is
+accepted while `ACCOUNT_DELETE_REQUIRE_REAUTH` is off — every build up to 1.03 deletes with the
+bearer alone, and App Review 5.1.1(v) needs that to keep working. The switch goes on once those
+builds are below the minimum supported version (OWNER_TASKS); an old build then gets the error's
+copy ("sign out, sign back in, and delete within 10 minutes").
 
 **Only `/auth/session-exchange` accepts a Supabase token (2026-11-26).** Every other route takes
 only an app-minted access token. Two fallbacks are gone:
@@ -2333,24 +2387,28 @@ The iOS client never sent a Supabase token as a bearer: it exchanges it at once.
 - It answers any JOSE error with a refusal, never a 500.
 
 Session-exchange then refuses an anonymous Supabase user (`is_anonymous`) and a token issued
-before the account's last password change. If it cannot read that timestamp, it fails CLOSED
-(503 `AUTH_UNAVAILABLE`). Nothing reads `SUPABASE_JWT_SECRET` any more.
+before the account's last password change or sign-out-all. If it cannot read those timestamps, it
+fails CLOSED (503 `AUTH_UNAVAILABLE`). Nothing reads `SUPABASE_JWT_SECRET` any more.
 
 **A password change evicts sessions, where the stamp is checked.**
 - **Who stamps it:** `/auth/reset-password`, `/auth/change-password`, `/auth/set-password`, and
   `/auth/confirm-email` when it sets a password all stamp `users.password_changed_at`. A stamp that
   fails is retried once, then logged at ERROR. The password change itself stands, because the
   password has already changed by then.
-- **Who checks it:** a token whose `iat` predates the stamp is refused by `/auth/refresh`, by
-  `/auth/session-exchange`, and by the strict per-route dependencies `get_current_user` and
-  `get_current_user_or_guest`.
-- **Who does not:** the router-level `get_current_user_id` gate does NOT read the stamp. On a route
-  whose only auth dependency is that gate (most market-data routes), a pre-change access token
-  keeps working until it expires, at most 24 h. It can no longer refresh, and it cannot reach any
-  route that reads the account.
+- **Who checks it:** a token whose `iat` predates the stamp — or `users.sessions_revoked_at`, the
+  sign-out-all stamp, whichever is later — is refused by `/auth/refresh` (in Python and again inside
+  `rotate_refresh_token`, under the lock), by `/auth/session-exchange`, and by the strict per-route
+  dependencies `get_current_user` and `get_current_user_or_guest`.
+- **Who does not:** the router-level `get_current_user_id` gate does NOT read the stamps (it reads
+  no row at all). On a route whose only auth dependency is that gate (most market-data routes), a
+  pre-change access token keeps working until it expires, at most 60 minutes (CC-10: it was 24 h).
+  It can no longer refresh, and it cannot reach any route that reads the account. A users-row
+  cache inside the gate was the alternative and was not taken: a second database dependency on
+  every market-data request, with the window still ~60 s plus cache, for a bound the shorter token
+  already gives at one refresh per hour of use.
 
-So "a reset evicts an attacker" holds for refresh, for account data and for the Supabase door. It
-does not hold for the market-data routes, for up to a day.
+So "a reset evicts an attacker" holds for refresh, for account data and for the Supabase door. On
+the market-data routes it holds after at most an hour.
 
 `/auth/refresh` fails CLOSED. When it cannot read the account's row, it answers 503
 `AUTH_UNAVAILABLE`, which the client retries without clearing its credential. Before 2026-11-26 it
@@ -2595,7 +2653,8 @@ an identity: every read path filters on `user_id`, so any identity more than one
 is a cross-user leak, not untidy state.
 
 **Which surfaces require an account.** All `.signInRequired` routes: the `/users/me` family,
-`/auth/logout`, `/auth/change-password`, `/auth/set-password`, `/billing/verify`, whale
+`/auth/logout`, `/auth/sign-out-all`, `/auth/reauthenticate`, `/auth/change-password`,
+`/auth/set-password`, `/billing/verify`, whale
 follow/unfollow/activity — and **every AI-generation surface**: the `/research/*` routes,
 `GET /stocks/{t}/report`, `POST /stocks/{t}/prewarm-report`, and every chat route. (The separate
 `POST /stocks/{t}/report/chat` was deleted 2026-09-11: it shared `ChatRateLimit` and the 1-credit

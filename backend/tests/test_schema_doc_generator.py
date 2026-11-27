@@ -670,7 +670,12 @@ def test_every_public_table_is_curated():
 # `scripts/dump_schema.sh` is re-run, `test_pending_tables_are_really_still_pending`
 # fails until the name is removed.
 # Empty is the healthy steady state.
-_PENDING_MIGRATION_TABLES: set[str] = set()
+_PENDING_MIGRATION_TABLES: set[str] = {
+    # 214 (2026-11-26): server-side sessions. Leave the list once 214 is applied and re-dumped —
+    # and then add `sessions_revoked_at` to public.users' key in schema_curation.py.
+    "public.auth_refresh_families",
+    "public.auth_refresh_tokens",
+}
 # 2026-10-29: 205's Trillion Club stake-finder ledger (trillion_club_stake_findings) was applied
 # and re-dumped, so it left the list.
 # 2026-10-23: 204's two Wiser weekly tables (learn_weekly_pieces, learn_narration_jobs) were

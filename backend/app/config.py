@@ -1629,7 +1629,7 @@ class Settings(BaseSettings):
     MARKETING_X_ALLOW_URLS: bool = False
     # The closed FIRST-LINE PREFIXES of the template captions (owner decision 2026-11-15 "Loosen caption hype
     # words", scope "Spotlights + Form 4 + earnings"; news_templates.FIRST_LINE_PREFIXES: "🚨 BREAKING:" only while
-    # the source is at most one federal business day old, "🚨 Insider purchase alert:", "📊 13F filing:"), at the
+    # the source is at most one federal business day old, "🚨 Insider purchase alert:", "🐋 13F filing:"), at the
     # start of a caption's first line only — never the YouTube title, the picture, the alt text or the video.
     # Read ONCE per template build (script_service._build_template_day, beside MARKETING_X_ALLOW_URLS) and FROZEN
     # into the accepted output (`first_line_prefix_on`): create_posts re-composes from the frozen value, so flipping

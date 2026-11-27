@@ -8016,7 +8016,7 @@ code but run only once listed in `MARKETING_NEWS_SERIES`, and only on the spotli
   bumped once for this release; every existing layout's bytes are pinned unchanged.
 - **First-line prefixes** (`FIRST_LINE_PREFIXES`, closed and code-owned): the insider spotlight "🚨 BREAKING:" while
   fresh, else "🚨 Insider purchase alert:"; the weekly Form 4 roundups the alert only; earnings "🚨 BREAKING:" only while
-  fresh; the 13F spotlight "📊 13F filing:"; every other series none. Fresh = a Form 4 filed at most one federal
+  fresh; the 13F spotlight "🐋 13F filing:" (📊 until 2026-11-26, the owner's change); every other series none. Fresh = a Form 4 filed at most one federal
   business day before the run with the lead's trades not late, or an earnings report at most one EXCHANGE trading day
   before it (C0: a day counts unless both the exchange and the federal government close — never looser than the
   federal count, so Veterans Day ages a report). Only at position 0 of a caption body or a

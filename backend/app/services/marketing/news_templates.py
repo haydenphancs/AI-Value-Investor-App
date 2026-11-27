@@ -340,7 +340,7 @@ logger = logging.getLogger(__name__)
 #: their long captions with a fixed question (`isp.p.question`, `f13s.p.question`), the last paragraph, kept where
 #: an outlet's paragraph limit allows. The same version (owner decision 2026-11-15 "Loosen caption hype words", scope
 #: "Spotlights + Form 4 + earnings"): a closed, code-owned first-line PREFIX (`FIRST_LINE_PREFIXES`: "🚨 BREAKING:",
-#: "🚨 Insider purchase alert:", "📊 13F filing:") may open a caption's first line — per series
+#: "🚨 Insider purchase alert:", "🐋 13F filing:") may open a caption's first line — per series
 #: (`PREFIX_IDS_BY_SERIES`: the insider spotlight BREAKING while fresh, else the alert; the weekly Form 4 roundups the
 #: alert only, never BREAKING; earnings BREAKING while fresh, else none; the 13F spotlight its filing, with after-prefix
 #: headline twins `f13s.hp.*`), content first (a tight outlet drops the prefix before a longer headline), never on the
@@ -626,14 +626,16 @@ class NewsTemplateRefused(ValueError):
 # prefix anywhere else, another emoji, "BREAKING" / "alert" without it, or a prefix the series may not carry is
 # refused. Switch MARKETING_FIRST_LINE_PREFIX (False), read ONCE per template build and frozen into
 # `output.first_line_prefix_on` (`revalidate` re-composes from the frozen value); off, every caption is byte for byte
-# the unprefixed composition. A change to any of these changes copy: it needs a TEMPLATE_VERSION bump.
+# the unprefixed composition. A change to any of these changes copy: it needs a TEMPLATE_VERSION bump — once the
+# switch has been on in production. (2026-11-26, owner: the 13F prefix's emoji 📊 → 🐋, "i don't like 📊" — made
+# without a bump because the switch had never been on, so no stored script or post carried a prefix.)
 
 #: id → the prefix text, without its trailing space. Single-code-point emoji with default emoji presentation (no
 #: VS16), so `compliance.clean(p) == p`; X weighs each emoji 2 (13 / 27 / 15 weighted with the space after it).
 FIRST_LINE_PREFIXES: Dict[str, str] = {
     "insider.breaking": "\U0001F6A8 BREAKING:",
     "insider.alert": "\U0001F6A8 Insider purchase alert:",
-    "thirteen_f.filing": "\U0001F4CA 13F filing:",
+    "thirteen_f.filing": "\U0001F40B 13F filing:",
     "earnings.breaking": "\U0001F6A8 BREAKING:",
 }
 #: series → the prefix ids it may carry, in preference order (the first that applies is used; a BREAKING id applies
@@ -1669,7 +1671,7 @@ LEXICON: Dict[str, str] = {
     "f13s.list.h.all.min": "{subj}: {n} holding changes.",
     "f13s.list.h.some": "{n} of the holding changes in {where}: {counts}.",
     "f13s.list.h.some.min": "{n} of the holding changes in {where}.",
-    # the AFTER-PREFIX twins ("📊 13F filing:" says "13F"): the filer the subject of the hook's verbs; the same facts
+    # the AFTER-PREFIX twins ("🐋 13F filing:" says "13F"): the filer the subject of the hook's verbs; the same facts
     "f13s.list.hp.all": "{filer} {clauses}.",
     "f13s.list.hp.all.min": "{n} holding changes by {filer}.",
     "f13s.list.hp.some.poss": "{n} of {filer_s} holding changes: {counts}.",
@@ -2342,7 +2344,7 @@ class _Parts:
     #: card): `extra_video_problems`. Never part of the composed output.
     picture_bound: bool = False
     #: news-v22 (first-line prefixes): caption headline → the twin written AFTER the prefix, where the prefix already
-    #: says some of its words ("📊 13F filing:" says "13F", so the 13F spotlight's twin drops "latest 13F"). The same
+    #: says some of its words ("🐋 13F filing:" says "13F", so the 13F spotlight's twin drops "latest 13F"). The same
     #: facts as its base headline: `stated_by_headline` stays keyed by the BASE. A headline not listed is written as
     #: it is after the prefix. Read only by `_caption_bodies`, only while a prefix applies.
     after_prefix: Dict[str, str] = field(default_factory=dict)

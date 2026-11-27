@@ -6202,7 +6202,9 @@ branch): it reads as that row, but a row of today reading so keeps asking every 
 read, so its own figures reach an open sheet (the Tracking card outside price hours waits for the next
 feed build); and a report that has shown figures of its own never reads through a row that does not
 stand, a guard holding its figures included, so no stale row speaks for its push's inbox rows or
-wakes (`_record_shown`, the tenth review).
+wakes (`_record_shown`, the tenth review). Its mirror is a residual: a real leftover beside a true
+report FMP filled two or more days late reads as itself while a guard holds its figures (`live`,
+"being confirmed"), its held push waiting for them; the landings cannot tell the two apart.
 
 A symbol draws ONE card from the days before today: its newest reported report, else the newest one
 still up (`newest_report`); the sheet opened with no date takes the same pick. The sheet asks again

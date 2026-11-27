@@ -174,7 +174,9 @@ forgets what it knew and a report FMP changes after it keeps its old rows (every
 web process); a report no push of this process told (the 16:00 ET pass's alone) is never followed;
 a row whose wake wrote words between two looks holds words never seen, and keeps them; a row still
 held shows the push's words in the inbox until its wake (or, opened before it, until the next
-look), since a correction never writes a held row.
+look), since a correction never writes a held row; and once no live row is held, a look's write that
+changes no row still keeps the record's surprise for its words, so a later correction can withhold
+a revenue verdict a row could keep ("Revenue reported", never false).
 
 COPY. Informational, never directive (SYSTEM_DESIGN_GUIDELINES §11.7). A lock-screen banner
 sits OUTSIDE the authenticated app, which is all FMP's Order Form licenses for display, so an

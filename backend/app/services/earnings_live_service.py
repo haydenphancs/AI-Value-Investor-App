@@ -1266,7 +1266,11 @@ def _record_shown(rec: _Record) -> _Record:
     stand as the report before (`_the_report_before`) once this record has shown figures of its
     own (`landed_at`): this record is then the report, and a guard holding its figures (a dropped
     digit) must not let a stale earlier row speak for it, in its sheet or in its push's inbox
-    rows and wakes (the tenth 2026-11-26 review)."""
+    rows and wakes (the tenth 2026-11-26 review). Residual (the eleventh check): a REAL leftover
+    beside a true report FMP filled two or more days late (so that report does not stand) reads as
+    itself while a guard holds its own figures, `live` and "being confirmed", and its held push
+    waits for them (ending unsent past the flush's bound): its landings read exactly as the stale
+    row's case this rule is for, and the other choice sends a stale consensus there."""
     before = rec.report_before
     if (before is None or has_results(eps_metric(rec), revenue_metric(rec))
             or not has_results(eps_metric(before), revenue_metric(before))):

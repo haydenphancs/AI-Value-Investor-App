@@ -10096,3 +10096,22 @@ def test_a_row_of_today_reading_as_an_earlier_report_keeps_asking_while_its_day_
                      fetched=True)
     own = svc.snapshot("INTC", monday, _et(monday, 7, 21))
     assert (own.reads_as, own.eps.estimate) == (None, 0.41)
+
+
+def test_a_landed_leftover_whose_figures_are_held_reads_as_the_report_before_that_stands():
+    """The eleventh 2026-11-27 check (a test gap): a report that has shown figures of its own never
+    reads through an earlier row that does NOT stand (`_record_shown`), but the common leftover's
+    report before DOES stand, and it must still read as that report while FMP holds the leftover's
+    own figures (dropped digits), never `live` and "being confirmed" the day after its report."""
+    svc = _svc()
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], _et(PREV, 16, 30),
+                     fetched=True)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 6), fetched=True)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44, rev=17.1e9)], _et(REPORT, 7),
+                     fetched=True)
+    assert svc._records[("INTC", REPORT)].landed_at is not None
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.044, rev=1.71e9)], _et(REPORT, 8),
+                     fetched=True)
+    snap = svc.snapshot("INTC", REPORT, _et(REPORT, 8, 1))
+    assert (snap.reads_as, snap.status, snap.live_label) == (PREV, els.STATUS_REPORTED, False)
+    assert (snap.eps.actual, snap.revenue.actual) == (0.44, 17.1e9)

@@ -1029,6 +1029,7 @@ def test_the_poll_builds_the_feed_only_while_a_price_can_move():
         "if MarketHoursUtil.shouldRefreshPrices( assetTypes: assets.map(\\.assetType), "
         "symbols: assets.map(\\.ticker) ) { let built: Bool = await self.loadTrackingFeed() "
         "if !built, self.filteredAlerts.contains(where: \\.isLiveEarnings) "
+        "|| !self.labelStartReports().isEmpty "
         "|| !self.labelEndReports().isEmpty { "
         "await self.refreshLiveEarningsCards(afterAFailedFeed: true) } } "
         "else if self.filteredAlerts.contains(where: \\.isLiveEarnings) "
@@ -1048,10 +1049,18 @@ def test_a_failed_feed_build_answers_false():
     assert feed.endswith(
         "} else { self.assetsErrorMessage = appError.message self.assetsRequiresSignIn = false "
         "self.assetsIsReconnecting = false } return false } }"), feed[-300:]
-    catch = feed[feed.rindex("} catch {"):]
-    assert "guard generation == loadGeneration else { return false }" in catch
-    assert "if appError.isCancellation { return false }" in catch
-    assert "return true" not in catch, "no failure answers true"
+    catch = feed.index("} catch {")
+    # Every answer read whole (the ninth review: `return true` was the only answer refused, so a
+    # failure arm answering `self.hasLiveFeed` or `!false` passed): the build's one success answers
+    # true, as its last statement before the catch, and every other answer is the literal false.
+    def answers(code: str) -> list:
+        return [value.strip() for value in re.findall(r"\breturn\b([^}]*)", code)]
+
+    assert answers(feed[catch:]) == ["false"] * 3, feed[catch:]
+    assert answers(feed[:catch]) == ["false", "true"], feed[:catch]
+    assert feed[:catch].rstrip().endswith("return true"), "success answers true, last"
+    assert "guard generation == loadGeneration else { return false }" in feed[catch:]
+    assert "if appError.isCancellation { return false }" in feed[catch:]
 
 
 _REFRESH_LIVE = "private func refreshLiveEarningsCards(afterAFailedFeed: Bool = false) async {"
@@ -2105,15 +2114,19 @@ def test_a_failed_first_load_keeps_trying_and_the_sheet_says_so():
     start = _body(vm, "func start() {")
     assert "self.live?.pollSeconds" not in start, "a failed first load ends the poll again"
     next_poll = _norm(_body(vm, "private var nextPollSeconds: Int? {"))
-    assert next_poll.index("if let live") < next_poll.index("guard loadFailed"), (
-        "a real answer must rule before the retry is even considered"
-    )
-    # The no-answer path's own return, read after its guard (the seventh 2026-11-26 review's
-    # follow-up: an order check found the ternary inside `if let live` and passed any return).
-    assert next_poll[next_poll.index("guard loadFailed"):] == (
+    # The whole getter (the ninth 2026-11-26 review: a pin on its tail alone let an early return
+    # before the no-answer path through): a refusal ends the poll, a real answer rules before the
+    # retry is even considered, and with no answer yet the sheet asks again on the 30 s retry,
+    # bounded.
+    assert next_poll == (
+        "{ if refused { return nil } if let live { "
+        "guard let seconds = live.pollSeconds, seconds > 0 else { return nil } "
+        "if failedAsksOverAnswer > 0 { let retry: Int = failedAsksOverAnswer < Self.maxFailedLoads "
+        "? Self.noAnswerRetrySeconds : Self.staleAnswerRetrySeconds return min(seconds, retry) } "
+        "return seconds } "
         "guard loadFailed, failedLoads < Self.maxFailedLoads else { return nil } "
         "return Self.noAnswerRetrySeconds }"
-    ), "with no answer yet the sheet asks again on the 30 s retry, bounded"
+    )
     retry = re.search(r"private static let noAnswerRetrySeconds = (\d+)\b", vm)
     assert retry and int(retry.group(1)) == 30, "read whole: a substring let 300 pass"
     assert "fallback" not in next_poll.lower(), (

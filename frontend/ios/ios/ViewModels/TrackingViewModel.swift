@@ -1762,11 +1762,13 @@ class TrackingViewModel: ObservableObject {
                 ) {
                     // A feed build that fails leaves every card as it was for as long as the
                     // feed keeps failing, one still saying LIVE from an earlier day included, by
-                    // its label or its status (2026-11-26 reviews): the LIVE cards are then asked
-                    // about through their own routes, as outside price hours, never handed back
-                    // to the feed that just failed (`refreshLiveEarningsCards`).
+                    // its label or its status, and a report-day card still drawn `upcoming`
+                    // (2026-11-26 reviews): those cards are then asked about through their own
+                    // routes, as outside price hours, never handed back to the feed that just
+                    // failed (`refreshLiveEarningsCards`).
                     let built: Bool = await self.loadTrackingFeed()
                     if !built, self.filteredAlerts.contains(where: \.isLiveEarnings)
+                                || !self.labelStartReports().isEmpty
                                 || !self.labelEndReports().isEmpty {
                         await self.refreshLiveEarningsCards(afterAFailedFeed: true)
                     }

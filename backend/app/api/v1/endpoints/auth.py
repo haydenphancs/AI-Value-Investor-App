@@ -8,6 +8,7 @@ from jose import JWTError
 from jose.exceptions import ExpiredSignatureError
 from supabase import Client
 import logging
+import random
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -31,6 +32,8 @@ from app.schemas.auth import (
     SetPasswordRequest, ConfirmEmailRequest,
     MessageResponse, PasswordChangedResponse, SignUpResponse, ResendConfirmationRequest,
     OAuthSignInRequest, SessionExchangeRequest,
+    ChangeEmailRequest, ConfirmEmailChangeRequest, EmailChangeResponse,
+    EMAIL_CHANGE_CHANGED, EMAIL_CHANGE_CODES_SENT,
     PASSWORD_TOO_LONG_MESSAGE, _validate_password_strength,
 )
 from app.utils.supabase_async import sb_exec
@@ -2354,4 +2357,468 @@ async def set_password(
         access_token=tokens.access_token,
         refresh_token=tokens.refresh_token,
         user_id=user_id,
+    )
+
+
+# ── Email change (audit CC-09, 2026-11-26) ───────────────────────────────────────────────────
+#
+# There was no way to change an account's email. Two routes now do it, on top of Supabase's
+# Secure email change (both addresses must confirm):
+#
+#   POST /auth/change-email          proof (current password, or the recovery code emailed to the
+#                                    current address) → GoTrue `PUT /user {email}` with the
+#                                    caller's OWN Supabase token → a code to each address.
+#   POST /auth/change-email/confirm  both codes → GoTrue `/verify` type email_change, twice →
+#                                    the account's address is the new one.
+#
+# `public.users.email` follows through migration 212's trigger; the routes also write it
+# themselves after a completed change, so the order of deploy and migration cannot leave Profile,
+# change-password and set-password on the old address.
+#
+# ⚠️ The GoTrue client is a PROCESS-WIDE singleton, and a sign-in stores its session on it. Two
+# separate `run_gotrue` calls (sign in, then `update_user`) can therefore interleave with another
+# request's sign-in, and `update_user` would change THAT user's email. So `update_user` is never
+# used: the PUT carries the caller's own access token explicitly (`jwt=`), which the SDK's
+# `_request` puts in the Authorization header over anything stored on the client.
+#
+# ENUMERATION: an address that already belongs to another account is answered exactly like a
+# sent pair of codes (and after a similar pause): nothing tells the caller which addresses have
+# accounts. The user simply never receives a code at that address.
+
+#: GoTrue codes meaning ANOTHER account already holds the address — answered as "codes sent".
+_GOTRUE_EMAIL_TAKEN_CODES = frozenset({"email_exists", "user_already_exists"})
+#: Wording fallback for an untyped "taken" refusal (an older GoTrue, a test fake).
+_EMAIL_TAKEN_MARKERS = ("already been registered", "already registered", "email address already")
+#: GoTrue codes meaning the address ITSELF cannot be used — the user's to fix.
+_GOTRUE_EMAIL_INVALID_CODES = frozenset({"email_address_invalid", "validation_failed"})
+
+#: How long the "taken" answer waits before it returns, so it is not obviously faster than a
+#: real send (GoTrue mails both codes before it answers). Patched to 0 in tests.
+_EMAIL_TAKEN_PAUSE_SECONDS = (0.4, 1.2)
+#: The same for a confirm with nothing pending, which skips the two verifies. Patched to 0 in tests.
+_CONFIRM_NOTHING_PENDING_PAUSE_SECONDS = (0.1, 0.4)
+
+#: Attempts per trusted client address and per account, per hour. Every start mails two codes.
+CHANGE_EMAIL_LIMIT_PER_IP = (10, 3600)
+CHANGE_EMAIL_LIMIT_PER_USER = (5, 3600)
+#: Each confirm checks up to two codes; GoTrue limits verifies on its side too.
+CONFIRM_EMAIL_CHANGE_LIMIT_PER_IP = (20, 3600)
+CONFIRM_EMAIL_CHANGE_LIMIT_PER_USER = (10, 3600)
+
+_EMAIL_CHANGE_CODES_SENT_MESSAGE = (
+    "We sent a code to your current email and another to the new one. "
+    "Enter both to finish the change."
+)
+_EMAIL_CHANGE_DONE_MESSAGE = "Your email has been changed. Use it to sign in from now on."
+_EMAIL_CHANGE_SEND_FAILED = (
+    "We couldn't send the codes right now. Please try again in a few minutes."
+)
+_EMAIL_CHANGE_BOTH_CODES_REFUSED = (
+    "Those codes are incorrect or have expired. Check the newest email at each address, "
+    "or start again to get new codes."
+)
+_EMAIL_CHANGE_CODE_SPENT = (
+    "We couldn't start the email change, and that code has now been used. "
+    "Send a new code and try again."
+)
+
+
+def _raw_json(data: Any) -> Any:
+    """`xform` for the SDK's `_request`: hand back GoTrue's JSON untouched. The SDK's own
+    parsers raise on the partial email-change answer (`{"msg": ...}` has no user), and its
+    `_request` turns ANY exception into an AuthRetryableError — a refused code would have read
+    as an outage."""
+    return data
+
+
+def _email_key(address: str) -> str:
+    return (address or "").strip().lower()
+
+
+#: The least time between two email-change SENDS for one account, whatever the address. It must
+#: stay at or above Supabase's own per-user minimum interval between emails (60 s by default):
+#: GoTrue runs its "address taken" check BEFORE that interval check, so without this spacing a
+#: second start within the minute answered a FREE address 429 (→ 503) and a TAKEN one 200 —
+#: two quick calls told any account holder which addresses have accounts (independent audit,
+#: 2026-11-26). Checked before any GoTrue call, charged on every send attempt (taken or free),
+#: answered with one 429. Process-local, which is enough: production runs one uvicorn worker.
+CHANGE_EMAIL_SEND_SPACING_SECONDS = 65
+_email_change_last_send: dict[str, float] = {}
+_EMAIL_CHANGE_LAST_SEND_MAX = 10_000
+
+
+def _email_change_send_wait(user_id: str) -> int:
+    """Seconds this account must still wait before another send, 0 when it may send now."""
+    last = _email_change_last_send.get(user_id)
+    if last is None:
+        return 0
+    left = CHANGE_EMAIL_SEND_SPACING_SECONDS - (time.monotonic() - last)
+    return max(0, int(left + 0.999))
+
+
+def _mark_email_change_send(user_id: str) -> None:
+    now = time.monotonic()
+    if len(_email_change_last_send) >= _EMAIL_CHANGE_LAST_SEND_MAX:
+        # Bounded: drop every entry whose wait is over (they no longer limit anything).
+        for uid, at in list(_email_change_last_send.items()):
+            if now - at >= CHANGE_EMAIL_SEND_SPACING_SECONDS:
+                del _email_change_last_send[uid]
+    _email_change_last_send[user_id] = now
+
+
+async def _read_auth_account(get_user_by_id, user_id: str, *, route: str) -> tuple[str, Optional[str]]:
+    """(current address, pending new address) from GoTrue's own user record — the source of
+    truth, never the `public.users` copy (CC-09 is exactly that copy going stale).
+
+    `get_user_by_id` is the bound ADMIN verb, resolved at the call site through
+    `resolve_admin_client` (tests/test_supabase_client_isolation.py)."""
+    try:
+        got = await run_gotrue(get_user_by_id, user_id)
+    except Exception as e:
+        if _gotrue_code(e) == "user_not_found" or _gotrue_status(e) == 404:
+            raise auth_error(
+                ErrorCode.AUTH_ACCOUNT_NOT_FOUND, message=f"{route}: no auth.users row for {user_id}",
+            )
+        logger.error(
+            "%s: account read failed for user=%s: %s: %s (status=%s code=%s)",
+            route, user_id, type(e).__name__, e, _gotrue_status(e), _gotrue_code(e), exc_info=True,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"{route}: admin.get_user_by_id failed: {type(e).__name__}",
+        )
+    user = getattr(got, "user", None)
+    if user is None or not getattr(user, "id", None):
+        raise auth_error(
+            ErrorCode.AUTH_ACCOUNT_NOT_FOUND, message=f"{route}: no auth user returned for {user_id}",
+        )
+    if str(user.id) != str(user_id):
+        logger.error("%s: admin read for user=%s returned user=%s", route, user_id, user.id)
+        raise auth_error(ErrorCode.AUTH_FORBIDDEN, message=f"{route}: account read mismatch")
+    current = (getattr(user, "email", None) or "").strip()
+    if not current:
+        # Not an email account at all (none exist today). Forbidden, not "not found": the
+        # session is fine and must not be cleared.
+        raise auth_error(
+            ErrorCode.AUTH_FORBIDDEN,
+            message=f"{route}: account {user_id} has no email address to change",
+            user_message="This account has no email address to change.",
+        )
+    pending = (getattr(user, "new_email", None) or "").strip() or None
+    return current, pending
+
+
+def _mirror_public_email(supabase: Client, user_id: str, email: str) -> None:
+    """Write the new address into `public.users` too. Migration 212's trigger normally already
+    has; this covers the window before it is applied. Best effort: the change itself succeeded,
+    and a failure leaves only the copy stale (logged, and the trigger/backfill repairs it)."""
+    try:
+        supabase.table("users").update({"email": email}).eq("id", user_id).execute()
+    except Exception as e:  # noqa: BLE001 — logged; the change itself already succeeded
+        logger.warning(
+            "change-email: could not mirror the new address into public.users for user=%s "
+            "(%s: %s) — migration 212's trigger is the other writer",
+            user_id, type(e).__name__, e,
+        )
+
+
+async def _verify_email_change_code(
+    request_verb, address: str, code: str, *, user_id: str, which: str,
+) -> str:
+    """One `/verify` type email_change. "complete" (GoTrue answered with a session: the change is
+    done), "accepted" (this half confirmed, the other still waits) or "rejected" (wrong, expired or
+    already used). An outage or a 429 raises 503 AUTH_UNAVAILABLE: the code may still be good."""
+    try:
+        answer = await run_gotrue(
+            request_verb, "POST", "verify",
+            body={"type": "email_change", "email": address, "token": code},
+            xform=_raw_json,
+        )
+    except Exception as e:
+        if _classify_gotrue_failure(e) == "rejected":
+            logger.info(
+                "change-email/confirm: the %s-address code was refused for user=%s "
+                "(status=%s code=%s)", which, user_id, _gotrue_status(e), _gotrue_code(e),
+            )
+            return "rejected"
+        raise _otp_failure(e, route="change-email/confirm", user_id=user_id)
+    if isinstance(answer, dict) and answer.get("access_token"):
+        return "complete"
+    return "accepted"
+
+
+@router.post("/change-email", response_model=EmailChangeResponse)
+async def change_email(
+    request: ChangeEmailRequest,
+    req: Request,
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
+):
+    """Start changing the signed-in account's email (audit CC-09). See `ChangeEmailRequest`.
+
+    The proof is the current password, or the recovery code from `POST /auth/forgot-password`
+    for an Apple/Google account with none. Then GoTrue's Secure email change mails a code to the
+    current AND the new address; `POST /auth/change-email/confirm` takes both. An address that
+    another account already uses gets the same "codes_sent" answer (enumeration).
+    """
+    client_ip = trusted_client_ip(req)
+    _enforce_credential_limits(
+        (f"changeemail:ip:{client_ip}", *CHANGE_EMAIL_LIMIT_PER_IP),
+        (f"changeemail:user:{user_id}", *CHANGE_EMAIL_LIMIT_PER_USER),
+        detail="Too many email change attempts. Please try again later.",
+    )
+    # Before any GoTrue call, and the same answer whatever the address (see the constant).
+    wait = _email_change_send_wait(user_id)
+    if wait:
+        raise HTTPException(
+            status_code=429,
+            detail="Please wait a minute before asking for new codes.",
+            headers={"Retry-After": str(wait)},
+        )
+
+    current, _pending = await _read_auth_account(
+        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.get_user_by_id,
+        user_id, route="change-email",
+    )
+    new_email = str(request.new_email).strip()
+    if _email_key(new_email) == _email_key(current):
+        raise auth_error(
+            ErrorCode.AUTH_EMAIL_UNCHANGED, message="change-email: the new address is the current one",
+        )
+
+    gotrue = _auth_of(auth_client, supabase)
+    spent_code = request.code is not None
+    if request.current_password is not None:
+        # An Apple/Google account has no password: the sign-in below would answer
+        # invalid_credentials, which reads as "your current password is incorrect" about a
+        # password that never existed. Same probe as change-password, failing open the same way.
+        methods = await auth_methods_service.get(supabase, user_id)
+        if methods is not None and methods.get("has_password") is False:
+            raise auth_error(
+                ErrorCode.AUTH_PASSWORD_NOT_SET,
+                message="change-email with a password on a password-less account",
+                user_message="This account doesn't have a password. Use the code we email you instead.",
+            )
+        try:
+            proven = await run_gotrue(
+                gotrue.auth.sign_in_with_password,
+                {"email": current, "password": request.current_password},
+            )
+        except Exception as e:
+            if _is_rejected_credential(e):
+                logger.info("change-email: current password did not match for user=%s", user_id)
+                raise auth_error(
+                    ErrorCode.AUTH_CREDENTIALS_INVALID,
+                    message="change-email: current-password re-authentication failed",
+                    user_message="Your current password is incorrect.",
+                )
+            logger.error(
+                "change-email: re-authentication failed unexpectedly for user=%s: %s: %s "
+                "(status=%s code=%s)", user_id, type(e).__name__, e, _gotrue_status(e),
+                _gotrue_code(e), exc_info=True,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_UNAVAILABLE,
+                message=f"change-email: current-password check upstream failure: {type(e).__name__}",
+            )
+    else:
+        try:
+            proven = await run_gotrue(
+                gotrue.auth.verify_otp,
+                {"email": current, "token": request.code, "type": "recovery"},
+            )
+        except Exception as e:
+            raise _otp_failure(e, route="change-email", user_id=user_id)
+
+    session = getattr(proven, "session", None)
+    supabase_token = getattr(session, "access_token", None)
+    proven_id = str(getattr(getattr(proven, "user", None), "id", "") or "")
+    if not supabase_token or not proven_id:
+        logger.error(
+            "change-email: the proof succeeded but returned no session for user=%s", user_id,
+        )
+        if spent_code:
+            raise auth_error(
+                ErrorCode.AUTH_CODE_USED, message="change-email: verify_otp returned no session",
+                user_message=_EMAIL_CHANGE_CODE_SPENT,
+            )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE, message="change-email: sign-in returned no session",
+        )
+    if proven_id != str(user_id):
+        logger.error(
+            "change-email: the proof resolved to a DIFFERENT user (token subject=%s, proof=%s)",
+            user_id, proven_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_FORBIDDEN, message="change-email: proof resolved to a different account",
+        )
+
+    # Charged on EVERY send attempt — a taken address included — or the spacing itself would
+    # tell the two apart.
+    _mark_email_change_send(user_id)
+    try:
+        updated = await run_gotrue(
+            gotrue.auth._request, "PUT", "user",
+            jwt=supabase_token, body={"email": new_email}, xform=_raw_json,
+        )
+    except Exception as e:
+        code = _gotrue_code(e)
+        if code in _GOTRUE_EMAIL_TAKEN_CODES or (
+            code is None and any(m in str(e).lower() for m in _EMAIL_TAKEN_MARKERS)
+        ):
+            logger.info(
+                "change-email: the new address already belongs to an account (user=%s) — "
+                "answering as sent", user_id,
+            )
+            await asyncio.sleep(random.uniform(*_EMAIL_TAKEN_PAUSE_SECONDS))
+            return EmailChangeResponse(
+                status=EMAIL_CHANGE_CODES_SENT, email=new_email,
+                message=_EMAIL_CHANGE_CODES_SENT_MESSAGE,
+            )
+        if code in _GOTRUE_EMAIL_INVALID_CODES:
+            logger.info(
+                "change-email: the provider refused the new address for user=%s (code=%s)",
+                user_id, code,
+            )
+            raise auth_error(
+                ErrorCode.AUTH_EMAIL_REJECTED,
+                message=f"change-email: the provider refused the new address (code={code})",
+            )
+        if _classify_gotrue_failure(e) == "rate_limited":
+            logger.error(
+                "GOTRUE_RATE_LIMITED route=change-email verb=update_user user=%s status=%s code=%s",
+                user_id, _gotrue_status(e), code,
+            )
+        else:
+            logger.error(
+                "change-email: update_user failed for user=%s: %s: %s (status=%s code=%s)",
+                user_id, type(e).__name__, e, _gotrue_status(e), code, exc_info=True,
+            )
+        if spent_code:
+            raise auth_error(
+                ErrorCode.AUTH_CODE_USED,
+                message=(
+                    f"change-email: update_user failed after a verified code: "
+                    f"{type(e).__name__} (code={code})"
+                ),
+                user_message=_EMAIL_CHANGE_CODE_SPENT,
+            )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"change-email: update_user failed: {type(e).__name__} (code={code})",
+            user_message=_EMAIL_CHANGE_SEND_FAILED,
+        )
+
+    body = updated if isinstance(updated, dict) else {}
+    now_email = str(body.get("email") or "").strip()
+    pending = str(body.get("new_email") or "").strip()
+    if now_email and _email_key(now_email) == _email_key(new_email) and not pending:
+        # GoTrue changed the address AT ONCE: this project has email confirmation off. Honest
+        # answer, and loud, because the double confirmation the design relies on is not happening.
+        logger.error(
+            "change-email: the address changed WITHOUT confirmation for user=%s — turn on "
+            "'Confirm email' and 'Secure email change' in Supabase (launch checklist §5b)", user_id,
+        )
+        await asyncio.to_thread(_mirror_public_email, supabase, user_id, now_email)
+        return EmailChangeResponse(
+            status=EMAIL_CHANGE_CHANGED, email=now_email, message=_EMAIL_CHANGE_DONE_MESSAGE,
+        )
+    logger.info("change-email: codes sent for user=%s", user_id)
+    return EmailChangeResponse(
+        status=EMAIL_CHANGE_CODES_SENT, email=new_email, message=_EMAIL_CHANGE_CODES_SENT_MESSAGE,
+    )
+
+
+@router.post("/change-email/confirm", response_model=EmailChangeResponse)
+async def confirm_email_change(
+    request: ConfirmEmailChangeRequest,
+    req: Request,
+    user_id: str = Depends(get_current_user_id),
+    supabase: Client = Depends(get_supabase),
+    auth_client: Client = Depends(get_auth_client),
+    admin_client: Client = Depends(get_admin_client),
+):
+    """Finish an email change with the code sent to the current address and the one sent to the
+    new address. Each code is checked against the address GoTrue itself holds (current, and the
+    pending `new_email`), never one from the body.
+
+    Order-tolerant: Secure email change consumes each code as it confirms, so a retry after one
+    code was accepted cannot re-check that one. The current-address code is tried first; if the
+    change is not complete, the new-address code is tried too, and a "complete" from either
+    finishes the job. A refusal names the code that failed when the other one was accepted.
+    """
+    client_ip = trusted_client_ip(req)
+    _enforce_credential_limits(
+        (f"changeemail_confirm:ip:{client_ip}", *CONFIRM_EMAIL_CHANGE_LIMIT_PER_IP),
+        (f"changeemail_confirm:user:{user_id}", *CONFIRM_EMAIL_CHANGE_LIMIT_PER_USER),
+        detail="Too many attempts. Please wait a while, then try again.",
+    )
+
+    current, pending = await _read_auth_account(
+        resolve_admin_client(admin_client, auth_client, supabase).auth.admin.get_user_by_id,
+        user_id, route="change-email/confirm",
+    )
+    if not pending:
+        # NOT a distinct answer (enumeration): a start aimed at another account's address leaves
+        # nothing pending, so "nothing to confirm" would tell the caller that address is
+        # registered. It reads exactly like two refused codes, after a pause like two verifies.
+        logger.info("change-email/confirm: nothing pending for user=%s", user_id)
+        await asyncio.sleep(random.uniform(*_CONFIRM_NOTHING_PENDING_PAUSE_SECONDS))
+        raise auth_error(
+            ErrorCode.AUTH_CODE_INVALID,
+            message="change-email/confirm: codes refused (nothing pending)",
+            user_message=_EMAIL_CHANGE_BOTH_CODES_REFUSED,
+        )
+
+    gotrue = _auth_of(auth_client, supabase)
+    first = await _verify_email_change_code(
+        gotrue.auth._request, current, request.current_code, user_id=user_id, which="current",
+    )
+    second = None
+    if first != "complete":
+        second = await _verify_email_change_code(
+            gotrue.auth._request, pending, request.new_code, user_id=user_id, which="new",
+        )
+
+    if "complete" in (first, second):
+        await asyncio.to_thread(_mirror_public_email, supabase, user_id, pending)
+        logger.info("change-email: completed for user=%s", user_id)
+        return EmailChangeResponse(
+            status=EMAIL_CHANGE_CHANGED, email=pending, message=_EMAIL_CHANGE_DONE_MESSAGE,
+        )
+
+    if first == "accepted" and second == "rejected":
+        user_message = (
+            f"The code sent to {pending} is incorrect or has expired. "
+            "Check the newest email at that address."
+        )
+    elif first == "rejected" and second == "accepted":
+        user_message = (
+            f"The code sent to {current} is incorrect or has expired. "
+            "Check the newest email at that address."
+        )
+    elif first == "accepted" and second == "accepted":
+        # Both halves confirmed and yet no session came back: GoTrue's answer is not the one this
+        # route was written against. Ours, and the codes are spent.
+        logger.error(
+            "change-email/confirm: both codes accepted but the change did not complete for user=%s",
+            user_id,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="change-email/confirm: both codes accepted, no completion",
+            user_message=(
+                "We couldn't finish the change. Check your profile, and start again if your "
+                "email hasn't changed."
+            ),
+        )
+    else:
+        user_message = _EMAIL_CHANGE_BOTH_CODES_REFUSED
+    raise auth_error(
+        ErrorCode.AUTH_CODE_INVALID,
+        message=f"change-email/confirm: codes refused (current={first}, new={second})",
+        user_message=user_message,
     )

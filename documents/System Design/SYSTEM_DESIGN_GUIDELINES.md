@@ -2787,6 +2787,49 @@ and for consumables that gate is load-bearing rather than tidy: Apple does not r
 so credits bought against a per-install guest identity would be stranded on an install the user can
 wipe. See [§9b.4](#9b4-restore-and-why-buying-requires-an-account).
 
+**An account's email changes only with a proof and two codes (2026-11-26, audit CC-09).** There
+was no way to change it, and `public.users.email` — the copy change-password, set-password and
+Profile read — never followed a change made in Studio.
+- `POST /auth/change-email {new_email, current_password | code}` needs exactly ONE proof: the
+  current password (re-checked by a real sign-in), or, for an Apple/Google account with none, the
+  recovery code `POST /auth/forgot-password` mails to the CURRENT address (set-password's proof).
+  Both are checked against the address GoTrue holds (`admin.get_user_by_id`), never the body and
+  never the `public.users` copy. The change itself is GoTrue `PUT /user {email}` made with the
+  caller's OWN Supabase token passed explicitly (`auth._request(..., jwt=)`): the auth client is a
+  process-wide singleton whose stored session another request's sign-in can replace, so
+  `update_user()` could change someone else's email.
+- With Supabase's **Secure email change** ON (the launch checklist pins it), GoTrue mails a code to
+  the current AND the new address, from the canonical template
+  `documents/legal/supabase-email-templates/change-email.html` (only `{{ .Token }}` and
+  `{{ .NewEmail }}`; never the current address, which a mistyped new one would leak).
+  `POST /auth/change-email/confirm {current_code, new_code}` verifies each as type `email_change`
+  against the account's current and pending (`new_email`) addresses. It is order-tolerant: each
+  code is spent as it confirms, so a "complete" answer from either verify finishes the change, and a
+  refusal names the address whose code failed when the other was accepted.
+- **Enumeration:** an address another account holds (`email_exists`) is answered exactly like a
+  real send (`status: "codes_sent"`, after a 0.4–1.2 s pause); no code ever arrives. GoTrue checks
+  "taken" BEFORE its per-user send interval, so a second start within that minute used to answer a
+  free address 503 and a taken one 200 (independent audit, 2026-11-26): the backend now spaces
+  sends per account (`CHANGE_EMAIL_SEND_SPACING_SECONDS` = 65, at or above Supabase's 60 s
+  default), checked before any GoTrue call and charged on every send attempt, one 429 for both.
+  Both routes are also limited (start 10/h per address, 5/h per account; confirm 20/h and 10/h).
+  **Residuals, accepted for the owner to re-check:** with Secure email change, GoTrue mails the
+  CURRENT address only on a real send, so an account holder sees in their own inbox whether an
+  address is taken (one inbox, one start, ≤ 5 per account per hour); turning Secure email change
+  off would close that but let a stolen password alone move an account. While the project-wide
+  email quota is used up, a free address answers 503 and a taken one 200. Timing differences remain
+  over many tries.
+- New codes, both 400 `fix_input`: `AUTH_EMAIL_UNCHANGED` (the current address) and
+  `AUTH_EMAIL_REJECTED` (GoTrue refused the address itself). A spent recovery code after a failed
+  change is `AUTH_CODE_USED`. There is deliberately no "nothing waits to confirm" code: a start
+  aimed at another account's address leaves nothing pending, so a confirm then reads exactly like
+  two refused codes (`AUTH_CODE_INVALID`, after a short pause). (A refused change also leaves an
+  EARLIER pending change, and its codes, intact — the same own-inbox residual as above.)
+- Migration 212's `on_auth_user_email_changed` trigger copies a changed, non-empty
+  `auth.users.email` into `public.users` (fails open; the pending `email_change` is never synced);
+  the routes also write it after a completed change, so deploy order does not matter. The caller's
+  session is not re-minted: the `email` claim in Caydex tokens is informational, read by nothing.
+
 Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 
 ### 9.2 Data Protection
@@ -5451,6 +5494,58 @@ calendar mode may simply not be reconciled yet.
   `refund_credits`' existing cap, unchanged from the calendar boundary.
 - A $0 offer period (an offer code or a future free trial) is a period like any other and grants a
   full allocation. That was already true of `grant_tier_upgrade`.
+
+### 9b.13 The welcome grant is once per person (migration 211, audit CC-01)
+
+Every new `public.users` row is seeded the free tier's allocation (`create_user_credits`, 50
+credits), and DELETE /users/me removes the auth row completely. So delete → sign up again with the
+same email, Apple ID or Google account, or a Gmail alias of a live account, used to mint another
+50 credits every time (two AI reports). Owner decisions, 2026-11-26: a returning account opens
+with "0 credits (Recommended)"; its fingerprint is kept "90 days (Recommended)".
+
+- **The ledger.** `deleted_account_fingerprints` holds HMAC-SHA256 fingerprints of a deleted
+  account's canonical email (lowercased, local part cut at its first `+`, Gmail dots removed,
+  googlemail.com → gmail.com: `canonical_account_email`) and of each non-email identity's
+  provider subject (`auth.identities.provider_id`, e.g. Apple's and Google's `sub`). No user id,
+  no email. The HMAC key is a Vault secret the migration generates inside the database
+  (`deleted_account_fingerprint_key`, never rotated: rotating it orphans every row); a missing key
+  RAISES rather than falling back to an unkeyed, dictionary-reversible hash. Rows expire 90 days
+  after the last deletion, are never matched once expired, and are deleted by the next sign-up or
+  deletion. Service-role only.
+- **Written** by `record_deleted_account(uuid)` from DELETE /users/me, after the purge succeeded
+  and BEFORE `admin.delete_user` (it reads `auth.users` / `auth.identities`). It fails OPEN, loudly:
+  deleting an account is an App Store 5.1.1(v) and privacy obligation, the ledger only protects
+  free credits, so a failure is an ERROR naming what is lost and the deletion completes. DELETE
+  /users/me is also limited (10 per address, 5 per account, per hour).
+- **Read** by `trg_withhold_returning_welcome`, a DEFERRED constraint trigger on `auth.users` AFTER
+  INSERT. It runs at COMMIT because GoTrue inserts the user row first and its identity row second
+  in one transaction, so an ordinary AFTER INSERT trigger cannot see the Apple/Google subject.
+  On a fingerprint match, or another live account with the same canonical email, it withholds the
+  UNTOUCHED opening grant only (nothing used, no purchased credits, no paid period,
+  `total = tier_alloc`, no ledger row but the `grant`): it appends a granted-only
+  `welcome_withheld` row (−50, `ref_id` NULL so no refund pairs with it; Credit History: "Welcome
+  credits already claimed") and sets `total` to 0. `tier_alloc` keeps the period's allowance on
+  purpose: `ensure_credit_period` tops a calendar account up whenever `tier_alloc` is below the
+  plan's allocation, so zeroing it re-granted the 50 as `tier_upgrade` at the next balance read
+  (caught by the local end-to-end run). The purchased pool is never
+  read or written (§9b.1). The next ET month's allowance arrives as usual. It fails OPEN (the 044
+  pattern): an error keeps the normal grant, because blocking a sign-up over a credit control is
+  the worse failure.
+- **Verified on a local Supabase stack (2026-11-26, CLI 2.75, migrations 211 + 212 applied as
+  `postgres` and re-applied idempotently):** delete → same address re-registered (other case) opens
+  at 0 with `grant` + `welcome_withheld`; a live Gmail account's `googlemail.com` dot/plus alias opens
+  at 0; an Apple and a Google subject, inserted the way GoTrue does (user row, then identity row, one
+  transaction), are withheld for a new relay address; a balance read does not top the grant back
+  up; with the Vault key hidden the sign-up commits with the normal grant and
+  `record_deleted_account` raises; expired rows neither match nor survive the next sign-up; a grant
+  used before commit is left alone. The suite pins the SQL at the source level only (no database in
+  tests), so this run is the behavioural evidence.
+- **Not covered, accepted:** a genuinely new mailbox or Apple/Google account still gets the
+  welcome grant (the bar is a real identity, not zero); the address an account had BEFORE an email
+  change is not fingerprinted at deletion; `+` is stripped for every domain, so two people sharing a
+  plus-addressed mailbox count as one (so a new QA or App Review account made as a +alias of an
+  existing inbox opens with 0 credits); a canonicalisation change needs a REINDEX of
+  `idx_users_canonical_email`. The privacy policy §6 states the 90-day fingerprint.
 
 ---
 

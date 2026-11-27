@@ -283,6 +283,21 @@ class ErrorCode(str, Enum):
     # UNCONFIRMED is not this: that person gets a new code (the code screen).
     AUTH_EMAIL_ALREADY_REGISTERED = "AUTH_EMAIL_ALREADY_REGISTERED"
 
+    # The in-app email change (POST /auth/change-email, migration 212, audit CC-09). Both are
+    # about what the user typed, never the session: 400 + `fix_input`, never 401, never in
+    # `triggersTokenRefresh`, never a cleared credential.
+    #   AUTH_EMAIL_UNCHANGED  the new address IS the account's current address.
+    #   AUTH_EMAIL_REJECTED   the identity provider refused the address itself (invalid). NEVER
+    #                         used for "an account already has it": that answer is the ordinary
+    #                         "codes sent" 200, so this route cannot tell anyone which addresses
+    #                         have accounts.
+    # ⚠️ There is deliberately NO "no change is waiting" code for /auth/change-email/confirm: a
+    # start aimed at another account's address leaves nothing pending, so that code would answer
+    # "is this address registered?" for the price of two junk codes. Nothing pending reads exactly
+    # like two refused codes (AUTH_CODE_INVALID).
+    AUTH_EMAIL_UNCHANGED = "AUTH_EMAIL_UNCHANGED"
+    AUTH_EMAIL_REJECTED = "AUTH_EMAIL_REJECTED"
+
     # The five below are deliberately DISTINCT rather than one AUTH_FAILED, because iOS must
     # react differently to each and only two of them may destroy a stored credential. Collapsing
     # them is how "tapped Follow while signed out" became "your session expired" — and how a
@@ -470,6 +485,8 @@ _USER_MESSAGES: Dict[ErrorCode, str] = {
         "This email is already in use. Please sign in instead, or use Forgot password on the "
         "sign-in screen. If you signed up with Apple or Google, use that button."
     ),
+    ErrorCode.AUTH_EMAIL_UNCHANGED: "That's already the email on your account.",
+    ErrorCode.AUTH_EMAIL_REJECTED: "That email address can't be used. Try a different one.",
     ErrorCode.TICKER_NOT_FOUND: (
         "We couldn't find that ticker symbol. Check the spelling and try again."
     ),
@@ -666,6 +683,8 @@ _DEFAULT_ACTIONS: Dict[ErrorCode, str] = {
     ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED: "sign_in",
     # fix_input: the field holds a dead code; the cure is a new one. NOT retry_later.
     ErrorCode.AUTH_CODE_USED: "fix_input",
+    ErrorCode.AUTH_EMAIL_UNCHANGED: "fix_input",
+    ErrorCode.AUTH_EMAIL_REJECTED: "fix_input",
     ErrorCode.TICKER_NOT_FOUND: "check_symbol",
     ErrorCode.FMP_RATE_LIMITED: "retry_later",
     ErrorCode.FMP_UNAVAILABLE: "retry_later",
@@ -751,6 +770,9 @@ _DEFAULT_STATUS: Dict[ErrorCode, int] = {
     # 503: ours — the code was good and the write failed. Never 401 (set-password's caller is
     # signed in and their session is fine).
     ErrorCode.AUTH_CODE_USED: 503,
+    # 400: what the user typed, or the account's state. Never 401/403 (no credential is wrong).
+    ErrorCode.AUTH_EMAIL_UNCHANGED: 400,
+    ErrorCode.AUTH_EMAIL_REJECTED: 400,
     ErrorCode.TICKER_NOT_FOUND: 404,
     ErrorCode.INVALID_PERSONA: 400,
     ErrorCode.INVALID_INPUT: 400,

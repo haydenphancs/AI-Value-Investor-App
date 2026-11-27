@@ -6,12 +6,14 @@ Frontend: GET /users/me, GET /users/me/credits, PATCH /users/me
 import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from supabase import Client
 import logging
 from typing import Optional
 
 from app.api.error_response import ErrorCode, auth_error, make_error_response
+from app.api.v1.endpoints.auth import _enforce_credential_limits
+from app.core.security import trusted_client_ip
 from app.database import (
     get_admin_client, get_auth_client, get_supabase, resolve_admin_client,
 )
@@ -19,6 +21,7 @@ from app.dependencies import (
     AvatarRateLimit,
     ProfileRateLimit,
     get_current_user,
+    get_current_user_id,
     get_current_user_or_guest,  # TEMP: guest fallback
     get_profile_identity,
     GUEST_USER_ID,
@@ -1505,30 +1508,107 @@ def _purge_avatars(supabase: Client, user_id: str) -> Optional[str]:
         return f"{type(e).__name__}: {e}"
 
 
+#: DELETE /users/me attempts per trusted client address and per account, per hour. Deletion is
+#: the middle step of the free-credit loop (audit CC-01: sign up, spend the welcome grant, delete,
+#: sign up again), so it is bounded even though the fingerprint ledger now closes the loop. 5 per
+#: account leaves room for the retries an ACCOUNT_DELETE_INCOMPLETE invites.
+ACCOUNT_DELETE_LIMIT_PER_IP = (10, 3600)
+ACCOUNT_DELETE_LIMIT_PER_USER = (5, 3600)
+
+
+async def _account_deletion_rate_limit(
+    req: Request, user_id: str = Depends(get_current_user_id),
+) -> None:
+    """Per-IP, then per-account, through the credential limiter's short-circuiting helper (its
+    keys are a trusted address and a verified token subject, never caller-chosen text)."""
+    client_ip = trusted_client_ip(req)
+    _enforce_credential_limits(
+        (f"delete_account:ip:{client_ip}", *ACCOUNT_DELETE_LIMIT_PER_IP),
+        (f"delete_account:user:{user_id}", *ACCOUNT_DELETE_LIMIT_PER_USER),
+        detail="Too many account deletion attempts. Please try again later.",
+    )
+
+
+AccountDeletionRateLimit = Depends(_account_deletion_rate_limit)
+
+
+def _record_deleted_account(supabase: Client, user_id: str) -> Optional[int]:
+    """Fingerprint the account (canonical email + Apple/Google subject) for 90 days, so the
+    account that replaces it does not get the free welcome credits again (migration 211, audit
+    CC-01). Must run while `auth.users` / `auth.identities` still hold the account, i.e. BEFORE
+    `admin.delete_user`.
+
+    FAILS OPEN, loudly. Deleting the account is an App Store 5.1.1(v) and privacy obligation; the
+    ledger only protects free credits. So a failure never blocks the deletion — it is an ERROR
+    (Sentry) naming what is lost: this person can claim the welcome grant once more. A missing
+    function (migration 211 not applied yet: PGRST202 / 42883) is a WARNING, the deploy-order
+    case. Returns the number of fingerprints written, or None when nothing could be recorded.
+    """
+    try:
+        result = supabase.rpc("record_deleted_account", {"p_user_id": user_id}).execute()
+    except Exception as e:  # noqa: BLE001 — classified and logged below; never blocks deletion
+        detail = str(e)
+        if "PGRST202" in detail or "42883" in detail:
+            logger.warning(
+                "Account deletion: record_deleted_account is missing (apply migration 211) — "
+                "user=%s deleted without a fingerprint", user_id,
+            )
+            return None
+        logger.error(
+            "Account deletion: could not record the deleted-account fingerprints for user=%s "
+            "(%s: %s) — deleting anyway; this email / Apple / Google ID can claim the welcome "
+            "credits once more", user_id, type(e).__name__, e, exc_info=True,
+        )
+        return None
+    written = result.data
+    if isinstance(written, bool) or not isinstance(written, int):
+        logger.error(
+            "Account deletion: record_deleted_account answered a %s for user=%s (expected a "
+            "fingerprint count) — treating as not recorded", type(written).__name__, user_id,
+        )
+        return None
+    if written <= 0:
+        # The auth row had no email and no Apple/Google identity, or was already gone.
+        logger.warning(
+            "Account deletion: no fingerprint recorded for user=%s (no email or identity found)",
+            user_id,
+        )
+    else:
+        logger.info("Account deletion: %d fingerprint(s) recorded for user=%s", written, user_id)
+    return written
+
+
 @router.delete("/me")
 async def delete_account(
     user: dict = Depends(get_current_user),
     supabase: Client = Depends(get_supabase),
     auth_client: Client = Depends(get_auth_client),
     admin_client: Client = Depends(get_admin_client),
+    _rate: None = AccountDeletionRateLimit,
 ):
     """Permanently delete the CALLER'S OWN account and all of their data.
 
-    Four steps, in this order:
+    Five steps, in this order:
 
     1. Storage — remove `research-pdfs/reports/<user_id>/*`. Done FIRST because the
        object path is the only remaining handle on those files; if the auth row went
-       first and step 4 then failed, the PDFs would be orphaned with no way to find them.
+       first and step 5 then failed, the PDFs would be orphaned with no way to find them.
     2. Un-FK'd tables — `_UNLINKED_USER_TABLES`. These have no foreign key to
-       `public.users`, so the cascade in step 4 does not reach them.
-    3. Sign in with Apple — revoke the stored Apple grant (SOC-04, best-effort, never blocks).
-    4. `auth.users` — cascades to `public.users` and every FK-linked child table
+       `public.users`, so the cascade in step 5 does not reach them.
+    3. The deleted-account fingerprint (migration 211, audit CC-01) — keyed HMACs of the
+       canonical email and the Apple/Google subject, kept 90 days, no user id. It must be read
+       from `auth.users` / `auth.identities` before step 5 removes them. Fails open (see
+       `_record_deleted_account`).
+    4. Sign in with Apple — revoke the stored Apple grant (SOC-04, best-effort, never blocks).
+       Independent of step 3 (it reads `apple_sign_in_grants`, not `auth.*`); after it because
+       the fingerprint is a fast database call and the Apple call can take up to 8 s.
+    5. `auth.users` — cascades to `public.users` and every FK-linked child table
        (user_credits, subscriptions, apple_sign_in_grants,
        user_settings, device_tokens, whale_follows, …). NOT chat_sessions: migration 111
        dropped its FK, so it is purged explicitly in step 2 via _UNLINKED_USER_TABLES
        (chat_messages still cascades from chat_sessions(id)).
 
-    The previous implementation did step 4 only, and its docstring claimed that removed
+    The previous implementation did step 5 only, and its docstring claimed that removed
     "all of the user's data in one call". It did not: four tables and every generated PDF
     survived. Promising deletion and not delivering it is both an App Review 5.1.1 problem
     and a straightforwardly false statement to the user.
@@ -1590,7 +1670,12 @@ async def delete_account(
             details={"failed": ", ".join(sorted(failures))},
         )
 
-    # 3. Sign in with Apple (SOC-04): revoke the account's Apple grant, as Apple's account-deletion
+    # 3. Fingerprint the account while the auth rows still exist, so a new account with the same
+    #    email / Apple ID / Google account opens without the welcome grant. Only once nothing
+    #    above failed: an aborted deletion keeps the account, and needs no fingerprint yet.
+    await asyncio.to_thread(_record_deleted_account, supabase, user_id)
+
+    # 4. Sign in with Apple (SOC-04): revoke the account's Apple grant, as Apple's account-deletion
     # guidance asks. BEFORE the auth row goes — `apple_sign_in_grants` cascades from public.users,
     # so afterwards the token needed to revoke is gone too. AFTER the purge check above, so a
     # deletion that aborts (and can be retried) never revokes first. Best-effort: a failure is
@@ -1606,7 +1691,7 @@ async def delete_account(
             user_id, type(e).__name__, exc_info=True,
         )
 
-    # 4. Identity row + every FK-linked child table.
+    # 5. Identity row + every FK-linked child table.
     try:
         # ADMIN client — the one nothing ever signs in on. `admin.*` does not emit SIGNED_IN
         # itself, which is what made this look safe, but it READS the same headers dict a

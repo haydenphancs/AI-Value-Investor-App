@@ -201,6 +201,11 @@ _EXPECTED_ACTIONS = {
     # "let them know right away"). The person is on the SIGN-UP form, holds no session, and
     # signing in is the cure — so `sign_in` is right here, as for AUTH_CONFIRMED_SIGN_IN_FAILED.
     ErrorCode.AUTH_EMAIL_ALREADY_REGISTERED: "sign_in",
+    # The email change (CC-09): the address typed IS the current one, or the provider refused
+    # the address itself. The user's to fix on the form they are looking at — never a retry of
+    # the identical request, never a session action.
+    ErrorCode.AUTH_EMAIL_UNCHANGED: "fix_input",
+    ErrorCode.AUTH_EMAIL_REJECTED: "fix_input",
     # Sign-in refused until the address is confirmed: the action opens the confirmation step.
     ErrorCode.EMAIL_NOT_CONFIRMED: "confirm_email",
 }

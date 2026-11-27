@@ -3,7 +3,7 @@
 import string
 import unicodedata
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from typing import Optional
 
 # The display-name bound lives with the profile schema that owns the column, and is imported
@@ -293,6 +293,79 @@ class ConfirmEmailRequest(BaseModel):
     @classmethod
     def _code_digits(cls, v: str) -> str:
         return _normalize_otp_code(v)
+
+
+class ChangeEmailRequest(BaseModel):
+    """Start changing the signed-in account's email address (audit CC-09).
+
+    The bearer token alone is never enough — a stolen access token would otherwise move the
+    account to the thief's mailbox, and every reset code with it. So exactly ONE proof comes
+    with the request:
+      * `current_password` — an account with a password, re-checked by a real sign-in; or
+      * `code` — the recovery code `POST /auth/forgot-password` emails to the CURRENT address
+        (an Apple/Google account has no password; the same proof `/auth/set-password` takes).
+    The current address is resolved from the token's subject, never the body.
+
+    Supabase's Secure email change then mails a code to BOTH addresses, and
+    `POST /auth/change-email/confirm` takes the two.
+    """
+
+    new_email: EmailStr
+    current_password: Optional[str] = Field(
+        default=None, min_length=1, max_length=SIGN_IN_SECRET_MAX_LENGTH, repr=False,
+    )
+    code: Optional[str] = Field(
+        default=None, min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False,
+    )
+
+    @field_validator("code")
+    @classmethod
+    def _code_digits(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else _normalize_otp_code(v)
+
+    @model_validator(mode="after")
+    def _exactly_one_proof(self) -> "ChangeEmailRequest":
+        if (self.current_password is None) == (self.code is None):
+            raise ValueError("send exactly one of current_password or code")
+        return self
+
+
+class ConfirmEmailChangeRequest(BaseModel):
+    """Finish an email change with the two codes Supabase's Secure email change sent: one to
+    the current address, one to the new one. Both addresses are read from the account itself
+    (the token's subject), never from the body."""
+
+    current_code: str = Field(min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False)
+    new_code: str = Field(min_length=OTP_MIN_DIGITS, max_length=OTP_RAW_MAX_LENGTH, repr=False)
+
+    @field_validator("current_code", "new_code")
+    @classmethod
+    def _code_digits(cls, v: str) -> str:
+        return _normalize_otp_code(v)
+
+
+#: `EmailChangeResponse.status` values. iOS decodes this field; a new value needs an iOS branch
+#: first (the decoder treats an unknown one as "codes sent", the safe reading).
+EMAIL_CHANGE_CODES_SENT = "codes_sent"
+EMAIL_CHANGE_CHANGED = "changed"
+
+
+class EmailChangeResponse(BaseModel):
+    """Both email-change steps answer with this shape.
+
+    `status`:
+      * "codes_sent" — `/auth/change-email`: check both inboxes. Also the answer when another
+        account already uses the address: no email goes out then, but the response is the same,
+        so this route never tells anyone which addresses have accounts.
+      * "changed" — `/auth/change-email/confirm` (or a project with email confirmation off): the
+        account's address is now `email`.
+    `email` is the address the user asked for ("codes_sent") or the account's new address
+    ("changed"). The caller's session is untouched either way: nothing is re-minted.
+    """
+
+    status: str
+    email: str
+    message: str
 
 
 class MessageResponse(BaseModel):

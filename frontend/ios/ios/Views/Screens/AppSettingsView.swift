@@ -107,7 +107,7 @@ struct AppSettingsView: View {
                 // The subscription sentence is Apple's account-deletion guidance for apps that sell
                 // auto-renewable subscriptions: billing is Apple's, so deleting the account here
                 // cannot stop it, and the user must be told how to.
-                Text("This action is permanent and cannot be undone. All your research reports, watchlists, and settings will be deleted.\n\nDeleting your account does not cancel a Pro or Max subscription billed by Apple. Cancel it first under Manage Subscription, or in Settings › your name › Subscriptions.")
+                Text("This action is permanent and cannot be undone. All your research reports, watchlists, and settings will be deleted.\n\nDeleting your account does not cancel a Pro or Max subscription billed by Apple. Cancel it first under Manage Subscription, or in Settings › your name › Subscriptions.\n\nA new account made with the same email, Apple ID or Google account within 90 days won't get the free welcome credits again.")
             }
             // Local, for the reason spelled out in `deleteAccount()`: `appState.currentError` renders
             // on the root, which this fullScreenCover is drawn above.
@@ -417,6 +417,30 @@ struct AppSettingsView: View {
                             subtitle: needsPassword
                                 ? "Add a password to sign in without \(appState.user.profile?.primaryProviderLabel ?? "your provider")"
                                 : "Update your account password"
+                        )
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(AppTypography.iconXS)
+                            .foregroundColor(AppColors.textMuted)
+                    }
+                    .padding(.horizontal, AppSpacing.lg)
+                    .padding(.vertical, AppSpacing.md)
+                    .background(AppColors.cardBackground)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+
+                // Email (audit CC-09). Same `hasPassword` reading as the password row: nil is
+                // UNKNOWN and treated as "has one" — the server answers a password sent for a
+                // password-less account with AUTH_PASSWORD_NOT_SET, which names the code route,
+                // whereas guessing "no password" would ask a password user for a reset code.
+                NavigationLink {
+                    ChangeEmailView(usesPassword: !needsPassword)
+                } label: {
+                    HStack {
+                        settingsLabel(
+                            title: "Change Email",
+                            subtitle: appState.user.profile?.email ?? "Move your account to a new address"
                         )
                         Spacer()
                         Image(systemName: "chevron.right")

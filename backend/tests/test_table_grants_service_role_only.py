@@ -159,6 +159,10 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # earnings figure nor reads the filing again. Public SEC data, but read only by the backend
     # (earnings_live_service).
     "209": ("earnings_filing_cache",),
+    # 211: keyed fingerprints of deleted accounts (audit CC-01). No user id and no email, but a
+    # client that could read it could test guesses against it, and one that could write it could
+    # deny another person's welcome grant. Read and written only by SECURITY DEFINER functions.
+    "211": ("deleted_account_fingerprints",),
     # 213: Sign in with Apple refresh tokens, kept only so account deletion can revoke the grant
     # (SOC-04). A credential; read and written only by the backend, as service_role.
     "213": ("apple_sign_in_grants",),

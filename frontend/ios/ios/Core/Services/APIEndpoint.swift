@@ -113,6 +113,13 @@ enum APIEndpoint: Sendable {
     /// Create a FIRST password for a signed-in account that has none (Apple/Google sign-in).
     /// The emailed recovery code is the proof — the session alone is deliberately not enough.
     case setPassword(code: String, newPassword: String)
+    /// Start changing a signed-in account's email (`POST /auth/change-email`). Exactly one proof:
+    /// the current password, or the recovery code `forgotPassword` mailed to the CURRENT address
+    /// (an Apple/Google account has no password). Supabase then mails a code to each address.
+    case changeEmail(newEmail: String, currentPassword: String?, code: String?)
+    /// Finish it with the two codes (`POST /auth/change-email/confirm`). Both addresses come from
+    /// the account on the server, never from this request.
+    case confirmEmailChange(currentCode: String, newCode: String)
     /// Re-send the signup confirmation email.
     case resendConfirmation(email: String)
     /// Confirm a new account's address with the emailed code and sign in with the password
@@ -488,6 +495,10 @@ enum APIEndpoint: Sendable {
             return "/api/v1/auth/change-password"
         case .setPassword:
             return "/api/v1/auth/set-password"
+        case .changeEmail:
+            return "/api/v1/auth/change-email"
+        case .confirmEmailChange:
+            return "/api/v1/auth/change-email/confirm"
         case .resendConfirmation:
             return "/api/v1/auth/resend-confirmation"
         case .confirmEmail:
@@ -837,6 +848,7 @@ enum APIEndpoint: Sendable {
         case .trackEvents,
              .signIn, .signUp, .refreshToken, .signOut,
              .forgotPassword, .resetPassword, .changePassword, .setPassword,
+             .changeEmail, .confirmEmailChange,
              .resendConfirmation, .confirmEmail, .oauthSignIn, .sessionExchange, .verifyPurchase,
              .addToWatchlist, .generateResearch, .rateReport,
              .createChatSession, .sendChatMessage, .streamChatMessage,
@@ -1057,6 +1069,12 @@ enum APIEndpoint: Sendable {
 
         case .setPassword(let code, let newPassword):
             return SetPasswordRequest(code: code, newPassword: newPassword)
+
+        case .changeEmail(let newEmail, let currentPassword, let code):
+            return ChangeEmailRequest(newEmail: newEmail, currentPassword: currentPassword, code: code)
+
+        case .confirmEmailChange(let currentCode, let newCode):
+            return ConfirmEmailChangeRequest(currentCode: currentCode, newCode: newCode)
 
         case .resendConfirmation(let email):
             return ResendConfirmationRequest(email: email)
@@ -1481,6 +1499,13 @@ enum APIEndpoint: Sendable {
         // its only caller already ignores the result — and saves a guaranteed-401 round trip.
         case .signOut, .changePassword, .setPassword:
             return .signInRequired
+
+        // The email change (audit CC-09): both take `get_current_user_id` and act on the
+        // caller's own account. NOT auth endpoints (`isAuthEndpoint`), for .setPassword's
+        // reason: a 401 comes from the dependency, before any code is checked, so the
+        // refresh-and-retry replays a request whose codes were never spent.
+        case .changeEmail, .confirmEmailChange:
+            return .signInRequired
         }
     }
 
@@ -1568,6 +1593,20 @@ nonisolated struct SetPasswordRequest: Encodable, Sendable {
     let newPassword: String
 }
 
+/// Exactly one of `currentPassword` / `code` is non-nil; the synthesized `Encodable` omits the
+/// nil one, which is what the backend's exactly-one-proof check reads.
+nonisolated struct ChangeEmailRequest: Encodable, Sendable {
+    let newEmail: String
+    let currentPassword: String?
+    let code: String?
+}
+
+/// No addresses: the server reads both from the account.
+nonisolated struct ConfirmEmailChangeRequest: Encodable, Sendable {
+    let currentCode: String
+    let newCode: String
+}
+
 nonisolated struct ResendConfirmationRequest: Encodable, Sendable {
     let email: String
 }
@@ -1635,6 +1674,24 @@ nonisolated struct PasswordChangedResponse: Decodable, Sendable {
         case refreshToken = "refresh_token"
         case userId = "user_id"
     }
+}
+
+/// `POST /auth/change-email` and `POST /auth/change-email/confirm` (audit CC-09).
+///
+/// `status` is a STRING on the wire, read through `isChanged`: only "changed" means the account's
+/// address is now `email`. Anything else — "codes_sent", or a value a newer backend adds — reads
+/// as "check both inboxes", the reading that claims nothing happened. Decoding the field as an
+/// enum would make an unknown value THROW after the server already did the work.
+///
+/// "codes_sent" is also the answer when another account already uses the address (no email goes
+/// out then): the server never says which addresses have accounts, so neither may this app.
+/// Nothing here re-mints the session — the caller's tokens are untouched by an email change.
+nonisolated struct EmailChangeResponse: Decodable, Sendable {
+    let status: String
+    let email: String
+    let message: String
+
+    var isChanged: Bool { status == "changed" }
 }
 
 nonisolated struct UpdateAvatarRequestBody: Encodable, Sendable {

@@ -93,8 +93,9 @@ struct ChangePasswordView: View {
     /// The wait after every send the server accepted.
     private static let sendCooldownSeconds = 60
     /// The most a 429 can hold a Send button: the longest window any credential limiter uses
-    /// (a recovery email is 3 per address per hour), so a malformed `Retry-After` cannot lock
-    /// the button for the life of the screen.
+    /// (the code-entry limits are 10 per address per hour; a recovery email is 3 per address
+    /// per 15 minutes), so a malformed `Retry-After` cannot lock the button for the life of
+    /// the screen.
     private static let rateLimitWaitCapSeconds = 3600
 
     init(mode: Mode = .change) {

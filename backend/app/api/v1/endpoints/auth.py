@@ -37,6 +37,42 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
+# Limits on the three routes that make Supabase SEND an email (owner decision 2026-11-26,
+# "15-minute window": an hour was long enough that a person retrying a few times gave up). The
+# 429's `Retry-After` is the window of the bucket that refused, and the app turns it into words.
+#
+# SHORT buckets (15 minutes) are the ones a real person meets:
+#   /register             5 per address, 10 per IP
+#   /resend-confirmation  3 per address, 10 per IP
+#   /forgot-password      3 per address, 10 per IP
+# Each IP bucket stays LOOSER than its address bucket, so one person's own retries are refused
+# by the 15-minute address window, never by something longer.
+#
+# HOURLY ceilings sit behind them, sized above anything a person does, so the short windows do
+# not multiply abuse by four (review 2026-11-26: 11 → 44 emails an hour into one inbox):
+#   per address: 16 confirmation emails (sign-up + resend together) and 6 reset emails an hour;
+#   per IP:      30 emails an hour across all three routes (the project's mail budget is 100).
+# One inbox can therefore get at most ~22 Caydex emails an hour (it was 11 with hourly windows),
+# and one IP at most 30. Supabase's "Minimum interval per user" (60 s) is kept PER EMAIL TYPE,
+# so it does not lower these. The /register IP limits also bound how fast one address can test
+# emails, now that a sign-up says plainly when one is in use (AUTH_EMAIL_ALREADY_REGISTERED):
+# 30 an hour (it was 5 a MINUTE). The code-ENTRY routes (/confirm-email, /reset-password) keep
+# their hour: those limit guesses at a code, not mail.
+REGISTER_EMAIL_WINDOW_SECONDS = 900
+MAIL_SEND_WINDOW_SECONDS = 900
+MAIL_HOUR_SECONDS = 3600
+CONFIRM_MAIL_PER_ADDRESS_PER_HOUR = 16
+RESET_MAIL_PER_ADDRESS_PER_HOUR = 6
+MAIL_PER_IP_PER_HOUR = 30
+
+# The sign-up answer while the address still needs confirming: a NEW address, or one whose
+# earlier sign-up was never confirmed (GoTrue re-sends that one's email). An address that
+# already has a CONFIRMED account no longer gets this answer: it is told so plainly with
+# AUTH_EMAIL_ALREADY_REGISTERED (owner decision 2026-11-26). Every build shows this sentence:
+# 1.0-1.03 on their "Confirm your email" screen, the new build under the address on its code
+# screen. Kept neutral about what the email holds (a code AND a link).
+SIGN_UP_PENDING_MESSAGE = "Check your email to confirm your address."
+
 # Every route here may call Supabase Auth through `run_gotrue`. Router-level, so a route added
 # tomorrow forwards the caller's trusted address too (SEC-7): GoTrue then rate-limits per USER
 # instead of on the one Railway egress address every user shares. Never raises.
@@ -335,9 +371,14 @@ async def sign_up(
     # whoever the attacker names — and it burns the project's mail quota, which is what stops
     # legitimate signups from arriving at all.
     email_key = (request.email or "").strip().lower()
+    # 5 per address per 15 minutes (owner, 2026-11-26: "15-minute window"; it was 5 an hour,
+    # and the owner's own retries locked the address for an hour). The wait the app shows is
+    # this window (`Retry-After`), so it now says "about 15 minutes".
     _enforce_credential_limits(
-        (f"register:ip:{client_ip}", 5, 60),
-        (f"register:email:{email_key}", 5, 3600),
+        (f"register:ip:{client_ip}", 10, REGISTER_EMAIL_WINDOW_SECONDS),
+        (f"mail:ip:h:{client_ip}", MAIL_PER_IP_PER_HOUR, MAIL_HOUR_SECONDS),
+        (f"register:email:{email_key}", 5, REGISTER_EMAIL_WINDOW_SECONDS),
+        (f"confirm_mail:email:{email_key}", CONFIRM_MAIL_PER_ADDRESS_PER_HOUR, MAIL_HOUR_SECONDS),
         detail="Too many registration attempts. Please try again later.",
     )
     try:
@@ -366,18 +407,32 @@ async def sign_up(
         # The confirmation gate. `email_confirmed_at` is set by Supabase only once the
         # address is verified; absent means "unconfirmed", so no tokens are issued.
         #
-        # The copy is identical for a new address, a pending one and an already-confirmed one
-        # (GoTrue answers the last with an obfuscated user and sends nothing): it must never
-        # reveal which. Neutral about the email's contents (it carries a code AND a link), and
-        # it names the way out for someone who already has an account.
+        # An address that already has a CONFIRMED account is told so plainly (owner decision
+        # 2026-11-26: "if users use the same email, we should let them know right away").
+        # GoTrue answers that sign-up with an OBFUSCATED user — a made-up id, no confirmation
+        # time, an EMPTY identities list — and sends no email, so without this the person waited
+        # for a code that never came. Only an empty LIST counts: a missing `identities` is
+        # unknown, and falls through to the ordinary pending answer. A pending (never confirmed)
+        # address is not "taken": GoTrue re-sends its email and the code screen opens.
         if not getattr(user, "email_confirmed_at", None):
+            identities = getattr(user, "identities", None)
+            # GoTrue also empties `identities` for an INVITED user it has just emailed; that
+            # person has no password yet and needs the code screen, not "already in use".
+            invited = getattr(user, "invited_at", None)
+            if isinstance(identities, list) and not identities and not invited:
+                # The made-up id is never logged as if it were a user.
+                logger.info(
+                    "Registration refused: the address already has a confirmed account "
+                    "(Supabase sent no email)"
+                )
+                raise auth_error(
+                    ErrorCode.AUTH_EMAIL_ALREADY_REGISTERED,
+                    message="sign_up: the address already has a confirmed account",
+                )
             logger.info("Registration pending email confirmation for user=%s", user.id)
             return SignUpResponse(
                 confirmation_required=True,
-                message=(
-                    "Check your email to confirm your address. Already have an account? "
-                    "Sign in or reset your password."
-                ),
+                message=SIGN_UP_PENDING_MESSAGE,
             )
 
         # Confirmation disabled project-side: a real session exists, so behave as before.
@@ -433,9 +488,16 @@ async def sign_up(
                 user_message="That email address can't be used. Please check it and try again.",
                 status_code=400,
             )
+        if gt_code == "over_email_send_rate_limit" and _is_per_user_send_interval(e):
+            # This address was mailed under a minute ago (GoTrue's per-user interval): a second
+            # tap on Create Account, or a retry. That email's code is still good, so the TRUE
+            # answer is the ordinary pending one — it used to be "couldn't send your
+            # confirmation email", which sent people waiting for a mail that had already left
+            # (seen 2026-11-26 in production).
+            logger.info("Registration: the address was mailed under a minute ago; no new email")
+            return SignUpResponse(confirmation_required=True, message=SIGN_UP_PENDING_MESSAGE)
         if gt_code == "over_email_send_rate_limit":
-            # The confirmation email could not be SENT: the project's email budget is spent,
-            # or this address was mailed moments ago. Keyed on the CODE, never on a bare 429:
+            # The confirmation email could not be SENT: the project's email budget is spent. Keyed on the CODE, never on a bare 429:
             # a per-IP `over_request_rate_limit` (shared Railway egress) must not be told
             # anything about an email. WARNING with the code so a spent budget is greppable;
             # never the address.
@@ -634,14 +696,21 @@ async def resend_confirmation(
 
     Same enumeration and rate-limit posture as /forgot-password — the response never reveals
     whether the address is registered or already confirmed, and it is limited on both the IP
-    and the address because it sends mail.
+    and the address because it sends mail. (/register now says plainly when an address has a
+    confirmed account — owner decision 2026-11-26 — so staying neutral HERE avoids a second,
+    cheaper and unthrottled-by-409 way to ask the same question.)
     """
     client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
+    # 3 per address and 10 per IP, per 15 minutes (owner, 2026-11-26; was 3 and 5 an hour).
+    # The IP bucket stays LOOSER than the address bucket so one person's own retries are
+    # refused by the address window, never by a longer IP one.
     _enforce_credential_limits(
-        (f"resend:ip:{client_ip}", 5, 3600),
-        (f"resend:email:{email_key}", 3, 3600),
+        (f"resend:ip:{client_ip}", 10, MAIL_SEND_WINDOW_SECONDS),
+        (f"mail:ip:h:{client_ip}", MAIL_PER_IP_PER_HOUR, MAIL_HOUR_SECONDS),
+        (f"resend:email:{email_key}", 3, MAIL_SEND_WINDOW_SECONDS),
+        (f"confirm_mail:email:{email_key}", CONFIRM_MAIL_PER_ADDRESS_PER_HOUR, MAIL_HOUR_SECONDS),
         detail="Too many requests. Please try again later.",
     )
 
@@ -1150,6 +1219,14 @@ def _gotrue_status(exc: BaseException) -> Optional[int]:
     return status_code if isinstance(status_code, int) and not isinstance(status_code, bool) else None
 
 
+def _is_per_user_send_interval(exc: Exception) -> bool:
+    """GoTrue's PER-ADDRESS send interval ("For security purposes, you can only request this
+    after N seconds"), as opposed to the PROJECT's spent email budget ("email rate limit
+    exceeded"). Both arrive as 429 `over_email_send_rate_limit`; only the message differs."""
+    text = f"{getattr(exc, 'message', '')} {exc}".lower()
+    return "only request this after" in text
+
+
 def _classify_gotrue_failure(exc: BaseException) -> str:
     """'rate_limited' | 'unavailable' | 'rejected' for an exception a GoTrue verb raised.
 
@@ -1651,13 +1728,17 @@ async def forgot_password(
     client_ip = trusted_client_ip(req)
     email_key = request.email.strip().lower()
 
-    # 5/hour per IP, 3/hour per address. Deliberately tight — this endpoint sends mail.
-    # Still a generic response shape, but 429 so a legitimate client can back off.
+    # 10 per IP and 3 per address, per 15 minutes (owner, 2026-11-26; was 5 and 3 an hour).
+    # Deliberately tight — this endpoint sends mail. Still a generic response shape, but 429
+    # so a legitimate client can back off. The IP bucket stays looser than the address one.
     _enforce_credential_limits(
-        (f"forgot:ip:{client_ip}", 5, 3600),
-        # Same exemption as sign-in: three posts an hour from anyone used to block the
-        # victim's OWN reset email for the hour.
-        _per_email_check("forgot", email_key, 3, 3600, req),
+        (f"forgot:ip:{client_ip}", 10, MAIL_SEND_WINDOW_SECONDS),
+        (f"mail:ip:h:{client_ip}", MAIL_PER_IP_PER_HOUR, MAIL_HOUR_SECONDS),
+        # Same exemption as sign-in: three posts from anyone used to block the victim's OWN
+        # reset email for the whole window. The hourly ceiling takes the same exemption, so
+        # nobody else's sends can hold a device that proved this address before.
+        _per_email_check("forgot", email_key, 3, MAIL_SEND_WINDOW_SECONDS, req),
+        _per_email_check("forgot_hour", email_key, RESET_MAIL_PER_ADDRESS_PER_HOUR, MAIL_HOUR_SECONDS, req),
         detail="Too many reset requests. Please try again later.",
     )
 

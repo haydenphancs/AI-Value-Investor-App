@@ -2469,10 +2469,37 @@ found Forgot password.
 - **No automatic resend.** The app never re-sends the email on its own:
   - A sign-in on an unconfirmed address opens the code screen and sends nothing.
   - "Send a new code" is a tap with a cooldown, because every send replaces the previous code.
-    The backend allows 3 sends per address per hour.
-  - Arriving from sign-up, the code screen shows the backend's own message: "Check your email to
-    confirm your address. Already have an account? Sign in or reset your password." So an
-    existing user is not left waiting for a code that never comes.
+    The backend allows 3 sends per address per 15 minutes (owner, 2026-11-26: an hour was long
+    enough to lose a user). The same 15-minute window applies to sign-up (5 per address) and
+    Forgot password (3 per address); each route's per-IP bucket stays looser (10 per 15
+    minutes), so one person's retries are refused by the address window. HOURLY ceilings sit
+    behind them, above anything a person does, so the short windows do not multiply abuse:
+    16 confirmation emails (sign-up + resend) and 6 reset emails per address an hour, and 30
+    emails per IP an hour across all three routes (the project's mail budget is 100). One inbox
+    can get at most ~22 Caydex emails an hour (11 before), one IP at most 30. Supabase's 60 s
+    "minimum interval per user" is kept per email TYPE and does not lower these. The code-ENTRY
+    routes (`/confirm-email`, `/reset-password`) keep 10 per address per hour: they limit
+    guesses, not mail. Residuals: everyone behind one NAT address shares the IP buckets (an 11th
+    sign-up in 15 minutes from one campus address waits up to 15 minutes); IPv6 clients are
+    keyed per address, not per /64; and 1.0–1.03 word every 429 as "wait a minute" (or "900
+    seconds" on Forgot password), so for them a refusal means up to 15 minutes.
+  - **An email already in use is said plainly** (owner, 2026-11-26: "if users use the same
+    email, we should let them know right away"). GoTrue answers a sign-up for an address that
+    already has a CONFIRMED account with a made-up user (empty `identities`) and sends nothing;
+    `/auth/register` now turns that into 409 `AUTH_EMAIL_ALREADY_REGISTERED` ("This email is
+    already in use. Sign in instead, or use Forgot password. If you signed up with Apple or
+    Google, use that button."). Every build shows it: 1.0–1.03 through their generic
+    business-error arm, the new build as `.validationFailed`. The accepted cost: a sign-up now
+    tells anyone whether an address has a Caydex account. The sign-up limits bound how fast (10
+    per IP per 15 minutes and 30 per IP an hour; the IP bucket was 5 per MINUTE before). An
+    address whose sign-up was never confirmed is not "in use": GoTrue re-sends its email and the
+    code screen opens; so does an INVITED address (GoTrue empties `identities` for it too, so
+    `invited_at` is checked). A second tap within a minute (GoTrue's per-address interval, "you
+    can only request this after N seconds") answers the ordinary pending sentence: the first
+    email's code is still good. The new build switches the form to Sign In on the 409, keeping
+    the address, so Forgot password sits under the sentence; the code screen no longer repeats
+    `SIGN_UP_PENDING_MESSAGE` ("Check your email to confirm your address."), which only restates
+    its title.
   - The screen's sign-in button reads "Already confirmed, or have an account? Sign in".
 - **The dashboard is unversioned state.** The repository holds the canonical template files and
   the exact settings table: the launch checklist's §5b(a), kept out of git. That table covers

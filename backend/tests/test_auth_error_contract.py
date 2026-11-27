@@ -197,6 +197,10 @@ _EXPECTED_ACTIONS = {
     # reset/set-password AFTER the code verified and the write failed (not a refused password):
     # the field holds a dead code; the cure is a new one — fix_input, never retry_later.
     ErrorCode.AUTH_CODE_USED: "fix_input",
+    # /auth/register: the address already has a confirmed account (owner decision 2026-11-26,
+    # "let them know right away"). The person is on the SIGN-UP form, holds no session, and
+    # signing in is the cure — so `sign_in` is right here, as for AUTH_CONFIRMED_SIGN_IN_FAILED.
+    ErrorCode.AUTH_EMAIL_ALREADY_REGISTERED: "sign_in",
     # Sign-in refused until the address is confirmed: the action opens the confirmation step.
     ErrorCode.EMAIL_NOT_CONFIRMED: "confirm_email",
 }
@@ -226,7 +230,10 @@ def test_only_session_failures_offer_sign_in():
     # screen after the address was confirmed — no session exists yet, the user is not on a
     # sign-in form, and signing in is exactly the step that is left. It is NOT a 401 because no
     # stored credential is involved (a 401 would walk iOS into its credential handling).
-    exempt = {ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED}
+    # The second (2026-11-26): AUTH_EMAIL_ALREADY_REGISTERED (409) is raised on the SIGN-UP form
+    # for an address that already has an account — no session, not a sign-in form, and signing
+    # in is the way forward. Not a 401 either: no credential was presented.
+    exempt = {ErrorCode.AUTH_CONFIRMED_SIGN_IN_FAILED, ErrorCode.AUTH_EMAIL_ALREADY_REGISTERED}
     for code in sign_in_codes - exempt:
         assert _DEFAULT_STATUS[code] == 401, f"{code.value} offers sign_in but is not a 401"
     for code in exempt:

@@ -13,7 +13,7 @@ failure:
   * either one looser than GoTrue -> the request goes out and GoTrue refuses it. On reset- and
     set-password that is not cosmetic: the server runs `verify_otp` FIRST, which spends the
     single-use emailed code, so a refused password burns the code (PW-1). Three recovery emails
-    an hour, and recovery locks.
+    per 15 minutes (6 an hour), and recovery locks.
   * either one STRICTER than GoTrue -> a false rejection the user cannot diagnose.
 
 THE DESIGN WAS REVERSED ON PURPOSE (2026-11-26). Both sides used to count ANY non-alphanumeric

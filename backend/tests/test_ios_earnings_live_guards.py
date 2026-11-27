@@ -1017,8 +1017,9 @@ def test_the_poll_builds_the_feed_only_while_a_price_can_move():
     feed is built only while `shouldRefreshPrices` says a price can move; otherwise the poll asks
     each LIVE card on screen (`filteredAlerts`: a card for another group is not on screen)
     through its own route, every 30 s, so a LIVE card still keeps up with the server. In price
-    hours a build that fails leaves the list as it was, so a card still wearing yesterday's LIVE
-    label is asked about through its own route while the feed keeps failing (2026-11-26 review)."""
+    hours a build that fails leaves the list as it was, so the LIVE cards, one still saying LIVE
+    from an earlier day by its label or its status included, are asked about through their own
+    routes while the feed keeps failing, never handed back to that feed (2026-11-26 reviews)."""
     timer = _norm(_body(_code(_TRACKING_VM), "func startPriceRefreshTimer() {"))
     assert timer == (
         "{ priceRefreshTask?.cancel() priceRefreshTask = Task { [weak self] in "
@@ -1027,7 +1028,9 @@ def test_the_poll_builds_the_feed_only_while_a_price_can_move():
         "let assets = self.trackedAssets "
         "if MarketHoursUtil.shouldRefreshPrices( assetTypes: assets.map(\\.assetType), "
         "symbols: assets.map(\\.ticker) ) { let built: Bool = await self.loadTrackingFeed() "
-        "if !built, !self.labelEndReports().isEmpty { await self.refreshLiveEarningsCards() } } "
+        "if !built, self.filteredAlerts.contains(where: \\.isLiveEarnings) "
+        "|| !self.labelEndReports().isEmpty { "
+        "await self.refreshLiveEarningsCards(afterAFailedFeed: true) } } "
         "else if self.filteredAlerts.contains(where: \\.isLiveEarnings) "
         "|| !self.labelStartReports().isEmpty "
         "|| !self.labelEndReports().isEmpty { "
@@ -1035,7 +1038,23 @@ def test_the_poll_builds_the_feed_only_while_a_price_can_move():
     )
 
 
-_REFRESH_LIVE = "private func refreshLiveEarningsCards() async {"
+def test_a_failed_feed_build_answers_false():
+    """The timer asks the LIVE cards through their own routes only when the feed build failed
+    (`test_the_poll_builds_the_feed_only_while_a_price_can_move`), and the first load's snapshot
+    and purge read the same answer: a failed build that answered true would stop the one and purge
+    against the last load's list. A build that failed for any reason but a sign-in refusal keeps
+    the lists, and ends false (the 2026-11-26 review: unpinned, `return true` passed)."""
+    feed = _norm(_body(_code(_TRACKING_VM), "private func loadTrackingFeed() async -> Bool {"))
+    assert feed.endswith(
+        "} else { self.assetsErrorMessage = appError.message self.assetsRequiresSignIn = false "
+        "self.assetsIsReconnecting = false } return false } }"), feed[-300:]
+    catch = feed[feed.rindex("} catch {"):]
+    assert "guard generation == loadGeneration else { return false }" in catch
+    assert "if appError.isCancellation { return false }" in catch
+    assert "return true" not in catch, "no failure answers true"
+
+
+_REFRESH_LIVE = "private func refreshLiveEarningsCards(afterAFailedFeed: Bool = false) async {"
 
 
 def test_a_live_card_is_asked_about_through_its_own_route_alone():
@@ -1054,13 +1073,17 @@ def test_a_live_card_is_asked_about_through_its_own_route_alone():
     refresh = _norm(_body(vm, _REFRESH_LIVE))
     assert refresh == (
         "{ let generation = loadGeneration let revision = alertsRevision "
+        "let floor: String? = afterAFailedFeed ? MarketHoursUtil.liveResultsFloorKey() : nil "
+        "let answerable: (LiveCardReport) -> Bool = { report in "
+        "floor.map { report.reportDate >= $0 } ?? true } "
         "let reports: [LiveCardReport] = filteredAlerts.compactMap { Self.liveCardReport($0) } "
+        ".filter(answerable) "
         "let starting: [LiveCardReport] = Array( "
-        "labelStartReports().prefix(Self.maxLiveCardsPerRound) ) "
+        "labelStartReports().filter(answerable).prefix(Self.maxLiveCardsPerRound) ) "
         "let startingIds: Set<String> = Set(starting.map(\\.id)) "
         "var batch: [LiveCardReport] = starting "
         "let ending: [LiveCardReport] = Array( "
-        "labelEndReports().prefix(Self.maxLiveCardsPerRound - batch.count) ) "
+        "labelEndReports().filter(answerable).prefix(Self.maxLiveCardsPerRound - batch.count) ) "
         "let endingIds: Set<String> = Set(ending.map(\\.id)) "
         "batch += ending "
         "if !reports.isEmpty { "
@@ -1084,15 +1107,15 @@ def test_a_live_card_is_asked_about_through_its_own_route_alone():
         "alerts[index] = .earnings(data.updated(with: answer)) "
         "case .keep: continue "
         "case .askTheFeed: logLiveCardHandedToTheFeed(answer, report: report) "
-        "await loadTrackingFeed() return } "
+        "if afterAFailedFeed { continue } await loadTrackingFeed() return } "
         "} catch { "
         "guard !Task.isCancelled, generation == loadGeneration, revision == alertsRevision else { return } "
         "let appError = AppError.from(error) "
         "logLiveCardFailure(error, as: appError, report: report) "
         "if case .notFound = appError { settleLabelStart(report, among: startingIds) "
-        "await loadTrackingFeed() return } "
+        "if afterAFailedFeed { continue } await loadTrackingFeed() return } "
         "if case .validationFailed = appError { settleLabelStart(report, among: startingIds) "
-        "await loadTrackingFeed() return } } } }"
+        "if afterAFailedFeed { continue } await loadTrackingFeed() return } } } }"
     )
     assert _norm(_body(vm, "private static func liveCardReport(_ alert: AppAlert) -> LiveCardReport? {")) == (
         "{ guard case .earnings(let data) = alert, data.status == .live, "
@@ -1174,7 +1197,8 @@ def test_a_card_still_labelled_after_its_day_is_asked_at_the_label_end():
     ), "every card still labelled, until an answer takes its label off, but one held to its time"
     refresh = _norm(_body(vm, _REFRESH_LIVE))
     start = refresh.index("var batch: [LiveCardReport] = starting")
-    end = refresh.index("labelEndReports().prefix(Self.maxLiveCardsPerRound - batch.count)")
+    end = refresh.index(
+        "labelEndReports().filter(answerable).prefix(Self.maxLiveCardsPerRound - batch.count)")
     rotation = refresh.index("if !reports.isEmpty {")
     assert start < end < rotation, "the label's start, then its end, then the LIVE rotation"
 
@@ -2080,10 +2104,16 @@ def test_a_failed_first_load_keeps_trying_and_the_sheet_says_so():
     vm = _code(_VM)
     start = _body(vm, "func start() {")
     assert "self.live?.pollSeconds" not in start, "a failed first load ends the poll again"
-    next_poll = _body(vm, "private var nextPollSeconds: Int? {")
-    assert next_poll.index("if let live") < next_poll.index("Self.noAnswerRetrySeconds"), (
+    next_poll = _norm(_body(vm, "private var nextPollSeconds: Int? {"))
+    assert next_poll.index("if let live") < next_poll.index("guard loadFailed"), (
         "a real answer must rule before the retry is even considered"
     )
+    # The no-answer path's own return, read after its guard (the seventh 2026-11-26 review's
+    # follow-up: an order check found the ternary inside `if let live` and passed any return).
+    assert next_poll[next_poll.index("guard loadFailed"):] == (
+        "guard loadFailed, failedLoads < Self.maxFailedLoads else { return nil } "
+        "return Self.noAnswerRetrySeconds }"
+    ), "with no answer yet the sheet asks again on the 30 s retry, bounded"
     retry = re.search(r"private static let noAnswerRetrySeconds = (\d+)\b", vm)
     assert retry and int(retry.group(1)) == 30, "read whole: a substring let 300 pass"
     assert "fallback" not in next_poll.lower(), (

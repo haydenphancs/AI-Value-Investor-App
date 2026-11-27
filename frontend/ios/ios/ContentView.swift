@@ -87,10 +87,7 @@ struct ContentView: View {
                 marketFocusSeq: updatesMarketFocusSeq,
                 tickerFocus: updatesTickerFocus,
                 onTickerFocusMissed: { missed in
-                    presentTickerLink(
-                        symbol: missed.symbol, assetType: missed.assetType,
-                        destination: missed.fallback
-                    )
+                    fallBackFromUpdates(missed)
                 }
             )
                 .opacity(selectedTab == .updates ? 1 : 0)
@@ -196,9 +193,13 @@ struct ContentView: View {
         // fallbacks (a locked ticker → the Updates upgrade sheet; not a chip → its News tab).
         //
         // ONE OWNER, consume-and-clear, `initial: true`: the research handoff's rules above.
-        .onChange(of: appState.pendingUpdatesFocus, initial: true) { _, focus in
-            guard let focus else { return }
+        //
+        // The tab on screen NOW is where the tap came from: if the ticker turns out not to be a
+        // chip, the fallback goes back there first (`fallBackFromUpdates`).
+        .onChange(of: appState.pendingUpdatesFocus, initial: true) { _, parked in
+            guard var focus = parked else { return }
             appState.pendingUpdatesFocus = nil
+            focus.returnTab = selectedTab
             openUpdatesTicker(focus)
         }
         // A Home Screen widget tap, parked by `iosApp.onOpenURL`: `caydex://ticker/<SYMBOL>` →
@@ -323,6 +324,27 @@ struct ContentView: View {
         case .updatesTicker(let symbol, let assetType):
             openUpdatesTicker(UpdatesTickerFocus(symbol: symbol, assetType: assetType))
         }
+    }
+
+    /// An Updates focus whose ticker is not one of the user's chips: its detail screen, on the
+    /// focus's fallback tab (the News tab for an alert's "Read the news").
+    ///
+    /// An alert's focus first goes BACK to the tab the tap came from (`returnTab`), so the
+    /// ticker screen's Done returns to Alerts — not to an Updates tab that had nothing for this
+    /// ticker (owner, 2026-11-27). The tab switch and the cover land in one update; the cover
+    /// is the shell's, so it presents over whichever tab is showing. A widget tap has no
+    /// `returnTab` and stays on Updates, as before.
+    ///
+    /// Only while the user is still ON Updates — the tab this focus put them on. The chips can
+    /// take seconds; a user who picked another tab meanwhile keeps it (`focusTicker`'s rule:
+    /// nothing lands over what the user did since).
+    private func fallBackFromUpdates(_ missed: UpdatesTickerFocus) {
+        if let origin = missed.returnTab, selectedTab == .updates {
+            selectedTab = origin
+        }
+        presentTickerLink(
+            symbol: missed.symbol, assetType: missed.assetType, destination: missed.fallback
+        )
     }
 
     /// Open a widget tap's asset, taking down whatever is on screen first.

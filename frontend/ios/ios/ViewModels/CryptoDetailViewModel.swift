@@ -168,7 +168,10 @@ class CryptoDetailViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init(cryptoSymbol: String) {
+    /// `initialTab` seeds the screen for a notification deep link — a price move's "Read the
+    /// news" that fell back here because the coin is not one of the user's Updates chips
+    /// (`UpdatesTickerFocus.fallback`). Defaults to Overview, so every other caller is unchanged.
+    init(cryptoSymbol: String, initialTab: CryptoDetailTab = .overview) {
         // Normalise to the BARE coin symbol exactly once, here. Callers disagree
         // about the form — the search router and notification routes pass "BTC",
         // Home's Market Pulse passes the FMP pair form "BTCUSD" — and every
@@ -178,6 +181,7 @@ class CryptoDetailViewModel: ObservableObject {
         // No repository is injected into this view model (it reads `StockRepository.shared`
         // throughout), so the loader takes the same default.
         self.chartHistory = ChartHistoryLoader(asset: .crypto)
+        self.selectedTab = initialTab
 
         // Open on the user's last range and that range's interval, resolved for CRYPTO:
         // a 5Y/ALL picked elsewhere opens 2Y (the CoinGecko cap), and a stock's 1D = 1 min

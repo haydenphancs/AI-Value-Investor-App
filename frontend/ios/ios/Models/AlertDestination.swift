@@ -57,15 +57,22 @@ struct AlertDestination: Identifiable, Hashable {
 
     /// The Updates focus this destination asks for, or nil for one that opens in a cover.
     ///
-    /// The fallback is where a ticker that is not one of the user's chips lands: the stock
-    /// screen on its News tab (what "Read the news" opened before), any other asset's own
-    /// screen (only `TickerDetailView` has tabs).
+    /// The fallback is where a ticker that is not one of the user's chips lands: its detail
+    /// screen on the News tab — stock, crypto and ETF (owner, 2026-11-27: "apply for crypto
+    /// also … ETF too"), the screens that have one and take it (`NotificationRouteContent`).
+    /// An index or commodity opens its own default screen.
     var updatesFocus: UpdatesTickerFocus? {
         guard case .updates(let symbol, let assetType) = target else { return nil }
+        let hasNewsTab: Bool = {
+            switch assetType {
+            case .stock, .crypto, .etf: return true
+            case .index, .commodity:    return false
+            }
+        }()
         return UpdatesTickerFocus(
             symbol: symbol,
             assetType: assetType,
-            fallback: assetType == .stock ? TickerDestination(tab: .news, section: nil) : .default
+            fallback: hasNewsTab ? TickerDestination(tab: .news, section: nil) : .default
         )
     }
 }

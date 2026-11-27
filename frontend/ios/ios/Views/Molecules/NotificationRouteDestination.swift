@@ -36,12 +36,22 @@ struct NotificationRouteContent: View {
                 // stock fundamentals for a coin.
                 switch assetType {
                 case .index:     IndexDetailView(indexSymbol: symbol)
-                // Only the stock screen has Financials/Holders, so only it takes
-                // the destination. The others ignore a tab they do not have.
+                // Only the stock screen has Financials/Holders, so only it takes the whole
+                // destination. Crypto and ETF take the TAB when they have one of that name
+                // (News, for a price move's "Read the news" fallback, owner 2026-11-27);
+                // any other tab is a hint they ignore, landing on Overview.
                 case .stock:     TickerDetailView(tickerSymbol: symbol, destination: destination)
-                case .crypto:    CryptoDetailView(cryptoSymbol: symbol)
+                case .crypto:
+                    CryptoDetailView(
+                        cryptoSymbol: symbol,
+                        initialTab: CryptoDetailTab(rawValue: destination.tab?.rawValue ?? "") ?? .overview
+                    )
                 case .commodity: CommodityDetailView(commoditySymbol: symbol)
-                case .etf:       ETFDetailView(etfSymbol: symbol)
+                case .etf:
+                    ETFDetailView(
+                        etfSymbol: symbol,
+                        initialTab: ETFDetailTab(rawValue: destination.tab?.rawValue ?? "") ?? .overview
+                    )
                 }
 
             case .report(let reportId, let ticker, let persona):

@@ -143,11 +143,15 @@ class ETFDetailViewModel: ObservableObject {
 
     // MARK: - Initialization
 
-    init(etfSymbol: String) {
+    /// `initialTab` seeds the screen for a notification deep link — a price move's "Read the
+    /// news" that fell back here because the ETF is not one of the user's Updates chips
+    /// (`UpdatesTickerFocus.fallback`). Defaults to Overview, so every other caller is unchanged.
+    init(etfSymbol: String, initialTab: ETFDetailTab = .overview) {
         self.etfSymbol = etfSymbol
         // `repository` is a fixed `.shared`, not injected, so the loader takes the same
         // default.
         self.chartHistory = ChartHistoryLoader(asset: .etfs)
+        self.selectedTab = initialTab
 
         // Seed the range AND interval as a resolved pair BEFORE the sinks are wired — the
         // user's remembered range and that range's interval, resolved for an ETF (a 2Y

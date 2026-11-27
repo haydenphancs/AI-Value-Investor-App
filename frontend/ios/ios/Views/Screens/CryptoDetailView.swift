@@ -55,11 +55,15 @@ struct CryptoDetailView: View {
         return rotated.map { CryptoAISuggestion(text: $0) }
     }
 
-    init(cryptoSymbol: String) {
+    /// `initialTab` is the notification deep link's tab (`NotificationRouteContent`); every
+    /// other caller keeps Overview.
+    init(cryptoSymbol: String, initialTab: CryptoDetailTab = .overview) {
         // Bare form everywhere on screen; `CryptoSymbol.pair` builds the FMP
         // pair where one is needed. Home passes "BTCUSD", search passes "BTC".
         self.cryptoSymbol = CryptoSymbol.bare(cryptoSymbol)
-        self._viewModel = StateObject(wrappedValue: CryptoDetailViewModel(cryptoSymbol: CryptoSymbol.bare(cryptoSymbol)))
+        self._viewModel = StateObject(wrappedValue: CryptoDetailViewModel(
+            cryptoSymbol: CryptoSymbol.bare(cryptoSymbol), initialTab: initialTab
+        ))
     }
 
     // Share sheet items

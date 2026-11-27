@@ -724,10 +724,7 @@ selectedTab: $selectedTab,
 marketFocusSeq: updatesMarketFocusSeq,
 tickerFocus: updatesTickerFocus,
 onTickerFocusMissed: { missed in
-    presentTickerLink(
-        symbol: missed.symbol, assetType: missed.assetType,
-        destination: missed.fallback
-    )
+    fallBackFromUpdates(missed)
 }
 """
 
@@ -885,6 +882,43 @@ def test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail(
         "too long moves the screen long after the tap"
     )
     assert "private var tickerFocusGeneration = 0" in vm
+
+
+_FALL_BACK_FROM_UPDATES = """
+{
+    if let origin = missed.returnTab, selectedTab == .updates {
+        selectedTab = origin
+    }
+    presentTickerLink(
+        symbol: missed.symbol, assetType: missed.assetType, destination: missed.fallback
+    )
+}
+"""
+
+
+def test_a_missed_focus_returns_to_its_tab_then_opens_the_detail():
+    """A focus whose ticker is not a chip (2026-11-27): an alert's goes BACK to the tab the tap
+    came from first, so the ticker screen's Done returns to Alerts, not to an Updates tab with
+    nothing for it; then the detail screen on the focus's fallback tab (News for "Read the
+    news"). A widget tap carries no returnTab and stays on Updates."""
+    content = _read(_CONTENT)
+    _assert_pinned(
+        _block(content, "private func fallBackFromUpdates(_ missed: UpdatesTickerFocus)"),
+        _FALL_BACK_FROM_UPDATES,
+        "a missed Updates focus no longer returns to the tab the alert was tapped on — and only "
+        "while the user is still on Updates — before it opens the ticker's detail screen on the "
+        "focus's fallback tab",
+    )
+    handler = _squash(_block(content, ".onChange(of: appState.pendingUpdatesFocus, initial: true)"))
+    recorded, opened = handler.find("focus.returnTab=selectedTab"), handler.find("openUpdatesTicker(focus)")
+    assert -1 < recorded < opened, (
+        "an alert's Updates focus no longer records the tab it was tapped on before the tab "
+        "switch: its fallback could only ever land on Updates"
+    )
+    assert "returnTab" not in _block(content, "private func presentDeepLink(_ link: PendingDeepLink)"), (
+        "a widget link now carries a return tab: it came from outside the app and has no tab "
+        "of its own to go back to"
+    )
 
 
 # The selection handler, in each spelling of "bind the new tab, then selectTab it".
@@ -1974,7 +2008,7 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
      _drop_line("                marketFocusSeq: updatesMarketFocusSeq,"),
      "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip", "its one Updates tab"),
     ("updates-tab-loses-the-ticker-fallback", _CONTENT,
-     _resub(r"presentTickerLink\(\s*symbol: missed\.symbol.*?missed\.fallback\s*\)", "_ = missed"),
+     _replace("fallBackFromUpdates(missed)\n", "_ = missed\n"),
      "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip", "its one Updates tab"),
     # ── the updates/<SYMBOL> link (2026-11-12) ──
     ("parse-updates-symbol-repaired", _GRAMMAR,
@@ -2115,7 +2149,20 @@ _MUTATIONS: list[tuple[str, Path, Callable[[str], str], str, str]] = [
      "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail", "focusTicker no longer"),
     ("missed-focus-loses-the-news-tab", _CONTENT,
      _replace("destination: missed.fallback", "destination: .default"),
-     "test_a_market_link_tears_down_then_opens_updates_on_the_market_chip", "its one Updates tab"),
+     "test_a_missed_focus_returns_to_its_tab_then_opens_the_detail", "no longer returns"),
+    ("missed-focus-stays-on-updates", _CONTENT,
+     _drop_line("            selectedTab = origin"),
+     "test_a_missed_focus_returns_to_its_tab_then_opens_the_detail", "no longer returns"),
+    ("missed-focus-yanks-a-user-who-moved-on", _CONTENT,
+     _replace("if let origin = missed.returnTab, selectedTab == .updates {", "if let origin = missed.returnTab {"),
+     "test_a_missed_focus_returns_to_its_tab_then_opens_the_detail", "no longer returns"),
+    ("alert-focus-forgets-its-tab", _CONTENT,
+     _drop_line("            focus.returnTab = selectedTab"),
+     "test_a_missed_focus_returns_to_its_tab_then_opens_the_detail", "no longer records"),
+    ("widget-link-gets-a-return-tab", _CONTENT,
+     _replace("openUpdatesTicker(UpdatesTickerFocus(symbol: symbol, assetType: assetType))",
+              "openUpdatesTicker(UpdatesTickerFocus(symbol: symbol, assetType: assetType, returnTab: selectedTab))"),
+     "test_a_missed_focus_returns_to_its_tab_then_opens_the_detail", "came from outside"),
     ("ticker-link-lands-on-the-news-tab", _CONTENT,
      _replace("destination tab: TickerDestination = .default", "destination tab: TickerDestination = TickerDestination(tab: .news, section: nil)"),
      "test_present_tears_down_then_opens_a_ticker_destination", "own tab"),
@@ -2364,6 +2411,7 @@ _MUTATION_COVERED = {
     "test_the_walk_reaches_every_view_it_must_guard",
     "test_the_journey_story_refreshes_its_grid_however_it_closes",
     "test_a_ticker_link_tears_down_then_opens_updates_on_that_chip_or_the_detail",
+    "test_a_missed_focus_returns_to_its_tab_then_opens_the_detail",
     "test_a_card_backed_row_links_to_its_updates_card",
     "test_the_extension_fetch_sends_its_app_version",
     "test_the_query_is_an_allow_list",

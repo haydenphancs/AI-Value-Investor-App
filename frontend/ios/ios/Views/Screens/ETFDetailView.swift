@@ -44,9 +44,13 @@ struct ETFDetailView: View {
         return rotated.map { ETFAISuggestion(text: $0) }
     }
 
-    init(etfSymbol: String) {
+    /// `initialTab` is the notification deep link's tab (`NotificationRouteContent`); every
+    /// other caller keeps Overview.
+    init(etfSymbol: String, initialTab: ETFDetailTab = .overview) {
         self.etfSymbol = etfSymbol
-        self._viewModel = StateObject(wrappedValue: ETFDetailViewModel(etfSymbol: etfSymbol))
+        self._viewModel = StateObject(wrappedValue: ETFDetailViewModel(
+            etfSymbol: etfSymbol, initialTab: initialTab
+        ))
     }
 
     // Share sheet items

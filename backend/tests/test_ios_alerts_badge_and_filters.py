@@ -1123,11 +1123,32 @@ def test_a_price_move_reads_its_news_on_the_updates_tab():
         "ticker_move offers a ticker TAB again: a second 'Read the news' row to the ticker screen "
         "beside the Updates one."
     )
-    focus = _balanced(src, "var updatesFocus: UpdatesTickerFocus? {")
-    assert "fallback: assetType == .stock ? TickerDestination(tab: .news, section: nil) : .default" in focus, (
-        "A ticker that is not one of the user's chips no longer falls back to its News tab "
-        "(owner, 2026-11-27: 'Ticker's News tab')."
+    focus = _squashed(_balanced(src, "var updatesFocus: UpdatesTickerFocus? {"))
+    assert (
+        "case.stock,.crypto,.etf:returntrue" in focus
+        and "case.index,.commodity:returnfalse" in focus
+        and "fallback:hasNewsTab?TickerDestination(tab:.news,section:nil):.default" in focus
+    ), (
+        "A ticker that is not one of the user's chips no longer falls back to its News tab — "
+        "stock, crypto and ETF (owner, 2026-11-27)."
     )
+    route = _read(_ROUTE_DEST)
+    for screen, enum, init in (
+        ("CryptoDetailView(", "CryptoDetailTab", "init(cryptoSymbol: String, initialTab: CryptoDetailTab = .overview)"),
+        ("ETFDetailView(", "ETFDetailTab", "init(etfSymbol: String, initialTab: ETFDetailTab = .overview)"),
+    ):
+        call = _squashed(route[route.index(screen):route.index(screen) + 260])
+        assert f"initialTab:{enum}(rawValue:destination.tab?.rawValue??\"\")??.overview" in call, (
+            f"The notification dispatch no longer hands {screen[:-1]} its tab: a crypto/ETF "
+            f"'Read the news' fallback would open on Overview, the same screen as 'Open X'."
+        )
+    for path, init in (
+        (_IOS / "ViewModels" / "CryptoDetailViewModel.swift", "init(cryptoSymbol: String, initialTab: CryptoDetailTab = .overview) {"),
+        (_IOS / "ViewModels" / "ETFDetailViewModel.swift", "init(etfSymbol: String, initialTab: ETFDetailTab = .overview) {"),
+    ):
+        assert "self.selectedTab = initialTab" in _balanced(_read(path), init), (
+            f"{path.name} no longer opens on the tab it was handed."
+        )
 
 
 def test_the_cover_hands_an_updates_destination_to_the_shell():
@@ -1160,7 +1181,7 @@ def test_the_shell_consumes_the_updates_focus_once():
         "cold launch from a push parks it before the shell renders)."
     )
     handler = _squashed(_balanced(content, opener))
-    guard = handler.find("guardletfocuselse{return}")
+    guard = handler.find("guardvarfocus=parkedelse{return}")
     cleared = handler.find("appState.pendingUpdatesFocus=nil")
     opened = handler.find("openUpdatesTicker(focus)")
     assert -1 < guard < cleared < opened, (

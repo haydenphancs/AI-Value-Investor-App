@@ -67,6 +67,11 @@ struct UpdatesTickerFocus: Equatable {
     /// Where on that fallback screen: the default for a widget tap, the News tab for an alert's
     /// "Read the news" (its news must still be one tap away).
     var fallback: TickerDestination = .default
+    /// The tab to go back to before that fallback opens, so closing the ticker screen returns
+    /// the user to where they tapped "Read the news" (Alerts, or the tab under a push's detail)
+    /// rather than to an Updates tab that had nothing for them (owner, 2026-11-27). Set by
+    /// `ContentView` for an alert's focus only; nil for a widget tap (it came from outside).
+    var returnTab: HomeTab? = nil
 }
 
 enum DeepLinkRouter {

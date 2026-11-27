@@ -507,6 +507,14 @@ class ReauthenticateRequest(BaseModel):
     supabase_access_token: Optional[str] = Field(
         default=None, min_length=16, max_length=TOKEN_MAX_LENGTH, repr=False,
     )
+    # Apple only: the single-use authorization code Sign in with Apple hands the app with the
+    # identity token. NOT a credential kind (it proves nothing by itself) — after the identity
+    # token proved the caller, it is exchanged for the refresh token that account deletion
+    # revokes (SOC-04). This is how an account last signed in on 1.0–1.03 (which never sent the
+    # code) gets a revocable grant at the "Confirm it's you" step right before deletion.
+    authorization_code: Optional[str] = Field(
+        default=None, max_length=AUTHORIZATION_CODE_MAX_LENGTH, repr=False,
+    )
 
     def credential_kind(self) -> Optional[str]:
         """`password` / `id_token` / `supabase_token`, or None when the body is not exactly one."""

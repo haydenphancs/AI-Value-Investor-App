@@ -465,6 +465,7 @@ async def test_change_email_is_limited_per_user_and_per_ip():
             await _start(SB(), new_email=_CURRENT)
         assert exc.value.status_code == 400
         rate_limiter._protected.pop(f"changeemail:user:{_USER_ID}", None)
+        rate_limiter._protected.pop(f"change_mail:email:{_CURRENT}", None)  # isolate the IP limit
     with pytest.raises(HTTPException) as exc:
         await _start(SB())
     assert exc.value.status_code == 429
@@ -754,3 +755,34 @@ def test_migration_212_syncs_email_on_update_and_fails_open():
     assert "DROP TRIGGER IF EXISTS on_auth_user_email_changed ON auth.users" in flat
     # The backfill touches only drifted rows (a re-run updates nothing).
     assert "AND p.email IS DISTINCT FROM a.email" in flat
+
+
+# ── Review 2026-11-27: change-email shares the hourly mail ceilings ─────────────────────
+
+@pytest.mark.asyncio
+async def test_a_change_email_start_counts_twice_against_the_hourly_ip_mail_ceiling():
+    """It mails two addresses, and the sign-up / resend / reset routes share the same per-IP
+    hourly ceiling (MAIL_PER_IP_PER_HOUR). With room for one email only, a start is refused."""
+    ip = "203.0.113.150"
+    for _ in range(auth_ep.MAIL_PER_IP_PER_HOUR - 1):
+        assert rate_limiter.is_allowed(
+            f"mail:ip:h:{ip}", max_requests=auth_ep.MAIL_PER_IP_PER_HOUR,
+            window_seconds=auth_ep.MAIL_HOUR_SECONDS, protected=True)
+    with pytest.raises(HTTPException) as exc:
+        await _start(SB(), ip=ip)
+    assert exc.value.status_code == 429
+    assert exc.value.headers["Retry-After"] == str(auth_ep.MAIL_HOUR_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_one_new_address_gets_at_most_five_change_codes_an_hour_whatever_the_ip():
+    """The caller chooses the new address, so it is a mail target: charged at entry on every
+    attempt (a taken and a free address answer alike)."""
+    for i in range(auth_ep.CHANGE_MAIL_PER_RECIPIENT_PER_HOUR):
+        await _start(SB(), ip=f"203.0.113.{160 + i}")
+        rate_limiter._protected.pop(f"changeemail:user:{_USER_ID}", None)
+    with pytest.raises(HTTPException) as exc:
+        await _start(SB(), ip="203.0.113.199")
+    assert exc.value.status_code == 429
+    assert exc.value.headers["Retry-After"] == str(auth_ep.MAIL_HOUR_SECONDS)
+

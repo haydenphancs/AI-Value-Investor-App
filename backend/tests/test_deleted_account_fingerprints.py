@@ -29,6 +29,17 @@ from fastapi import HTTPException
 from app.api.v1.endpoints import users as users_ep
 from app.core.security import rate_limiter
 
+@pytest.fixture(autouse=True)
+def _fresh_deletion_limiter():
+    """DELETE /users/me charges its per-account bucket inside the handler (after the re-auth
+    check, review 2026-11-27); tests that call the handler directly, several times for one
+    account, start each test with an empty limiter."""
+    from app.core.security import rate_limiter as _rl
+    _rl.clear()
+    yield
+    _rl.clear()
+
+
 _USER_ID = "11111111-2222-4333-8444-555555555555"
 _BACKEND = Path(__file__).resolve().parents[1]
 _MIGRATION = _BACKEND / "database" / "migrations" / "211_deleted_account_fingerprints.sql"
@@ -190,15 +201,26 @@ def _clean_limiter():
 
 @pytest.mark.asyncio
 async def test_deletion_is_limited_per_account(_clean_limiter):
+    """Charged by `_charge_account_deletion`, which delete_account calls only AFTER the re-auth
+    check passed (review 2026-11-27), never by the dependency."""
     per_user, window = users_ep.ACCOUNT_DELETE_LIMIT_PER_USER
     for i in range(per_user):
-        await users_ep._account_deletion_rate_limit(_Req(f"198.51.100.{i}"), user_id=_USER_ID)
+        users_ep._charge_account_deletion(_USER_ID)
     with pytest.raises(HTTPException) as exc:
-        await users_ep._account_deletion_rate_limit(_Req("198.51.100.200"), user_id=_USER_ID)
+        users_ep._charge_account_deletion(_USER_ID)
     assert exc.value.status_code == 429
     assert exc.value.headers["Retry-After"] == str(window)
-    # Another account from a fresh address is unaffected.
-    await users_ep._account_deletion_rate_limit(_Req("198.51.100.201"), user_id="someone-else")
+    # Another account is unaffected, and the dependency no longer touches the account bucket.
+    users_ep._charge_account_deletion("someone-else")
+    await users_ep._account_deletion_rate_limit(_Req("198.51.100.201"), user_id="third-user")
+    assert "delete_account:user:third-user" not in rate_limiter._protected
+
+
+def test_the_account_bucket_is_charged_after_the_reauth_check_and_before_any_purge():
+    import inspect as _inspect
+    src = _inspect.getsource(users_ep.delete_account)
+    assert src.index("_deletion_reauth_refusal(") < src.index("_charge_account_deletion(user_id)") \
+        < src.index("_purge_research_pdfs")
 
 
 @pytest.mark.asyncio

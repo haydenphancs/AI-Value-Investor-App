@@ -1614,6 +1614,11 @@ nonisolated struct ReauthenticateRequestBody: Encodable, Sendable {
     var idToken: String?
     var nonce: String?
     var supabaseAccessToken: String?
+    /// Apple only: the fresh single-use authorization code. The server exchanges it for the
+    /// refresh token account deletion revokes (SOC-04) — the way an account last signed in on
+    /// 1.0–1.03 gets a revocable grant right before it is deleted. `authorization_code` on the
+    /// wire (the encoder converts to snake_case); an older backend ignores it.
+    var authorizationCode: String?
 }
 
 nonisolated struct ReauthenticateResponse: Decodable, Sendable {
@@ -1741,7 +1746,7 @@ nonisolated struct PasswordChangedResponse: Decodable, Sendable {
 /// enum would make an unknown value THROW after the server already did the work.
 ///
 /// "codes_sent" is also the answer when another account already uses the address (no email goes
-/// out then): the server never says which addresses have accounts, so neither may this app.
+/// out then): this route never says which addresses have accounts (sign-up does, by design, since 2026-11-26), so neither may this app.
 /// Nothing here re-mints the session — the caller's tokens are untouched by an email change.
 nonisolated struct EmailChangeResponse: Decodable, Sendable {
     let status: String

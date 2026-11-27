@@ -61,7 +61,8 @@ logger = logging.getLogger(__name__)
 # HOURLY ceilings sit behind them, sized above anything a person does, so the short windows do
 # not multiply abuse by four (review 2026-11-26: 11 → 44 emails an hour into one inbox):
 #   per address: 16 confirmation emails (sign-up + resend together) and 6 reset emails an hour;
-#   per IP:      30 emails an hour across all three routes (the project's mail budget is 100).
+#   per IP:      30 emails an hour across all three routes AND /auth/change-email (which counts
+#                twice per start: it mails two addresses), against the project's budget of 100.
 # One inbox can therefore get at most ~22 Caydex emails an hour (it was 11 with hourly windows),
 # and one IP at most 30. Supabase's "Minimum interval per user" (60 s) is kept PER EMAIL TYPE,
 # so it does not lower these. The /register IP limits also bound how fast one address can test
@@ -74,6 +75,8 @@ MAIL_HOUR_SECONDS = 3600
 CONFIRM_MAIL_PER_ADDRESS_PER_HOUR = 16
 RESET_MAIL_PER_ADDRESS_PER_HOUR = 6
 MAIL_PER_IP_PER_HOUR = 30
+# /auth/change-email: codes mailed to one NEW address (the caller chooses it) per hour.
+CHANGE_MAIL_PER_RECIPIENT_PER_HOUR = 5
 
 # The sign-up answer while the address still needs confirming: a NEW address, or one whose
 # earlier sign-up was never confirmed (GoTrue re-sends that one's email). An address that
@@ -1176,6 +1179,26 @@ async def reauthenticate(
         )
 
     logger.info("reauthenticate: user=%s re-proved a %s credential", user_id, kind)
+
+    # Apple: store the grant from the fresh authorization code, AFTER the identity token proved
+    # the caller, and BEFORE answering — the deletion this proof is for comes next and revokes
+    # whatever grant is stored. Without this, an account last signed in on 1.0–1.03 (no code was
+    # ever sent) is never revoked (SOC-04, review 2026-11-27). Best-effort: the service never
+    # raises and checks the code's subject against the verified token's; a failure here must
+    # never refuse the re-authentication.
+    if kind == "id_token" and request.provider == "apple" and request.authorization_code:
+        try:
+            apple_grant = await apple_sign_in_service.store_grant_from_authorization_code(
+                supabase, user_id=user_id, authorization_code=request.authorization_code,
+                identity_token=request.id_token,
+            )
+            logger.info("reauthenticate: Apple grant for user=%s: %s", user_id, apple_grant)
+        except Exception as e:  # noqa: BLE001 — never fail a re-authentication on the grant
+            logger.error(
+                "reauthenticate: Apple grant step raised for user=%s (%s) — proof issued anyway",
+                user_id, type(e).__name__, exc_info=True,
+            )
+
     return ReauthenticateResponse(
         reauth_token=create_reauth_token(user_id),
         expires_in=settings.REAUTH_TOKEN_EXPIRE_SECONDS,
@@ -3107,9 +3130,18 @@ async def change_email(
     another account already uses gets the same "codes_sent" answer (enumeration).
     """
     client_ip = trusted_client_ip(req)
+    # Each start makes GoTrue mail TWO addresses, so it counts twice against the per-IP hourly
+    # mail ceiling the sign-up, resend and reset routes share (review 2026-11-27: this route
+    # used to sit outside it). The new address is chosen by the caller, so it gets its own
+    # hourly bucket too — charged on every attempt, at entry, so a taken address and a free one
+    # get the same answer and no code is spent before a refusal. Caller-chosen key last.
     _enforce_credential_limits(
         (f"changeemail:ip:{client_ip}", *CHANGE_EMAIL_LIMIT_PER_IP),
         (f"changeemail:user:{user_id}", *CHANGE_EMAIL_LIMIT_PER_USER),
+        (f"mail:ip:h:{client_ip}", MAIL_PER_IP_PER_HOUR, MAIL_HOUR_SECONDS),
+        (f"mail:ip:h:{client_ip}", MAIL_PER_IP_PER_HOUR, MAIL_HOUR_SECONDS),
+        (f"change_mail:email:{_email_key(str(request.new_email))}",
+         CHANGE_MAIL_PER_RECIPIENT_PER_HOUR, MAIL_HOUR_SECONDS),
         detail="Too many email change attempts. Please try again later.",
     )
     # Before any GoTrue call, and the same answer whatever the address (see the constant).

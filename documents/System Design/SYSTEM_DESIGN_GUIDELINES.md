@@ -2414,8 +2414,11 @@ bearer alone, and App Review 5.1.1(v) needs that to keep working. The switch goe
 builds are below the minimum supported version (OWNER_TASKS); an old build then gets the error's
 copy ("sign out, sign back in, and delete within 10 minutes").
 
-**Only `/auth/session-exchange` accepts a Supabase token (2026-11-26).** Every other route takes
-only an app-minted access token. Two fallbacks are gone:
+**Only `/auth/session-exchange` turns a Supabase token into a session (2026-11-26);
+`/auth/reauthenticate` also verifies one sent in the request body (JWKS only, sign-in under 10
+minutes) but returns only a five-minute re-auth proof.** Both read it from the request body; no
+route accepts a Supabase token as its bearer, which is always an app-minted access token. Two
+fallbacks are gone:
 - the old path that let any route accept a Supabase JWT as a bearer;
 - the `SUPABASE_JWT_SECRET`-keyed 503 branch that came with it.
 
@@ -2542,8 +2545,12 @@ found Forgot password.
     minutes), so one person's retries are refused by the address window. HOURLY ceilings sit
     behind them, above anything a person does, so the short windows do not multiply abuse:
     16 confirmation emails (sign-up + resend) and 6 reset emails per address an hour, and 30
-    emails per IP an hour across all three routes (the project's mail budget is 100). One inbox
-    can get at most ~22 Caydex emails an hour (11 before), one IP at most 30. Supabase's 60 s
+    emails per IP an hour across all three routes (the project's mail budget is 100).
+    `/auth/change-email` counts against the same per-IP hourly ceiling (2 emails per start: it
+    mails the current and the new address) and has its own per-recipient hourly bucket (5 starts
+    an hour toward one new address). One inbox can get at most ~22 Caydex emails an hour from
+    sign-up, resend and reset (11 before), plus at most 5 change-email codes as someone's new
+    address; one IP at most 30. Supabase's 60 s
     "minimum interval per user" is kept per email TYPE and does not lower these. The code-ENTRY
     routes (`/auth/confirm-email`, `/auth/reset-password`) keep 10 per address per hour: they limit
     guesses, not mail. Residuals: everyone behind one NAT address shares the IP buckets (an 11th
@@ -2724,7 +2731,7 @@ is a cross-user leak, not untidy state.
 
 **Which surfaces require an account.** All `.signInRequired` routes: the `/users/me` family,
 `/auth/logout`, `/auth/sign-out-all`, `/auth/reauthenticate`, `/auth/change-password`,
-`/auth/set-password`, `/billing/verify`, whale
+`/auth/set-password`, `/auth/change-email`, `/auth/change-email/confirm`, `/billing/verify`, whale
 follow/unfollow/activity — and **every AI-generation surface**: the `/research/*` routes,
 `GET /stocks/{t}/report`, `POST /stocks/{t}/prewarm-report`, and every chat route. (The separate
 `POST /stocks/{t}/report/chat` was deleted 2026-09-11: it shared `ChatRateLimit` and the 1-credit
@@ -2782,14 +2789,22 @@ verifies (`sign_in_with_id_token`). Four things sit around that (sign-in audit S
   (`APPLE_SIGN_IN_KEY_ID` / `APPLE_SIGN_IN_PRIVATE_KEY`, team `APPLE_TEAM_ID`, client
   `APPLE_BUNDLE_ID`). With either secret unset the feature is OFF: sign-in stores nothing (one
   WARNING per process) and every deletion logs a WARNING that the grant was not revoked. Shipped
-  builds' Apple users have no stored grant until they sign in with Apple again on ≥ 1.04.
+  builds' Apple users have no stored grant until they sign in with Apple again on ≥ 1.04 — or
+  confirm it's them with Apple before deleting: the Confirm It's You step on ≥ 1.04 sends Apple's
+  fresh `authorization_code` to `/auth/reauthenticate` with the identity token, which stores the
+  grant from it the same way (after the token proved the caller, the same subject check,
+  best-effort: a failure never refuses the re-authentication), so an account last signed in on
+  1.0–1.03 is revoked when deleted from 1.04. A deletion from 1.0–1.03 itself still revokes
+  nothing for such an account.
   The app also asks `getCredentialState(forUserID:)` on foreground, on iOS's
   `credentialRevokedNotification` and when a session is established, for a session that came in
   WITH Apple (the Keychain account link `AppleSignInStore` records at sign-in, cleared with the
   session tokens and by every non-Apple sign-in), and signs out through `AppState.signOut()` on
   `.revoked` only — `.notFound` / `.transferred` keep the session.
-- **Google grant (SOC-04).** GoogleSignIn keeps its own state in the Keychain: every sign-out
-  signs it out (`AuthService.finishSignOut`), and an account deletion `disconnect`s it first —
+- **Google grant (SOC-04).** GoogleSignIn keeps its own state in the Keychain: every session end
+  signs it out — a tapped Sign Out, and also a session the server ended (a dead credential, an
+  undone adoption, the fresh-install purge), through `AuthService.clearToken`
+  (`SocialSignInService.endGoogleSession()`) — and an account deletion `disconnect`s it first —
   revoking the device's grant — before the sign-out (`AppState.signOutAfterAccountDeletion`).
 - **Google nonce (SOC-07).** The native Google path now binds a nonce exactly like Apple: GIDSignIn
   gets the SHA-256 hex of a fresh raw nonce (it copies what it is given into the ID token's claim)
@@ -2866,12 +2881,17 @@ Profile read — never followed a change made in Studio.
   code is spent as it confirms, so a "complete" answer from either verify finishes the change, and a
   refusal names the address whose code failed when the other was accepted.
 - **Enumeration:** an address another account holds (`email_exists`) is answered exactly like a
-  real send (`status: "codes_sent"`, after a 0.4–1.2 s pause); no code ever arrives. GoTrue checks
+  real send (`status: "codes_sent"`, after a 0.4–1.2 s pause); no code ever arrives.
+  `/auth/register`'s 409 `AUTH_EMAIL_ALREADY_REGISTERED` already tells anyone whether an address
+  has a CONFIRMED account (owner decision 2026-11-26), so change-email stays silent only so that
+  it does not open a second, cheaper channel — as `/auth/resend-confirmation` already does. GoTrue checks
   "taken" BEFORE its per-user send interval, so a second start within that minute used to answer a
   free address 503 and a taken one 200 (independent audit, 2026-11-26): the backend now spaces
   sends per account (`CHANGE_EMAIL_SEND_SPACING_SECONDS` = 65, at or above Supabase's 60 s
   default), checked before any GoTrue call and charged on every send attempt, one 429 for both.
-  Both routes are also limited (start 10/h per address, 5/h per account; confirm 20/h and 10/h).
+  Both routes are also limited (start 10/h per address, 5/h per account; confirm 20/h and 10/h),
+  and a start also counts twice against the per-IP hourly mail ceiling and once against a 5/h
+  bucket for the new address (the mail limits above).
   **Residuals, accepted for the owner to re-check:** with Secure email change, GoTrue mails the
   CURRENT address only on a real send, so an account holder sees in their own inbox whether an
   address is taken (one inbox, one start, ≤ 5 per account per hour); turning Secure email change
@@ -2895,7 +2915,7 @@ Full invariant set: [.claude/rules/auth.md](../../.claude/rules/auth.md).
 
 | Data | iOS storage | Backend storage | Notes |
 |---|---|---|---|
-| Auth tokens | **Keychain** (`Core/Services/AuthService.swift::KeychainService`), `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` | n/a | The live in-process copy is `APIClient.currentAuthToken()`, which **deliberately diverges** from the Keychain during `.restoring` — never read the Keychain directly (`.claude/rules/auth.md` §8). **A fresh install purges the session an earlier install left behind (2026-11-26).** Keychain items outlive the app, so a reinstall used to restore the previous user's session. `AuthService.purgeSessionLeftByAnEarlierInstall` runs first in the launch Task, before the one launch Keychain read. It clears the two session tokens only when BOTH traces of an earlier launch are missing: the UserDefaults marker `auth.install-marker.v1`, and the App Group key `widget.api.baseURL`, which every build since 2026-08-28 writes at each launch and which iOS deletes with the app. An update keeps the session: it arrives without the marker but with the App Group key. An unreadable App Group also keeps it (logged as a warning). The device proof and the guest install id are never cleared. |
+| Auth tokens | **Keychain** (`Core/Services/AuthService.swift::KeychainService`), `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`: the two session tokens, plus `AppleSignInStore`'s `apple-account-link-v1` (the Apple ID the current session signed in with) and `apple-pending-name-v1` (Apple's first-time name, kept only until an `/auth/oauth` succeeds or the session ends) | `auth_refresh_families` / `auth_refresh_tokens` (migration 214: ids, expiry and revocation only, never the token text); `apple_sign_in_grants` (migration 213: Apple's refresh token, kept only for the revoke at account deletion, service-role-only, deleted with the user row) | The live in-process copy is `APIClient.currentAuthToken()`, which **deliberately diverges** from the Keychain during `.restoring` — never read the Keychain directly (`.claude/rules/auth.md` §8). **A fresh install purges the session an earlier install left behind (2026-11-26).** Keychain items outlive the app, so a reinstall used to restore the previous user's session. `AuthService.purgeSessionLeftByAnEarlierInstall` runs first in the launch Task, before the one launch Keychain read. It clears the two session tokens and the Apple account link (through `AuthService.clearToken`) only when BOTH traces of an earlier launch are missing: the UserDefaults marker `auth.install-marker.v1`, and the App Group key `widget.api.baseURL`, which every build since 2026-08-28 writes at each launch and which iOS deletes with the app. An update keeps the session: it arrives without the marker but with the App Group key. An unreadable App Group also keeps it (logged as a warning). The device proof and the guest install id are never cleared. |
 | User profile | **In memory only** — `UserState.profile` | `public.users` (RLS) | Re-fetched from the backend each launch. Not persisted. |
 | Research reports | **In memory only** — `ResearchState.reports` | `research_reports` (service-role; the in-code `user_id` filter is the effective wall) | Not persisted client-side. |
 | Last Home dashboard (Market Pulse, scanners, signals as served, themes, the watchlist strip — active group name, tickers and prices — and the Trillion group) | **On disk** since 2026-10-01: the raw `GET /home/dashboard` response under Library/Caches/HomeDashboard (`HomeDashboardSnapshotStore`), `.completeFileProtectionUntilFirstUserAuthentication`, never backed up | nothing new — built per request from the existing tables | The account's watchlist tickers and their prices now survive app termination. Owner-stamped with the stored token's `sub`, shown for at most 96 h, deleted at session end, on a change of account and by Settings › Clear Cache (§7.1). Pro signals are kept exactly as served; the server's redaction remains the gate. |
@@ -5575,7 +5595,9 @@ with "0 credits (Recommended)"; its fingerprint is kept "90 days (Recommended)".
   and BEFORE `admin.delete_user` (it reads `auth.users` / `auth.identities`). It fails OPEN, loudly:
   deleting an account is an App Store 5.1.1(v) and privacy obligation, the ledger only protects
   free credits, so a failure is an ERROR naming what is lost and the deletion completes. DELETE
-  /users/me is also limited (10 per address, 5 per account, per hour).
+  /users/me is also limited (10 per address, 5 per account, per hour). The per-account limit is
+  charged only AFTER the re-authentication check (§9.1), so a refused proof never uses it up and
+  someone holding a stolen token cannot lock the owner out of deleting.
 - **Read** by `trg_withhold_returning_welcome`, a DEFERRED constraint trigger on `auth.users` AFTER
   INSERT. It runs at COMMIT because GoTrue inserts the user row first and its identity row second
   in one transaction, so an ordinary AFTER INSERT trigger cannot see the Apple/Google subject.

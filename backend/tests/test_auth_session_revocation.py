@@ -757,6 +757,11 @@ class _DeleteDB:
         self.auth = SimpleNamespace(admin=SimpleNamespace(
             delete_user=lambda uid: self.log.append(("delete_user", uid))))
 
+    def rpc(self, name, params):
+        # The 211 fingerprint (`record_deleted_account`) — recorded so the order is visible.
+        self.log.append(("rpc", name))
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=1))
+
 
 @pytest.fixture
 def _no_purges(monkeypatch):
@@ -764,6 +769,15 @@ def _no_purges(monkeypatch):
     monkeypatch.setattr(users_ep, "_purge_research_pdfs", lambda sb, uid: calls.append("pdfs"))
     monkeypatch.setattr(users_ep, "_purge_avatars", lambda sb, uid: calls.append("avatars"))
     monkeypatch.setattr(users_ep, "_purge_unlinked_rows", lambda sb, uid: calls.append("rows") or {})
+    from app.services import apple_sign_in_service as _apple
+
+    async def _revoke(sb, uid):
+        calls.append("apple_revoke")
+        if isinstance(getattr(sb, "log", None), list):
+            sb.log.append(("apple_revoke", uid))
+        return _apple.NO_GRANT
+
+    monkeypatch.setattr(_apple, "revoke_for_account", _revoke)
     return calls
 
 
@@ -774,10 +788,26 @@ async def _delete(db, *, reauth=None, claims=None):
 
 
 @pytest.mark.asyncio
+async def test_refused_proofs_never_use_up_the_accounts_deletion_attempts(_no_purges):
+    """Review 2026-11-27: the per-account deletion bucket used to be charged by the dependency,
+    BEFORE the re-auth check, so someone holding the token could spend the owner's five
+    attempts with bad proofs and block the real deletion for an hour."""
+    per_user, _ = users_ep.ACCOUNT_DELETE_LIMIT_PER_USER
+    for _ in range(per_user + 2):
+        with pytest.raises(HTTPException) as ei:
+            await _delete(_DeleteDB(), reauth="not-a-proof")
+        assert _code(ei) == "AUTH_REAUTH_REQUIRED"
+    assert await _delete(_DeleteDB()) == {"deleted": True}
+
+
+@pytest.mark.asyncio
 async def test_a_shipped_build_still_deletes_with_the_bearer_alone(_no_purges):
     db = _DeleteDB()
     assert await _delete(db) == {"deleted": True}
-    assert ("delete_user", _UID) in db.log
+    # The combined order (review 2026-11-27): the 211 fingerprint, then the 213 Apple revoke,
+    # then the login itself — after the purge, which ran first.
+    assert db.log == [("rpc", "record_deleted_account"), ("apple_revoke", _UID), ("delete_user", _UID)]
+    assert _no_purges == ["pdfs", "avatars", "rows", "apple_revoke"]
 
 
 @pytest.mark.asyncio
@@ -875,6 +905,68 @@ async def test_a_linked_provider_subject_is_verified_by_gotrue():
     with pytest.raises(HTTPException) as ei:
         await _reauth(db, ReauthenticateRequest(provider="apple", id_token=_id_token("apple-sub-1")))
     assert _code(ei) == "AUTH_PROVIDER_FAILED"
+
+
+# ── Review 2026-11-27: the Apple code at "Confirm it's you" stores the grant ─────────
+
+def _apple_store_recorder(monkeypatch, *, raises=False):
+    from app.services import apple_sign_in_service as svc
+    calls = []
+
+    async def fake_store(supabase, *, user_id, authorization_code, identity_token):
+        calls.append((user_id, authorization_code, identity_token))
+        if raises:
+            raise RuntimeError("apple exchange blew up")
+        return "stored"
+
+    monkeypatch.setattr(svc, "store_grant_from_authorization_code", fake_store)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_an_apple_reauth_with_a_code_stores_the_grant_before_answering(monkeypatch):
+    """An account last signed in on 1.0–1.03 has no stored grant; the re-auth right before its
+    deletion is the last chance to get one, or the deletion revokes nothing (SOC-04)."""
+    calls = _apple_store_recorder(monkeypatch)
+    db = FakeDB()
+    db.sessions.users[_UID]["_identities"] = {("apple", "apple-sub-1")}
+    token = _id_token("apple-sub-1")
+    out = await _reauth(db, ReauthenticateRequest(
+        provider="apple", id_token=token, nonce="n", authorization_code="c0de"))
+    assert decode_reauth_token(out.reauth_token, _UID)
+    assert calls == [(_UID, "c0de", token)]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_apple_grant_store_never_refuses_the_reauth(monkeypatch):
+    _apple_store_recorder(monkeypatch, raises=True)
+    db = FakeDB()
+    db.sessions.users[_UID]["_identities"] = {("apple", "apple-sub-1")}
+    out = await _reauth(db, ReauthenticateRequest(
+        provider="apple", id_token=_id_token("apple-sub-1"), nonce="n", authorization_code="c0de"))
+    assert decode_reauth_token(out.reauth_token, _UID)
+
+
+@pytest.mark.asyncio
+async def test_no_grant_is_stored_for_google_for_no_code_or_for_another_account(monkeypatch):
+    calls = _apple_store_recorder(monkeypatch)
+    db = FakeDB()
+    db.sessions.users[_UID]["_identities"] = {("apple", "apple-sub-1"), ("google", "g-sub-1")}
+    await _reauth(db, ReauthenticateRequest(
+        provider="google", id_token=_id_token("g-sub-1"), authorization_code="c0de"))
+    await _reauth(db, ReauthenticateRequest(provider="apple", id_token=_id_token("apple-sub-1"), nonce="n"))
+    db.id_token_owner = _OTHER        # GoTrue verified the token as ANOTHER account
+    with pytest.raises(HTTPException):
+        await _reauth(db, ReauthenticateRequest(
+            provider="apple", id_token=_id_token("apple-sub-1"), nonce="n", authorization_code="c0de"))
+    assert calls == [], "a grant was stored for Google, without a code, or for another account"
+
+
+def test_the_reauth_code_is_a_redacted_optional_field_not_a_credential_kind():
+    field = ReauthenticateRequest.model_fields["authorization_code"]
+    assert field.repr is False and field.default is None
+    assert ReauthenticateRequest(authorization_code="c0de").credential_kind() is None
+    assert "c0de" not in repr(ReauthenticateRequest(password="x", authorization_code="c0de"))
 
 
 @pytest.mark.asyncio

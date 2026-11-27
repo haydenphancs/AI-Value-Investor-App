@@ -78,10 +78,14 @@ final class ConfirmIdentityViewModel: ObservableObject {
     /// Supabase session the web Google flow ends with.
     nonisolated static func body(for handshake: SocialSignInResult) -> ReauthenticateRequestBody {
         switch handshake {
-        // displayName, authorizationCode and appleUserID are for the SIGN-IN only (the Apple code
-        // exchange and the pending name); re-authentication proves identity with the token alone.
-        case .identityToken(let provider, let token, let nonce, _, _, _):
-            return ReauthenticateRequestBody(provider: provider, idToken: token, nonce: nonce)
+        // The token proves identity. Apple's authorization code rides along so the server can
+        // store the grant that the deletion right after this revokes (SOC-04): an account last
+        // signed in on 1.0–1.03 never sent one. displayName and appleUserID are sign-in only.
+        case .identityToken(let provider, let token, let nonce, _, let authorizationCode, _):
+            return ReauthenticateRequestBody(
+                provider: provider, idToken: token, nonce: nonce,
+                authorizationCode: provider == "apple" ? authorizationCode : nil
+            )
         case .supabaseSession(let accessToken):
             return ReauthenticateRequestBody(supabaseAccessToken: accessToken)
         }

@@ -1518,16 +1518,31 @@ ACCOUNT_DELETE_LIMIT_PER_IP = (10, 3600)
 ACCOUNT_DELETE_LIMIT_PER_USER = (5, 3600)
 
 
+_ACCOUNT_DELETE_LIMIT_DETAIL = "Too many account deletion attempts. Please try again later."
+
+
 async def _account_deletion_rate_limit(
     req: Request, user_id: str = Depends(get_current_user_id),
 ) -> None:
-    """Per-IP, then per-account, through the credential limiter's short-circuiting helper (its
-    keys are a trusted address and a verified token subject, never caller-chosen text)."""
+    """Per-IP, before anything else (its key is a trusted address, never caller-chosen text).
+
+    The PER-ACCOUNT bucket is NOT here (review 2026-11-27): a dependency runs before the
+    re-authentication check, so someone holding the token could spend the account's five
+    attempts with bad proofs and lock the real owner out of deleting for an hour. It is charged
+    in `delete_account` right after the re-auth check passes (`_charge_account_deletion`)."""
     client_ip = trusted_client_ip(req)
     _enforce_credential_limits(
         (f"delete_account:ip:{client_ip}", *ACCOUNT_DELETE_LIMIT_PER_IP),
+        detail=_ACCOUNT_DELETE_LIMIT_DETAIL,
+    )
+
+
+def _charge_account_deletion(user_id: str) -> None:
+    """The per-account deletion bucket, charged only once the caller has re-authenticated (or
+    is a pre-1.04 client let through while ACCOUNT_DELETE_REQUIRE_REAUTH is off)."""
+    _enforce_credential_limits(
         (f"delete_account:user:{user_id}", *ACCOUNT_DELETE_LIMIT_PER_USER),
-        detail="Too many account deletion attempts. Please try again later.",
+        detail=_ACCOUNT_DELETE_LIMIT_DETAIL,
     )
 
 
@@ -1692,6 +1707,8 @@ async def delete_account(
             ErrorCode.AUTH_REAUTH_REQUIRED,
             message=f"account deletion needs re-authentication: {refusal}",
         )
+    # Only an accepted request spends the account's deletion attempts (see the rate limit).
+    _charge_account_deletion(user_id)
 
     failures: dict[str, str] = {}
 

@@ -255,6 +255,10 @@ def _t_google_session_end() -> None:
     finish = _block(_code(_AUTH), _AUTH_FINISH)
     assert _in_order(finish, ("SocialSignInService.endGoogleSession()", "if let endedToken")), (
         "finishSignOut no longer signs GoogleSignIn out (first, before the round trips a kill can cut)")
+    # Review 2026-11-27: a session the SERVER ended (dead credential, undone adoption, the
+    # fresh-install purge) reaches only clearToken, so the Google SDK must end there too.
+    assert "SocialSignInService.endGoogleSession()" in _block(_code(_AUTH), _AUTH_CLEAR), (
+        "clearToken no longer signs GoogleSignIn out, so a server-ended session leaves it signed in")
     after = _block(_code(_APP), _APP_AFTER_DELETE)
     assert _in_order(after, ("SocialSignInService.disconnectGoogleGrant()", "signOut()")), (
         "account deletion no longer disconnects Google BEFORE signing out — the sign-out clears "
@@ -354,6 +358,9 @@ _MUTATIONS = [
     ("code-sent-for-google", _AUTH,
      (("authorizationCode: isApple ? authorizationCode : nil", "authorizationCode: authorizationCode"),),
      _t_apple_code, "signInWithProvider no longer sends the authorization code for Apple only"),
+    ("google-outlives-server-ended-session", _AUTH,
+     (("        SocialSignInService.endGoogleSession()\n        // The Apple account link", "        // The Apple account link"),),
+     _t_google_session_end, "clearToken no longer signs GoogleSignIn out"),
     ("link-outlives-session", _AUTH,
      (("        AppleSignInStore.clearAccountLink(keychain: keychain)\n    }\n}", "    }\n}"),),
      _t_account_link, "clearToken no longer drops the Apple account link"),
@@ -386,7 +393,8 @@ _MUTATIONS = [
      (('Task { [weak self] in await self?.checkAppleCredentialState(trigger: "session-established") }', ""),),
      _t_credential_check, "a cold launch no longer checks the Apple credential"),
     ("signout-keeps-google", _AUTH,
-     (("        SocialSignInService.endGoogleSession()\n", ""),),
+     (("        SocialSignInService.endGoogleSession()\n\n        if handoff.endedByServer {",
+       "\n        if handoff.endedByServer {"),),
      _t_google_session_end, "finishSignOut no longer signs GoogleSignIn out"),
     ("delete-signs-out-first", _APP,
      (("        SocialSignInService.disconnectGoogleGrant()\n        signOut()\n",

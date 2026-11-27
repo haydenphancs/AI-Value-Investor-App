@@ -714,6 +714,12 @@ final class AuthService {
         keychainWrites &+= 1
         storedTokenPresent = false
         refreshTokenMirror = nil
+        // GoogleSignIn's own signed-in state ends with every session too — not only on a tapped
+        // Sign Out (`finishSignOut`) but when the server ends the session (a dead credential, an
+        // undone adoption, the fresh-install purge), which reach only this funnel (review
+        // 2026-11-27). Local and synchronous; a no-op when nobody signed in with Google here.
+        // After an account deletion `disconnectGoogleGrant()` has already read its token.
+        SocialSignInService.endGoogleSession()
         // The Apple account link describes THIS session, so it ends with it (SOC-04) — on every
         // path that ends one: sign-out, a dead credential, an undone adoption, the fresh-install
         // purge (a link an earlier install left would otherwise outlive its session).

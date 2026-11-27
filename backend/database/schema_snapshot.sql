@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict MeHyzUjfriTIK7EPbNCovC09k4EG2AqELB3obhhw1dzhCGec1U7KVJnd9F3W1Ik
+\restrict xLonKklE55R32MdKuMO7RFyTxQVOEhzWhM8hyqoIJwWyZZS6bNXnIcme1zdToy7
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -759,9 +759,18 @@ CREATE FUNCTION extensions.pgrst_ddl_watch() RETURNS event_trigger
     AS $$
 DECLARE
   cmd record;
+  obj_schema text;
 BEGIN
   FOR cmd IN SELECT * FROM pg_event_trigger_ddl_commands()
   LOOP
+    -- triggers and rules have no schema of their own (schema_name is NULL),
+    -- so use the schema of the table they belong to
+    obj_schema := CASE
+      WHEN cmd.object_type IN ('trigger', 'rule')
+        THEN (pg_identify_object_as_address(cmd.classid, cmd.objid, cmd.objsubid)).object_names[1]
+      ELSE cmd.schema_name
+    END;
+
     IF cmd.command_tag IN (
       'CREATE SCHEMA', 'ALTER SCHEMA'
     , 'CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO', 'ALTER TABLE'
@@ -775,7 +784,8 @@ BEGIN
     , 'COMMENT'
     )
     -- don't notify in case of CREATE TEMP table or other objects created on pg_temp
-    AND cmd.schema_name is distinct from 'pg_temp'
+    -- also exclude any objects inside Supabase schemas
+    AND COALESCE(obj_schema, '') NOT IN ('pg_temp', 'auth', 'realtime', '_realtime', 'storage')
     THEN
       NOTIFY pgrst, 'reload schema';
     END IF;
@@ -793,9 +803,17 @@ CREATE FUNCTION extensions.pgrst_drop_watch() RETURNS event_trigger
     AS $$
 DECLARE
   obj record;
+  obj_schema text;
 BEGIN
   FOR obj IN SELECT * FROM pg_event_trigger_dropped_objects()
   LOOP
+    -- triggers and rules have no schema of their own (schema_name is NULL),
+    -- so use the schema of the table they belonged to
+    obj_schema := CASE
+      WHEN obj.object_type IN ('trigger', 'rule') THEN obj.address_names[1]
+      ELSE obj.schema_name
+    END;
+
     IF obj.object_type IN (
       'schema'
     , 'table'
@@ -808,6 +826,8 @@ BEGIN
     , 'rule'
     )
     AND obj.is_temporary IS false -- no pg_temp objects
+    -- also exclude any objects inside Supabase schemas
+    AND COALESCE(obj_schema, '') NOT IN ('pg_temp', 'auth', 'realtime', '_realtime', 'storage')
     THEN
       NOTIFY pgrst, 'reload schema';
     END IF;
@@ -4722,12 +4742,15 @@ begin
             set_config('request.jwt.claim.role', role_name, true),
             set_config('request.headers', headers, true);
 
-    -- One lookup for every probe, by the full primary key.
-    visible_ids := array(
-      select m.id
-      from realtime.messages m
-      where m.inserted_at = probe_inserted_at
-        and m.id = any(probe_ids));
+    -- One lookup for every probe, by the full primary key. Skipped without probes, so the
+    -- SELECT policies are not planned for a write.
+    if cardinality(probe_ids) > 0 then
+      visible_ids := array(
+        select m.id
+        from realtime.messages m
+        where m.inserted_at = probe_inserted_at
+          and m.id = any(probe_ids));
+    end if;
 
     read_allowed := array(
       select p.id = any(visible_ids)
@@ -7538,6 +7561,8 @@ CREATE TABLE auth.custom_oauth_providers (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     custom_claims_allowlist text[] DEFAULT '{}'::text[] NOT NULL,
+    client_auth_method text DEFAULT 'client_secret'::text NOT NULL,
+    client_assertion_audience text,
     CONSTRAINT custom_oauth_providers_authorization_url_https CHECK (((authorization_url IS NULL) OR (authorization_url ~~ 'https://%'::text))),
     CONSTRAINT custom_oauth_providers_authorization_url_length CHECK (((authorization_url IS NULL) OR (char_length(authorization_url) <= 2048))),
     CONSTRAINT custom_oauth_providers_client_id_length CHECK (((char_length(client_id) >= 1) AND (char_length(client_id) <= 512))),
@@ -7855,6 +7880,7 @@ CREATE TABLE auth.one_time_tokens (
     created_at timestamp without time zone DEFAULT now() NOT NULL,
     updated_at timestamp without time zone DEFAULT now() NOT NULL,
     expires_at timestamp with time zone,
+    link_token_hash text,
     CONSTRAINT one_time_tokens_token_hash_check CHECK ((char_length(token_hash) > 0))
 );
 
@@ -7916,6 +7942,7 @@ CREATE TABLE auth.saml_providers (
     created_at timestamp with time zone,
     updated_at timestamp with time zone,
     name_id_format text,
+    dedicated_scope boolean,
     CONSTRAINT "entity_id not empty" CHECK ((char_length(entity_id) > 0)),
     CONSTRAINT "metadata_url not empty" CHECK (((metadata_url = NULL::text) OR (char_length(metadata_url) > 0))),
     CONSTRAINT "metadata_xml not empty" CHECK ((char_length(metadata_xml) > 0))
@@ -10077,7 +10104,9 @@ CREATE TABLE public.marketing_runs (
     last_error text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    lane text DEFAULT 'main'::text NOT NULL,
     CONSTRAINT marketing_runs_content_class_check CHECK ((content_class = ANY (ARRAY['A'::text, 'C'::text, 'F'::text]))),
+    CONSTRAINT marketing_runs_lane_valid CHECK ((lane = ANY (ARRAY['main'::text, 'spotlight'::text]))),
     CONSTRAINT marketing_runs_stage_check CHECK ((stage = ANY (ARRAY['planned'::text, 'selected'::text, 'scripted'::text, 'voiced'::text, 'rendered'::text, 'assets_ready'::text]))),
     CONSTRAINT marketing_runs_status_check CHECK ((status = ANY (ARRAY['planned'::text, 'in_progress'::text, 'media_ready'::text, 'published'::text, 'failed'::text, 'skipped'::text])))
 );
@@ -10087,7 +10116,7 @@ CREATE TABLE public.marketing_runs (
 -- Name: TABLE marketing_runs; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.marketing_runs IS 'One row per ET calendar day of the zero-touch marketing engine (SYSTEM_DESIGN_GUIDELINES §12). The media worker CLAIMS the day by inserting this row (UNIQUE run_date) and checkpoints its last completed stage here so a killed or skipped Railway cron slot resumes on the next hourly tick instead of starting over or double-producing. Written through the token-gated internal API (app/api/v1/endpoints/marketing_internal.py); the worker holds no Supabase key.';
+COMMENT ON TABLE public.marketing_runs IS 'One row per (ET calendar day, lane) of the zero-touch marketing engine (SYSTEM_DESIGN_GUIDELINES §12). The media worker CLAIMS a day''s run by inserting this row (UNIQUE (run_date, lane), migration 210: the main lane every day, the spotlight lane on its own weekdays) and checkpoints its last completed stage here so a killed or skipped Railway cron slot resumes on the next hourly tick instead of starting over or double-producing. Written through the token-gated internal API (app/api/v1/endpoints/marketing_internal.py); the worker holds no Supabase key.';
 
 
 --
@@ -10095,6 +10124,13 @@ COMMENT ON TABLE public.marketing_runs IS 'One row per ET calendar day of the ze
 --
 
 COMMENT ON COLUMN public.marketing_runs.content_class IS 'Informational mirror of the day''s content class, written best-effort by script_service._heal_mirror: A = educational lesson (writer + semantic judge), C = reportorial-filings template, F = company-fundamentals template. The authoritative class derives from marketing_scripts.template_id; create_posts never gates on this column.';
+
+
+--
+-- Name: COLUMN marketing_runs.lane; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_runs.lane IS 'Which daily run this row is (migration 210): main (the afternoon run every day has had since migration 170; the claiming INSERT never sends the column, so it defaults here) or spotlight (the second, morning run on MARKETING_SPOTLIGHT_WEEKDAYS, claimed through its own route). Written once by the claim and never updated.';
 
 
 --
@@ -10123,10 +10159,12 @@ CREATE TABLE public.marketing_scripts (
     content_rejections integer DEFAULT 0 NOT NULL,
     reject_reason text,
     claude_usage jsonb,
+    lane text DEFAULT 'main'::text NOT NULL,
     CONSTRAINT marketing_scripts_claude_usage_object CHECK (((claude_usage IS NULL) OR (jsonb_typeof(claude_usage) = 'object'::text))),
     CONSTRAINT marketing_scripts_content_rejections_nonneg CHECK ((content_rejections >= 0)),
     CONSTRAINT marketing_scripts_generations_check CHECK ((generations >= 0)),
-    CONSTRAINT marketing_scripts_reject_reason_valid CHECK (((reject_reason IS NULL) OR (reject_reason = ANY (ARRAY['content'::text, 'writer_unavailable'::text, 'empty_pool'::text, 'source_ineligible'::text])))),
+    CONSTRAINT marketing_scripts_lane_valid CHECK ((lane = ANY (ARRAY['main'::text, 'spotlight'::text]))),
+    CONSTRAINT marketing_scripts_reject_reason_valid CHECK (((reject_reason IS NULL) OR (reject_reason = ANY (ARRAY['content'::text, 'writer_unavailable'::text, 'empty_pool'::text, 'source_ineligible'::text, 'nothing_qualified'::text])))),
     CONSTRAINT marketing_scripts_status_check CHECK ((status = ANY (ARRAY['rest_day'::text, 'selected'::text, 'generating'::text, 'accepted'::text, 'rejected'::text])))
 );
 
@@ -10184,7 +10222,7 @@ COMMENT ON COLUMN public.marketing_scripts.content_rejections IS 'Generations th
 -- Name: COLUMN marketing_scripts.reject_reason; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON COLUMN public.marketing_scripts.reject_reason IS 'Why a rejected row was closed: content (the validators, 4 times) | writer_unavailable (4 generations ended without a verdict) | empty_pool | source_ineligible.';
+COMMENT ON COLUMN public.marketing_scripts.reject_reason IS 'Why a rejected row was closed: content (the validators, 4 times) | writer_unavailable (4 generations ended without a verdict) | empty_pool | source_ineligible | nothing_qualified (a spotlight day whose series chain found no record; the run closes skipped, never the lesson).';
 
 
 --
@@ -10192,6 +10230,13 @@ COMMENT ON COLUMN public.marketing_scripts.reject_reason IS 'Why a rejected row 
 --
 
 COMMENT ON COLUMN public.marketing_scripts.claude_usage IS 'The Claude tokens inside tokens_used (never in addition to it), by served model and kind: {"<model>": {"input", "output", "cache_read", "cache_write"}}, summed over every generation of the run, failed Claude attempts included (migration 206). NULL = no Claude token was billed (the MARKETING_*_PROVIDER switches on gemini, or a row older than 206). Written only by app/services/marketing/script_service.py, and only when a generation billed Claude; the weekly digest prices it at Claude list prices and tokens_used minus it at the Gemini rate.';
+
+
+--
+-- Name: COLUMN marketing_scripts.lane; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.lane IS 'The lane of the run this script belongs to (migration 210), copied from marketing_runs.lane by the selecting INSERT (run_service.insert_script, the only writer). Lets the readers that take one script per day tell the main and spotlight scripts of one day apart.';
 
 
 --
@@ -13962,11 +14007,11 @@ ALTER TABLE ONLY public.marketing_runs
 
 
 --
--- Name: marketing_runs marketing_runs_run_date_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: marketing_runs marketing_runs_run_date_lane_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.marketing_runs
-    ADD CONSTRAINT marketing_runs_run_date_key UNIQUE (run_date);
+    ADD CONSTRAINT marketing_runs_run_date_lane_key UNIQUE (run_date, lane);
 
 
 --
@@ -15014,6 +15059,13 @@ CREATE INDEX oauth_consents_active_user_client_idx ON auth.oauth_consents USING 
 --
 
 CREATE INDEX oauth_consents_user_order_idx ON auth.oauth_consents USING btree (user_id, granted_at DESC);
+
+
+--
+-- Name: one_time_tokens_link_token_hash_hash_idx; Type: INDEX; Schema: auth; Owner: -
+--
+
+CREATE INDEX one_time_tokens_link_token_hash_hash_idx ON auth.one_time_tokens USING hash (link_token_hash);
 
 
 --
@@ -16729,6 +16781,13 @@ CREATE UNIQUE INDEX buckets_analytics_unique_name_idx ON storage.buckets_analyti
 --
 
 CREATE INDEX idx_multipart_uploads_list ON storage.s3_multipart_uploads USING btree (bucket_id, key, created_at);
+
+
+--
+-- Name: idx_multipart_uploads_parts_upload_part; Type: INDEX; Schema: storage; Owner: -
+--
+
+CREATE INDEX idx_multipart_uploads_parts_upload_part ON storage.s3_multipart_uploads_parts USING btree (upload_id, part_number);
 
 
 --
@@ -22191,5 +22250,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict MeHyzUjfriTIK7EPbNCovC09k4EG2AqELB3obhhw1dzhCGec1U7KVJnd9F3W1Ik
+\unrestrict xLonKklE55R32MdKuMO7RFyTxQVOEhzWhM8hyqoIJwWyZZS6bNXnIcme1zdToy7
 

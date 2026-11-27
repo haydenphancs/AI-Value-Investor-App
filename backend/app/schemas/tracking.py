@@ -276,10 +276,12 @@ class EarningsLiveResponse(BaseModel):
     guidance: Optional[str] = None
     year_ago: Optional[EarningsLiveYearAgoResponse] = None
     last_quarters: List[EarningsLiveQuarterResponse] = Field(default_factory=list)
-    # How often the client should ask again: 30 while `status == "live"`, and on an `upcoming` or
-    # `awaiting` answer for a day nobody has read yet, 120 while a reported report's preliminary
-    # figures can still be confirmed by FMP, once just after midnight ET for a report in on its
-    # own day (that ask takes its LIVE label off), null otherwise.
+    # How often the client should ask again: 30 while `status == "live"`, on an `upcoming` or
+    # `awaiting` answer for a day nobody has read yet, on a report that still wants FMP's answer
+    # while its day awaits its first load, and on FMP's leftover row that reads `reported` while
+    # its own figures fill; 120 while a reported report's preliminary figures can still be
+    # confirmed by FMP; once just after midnight ET for a report in on its own day (that ask
+    # takes its LIVE label off); null otherwise.
     poll_seconds: Optional[int] = None
     # The LIVE label: the report's own day, LIVE or in, to midnight ET (`live_label`); never on
     # FMP's leftover row dated the day after a report.

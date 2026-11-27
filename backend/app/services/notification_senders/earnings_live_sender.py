@@ -187,8 +187,10 @@ the check"; scoped after the 2026-11-20 review, "fix what you need to fix first"
 the sheet show FMP's numbers. The inbox corrections read it as a figure with no verdict, and a
 doubt that rests on an EPS the record holds ("being confirmed") states nothing, so a passing hold
 corrects nothing; an EPS not out yet is no hold, so a row's revenue verdict FMP has moved since is
-corrected to the figure with none. A correction judges a row's own revenue verdict at the surprise
-its text was written from, as the push did (`_merged`).
+corrected to the figure with none. A correction judges a row's own revenue verdict at every
+surprise its text was written at, as the push did, and withholds it if the push would at any of
+them: rows holding the same words cannot be told apart, and a figure with no verdict is never false
+(`_merged`).
 `EARNINGS_LIVE_REVENUE_CHECK_ENABLED` turns it off. INFO `EARNINGS_LIVE_REVENUE_WITHHELD` names
 each landing whose push went out so, once, after the send; a row held for the night takes the
 record's words at its wake, which may say otherwise.
@@ -199,7 +201,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import AbstractSet, Any, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Set, Tuple
 
@@ -298,10 +300,11 @@ class _Words:
 
     stated: Tuple[Stated, ...]
     phrases: Tuple[str, ...] = ()
-    # The live kind's revenue surprise behind `stated`, in percent as the record held it when the
-    # text was written: the revenue check judges this, as the push did, never the whole percent
-    # the text printed (`_merged`). None with no revenue stated.
-    revenue_pct: Optional[float] = None
+    # Every revenue surprise behind `stated` the text was written at (live kind), in percent as the
+    # record held it: the revenue check judges these, as the push did, never the whole percent the
+    # text printed (`_merged`). One text prints at more than one ("25%" at 24.6% and at 25.3%), and
+    # the rows holding it cannot be told apart. Empty with no revenue stated.
+    revenue_pcts: FrozenSet[float] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -725,13 +728,23 @@ class _Said(NamedTuple):
     body: str
     # The live kind's words for each metric, (revenue, EPS); none for the result kind.
     phrases: Tuple[str, ...] = ()
-    # The live kind's revenue surprise behind `stated` (`_Words.revenue_pct`).
+    # The live kind's revenue surprise behind `stated` now (`_Words.revenue_pcts`).
     revenue_pct: Optional[float] = None
 
 
 def _words_of(said: _Said) -> _Words:
     """What a text the record's words make states (`_Words`)."""
-    return _Words(said.stated, said.phrases, said.revenue_pct)
+    return _Words(said.stated, said.phrases,
+                  frozenset() if said.revenue_pct is None else frozenset({said.revenue_pct}))
+
+
+def _know(known: Dict[str, _Words], text: str, words: _Words) -> None:
+    """Keep `text` among those a report's rows may hold, with every revenue surprise it was written
+    at so far (`_Words.revenue_pcts`): the same words seen at another surprise add it, never
+    replace what was known."""
+    held = known.get(text)
+    known[text] = words if held is None else replace(
+        held, revenue_pcts=held.revenue_pcts | words.revenue_pcts)
 
 
 def _result_stated(surprise: float) -> Stated:
@@ -801,23 +814,25 @@ def _without_verdict(phrase: str) -> str:
     return f"{phrase.split(' ', 1)[0]} reported"
 
 
-def _own_revenue_in_doubt(revenue: Stated, revenue_pct: Optional[float],
+def _own_revenue_in_doubt(revenue: Stated, revenue_pcts: AbstractSet[float],
                           snap: LiveSnapshot) -> bool:
-    """The revenue check (`_in_doubt`) on a row's own revenue verdict, at the surprise its text
-    was written from (`_Words.revenue_pct`; the percent it printed only when that is unknown), set
-    beside the record's EPS, at the record's revenue consensus: the push judged the unrounded
-    surprise, and a correction judges what a push of the same pair would."""
+    """The revenue check (`_in_doubt`) on a row's own revenue verdict, set beside the record's
+    EPS, at the record's revenue consensus, at each two-decimal surprise its text was written at
+    (`_Words.revenue_pcts`; the percent it printed only when none is known): in doubt if a push of
+    the pair would withhold at any of them. The push judged that surprise, never its whole
+    percent, and the rows holding one text cannot be told apart: a figure with no verdict is never
+    false."""
     if revenue is None or revenue[0] not in ("beat", "missed"):
         return False
-    rev_pct = revenue_pct
-    if rev_pct is None:
+    pcts = set(revenue_pcts)
+    if not pcts:
         if revenue[1] is None:
             return False
-        rev_pct = float(revenue[1]) if revenue[0] == "beat" else -float(revenue[1])
+        pcts = {float(revenue[1]) if revenue[0] == "beat" else -float(revenue[1])}
     eps = snap.eps
     shown = eps.actual is not None
-    return _in_doubt(snap.revenue.estimate, rev_pct, eps.surprise_pct if shown else None,
-                     eps_gaap=shown and eps.basis == BASIS_GAAP)
+    return any(_in_doubt(snap.revenue.estimate, pct, eps.surprise_pct if shown else None,
+                         eps_gaap=shown and eps.basis == BASIS_GAAP) for pct in pcts)
 
 
 def _prints_release_figure(phrases: Tuple[str, ...]) -> bool:
@@ -839,12 +854,12 @@ def _merged(kind: str, held: _Words, said: _Said, snap: LiveSnapshot) -> Tuple[s
     own = [_out_of_words(was, new) for was, new in zip(held.stated, said.stated)]
     stated = [w if k else n for k, w, n in zip(own, held.stated, said.stated)]
     phrases = [h if k else r for k, h, r in zip(own, held.phrases, said.phrases)]
-    revenue_pct = held.revenue_pct if own[0] else said.revenue_pct
-    if own[0] and not own[1] and _own_revenue_in_doubt(stated[0], revenue_pct, snap):
+    revenue_pcts = held.revenue_pcts if own[0] else _words_of(said).revenue_pcts
+    if own[0] and not own[1] and _own_revenue_in_doubt(stated[0], revenue_pcts, snap):
         stated[0], phrases[0] = _NO_VERDICT, _without_verdict(phrases[0])
     words = tuple(phrases)
     return (_live_body(words, _prints_release_figure(words)),
-            _Words(tuple(stated), words, revenue_pct))
+            _Words(tuple(stated), words, revenue_pcts))
 
 
 class _Write(NamedTuple):
@@ -903,9 +918,9 @@ def _note_told(kind: str, snap: LiveSnapshot, title: str, body: str) -> None:
              else _Words((None,) * (2 if kind == KIND_EARNINGS_LIVE else 1)))
     then = told.get(kind)
     known: Dict[str, _Words] = dict(then.known) if then is not None else {}
-    known[body] = words
+    _know(known, body, words)
     if said is not None:
-        known.setdefault(said.body, words)
+        _know(known, said.body, words)
     told[kind] = _Told(title, known, said.body if said is not None else body,
                        then.held if then is not None else False,
                        then.written if then is not None else frozenset())
@@ -959,7 +974,7 @@ async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
         if told is None:
             continue
         known: Dict[str, _Words] = dict(then.known)
-        known.setdefault(said.body, _words_of(said))
+        _know(known, said.body, _words_of(said))
         writes = _corrections(kind, known, then.written, said, snap)
         if not writes or (track == RESULT_ROWS_IN_LIVE_WORDS
                           and (snap.symbol, snap.day) not in _result_rows_in_live_words):
@@ -977,7 +992,7 @@ async def _revise_changed(snapshots: List[LiveSnapshot]) -> int:
         # text the sender forgot is out of every later look's reach. An empty `seen` owes a look
         # after the back-off whatever the record says then.
         for write in writes:
-            known.setdefault(write.text, write.words)
+            _know(known, write.text, write.words)
         written = then.written | {write.text for write in writes}
         told[track] = _Told(then.title, known, "", then.held, written)
         try:

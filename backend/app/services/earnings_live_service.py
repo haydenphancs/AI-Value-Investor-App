@@ -357,7 +357,9 @@ STATUSES (no time of day exists on `/stable` rows, so the window is the report d
   row FMP filled on Monday morning, beside Monday's true report) is the one the push skipped, so
   the later row keeps its label, and its release is still read late (LATE READS in
   `earnings_filing_service`). Not after a restart, nor when FMP fills the stale earlier row inside
-  its own window after the true report was told (residuals: no label, no late read).
+  its own window after the true report was told, or in the same answer (residuals: no label, no
+  late read, and `reported` while its figures fill, its sheet still polling; the same landings come
+  from a real leftover FMP filled before its report, which must never read LIVE).
   A symbol draws ONE card from the days before today (`newest_report`): the newest reported
   report, else the newest one still up. A company does not report twice in a few days, so a
   pending row beside a reported one is a leftover and never hides the figures. The sheet
@@ -1231,8 +1233,12 @@ def _the_report_before(earlier: _Record) -> bool:
     included. The landing that counts is the one the push acted on, the first figure's or else the
     first EPS's. A record first seen already holding results stands: nothing says it landed late.
     Residuals, judged from this process's landings alone: the true report told first, then the
-    stale earlier row filled inside its own window, leaves the true report unlabelled and off the
-    late list; so does a restart, which rebuilds the stale row holding its results."""
+    stale earlier row filled inside its own window, or both filled in one answer, leaves the true
+    report unlabelled, off the late list, and `reported` while its figures fill (its sheet still
+    polls; `EarningsLiveService.snapshot`); so does a restart, which rebuilds the stale row holding
+    its results. Telling those apart from a real leftover FMP filled before its report needs more
+    than the landings: that order reads the same, and a leftover must never read LIVE the day after
+    its report (owner, 2026-11-20)."""
     if not has_results(eps_metric(earlier), revenue_metric(earlier)):
         return False
     # The landing the push acted on: the first figure's, else the first EPS's (EPS LANDS ON ITS
@@ -2133,9 +2139,16 @@ class EarningsLiveService:
             ranked = _ranked_rows(group, today)
             _note_consensus(rec, ranked)
             via_this = via or ("own_fetch" if fetched else "memo")
+            # FMP's figures before this answer, for the change log, which is written after the
+            # landing is noted, so it says whether this very fold landed the report.
+            before = _fmp_figures(rec)
+            logged = rec.landed_at is not None and rec.symbol in self._watched
+            eps_landed_before = rec.eps_landed_at is not None
             took[symbol] = self._fold_report(rec, _rows_to_fold(ranked, today), now,
                                              fetched=fetched, via=via_this)
             self._note_landing(rec, now, via=via_this)
+            if logged:
+                _log_changed_figures(rec, before, via_this, eps_landed_before)
             if not fetched:
                 _note_memo_read(rec, now, stored_at)
         if unopened:
@@ -2193,10 +2206,8 @@ class EarningsLiveService:
         record took its EPS from, None when it took none. A record holds the EPS it took and may
         still not show it: FMP's unfilled zeros (`_fmp_zeros_unfilled`), or a dropped digit held
         as "checking" (`eps_metric`). FMP changing a watched report's figures or consensus after
-        one showed is logged (`_log_changed_figures`)."""
-        before = _fmp_figures(rec)
-        logged = rec.landed_at is not None and rec.symbol in self._watched
-        eps_landed_before = rec.eps_landed_at is not None
+        one showed is logged by the caller once the landing is noted (`observe_rows`,
+        `_log_changed_figures`)."""
         held = _held_figures(rec)
         alone = self._without_release(rec, rows)
         eps_pick, revenue_pick, refused = self._picks(rec, rows)
@@ -2267,8 +2278,6 @@ class EarningsLiveService:
             rec.unlisted_since = None
             if rec.checked_at is None or now > rec.checked_at:
                 rec.checked_at = now
-        if logged:
-            _log_changed_figures(rec, before, via, eps_landed_before)
         return eps_pick[0] if eps_pick is not None else None
 
     @classmethod
@@ -2566,8 +2575,14 @@ class EarningsLiveService:
         if rec is None:
             return None
         n = et_now(now)
+        if not has_results(eps_metric(rec), revenue_metric(rec)):
+            # A row with no figures of its own reads as the report before it as soon as that
+            # report holds one, not at its own next fold, which for an after-close company's
+            # leftover can be 15 min after the report landed (the 2026-11-26 review).
+            self._note_report_before(rec)
         snap = snapshot_of(rec, n.date(), n)
-        if (snap.status == STATUS_LIVE or snap.live_label) and (
+        if (snap.status == STATUS_LIVE or snap.live_label) and snap.reads_as is None and (
+                has_results(snap.eps, snap.revenue)) and (
                 (rec.report_before is not None and _the_report_before(rec.report_before))
                 or self._reported_shortly_before(rec.symbol, rec.day)):
             # FMP's leftover (ONE REPORT, TWO DATES): the report before it is in, so this row is no

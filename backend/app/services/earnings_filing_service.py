@@ -5402,7 +5402,8 @@ class EarningsFilingWatcher:
     _round_ended: Optional[float] = None
     _parked_until: float = 0.0
     # The accessions a late read's model call was cut on (`_Watch.cut_on`) and nothing has settled
-    # since: a late twin reaching one in a busy round waits with it, with no call of its own.
+    # since (a read, a skip, a give-up; a failed read settles nothing): a late twin reaching one in
+    # a busy round waits with it, with no call of its own (logged `result=late_wait`).
     _cut: Set[str] = field(default_factory=set)
     calls: int = 0
     # Model calls made, each one's read's (`_extract`).
@@ -5996,6 +5997,11 @@ class EarningsFilingWatcher:
                 # for a calm round, or for the twin's read, with no call and no attempt spent.
                 w.cut_on = acc
                 w.checked_mono = time.monotonic()
+                logger.info(
+                    "EARNINGS_LIVE_FILING sym=%s day=%s acc=%s result=late_wait: a call on this "
+                    "filing was cut and this round is as busy, so it waits with it, no call",
+                    symbol, report_day.isoformat(), acc,
+                )
                 return None
             calls_before = self.model_calls
             outcome, figures = await self._extract(
@@ -6006,11 +6012,11 @@ class EarningsFilingWatcher:
                 w.checked_mono = time.monotonic()
                 self._cut.add(acc)
                 return None
-            self._cut.discard(acc)
             if outcome is _Read.RELEASE:
                 # Nothing verified, yet the release is found: its link is still worth keeping. The
                 # memo keeps "nothing verified" (None), so no ticker reads it twice.
                 self._extracted[acc] = figures
+                self._cut.discard(acc)
                 w.cut_on = None
                 figures = figures or _link_only(filing, cik)
                 w.found, w.done, w.figures = filing, True, figures
@@ -6032,6 +6038,9 @@ class EarningsFilingWatcher:
                     symbol, report_day.isoformat(), acc, tries,
                 )
             w.skipped.add(acc)
+            # Settled (not the release, or out of attempts): a cut on it holds no twin back. A failed
+            # read (RETRY, above) settles nothing, and its ticker still waits on the cut.
+            self._cut.discard(acc)
             if w.cut_on == acc:
                 # The filing a cut left waiting is settled (not the release, or out of attempts):
                 # nothing waits for a calm round any more, nor for a twin's read of it.

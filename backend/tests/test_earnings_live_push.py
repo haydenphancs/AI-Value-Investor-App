@@ -7691,3 +7691,131 @@ def test_figures_the_daily_pass_brings_are_logged_as_the_passs(live, monkeypatch
     lines = [r.getMessage() for r in caplog.records
              if r.getMessage().startswith("EARNINGS_LIVE_LANDING")]
     assert len(lines) == 1 and " landed via=daily_pass " in lines[0], lines
+
+
+# ── The eighth 2026-11-26 review (of the seventh's fixes) ─────────────────────────────────────────
+
+_EPS_PLUS_13 = 0.4641              # +13.2% against 0.41, prints "13"
+_REV_PLUS_24_6 = 16.6e9 * 1.246    # prints "25", under the check's 25%
+_REV_PLUS_25_3 = 16.6e9 * 1.253    # prints "25", over it
+
+
+async def _a_text_written_at_two_surprises(dispatch, live, first_rev, back_rev, last_eps) -> str:
+    """The push at `first_rev`, the revenue restated to +3% and back to `back_rev`, which prints
+    the push's words again, then the revenue held (a dropped digit) beside a restated EPS."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    await sender.dispatch_landings(_lands(live, at, eps=_EPS_PLUS_13, revenue=first_rev), at)
+    pushed = dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"]
+    assert pushed == "Revenue beat consensus by 25% · EPS beat consensus by 13%."
+    for minute, rev in ((20, 17.1e9), (40, back_rev)):
+        t = at + timedelta(minutes=minute)
+        await sender.dispatch_landings(_fmp_says(live, t, eps=_EPS_PLUS_13, revenue=rev), t)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == sender.UPDATED_MARK + pushed
+    t = at + timedelta(minutes=60)
+    snaps = _fmp_says(live, t, eps=last_eps, revenue=back_rev / 10)
+    assert live.snapshot("INTC", REPORT, t).revenue.checking
+    await sender.dispatch_landings(snaps, t)
+    return dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"]
+
+
+@pytest.mark.asyncio
+async def test_a_text_written_again_at_another_surprise_is_judged_at_that_one_too(dispatch, live):
+    """The eighth review: the words a text was first seen at kept their surprise for good, so a row
+    rewritten to the same words at +25.3% was still judged at the push's +24.6%, and kept a revenue
+    verdict a push of the pair (+25.3%, EPS +12.5%) withholds."""
+    row = await _a_text_written_at_two_surprises(dispatch, live, _REV_PLUS_24_6, _REV_PLUS_25_3,
+                                                 0.46125)
+    assert row == "Updated: Revenue reported · EPS beat consensus by 12%."
+
+
+@pytest.mark.asyncio
+async def test_a_text_written_at_two_surprises_withholds_where_either_would(dispatch, live):
+    """The other order (+25.3% pushed, +24.6% later in the same words): a push of (+24.6%, EPS
+    -12%) keeps the verdict, but rows holding those words were written at both, and cannot be told
+    apart, so the correction withholds: "Revenue reported" is never false."""
+    row = await _a_text_written_at_two_surprises(dispatch, live, _REV_PLUS_25_3, _REV_PLUS_24_6,
+                                                 0.3608)
+    assert row == "Updated: Revenue reported · EPS missed consensus by 12%."
+
+
+@pytest.mark.asyncio
+async def test_a_row_printing_no_release_figure_gets_no_release_sentence(dispatch, live):
+    """The eighth review: F2's other half. The release's sentence follows the row's words, never
+    the record's flag alone: a correction's own text in FMP's words stays as it is while the record
+    shows only the release's revenue, in doubt beside a held EPS."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    await sender.dispatch_landings(_lands(live, at, eps=0.451, revenue=17.1e9), at)
+    t = at + timedelta(minutes=20)
+    await sender.dispatch_landings(_fmp_says(live, t, eps=0.3608, revenue=17.1e9), t)
+    written = dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"]
+    assert written == "Updated: Revenue beat consensus by 3% · EPS missed consensus by 12%."
+    t2 = at + timedelta(minutes=40)
+    live.observe_rows(REPORT, [_fmp_row(eps=0.036, revenue=1.71e9)], t2, fetched=True)
+    live.absorb_filing("INTC", REPORT, FilingFigures(
+        accession="0000000000-26-000009", accepted_at=t2, url=None, revenue=21.6e9), t2)
+    (snap,) = live.landed_snapshots(t2)
+    assert snap.preliminary and snap.eps.checking
+    await sender.dispatch_landings([snap], t2)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == written
+
+
+@pytest.mark.asyncio
+async def test_a_looks_own_words_carry_their_surprise(dispatch, live):
+    """The eighth review: F4 on the record's own words (a look's text, which a correction and a
+    wake write): a revenue at +24.6%, printed "25", beside an EPS restated to -12% keeps its
+    verdict, as a push of the pair does."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    await sender.dispatch_landings(_lands(live, at, eps=0.451, revenue=17.1e9), at)
+    t = at + timedelta(minutes=20)
+    await sender.dispatch_landings(_fmp_says(live, t, eps=0.451, revenue=_REV_PLUS_24_6), t)
+    t2 = at + timedelta(minutes=40)
+    await sender.dispatch_landings(_fmp_says(live, t2, eps=0.3608, revenue=_REV_PLUS_24_6 / 10),
+                                   t2)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == (
+        "Updated: Revenue beat consensus by 25% · EPS missed consensus by 12%.")
+
+
+@pytest.mark.asyncio
+async def test_a_corrections_own_words_carry_their_surprise(dispatch, live):
+    """The eighth review: F4 on a correction's own merged text, which no look saw: kept at +24.6%
+    beside EPS +15%, then judged at +24.6% again beside EPS -12%."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    await sender.dispatch_landings(_lands(live, at, eps=_EPS_PLUS_13, revenue=_REV_PLUS_24_6), at)
+    t = at + timedelta(minutes=20)
+    await sender.dispatch_landings(_fmp_says(live, t, eps=0.4715, revenue=_REV_PLUS_24_6 / 10), t)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == (
+        "Updated: Revenue beat consensus by 25% · EPS beat consensus by 15%.")
+    t2 = at + timedelta(minutes=40)
+    await sender.dispatch_landings(_fmp_says(live, t2, eps=0.3608, revenue=_REV_PLUS_24_6 / 10),
+                                   t2)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == (
+        "Updated: Revenue beat consensus by 25% · EPS missed consensus by 12%.")
+
+
+@pytest.mark.asyncio
+async def test_a_wakes_row_in_a_looks_words_is_judged_at_that_looks_surprise(dispatch, live):
+    """The eighth review: a look's own text must carry its surprise even when no correction writes
+    it (a correction writing the same words would add it back): the push said "Revenue reported"
+    (+40% beside EPS +10%), FMP restated the revenue to +24.6% (a verdict gained: news, no write),
+    and u2's held row woke on those words. When the revenue is then held beside an EPS restated
+    to -12%, u2's row keeps "beat by 25%", judged at +24.6% as a push of the pair would be."""
+    key = "earnings_result:INTC:2026-10-29"
+    at = _et_time(REPORT, 8)
+    await sender.dispatch_landings(_lands(live, at, eps=0.451, revenue=16.6e9 * 1.4), at)
+    assert dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u1"] == (
+        "Revenue reported · EPS beat consensus by 10%.")
+    t = at + timedelta(minutes=20)
+    await sender.dispatch_landings(_fmp_says(live, t, eps=0.451, revenue=_REV_PLUS_24_6), t)
+    woke = "Revenue beat consensus by 25% · EPS beat consensus by 10%."
+    assert dispatch.revised == [], "a verdict gained is news"
+    dispatch.rows[(key, KIND_EARNINGS_LIVE)]["u2"] = woke            # u2's wake, the record's words
+    t2 = at + timedelta(minutes=40)
+    await sender.dispatch_landings(_fmp_says(live, t2, eps=0.3608, revenue=_REV_PLUS_24_6 / 10),
+                                   t2)
+    rows = dispatch.rows[(key, KIND_EARNINGS_LIVE)]
+    assert rows["u2"] == "Updated: Revenue beat consensus by 25% · EPS missed consensus by 12%."
+    assert rows["u1"] == "Updated: Revenue reported · EPS missed consensus by 12%."

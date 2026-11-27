@@ -9918,3 +9918,79 @@ def test_fmps_later_figures_are_logged_for_a_watched_report_only(caplog, watched
         assert len(first) == 1 and "rev=17100000000.0" in first[0][1], first
     else:
         assert changed == [] and first == []
+
+
+# ── The eighth 2026-11-26 review (of the seventh's fixes) ─────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_a_leftover_with_no_figures_reads_as_the_report_before_as_soon_as_it_lands(
+        monkeypatch, windows):
+    """The eighth review: INTC reported after Wednesday's close and FMP filled the Wednesday row
+    only on Thursday morning. Thursday's pending leftover noted no report before it (Wednesday had
+    no figure then), and an after-close company's day is fetched every 15 min, so for minutes after
+    Wednesday landed the leftover read `reported` with no figure at all. It reads as the report
+    before as soon as that report holds one."""
+    windows["INTC"] = _CLOSE
+    fmp = _FMP({PREV: [_row("INTC", PREV)], REPORT: [_row("INTC", REPORT)]})
+    seen: List[Tuple[str, Any]] = []
+
+    def _on_tick(at):
+        if at >= _et(REPORT, 6, 10):
+            fmp.by_day[PREV] = [_row("INTC", PREV, eps=0.44, rev=17.1e9)]
+
+    async def _after(at):
+        later = at + timedelta(seconds=30)
+        wednesday = _svc().snapshot("INTC", PREV, later)
+        seen.append((els.et_now(at).strftime("%H:%M"), _svc().snapshot("INTC", REPORT, later),
+                     wednesday is not None and els.has_results(wednesday.eps, wednesday.revenue)))
+
+    await _calls_per_day(monkeypatch, fmp, _et(REPORT, 6), _et(REPORT, 6, 17), ["INTC"],
+                         _on_tick, after_tick=_after)
+    after_wednesday = [(minute, snap) for minute, snap, in_ in seen if in_]
+    assert after_wednesday and after_wednesday[0][0] < "06:15", "the gap this test is about"
+    for minute, snap in after_wednesday:
+        assert snap.reads_as == PREV, (minute, snap)
+        assert (snap.status, snap.eps.actual, snap.live_label) == (
+            els.STATUS_REPORTED, 0.44, False), (minute, snap)
+    for minute, snap, _ in seen:
+        assert not (snap.status == els.STATUS_REPORTED and snap.reads_as is None
+                    and not els.has_results(snap.eps, snap.revenue)), (minute, snap)
+
+
+def test_a_real_leftover_filled_before_its_report_never_reads_live():
+    """The guard on the eighth review's other F12 finding. A true report told first, then a stale
+    earlier row FMP fills, reads `reported` while its figures fill (a documented residual): its
+    landings read exactly as a real leftover FMP filled before its own report does, and a leftover
+    must never read LIVE the day after its report (owner, 2026-11-20). Here INTC reported after
+    Wednesday's close; FMP fills Thursday's leftover (its EPS) at 06:00, Wednesday's row at 06:12."""
+    svc = _svc()
+    svc.observe_rows(PREV, [_row("INTC", PREV)], _et(PREV, 16, 30), fetched=True)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 3), fetched=True)
+    svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.44)], _et(REPORT, 6), fetched=True)
+    svc.observe_rows(PREV, [_row("INTC", PREV, eps=0.44, rev=17.1e9)], _et(REPORT, 6, 12),
+                     fetched=True)
+    for hour in (7, 12, 23):
+        snap = svc.snapshot("INTC", REPORT, _et(REPORT, hour))
+        assert (snap.status, snap.live_label) == (els.STATUS_REPORTED, False), hour
+        assert snap.poll_seconds == els.EARNINGS_LIVE_POLL_SECONDS
+
+
+def test_fmps_first_figures_in_the_fold_that_lands_the_report_say_after_the_landing(caplog):
+    """The eighth review: the change log was written before the landing was noted, so after a
+    restart restored a revenue-only release, FMP's answer that landed the EPS (and was pushed) logged
+    its first revenue as "(no landing)". It is written after the landing now."""
+    svc = _svc()
+    svc.note_watched(["INTC"])
+    svc.restore_filing("INTC", REPORT, _morning_filing(eps_adjusted=None,
+                                                       accepted_at=_et(REPORT, 16, 2)),
+                       _et(REPORT, 16, 30))
+    svc.observe_rows(REPORT, [_row("INTC", REPORT)], _et(REPORT, 16, 31), fetched=True)
+    with caplog.at_level(logging.INFO, logger=els.logger.name):
+        svc.observe_rows(REPORT, [_row("INTC", REPORT, eps=0.45, rev=17.1e9)],
+                         _et(REPORT, 16, 40), fetched=True)
+    lines = [r.getMessage() for r in caplog.records
+             if r.getMessage().startswith(("EARNINGS_LIVE_LANDING", "EARNINGS_LIVE_FMP_FIRST"))]
+    assert len(lines) == 2, lines
+    assert lines[0].startswith("EARNINGS_LIVE_LANDING") and " landed via=own_fetch " in lines[0]
+    assert lines[1].startswith("EARNINGS_LIVE_FMP_FIRST") and lines[1].endswith("(after the landing)")
+    assert [s.symbol for s in svc.landed_snapshots(_et(REPORT, 16, 41))] == ["INTC"]

@@ -15539,3 +15539,57 @@ async def test_a_late_twin_waits_with_the_filing_its_twins_call_was_cut_on(watch
     assert watcher.model_calls == 2, "one cut call, then one whole read"
     assert found_at["INTC"] >= "18:30" and found_at["INTCB"] >= found_at["INTC"]
     assert not watcher._cut, "a settled filing leaves nothing cut"
+
+
+class _ScriptedModel(_Gemini):
+    """Each model call does what the script says next: `slow` (outlasts a 0.05 s late deadline),
+    `fail` (a 503) or `ok`."""
+
+    def __init__(self, script):
+        super().__init__()
+        self.script = list(script)
+        self.seen: List[Tuple[str, str]] = []
+
+    async def generate_json(self, prompt, **kwargs):
+        symbol = prompt.split("Company ticker: ", 1)[1].split(".", 1)[0]
+        what = self.script.pop(0)
+        self.seen.append((symbol, what))
+        if what == "slow":
+            await asyncio.sleep(0.2)
+        if what == "fail":
+            self.calls += 1
+            raise RuntimeError("gemini 503")
+        return await super().generate_json(prompt, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_whole_read_keeps_the_cut_so_a_twin_still_waits(watcher, monkeypatch,
+                                                                        clock, caplog):
+    """The eighth review: any outcome but a cut forgot the cut, a failed read (RETRY) included,
+    though that ticker still waits on it. INTC's late call is cut at 16:03; its whole read in a
+    calm round fails at 16:08; at 16:20 a busy round brings INTCB, which then paid a cut call of its
+    own. It waits with the filing now, with no call, and says so in the log."""
+    monkeypatch.setattr(efs, "_LATE_MODEL_DEADLINE_SECONDS", 0.05)
+    ciks = dict(_CIKS, INTCB=_CIKS["INTC"])
+    sec = _SEC(filings={_CIKS["INTC"]: [_8K]})
+    gem = _ScriptedModel(["slow", "fail"])
+    start = datetime(2026, 10, 29, 16, 3, tzinfo=ET).astimezone(timezone.utc)
+
+    async def _round(minute, waiting, late):
+        clock.at = 1_000_000.0 + minute * 60
+        return await asyncio.wait_for(watcher.run_once(
+            start + timedelta(minutes=minute), waiting, REPORT, sec=sec, gemini=gem,
+            cik_map=ciks, sleep=_no_sleep, late=late), 5.0)
+
+    await _round(0, ["AAPL"], ["INTC"])
+    assert watcher._cut == {ACC}
+    watcher._watch[("AAPL", REPORT)].done = True          # nothing waits at 16:08: a calm round
+    await _round(5, ["AAPL"], ["INTC"])
+    w = watcher._watch[("INTC", REPORT)]
+    assert w.attempts == {ACC: 1} and w.cut_on == ACC and watcher._cut == {ACC}
+    with caplog.at_level(logging.INFO, logger=efs.__name__):
+        await _round(17, ["MSFT"], ["INTC", "INTCB"])        # MSFT waits in its window: busy
+    assert gem.seen == [("INTC", "slow"), ("INTC", "fail")], "INTCB paid no call"
+    assert watcher._watch[("INTCB", REPORT)].cut_on == ACC
+    (line,) = [r.getMessage() for r in caplog.records if "result=late_wait" in r.getMessage()]
+    assert "sym=INTCB" in line and ACC in line

@@ -47,11 +47,14 @@ TWO INVARIANTS, both learned the hard way in this repo
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import math
 import time
+from collections import OrderedDict
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
@@ -100,6 +103,24 @@ _UNIVERSE_DEGRADED_KEY = "price:universe:degraded"
 
 # A single profile is cheap; this only collapses the duplicate calls a single screen makes.
 _QUOTE_TTL = 30.0
+# ...except inside the one US closed window (L3, holdings-widget spec 2026-11-27). A
+# single-symbol quote is the OFF-UNIVERSE path (a sub-$50M listing, a brand-new ticker, an
+# OTC or foreign symbol — `get_quotes`' per-symbol fallback): one `/stable/profile` call per
+# symbol per 30 s, and every closed-app Holdings tile build pays it for each such holding,
+# all night and all weekend, for a price that cannot move. Same rule as
+# `_UNIVERSE_CLOSED_TTL`: an entry is served up to 15 min only when its stamp AND the read
+# both fall in `session_phase() == SESSION_CLOSED` (`_universe_in_closed_window`), so a read
+# in pre-market, the regular session or after-hours always gets the 30 s rule — no
+# app-visible freshness changes while any US session trades. Two more conditions, because a
+# profile quote is not a universe row: the listing must be on a US exchange
+# (`_CLOSED_WINDOW_QUOTE_EXCHANGES` — a London or Tokyo listing TRADES during the US closed
+# window), and it must not carry FMP's "not actively trading" flag (its change is decided
+# against a registry that can move overnight, `profile_change_is_current`). Anything else —
+# an unknown or missing exchange included — keeps the 30 s rule (fail closed).
+_QUOTE_CLOSED_TTL = _UNIVERSE_CLOSED_TTL
+_CLOSED_WINDOW_QUOTE_EXCHANGES = frozenset({
+    "NASDAQ", "NYSE", "AMEX", "NYSE AMERICAN", "NYSE ARCA", "NYSEARCA", "BATS", "CBOE",
+})
 
 # Crypto quotes come from CoinGecko, whose Basic plan is 100,000 calls/MONTH — a
 # sustained 2.3/minute, not the 300/minute burst ceiling. That budget, not latency, is
@@ -296,6 +317,74 @@ def _universe_is_fresh(stamp: float, now: Optional[float] = None) -> bool:
     if age < _UNIVERSE_TTL:
         return True
     return age < _universe_ttl_for(stamp, now)
+
+
+def _closed_window_quote_eligible(quote: Any) -> bool:
+    """May this single-symbol quote use `_QUOTE_CLOSED_TTL`? Only a US-exchange listing
+    without FMP's "not actively trading" flag (see `_QUOTE_CLOSED_TTL`)."""
+    if not isinstance(quote, dict) or quote.get("isActivelyTrading") is False:
+        return False
+    exchange = quote.get("exchange")
+    return isinstance(exchange, str) and exchange.strip().upper() in _CLOSED_WINDOW_QUOTE_EXCHANGES
+
+
+def _single_quote_hit(key: str, now: Optional[float] = None) -> Optional[Any]:
+    """`get_quote`'s cache read: the 30 s rule, or the closed-window tier (`_QUOTE_CLOSED_TTL`).
+
+    The 30 s branch is `_cache_get(key, _QUOTE_TTL)` exactly (expired once older than the
+    TTL), so a read in any live phase behaves as before; only an entry past 30 s asks the
+    session calendar. An expired entry is dropped, as `_cache_get` does.
+    """
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    stamp, value = entry
+    now = time.time() if now is None else float(now)
+    age = now - stamp
+    if age <= _QUOTE_TTL:
+        return value
+    if (
+        age <= _QUOTE_CLOSED_TTL
+        and _closed_window_quote_eligible(value)
+        and _universe_in_closed_window(stamp, now)
+    ):
+        return value
+    _cache.pop(key, None)
+    return None
+
+
+# ── Per-build upstream counters (the extension build's INFO line) ────────────────────
+# A closed-app Holdings tile build (`widget_movers_service`, `for_extension=True`) logs ONE
+# INFO line naming the upstream calls it caused — the numbers the owner reads for a week
+# before widening the widget push (holdings-widget spec §6). A ContextVar, not a return
+# value: the calls happen several layers down, inside `asyncio.gather` children and the
+# board's refresh task, all of which copy the context at creation and so share the ONE
+# mutable dict the build installed. Outside such a build the var is None and counting is a
+# no-op, so no other caller pays anything or sees any change.
+_UPSTREAM_COUNTERS: "contextvars.ContextVar[Optional[Dict[str, int]]]" = contextvars.ContextVar(
+    "price_service_upstream_counters", default=None,
+)
+
+
+def count_upstream(name: str, n: int = 1) -> None:
+    """Add `n` to counter `name` of the build in progress, if any (else a no-op)."""
+    counters = _UPSTREAM_COUNTERS.get()
+    if counters is not None:
+        counters[name] = counters.get(name, 0) + n
+
+
+@contextmanager
+def counting_upstream_calls() -> Iterator[Dict[str, int]]:
+    """Install a fresh counter dict for the calls made inside the block, and yield it.
+
+    Use it around ONE coroutine's awaits (never across tasks): the reset needs the context
+    the token was made in."""
+    counters: Dict[str, int] = {}
+    token = _UPSTREAM_COUNTERS.set(counters)
+    try:
+        yield counters
+    finally:
+        _UPSTREAM_COUNTERS.reset(token)
 
 
 async def _empty_quote_map() -> Dict[str, Dict[str, Any]]:
@@ -866,10 +955,12 @@ class PriceService:
             return {}
 
         key = f"price:quote:{sym}"
-        hit = _cache_get(key, _QUOTE_TTL)
+        # The 30 s rule, or 15 min inside the US closed window (`_QUOTE_CLOSED_TTL`).
+        hit = _single_quote_hit(key)
         if hit is not None:
             return hit
 
+        count_upstream("fmp_profile")
         try:
             rows = await get_fmp_client().get_company_profile(sym)
         except Exception as e:
@@ -916,11 +1007,23 @@ class PriceService:
 
     # ── batch ─────────────────────────────────────────────────────────────────────
 
-    async def get_quotes(self, symbols: Sequence[str]) -> Dict[str, Dict[str, Any]]:
+    async def get_quotes(
+        self,
+        symbols: Sequence[str],
+        *,
+        crypto_max_age: Optional[float] = None,
+        crypto_board_user: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
         """Quote-shaped rows keyed by UPPERCASE symbol. Replaces `get_batch_quotes_bulk`.
 
         Returns only the symbols it could resolve — a caller must treat a missing key as
         "no data" and drop the row, exactly as it did when batch-quote omitted a symbol.
+
+        `crypto_max_age` (seconds) routes the crypto half through the shared widget crypto
+        BOARD (`get_crypto_board_quotes`, on behalf of `crypto_board_user`) instead of the
+        per-set `_crypto_quotes`: rows up to that old, and a coin the board does not carry
+        is simply absent. Only the closed-app Holdings tile build passes it (owner
+        2026-11-27, "Every 10 minutes"); every other caller omits it and is unchanged.
         """
         wanted = {(s or "").strip().upper() for s in symbols if s and s.strip()}
         # SPLIT, don't just drop. `is_blocked_symbol` is about the FMP LICENCE, and it
@@ -940,10 +1043,23 @@ class PriceService:
         if not wanted and not crypto:
             return {}
 
+        if not crypto:
+            crypto_leg = _empty_quote_map()
+        elif crypto_max_age is None:
+            crypto_leg = self._crypto_quotes(crypto)
+        else:
+            # The board admits at most N coins per user in REQUEST order, so hand it the
+            # caller's order, not the set's (which differs run to run).
+            ordered = [
+                s for s in dict.fromkeys((x or "").strip().upper() for x in symbols if x)
+                if s in crypto
+            ]
+            crypto_leg = self.get_crypto_board_quotes(ordered, crypto_max_age, crypto_board_user)
+
         universe, closes, crypto_rows = await asyncio.gather(
             self._get_universe(),
             self.get_close_snapshots(wanted),
-            self._crypto_quotes(crypto) if crypto else _empty_quote_map(),
+            crypto_leg,
             return_exceptions=True,
         )
         if isinstance(universe, Exception):
@@ -1021,6 +1137,68 @@ class PriceService:
         """
         return str(getattr(settings, "CRYPTO_PRICE_SOURCE", "coingecko") or "").lower() != "fmp"
 
+    @classmethod
+    def _quote_from_markets_row(cls, sym: str, row: Any) -> Optional[Dict[str, Any]]:
+        """One `/coins/markets` row → the quote-shaped row for `sym`, or None (no price).
+
+        The ONE mapping, shared by `_crypto_quotes` and the widget crypto board, so the two
+        can never price the same coin differently.
+        """
+        if not isinstance(row, dict):
+            return None
+        price = _finite(row.get("current_price"))
+        if price is None:
+            # Unknown price → omit. Never a fabricated $0.00.
+            return None
+        change = _finite(row.get("price_change_24h"))
+        change_pct = _finite(row.get("price_change_percentage_24h"))
+        # previousClose is DERIVED, never defaulted: an absent 24h change means
+        # the reference is unknown, and `price - 0` would put the dashed
+        # reference line exactly on the last tick — plausible and wrong.
+        previous_close = (price - change) if change is not None else None
+        return cls._shape(
+            symbol=sym,
+            name=row.get("name"),
+            price=price,
+            previous_close=previous_close,
+            change=change,
+            change_pct=change_pct,
+            volume=_finite(row.get("total_volume")),
+            avg_volume=None,
+            market_cap=_finite(row.get("market_cap")),
+            exchange="CRYPTO",
+            # 52-week band deliberately OMITTED. `/coins/markets` carries `atl`
+            # and `ath`, which are ALL-TIME, not 52-week — labelling Bitcoin's
+            # 2013 low as a "52-Week Low" is precisely the $67.81 bug this
+            # rebuild removed. `_shape` omits the keys entirely when None, which
+            # keeps each caller's `.get("yearLow", 0)` default reachable. The
+            # real band comes from `crypto_service._cg_52_week_band` (/ohlc).
+        )
+
+    async def get_crypto_board_quotes(
+        self,
+        symbols: Sequence[str],
+        max_age: float,
+        user_id: Optional[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """Crypto quotes from the shared widget crypto BOARD, keyed by the requested symbol.
+
+        For the closed-app Holdings tile only (`get_quotes(crypto_max_age=)`): WidgetKit
+        builds it ~35-47 times a day per tile, and the per-set `_crypto_quotes` path would
+        cost one CoinGecko credit per build for every coin holder — over the 100k/month
+        Basic quota at ~100 users (holdings-widget spec §6). The board is one process-local
+        table of up to `WIDGET_CRYPTO_BOARD_MAX_COINS` coins, refreshed in ONE
+        `/coins/markets` call (≤250 ids, `per_page=250`) at most once per `max_age` for
+        every user together. Owner decision 2026-11-27 ("Every 10 minutes"): rows up to
+        `max_age` old, and a coin past this user's first `WIDGET_CRYPTO_BOARD_PER_USER`
+        coins (request order) is left unpriced — the tile counts it "no price". Absent from
+        the answer, never `{}`-valued, never a fabricated price (invariant #1).
+
+        Never raises for an upstream failure: the coins it cannot price are absent, exactly
+        as `_crypto_quotes` omits them.
+        """
+        return await _crypto_board_quotes(symbols, max_age, user_id)
+
     async def _crypto_quotes(self, symbols: Sequence[str]) -> Dict[str, Dict[str, Any]]:
         """Quote-shaped rows for crypto pairs, keyed by the symbol the caller asked for.
 
@@ -1078,6 +1256,7 @@ class PriceService:
                     future.set_result({})
                 return {}
 
+            fetched_at = _board_clock()
             rows = await client.get_markets(
                 [crypto_base_symbol(s) for s in id_by_symbol]
             )
@@ -1085,39 +1264,16 @@ class PriceService:
 
             out: Dict[str, Dict[str, Any]] = {}
             for sym, coin_id in id_by_symbol.items():
-                row = by_id.get(coin_id)
-                if not isinstance(row, dict):
-                    continue
-                price = _finite(row.get("current_price"))
-                if price is None:
-                    # Unknown price → omit. Never a fabricated $0.00.
-                    continue
-                change = _finite(row.get("price_change_24h"))
-                change_pct = _finite(row.get("price_change_percentage_24h"))
-                # previousClose is DERIVED, never defaulted: an absent 24h change means
-                # the reference is unknown, and `price - 0` would put the dashed
-                # reference line exactly on the last tick — plausible and wrong.
-                previous_close = (price - change) if change is not None else None
-                out[sym] = self._shape(
-                    symbol=sym,
-                    name=row.get("name"),
-                    price=price,
-                    previous_close=previous_close,
-                    change=change,
-                    change_pct=change_pct,
-                    volume=_finite(row.get("total_volume")),
-                    avg_volume=None,
-                    market_cap=_finite(row.get("market_cap")),
-                    exchange="CRYPTO",
-                    # 52-week band deliberately OMITTED. `/coins/markets` carries `atl`
-                    # and `ath`, which are ALL-TIME, not 52-week — labelling Bitcoin's
-                    # 2013 low as a "52-Week Low" is precisely the $67.81 bug this
-                    # rebuild removed. `_shape` omits the keys entirely when None, which
-                    # keeps each caller's `.get("yearLow", 0)` default reachable. The
-                    # real band comes from `crypto_service._cg_52_week_band` (/ohlc).
-                )
+                quote = self._quote_from_markets_row(sym, by_id.get(coin_id))
+                if quote is not None:
+                    out[sym] = quote
 
             _cache_set(key, out)
+            # Write-through to the widget crypto board: a priced row this call just fetched
+            # is as good as one the board would fetch, so a coin the app priced is already
+            # there when a closed-app tile asks (never a no-price marker: a row missing
+            # here may be a page CoinGecko cut, not a coin without a price).
+            _write_through_crypto_board(out, fetched_at)
             if not future.done():
                 future.set_result(out)
             return out
@@ -1145,7 +1301,13 @@ class PriceService:
         finally:
             _inflight.pop(key, None)
 
-    async def get_quotes_list(self, symbols: Sequence[str]) -> List[Dict[str, Any]]:
+    async def get_quotes_list(
+        self,
+        symbols: Sequence[str],
+        *,
+        crypto_max_age: Optional[float] = None,
+        crypto_board_user: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """`get_quotes` as a LIST — the drop-in shape for `get_batch_quotes_bulk`.
 
         Every one of the 19 former batch-quote call sites iterates the result and builds
@@ -1160,8 +1322,16 @@ class PriceService:
 
         Symbols that could not be resolved are ABSENT, exactly as `batch-quote` omitted
         them — callers already skip a missing symbol rather than rendering a zero.
+
+        `crypto_max_age` / `crypto_board_user`: see `get_quotes`. Forwarded only when set,
+        so a caller that omits them makes exactly today's call.
         """
-        resolved = await self.get_quotes(symbols)
+        if crypto_max_age is None:
+            resolved = await self.get_quotes(symbols)
+        else:
+            resolved = await self.get_quotes(
+                symbols, crypto_max_age=crypto_max_age, crypto_board_user=crypto_board_user,
+            )
         out: List[Dict[str, Any]] = []
         seen: set = set()
         for raw in symbols:
@@ -1698,6 +1868,369 @@ class PriceService:
         while d.weekday() >= 5:
             d -= timedelta(days=1)
         return d.isoformat()
+
+
+# ── The widget crypto board (holdings-widget spec §3 "Budget levers", lever L1) ──────────
+#
+# WHY: a closed-app Holdings tile is built by WidgetKit ~35 times a weekday (+ ≤12 pushes),
+# per tile, and each build used to price its coins through `_crypto_quotes`, whose cache is
+# keyed by the SORTED SYMBOL SET for 60 s — two users rarely share a set, so every build
+# was one CoinGecko credit: ~141k a month at 100 coin-holding users against the Basic
+# plan's 100k (spec §6). The board is one table of coins for EVERY extension build,
+# refreshed at most once per `max_age` in ONE `/coins/markets` call: ≤144 calls a day at
+# the 600 s default, whatever the number of users (owner 2026-11-27, "Every 10 minutes").
+#
+# THE RULES, each with its reason:
+#   * Per-SYMBOL entries, so {BTC, ETH} and {BTC} share BTC's row.
+#   * A refresh covers EVERY admitted coin, chunked at `_BOARD_CHUNK_IDS` ids with
+#     `per_page` set to it: `/coins/markets`' default page is 100 rows, and a 101-coin call
+#     without `per_page` silently lost the rest.
+#   * Every coin a refresh asked about gets a stamped answer — its quote, or the NO_PRICE
+#     marker (`None`) when CoinGecko listed no price or the symbol resolves to no coin — and
+#     both count as hits within `max_age`. Without the marker a coin with no price looked
+#     stale on every build and asked again.
+#   * The GATE: a refresh starts only when some requested coin is stale AND the last one
+#     STARTED at least `max_age` ago (success or failure — an outage is not retried faster).
+#     So a coin admitted mid-window waits for the next window (or a write-through) — the
+#     price of a hard ≤1-call-per-window budget.
+#   * Admission: at most `WIDGET_CRYPTO_BOARD_PER_USER` coins per request, in REQUEST order
+#     (one user cannot fill the board), and least-recently-requested coins are evicted past
+#     `WIDGET_CRYPTO_BOARD_MAX_COINS`. A coin outside the board is never fetched for an
+#     extension build: it is absent, which the tile counts "no price" (owner decision 6).
+#   * ONE shared refresh in flight, as a task a cancelled caller cannot kill.
+#   * `_crypto_quotes` (every app path) WRITES THROUGH its priced rows, so a coin the app
+#     priced in the window is served at once — the first closed-app build after a grant is
+#     minted (with the app open) does not wait a window for a coin new to the board.
+#   * Process memory only (invariant #2: a live price is never persisted). A restart starts
+#     empty and the first build refreshes.
+
+_BOARD_CHUNK_IDS = 250          # == coingecko.MARKETS_MAX_PER_PAGE (pinned by a test)
+_BOARD_DEFAULT_MAX_AGE = 600.0  # == Settings.WIDGET_CRYPTO_MAX_AGE_SECONDS' default
+_BOARD_MAX_AGE_CEILING = 86_400.0
+_BOARD_DEFAULT_MAX_COINS = 250  # == Settings.WIDGET_CRYPTO_BOARD_MAX_COINS' default
+_BOARD_DEFAULT_PER_USER = 20    # == Settings.WIDGET_CRYPTO_BOARD_PER_USER' default
+
+
+def _board_clock() -> float:
+    """The board's clock (monotonic seconds). A seam, so a test can step time."""
+    return time.monotonic()
+
+
+def _positive_int_setting(value: Any, default: int, name: str) -> int:
+    """`value` when it is a real int >= 1, else `default` with a WARNING (Settings bounds it
+    already; this only stops a hand-patched or garbage value from disabling the bound)."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    logger.warning(
+        "price_service: %s=%r is not a positive int — the crypto board uses %d",
+        name, value, default,
+    )
+    return default
+
+
+def _crypto_board_limits() -> Tuple[int, int]:
+    """(max coins on the board, coins one request may admit), read at call time."""
+    return (
+        _positive_int_setting(
+            settings.WIDGET_CRYPTO_BOARD_MAX_COINS, _BOARD_DEFAULT_MAX_COINS,
+            "WIDGET_CRYPTO_BOARD_MAX_COINS",
+        ),
+        _positive_int_setting(
+            settings.WIDGET_CRYPTO_BOARD_PER_USER, _BOARD_DEFAULT_PER_USER,
+            "WIDGET_CRYPTO_BOARD_PER_USER",
+        ),
+    )
+
+
+def _board_max_age(value: Any) -> float:
+    """A usable `max_age`: finite, > 0, at most a day. Anything else → the default + WARNING
+    (a NaN would make every entry stale AND every gate open — one call per build)."""
+    try:
+        age = float(value)
+    except (TypeError, ValueError):
+        age = math.nan
+    if isinstance(value, bool) or not math.isfinite(age) or age <= 0:
+        logger.warning(
+            "price_service: crypto board max_age %r is unusable — using %.0fs",
+            value, _BOARD_DEFAULT_MAX_AGE,
+        )
+        return _BOARD_DEFAULT_MAX_AGE
+    if age > _BOARD_MAX_AGE_CEILING:
+        logger.warning(
+            "price_service: crypto board max_age %.0fs is over a day — capped at %.0fs",
+            age, _BOARD_MAX_AGE_CEILING,
+        )
+        return _BOARD_MAX_AGE_CEILING
+    return age
+
+
+class _CryptoBoard:
+    """The board's process-local state. ONE instance, `_CRYPTO_BOARD`.
+
+    * `members` — the admitted coins (request symbols), least-recently REQUESTED first.
+    * `entries` — symbol → (stamp, quote or None). None is the NO_PRICE marker. Holds the
+      members and recent non-members (a write-through, an evicted coin), at most twice the
+      board — so a coin evicted and re-admitted inside its window keeps its row.
+    * `last_refresh_at` — when the last refresh STARTED: the gate.
+    * `refresh_task` — the one shared refresh in flight.
+    """
+
+    def __init__(self) -> None:
+        self.members: "OrderedDict[str, None]" = OrderedDict()
+        self.entries: "OrderedDict[str, Tuple[float, Optional[Dict[str, Any]]]]" = OrderedDict()
+        self.last_refresh_at: Optional[float] = None
+        self.refresh_task: Optional[asyncio.Task] = None
+
+    def admit(
+        self, symbols: Sequence[str], *, per_user: int, max_coins: int,
+    ) -> Tuple[List[str], int, int]:
+        """Admit / touch this request's first coins. Returns (eligible, past the per-user
+        cap, evicted). The eligible coins are the most recent after this, so the eviction
+        that follows can never drop one of them."""
+        eligible = list(symbols[: max(0, min(per_user, max_coins))])
+        for sym in eligible:
+            self.members[sym] = None
+            self.members.move_to_end(sym)
+        evicted = 0
+        while len(self.members) > max_coins:
+            self.members.popitem(last=False)
+            evicted += 1
+        return eligible, len(symbols) - len(eligible), evicted
+
+    def fresh_entry(
+        self, sym: str, now: float, max_age: float,
+    ) -> Optional[Tuple[float, Optional[Dict[str, Any]]]]:
+        """The entry for `sym` when it is at most `max_age` old, else None (stale / none)."""
+        entry = self.entries.get(sym)
+        if entry is None or now - entry[0] > max_age:
+            return None
+        return entry
+
+    def write(self, sym: str, stamp: float, quote: Optional[Dict[str, Any]]) -> None:
+        """Store an answer unless a NEWER one is already held (a write-through can land
+        while a refresh that started earlier is still out)."""
+        held = self.entries.get(sym)
+        if held is not None and held[0] > stamp:
+            return
+        self.entries[sym] = (stamp, quote)
+        self.entries.move_to_end(sym)
+
+    def prune(self, max_coins: int) -> None:
+        """Hold at most twice the board: drop the oldest-written NON-member entries."""
+        cap = 2 * max_coins
+        if len(self.entries) <= cap:
+            return
+        for sym in list(self.entries):
+            if len(self.entries) <= cap:
+                break
+            if sym not in self.members:
+                del self.entries[sym]
+
+
+_CRYPTO_BOARD = _CryptoBoard()
+
+
+def crypto_board_size() -> int:
+    """How many coins the widget crypto board carries (for the extension build's INFO line)."""
+    return len(_CRYPTO_BOARD.members)
+
+
+def _reset_crypto_board() -> None:
+    """Forget the board (tests; never called in production)."""
+    global _CRYPTO_BOARD
+    _CRYPTO_BOARD = _CryptoBoard()
+
+
+def _write_through_crypto_board(rows: Dict[str, Dict[str, Any]], stamp: float) -> None:
+    """Store `_crypto_quotes`' freshly FETCHED priced rows on the board (never a cache hit's,
+    which would re-stamp an old row as new). Best-effort: the app's own answer never
+    depends on it."""
+    if not rows:
+        return
+    try:
+        max_coins, _ = _crypto_board_limits()
+        board = _CRYPTO_BOARD
+        for sym, quote in rows.items():
+            if isinstance(quote, dict) and quote.get("price") is not None:
+                board.write(sym, stamp, quote)
+        board.prune(max_coins)
+    except Exception as e:
+        logger.warning(
+            "price_service: crypto board write-through skipped for %d row(s) (%s: %s) — "
+            "the caller's quotes are unaffected",
+            len(rows), type(e).__name__, e,
+        )
+
+
+async def _refresh_crypto_board(board: _CryptoBoard, symbols: List[str]) -> None:
+    """Fetch every coin in `symbols` (the board, snapshot when the refresh was started) and
+    stamp each with its quote or the NO_PRICE marker. Never raises for an upstream failure:
+    a coin it could not ask about stays unstamped (stale) until the next window."""
+    from app.integrations.coingecko import get_coingecko_client
+    from app.services.coingecko_adapter import crypto_base_symbol, markets_rows_by_id
+
+    started = _board_clock()
+    try:
+        max_coins, _ = _crypto_board_limits()
+        client = get_coingecko_client()
+        # Coin id → the request symbols on it (MATIC and POL share one id; BTC and BTCUSD
+        # too). Each id is asked about ONCE, then every symbol on it is answered.
+        syms_by_id: "OrderedDict[str, List[str]]" = OrderedDict()
+        unresolved: List[str] = []
+        resolve_failed: List[str] = []
+        for sym in symbols:
+            try:
+                coin_id = await client.resolve_coin_id(crypto_base_symbol(sym))
+            except Exception as e:
+                # Not an answer ("no such coin"): leave it unstamped, never NO_PRICE.
+                resolve_failed.append(sym)
+                logger.warning(
+                    "price_service: crypto board could not resolve %s (%s: %s) — left "
+                    "unpriced until the next refresh window",
+                    sym, type(e).__name__, e,
+                )
+                continue
+            if coin_id:
+                syms_by_id.setdefault(str(coin_id), []).append(sym)
+            else:
+                unresolved.append(sym)
+        for sym in unresolved:
+            board.write(sym, started, None)
+
+        ids = list(syms_by_id)
+        chunks = [ids[i:i + _BOARD_CHUNK_IDS] for i in range(0, len(ids), _BOARD_CHUNK_IDS)]
+
+        async def _fetch(chunk: List[str]) -> List[Dict[str, Any]]:
+            count_upstream("coingecko")
+            return await client.get_markets(
+                [crypto_base_symbol(syms_by_id[cid][0]) for cid in chunk],
+                per_page=_BOARD_CHUNK_IDS,
+            )
+
+        results = await asyncio.gather(*(_fetch(c) for c in chunks), return_exceptions=True)
+        priced = no_price = unstamped = 0
+        for chunk, rows in zip(chunks, results):
+            chunk_syms = sum(len(syms_by_id[cid]) for cid in chunk)
+            if isinstance(rows, BaseException):
+                if not isinstance(rows, Exception):
+                    raise rows
+                unstamped += chunk_syms
+                logger.warning(
+                    "price_service: crypto board fetch of %d coin(s) failed (%s: %s) — "
+                    "they stay as they were until the next refresh window",
+                    len(chunk), type(rows).__name__, rows,
+                )
+                continue
+            by_id = markets_rows_by_id(rows)
+            if not by_id:
+                # Not ONE row for a page that named coins is no answer (a malformed or
+                # refused body): marking every coin NO_PRICE on it would hide them all for
+                # a whole window. Left unstamped; the gate still holds the next try.
+                unstamped += chunk_syms
+                logger.warning(
+                    "price_service: crypto board fetch of %d coin(s) returned no rows — "
+                    "treated as no answer, coins left as they were",
+                    len(chunk),
+                )
+                continue
+            for cid in chunk:
+                row = by_id.get(cid)
+                for sym in syms_by_id[cid]:
+                    quote = PriceService._quote_from_markets_row(sym, row)
+                    board.write(sym, started, quote)
+                    if quote is None:
+                        no_price += 1
+                    else:
+                        priced += 1
+        board.prune(max_coins)
+        logger.info(
+            "price_service: crypto board refreshed — %d coin(s): %d priced, %d no price, "
+            "%d unresolved, %d unstamped (failed fetch or resolve) in %d call(s), %.2fs",
+            len(symbols), priced, no_price, len(unresolved),
+            unstamped + len(resolve_failed), len(chunks), _board_clock() - started,
+        )
+    except Exception:
+        logger.exception(
+            "price_service: crypto board refresh of %d coin(s) failed unexpectedly — "
+            "rows stay as they were until the next refresh window",
+            len(symbols),
+        )
+
+
+async def _crypto_board_quotes(
+    symbols: Sequence[str], max_age: Any, user_id: Optional[str],
+) -> Dict[str, Dict[str, Any]]:
+    """`PriceService.get_crypto_board_quotes` (see there and the block above)."""
+    if isinstance(symbols, str):
+        symbols = [symbols]
+    wanted = [
+        s for s in dict.fromkeys(str(x or "").strip().upper() for x in (symbols or [])) if s
+    ]
+    if not wanted:
+        return {}
+    age_limit = _board_max_age(max_age)
+    max_coins, per_user = _crypto_board_limits()
+    board = _CRYPTO_BOARD
+    eligible, past_cap, evicted = board.admit(wanted, per_user=per_user, max_coins=max_coins)
+    if past_cap:
+        count_upstream("off_board", past_cap)
+        logger.debug(
+            "price_service: crypto board serves %d of %d coin(s) for user=%s — %d past the "
+            "per-user cap of %d stay unpriced",
+            len(eligible), len(wanted), user_id, past_cap, per_user,
+        )
+    if evicted:
+        logger.info(
+            "price_service: crypto board full (%d coins) — evicted %d least-recently-"
+            "requested coin(s) for user=%s",
+            max_coins, evicted, user_id,
+        )
+
+    now = _board_clock()
+    stale = [s for s in eligible if board.fresh_entry(s, now, age_limit) is None]
+    if stale:
+        await _join_or_start_board_refresh(board, now, age_limit)
+        now = _board_clock()
+
+    out: Dict[str, Dict[str, Any]] = {}
+    unpriced = 0
+    for sym in eligible:
+        entry = board.fresh_entry(sym, now, age_limit)
+        if entry is not None and entry[1] is not None:
+            out[sym] = entry[1]
+        elif entry is None:
+            unpriced += 1
+    if unpriced:
+        count_upstream("board_stale", unpriced)
+    return out
+
+
+async def _join_or_start_board_refresh(board: _CryptoBoard, now: float, max_age: float) -> None:
+    """Join the refresh in flight, or start one if the gate is open; else return at once."""
+    loop = asyncio.get_running_loop()
+    task = board.refresh_task
+    if task is not None and (task.done() or task.get_loop() is not loop):
+        board.refresh_task = task = None
+    if task is None:
+        if board.last_refresh_at is not None and now - board.last_refresh_at < max_age:
+            # The gate: one board refresh per window. A coin admitted since the last one
+            # waits for the next (or for an app write-through).
+            return
+        board.last_refresh_at = now
+        task = loop.create_task(_refresh_crypto_board(board, list(board.members)))
+        board.refresh_task = task
+    try:
+        # Shielded: a caller that is cancelled (a WidgetKit request dropped mid-build) must
+        # not cancel the refresh every other build is waiting on.
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if not task.cancelled() or (current is not None and current.cancelling()):
+            raise
+        logger.warning(
+            "price_service: the crypto board refresh was cancelled — serving the rows "
+            "already held"
+        )
 
 
 _price_service: Optional[PriceService] = None

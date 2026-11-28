@@ -89,11 +89,12 @@ import asyncio
 import logging
 import math
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from app.config import settings
 from app.database import get_supabase
 from app.utils.inflight import fail_shared_future
 from app.services._analyst_common import analyst_section_available
@@ -136,7 +137,12 @@ from app.utils.market_hours import (
     session_phase,
     session_trading_date,
 )
-from app.services.price_service import price_source
+from app.services.price_service import (
+    count_upstream,
+    counting_upstream_calls,
+    crypto_board_size,
+    price_source,
+)
 from app.services.market_movers_service import get_market_movers_service
 
 logger = logging.getLogger(__name__)
@@ -248,6 +254,18 @@ _CTX_CACHE_MAX_SESSIONS = 3
 # each minute — see `_fetch_market_context`, where the indices now ride the universe
 # batch quote instead.
 _CONTEXT_TTL_SECONDS = 3600
+
+# The head ticker's industry, when `company_profile_cache` lacks it (`_industry_for_one`):
+# one FMP `/profile` call per build, for a name that changes about never. A closed-app
+# Holdings tile builds ~35-47 times a day per device (holdings-widget spec §6, lever L2),
+# so it is memoised: a found industry for a day, a profile that names none for an hour
+# (FMP may fill it in), and an EMPTY answer for 5 min only — `get_company_profiles_batch`
+# folds a failed call into `[]`, so an empty answer may be an outage, and an hour without the
+# industry line for a blip would be the wrong trade. A raised error is never memoised.
+_INDUSTRY_HIT_TTL_SECONDS = 24 * 3600
+_INDUSTRY_MISS_TTL_SECONDS = 3600
+_INDUSTRY_UNSURE_TTL_SECONDS = 300
+_INDUSTRY_MEMO_MAX_ENTRIES = 2048
 
 # FMP's SILENT row cap on `earnings-calendar`: a larger answer is cut, NEWEST dates kept.
 # The same number as `earnings_window_service._TRUNCATION_ROWS` (a test pins them equal).
@@ -1206,6 +1224,19 @@ def _payload_key(base: str, links_web_only: bool) -> str:
     return base + _LINKS_WEB_ONLY_KEY_SUFFIX if links_web_only else base
 
 
+# Appended to a Holdings payload's key when the closed-app EXTENSION asked for it and a
+# holding is a coin. Such a build prices its coins from the shared crypto board (rows up to
+# `WIDGET_CRYPTO_MAX_AGE_SECONDS` old, coins past the per-user cap unpriced —
+# `price_service.get_crypto_board_quotes`), the app's build from a ≤60 s per-set quote: two
+# different payloads, so they never share an entry or an in-flight build. Without the
+# suffix a board build cached for 60 s would answer the APP's next request with older coin
+# rows — an app-visible regression the spec rules out ("App (session) builds are
+# unchanged"). With no coin held the two builds are byte-identical, so the key is shared
+# and an app build in the same minute serves the extension for free. Like `#web`, never a
+# character a ticker or user id holds (`_payload_card_scopes` cuts at the first `#`).
+_EXTENSION_KEY_SUFFIX = "#ext"
+
+
 def cards_for_caller(
     cards: Any, *, links_web_only: bool, now: datetime,
 ) -> Dict[str, Optional[Dict[str, Any]]]:
@@ -1253,9 +1284,10 @@ def cards_for_caller(
 def _payload_card_scopes(key: str) -> frozenset:
     """The Insights card scopes a cached payload's TEXT comes from: the market roll-up for
     the Market tile (its brief), the holdings for a `portfolio:<user>:<T1,T2,…>` key. Either
-    may carry the `#web` gate suffix (`_payload_key`)."""
-    if key.endswith(_LINKS_WEB_ONLY_KEY_SUFFIX):
-        key = key[: -len(_LINKS_WEB_ONLY_KEY_SUFFIX)]
+    may carry the `#web` gate suffix (`_payload_key`), and a Holdings key the `#ext` one
+    (`_EXTENSION_KEY_SUFFIX`) before it — so everything from the first `#` is cut: neither
+    a ticker nor a user id holds one."""
+    key = key.split("#", 1)[0]
     if key == "market":
         return frozenset({MARKET_SCOPE})
     if key.startswith("portfolio:"):
@@ -1427,6 +1459,11 @@ class WidgetMoversService:
         # card scope -> monotonic stamp of its newest stored Insights card. See
         # `forget_payloads_for`.
         self._card_stamps: Dict[str, float] = {}
+        # ticker -> (monotonic expiry, industry or None): `_industry_for_one`'s memo, LRU-
+        # bounded at `_INDUSTRY_MEMO_MAX_ENTRIES`, and its one lookup in flight per ticker
+        # (a push wake builds many tiles with the same head at once).
+        self._industry_memo: "OrderedDict[str, Tuple[float, Optional[str]]]" = OrderedDict()
+        self._industry_inflight: Dict[str, asyncio.Task] = {}
 
     # ── public ───────────────────────────────────────────────────────
 
@@ -1448,8 +1485,21 @@ class WidgetMoversService:
         )
 
     async def get_portfolio_mover(
-        self, user_id: str, tickers: Sequence[str], *, links_web_only: bool = False,
+        self,
+        user_id: str,
+        tickers: Sequence[str],
+        *,
+        links_web_only: bool = False,
+        for_extension: bool = False,
     ) -> WidgetMoverPayload:
+        # `for_extension`: the closed-app widget extension asked (`GET /widget/holdings-mover`,
+        # holdings-widget spec §3). Such a build prices coins from the shared crypto board and
+        # logs one INFO counter line (`_build_portfolio_for_extension`); the app's builds are
+        # unchanged. Its key gains `#ext` only when a holding is a coin (`_EXTENSION_KEY_SUFFIX`).
+        if for_extension:
+            return await self._get_portfolio_mover_for_extension(
+                user_id, tickers, links_web_only=links_web_only,
+            )
         # KEYED ON THE USER, not just the ticker set.
         #
         # The build is not a pure function of the tickers: `_build_portfolio` calls
@@ -1473,6 +1523,58 @@ class WidgetMoversService:
                 key, lambda: self._build_portfolio(user_id, tickers, links_web_only=True),
             )
         return await self._cached(key, lambda: self._build_portfolio(user_id, tickers))
+
+    async def _get_portfolio_mover_for_extension(
+        self, user_id: str, tickers: Sequence[str], *, links_web_only: bool,
+    ) -> WidgetMoverPayload:
+        """`get_portfolio_mover(for_extension=True)`: the same per-user payload memo, keyed
+        apart from the app's only when a coin is held (`_EXTENSION_KEY_SUFFIX`)."""
+        # The app's key, character for character (`get_portfolio_mover`), so an equity-only
+        # extension build shares the app's entry and in-flight build.
+        base = "portfolio:" + user_id + ":" + ",".join(sorted({t.upper() for t in tickers if t}))
+        if any(_is_round_the_clock(str(t).upper().strip()) for t in tickers if t):
+            base += _EXTENSION_KEY_SUFFIX
+        return await self._cached(
+            _payload_key(base, links_web_only),
+            lambda: self._build_portfolio_for_extension(
+                user_id, tickers, links_web_only=links_web_only,
+            ),
+        )
+
+    async def _build_portfolio_for_extension(
+        self, user_id: str, tickers: Sequence[str], *, links_web_only: bool,
+    ) -> WidgetMoverPayload:
+        """`_build_portfolio` with the coins priced from the shared crypto board, plus ONE
+        INFO line naming the upstream calls this build caused — the counters the owner reads
+        for a week before turning widget pushes on (spec §6: `o` = `fmp_profile`, the board
+        cost = `coingecko`, coins left unpriced = `off_board` + `board_stale`)."""
+        crypto_max_age = settings.WIDGET_CRYPTO_MAX_AGE_SECONDS
+        started = time.monotonic()
+        outcome = "error"
+        requested = len({str(t).upper().strip() for t in tickers if t and str(t).strip()})
+        with counting_upstream_calls() as counters:
+            try:
+                payload = await self._build_portfolio(
+                    user_id, tickers, links_web_only=links_web_only,
+                    crypto_board_user=user_id, crypto_max_age=crypto_max_age,
+                )
+                # A degraded build withholds `holdings_count` (`_build_portfolio`).
+                outcome = "ok" if payload.holdings_count is not None else "degraded"
+                return payload
+            finally:
+                logger.info(
+                    "widget holdings build user=%s fmp_profile=%d coingecko=%d board_size=%d "
+                    "off_board=%d board_stale=%d holdings=%d outcome=%s in %.2fs",
+                    user_id,
+                    counters.get("fmp_profile", 0),
+                    counters.get("coingecko", 0),
+                    crypto_board_size(),
+                    counters.get("off_board", 0),
+                    counters.get("board_stale", 0),
+                    requested,
+                    outcome,
+                    time.monotonic() - started,
+                )
 
     async def attribute_ticker_move(self, ticker: str) -> Optional["MoveExplanation"]:
         """Same-day attribution for ONE arbitrary ticker — the widget's engine, made callable.
@@ -1825,15 +1927,28 @@ class WidgetMoversService:
             return None
 
     async def _build_portfolio(
-        self, user_id: str, tickers: Sequence[str], *, links_web_only: bool = False,
+        self,
+        user_id: str,
+        tickers: Sequence[str],
+        *,
+        links_web_only: bool = False,
+        crypto_board_user: Optional[str] = None,
+        crypto_max_age: Optional[float] = None,
     ) -> WidgetMoverPayload:
         # The tile's denominator — every holding asked about, whether or not it prices.
         requested = len({str(t).upper().strip() for t in tickers if t and str(t).strip()})
+        # `crypto_max_age` set = an extension build (`_build_portfolio_for_extension`): the
+        # coins come from the shared crypto board. Forwarded only when set, so the app's
+        # call into `_rank_and_read` is exactly today's.
+        board = (
+            {} if crypto_max_age is None
+            else {"crypto_board_user": crypto_board_user, "crypto_max_age": crypto_max_age}
+        )
         # |%| ranking, and the market band ranks like any holding: the Holdings tile no
         # longer draws the band, and the counts must cover EVERY holding — a user who holds
         # SPY wants to see SPY. The self-attribution guard lives in `_build_mover`.
         ranked, cards, news_ok, index_rows = await self._rank_and_read(
-            tickers, basis="abs_change", exclude_band=False, phase=session_phase(),
+            tickers, basis="abs_change", exclude_band=False, phase=session_phase(), **board,
         )
         # The web-only hold, BEFORE anything reads a card (`cards_for_caller`).
         cards = cards_for_caller(
@@ -1990,19 +2105,69 @@ class WidgetMoversService:
         return shared.for_tickers(industry_map, session_date, index_rows)
 
     async def _industry_for_one(self, ticker: str) -> Optional[str]:
-        try:
-            rows = await get_fmp_client().get_company_profiles_batch([ticker])
-        except Exception as e:
-            logger.warning(
-                "widget: profile lookup failed for %s (%s: %s)",
-                ticker, type(e).__name__, e,
-            )
+        """The head ticker's industry from its FMP profile, memoised (lever L2: see
+        `_INDUSTRY_HIT_TTL_SECONDS`) with one lookup in flight per ticker. None = unknown."""
+        sym = str(ticker or "").strip().upper()
+        if not sym:
             return None
-        for r in rows or []:
-            ind = str((r or {}).get("industry") or "").strip()
-            if ind:
-                return ind
-        return None
+        held = self._industry_memo.get(sym)
+        if held is not None:
+            expires_at, name = held
+            if time.monotonic() < expires_at:
+                self._industry_memo.move_to_end(sym)
+                return name
+            self._industry_memo.pop(sym, None)
+        loop = asyncio.get_running_loop()
+        task = self._industry_inflight.get(sym)
+        if task is None or task.done() or task.get_loop() is not loop:
+            task = loop.create_task(self._fetch_industry(sym))
+            self._industry_inflight[sym] = task
+        try:
+            # Shielded: a build that is cancelled must not cancel the lookup other builds
+            # with the same head are waiting on.
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if not task.cancelled() or (current is not None and current.cancelling()):
+                raise
+            logger.warning("widget: industry lookup for %s was cancelled — no industry line", sym)
+            return None
+
+    async def _fetch_industry(self, sym: str) -> Optional[str]:
+        """One profile call for `sym`; memoises the answer (never a raised error)."""
+        try:
+            count_upstream("fmp_profile")
+            try:
+                rows = await get_fmp_client().get_company_profiles_batch([sym])
+            except Exception as e:
+                logger.warning(
+                    "widget: profile lookup failed for %s (%s: %s)",
+                    sym, type(e).__name__, e,
+                )
+                return None
+            got_row = False
+            name: Optional[str] = None
+            for r in rows if isinstance(rows, list) else []:
+                if not isinstance(r, dict):
+                    continue
+                got_row = True
+                ind = str(r.get("industry") or "").strip()
+                if ind:
+                    name = ind
+                    break
+            ttl = (
+                _INDUSTRY_HIT_TTL_SECONDS if name
+                else _INDUSTRY_MISS_TTL_SECONDS if got_row
+                else _INDUSTRY_UNSURE_TTL_SECONDS
+            )
+            self._industry_memo[sym] = (time.monotonic() + ttl, name)
+            self._industry_memo.move_to_end(sym)
+            while len(self._industry_memo) > _INDUSTRY_MEMO_MAX_ENTRIES:
+                self._industry_memo.popitem(last=False)
+            return name
+        finally:
+            if self._industry_inflight.get(sym) is asyncio.current_task():
+                self._industry_inflight.pop(sym, None)
 
     async def _fetch_market_context(self, session_day: date) -> "_MarketContext":
         fmp = get_fmp_client()
@@ -2569,6 +2734,8 @@ class WidgetMoversService:
         basis: str = "z",
         exclude_band: bool = True,
         phase: Optional[str] = None,
+        crypto_board_user: Optional[str] = None,
+        crypto_max_age: Optional[float] = None,
     ) -> Tuple[List[RankedMover], Dict[str, Optional[Dict[str, Any]]], bool, Dict[str, Dict[str, Any]]]:
         """Quote, rank and card-read `tickers`: (ranked, cards, news_available, index_rows).
 
@@ -2576,7 +2743,8 @@ class WidgetMoversService:
         holding (portfolio mode — the Holdings tile no longer draws the band); `phase` is
         `drop_prior_session_movers`' (the builders pass `session_phase()`; None keeps
         newest-wins). The one-argument form is `attribute_ticker_move`'s and must keep
-        working with these defaults.
+        working with these defaults. `crypto_max_age` / `crypto_board_user` are an extension
+        build's (`_quotes`); None keeps the app's quote call byte for byte.
 
         `index_rows` carries the band AND the Home pulse equities (IWM, GLD), quoted in the
         SAME batch: `build_market_context` reads the band, `build_market_assets` the pulse.
@@ -2608,8 +2776,15 @@ class WidgetMoversService:
         # The indices ride along on the SAME request — `batch-quote` chunks at 300 and the
         # universe is capped at 200, so this is free. In market mode they are excluded from
         # ranking below; an index is not a "mover" the market tile can attribute.
+        quote_syms = symbols + [s for s in extra_syms if s not in symbols]
         quotes, sigmas = await asyncio.gather(
-            self._quotes(symbols + [s for s in extra_syms if s not in symbols]),
+            (
+                self._quotes(quote_syms) if crypto_max_age is None
+                else self._quotes(
+                    quote_syms, crypto_max_age=crypto_max_age,
+                    crypto_board_user=crypto_board_user,
+                )
+            ),
             get_volatility_cache_service().get_sigmas_bulk(symbols),
             return_exceptions=True,
         )
@@ -2738,8 +2913,21 @@ class WidgetMoversService:
         index_rows = {s: (quotes.get(s) or {}) for s in extra_syms if quotes.get(s)}
         return ranked, cards, news_available, index_rows
 
-    async def _quotes(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
-        rows = await price_source(self).get_quotes_list(symbols)
+    async def _quotes(
+        self,
+        symbols: List[str],
+        *,
+        crypto_max_age: Optional[float] = None,
+        crypto_board_user: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        source = price_source(self)
+        if crypto_max_age is None:
+            rows = await source.get_quotes_list(symbols)
+        else:
+            # An extension build: coins from the shared crypto board (`price_service`).
+            rows = await source.get_quotes_list(
+                symbols, crypto_max_age=crypto_max_age, crypto_board_user=crypto_board_user,
+            )
         out: Dict[str, Dict[str, Any]] = {}
         for r in rows or []:
             sym = str(r.get("symbol") or "").upper()

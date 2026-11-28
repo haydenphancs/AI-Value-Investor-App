@@ -605,6 +605,37 @@ class Settings(BaseSettings):
     # ⚠️ Also set this explicitly on Railway. The deployment overrides this default, so a
     # code change alone does not fix production.
     APNS_ENV: str = "production"
+
+    # ── Home Screen widget: the Holdings grant + WidgetKit push (migration 216) ─────────────
+    # Owner 2026-11-27: "Own key, 30-day life (Recommended)", "Yes, add push too", "Yes, issue it
+    # in refresh (Recommended)". Every switch defaults OFF. Read at call time, but `settings` is an
+    # lru_cache'd singleton, so changing one on Railway needs a RESTART.
+    #
+    # The grant switch gates the MINT inside POST /auth/refresh and the data route GET
+    # /widget/holdings-mover (503 AUTH_UNAVAILABLE while off). It is never read by the key
+    # dependency, so POST /widget/holdings-grant/revoke keeps working while it is off — a device
+    # signing out must always be able to kill its key.
+    WIDGET_HOLDINGS_GRANTS_ENABLED: bool = False
+    # Content-free WidgetKit pushes from the insight sweeper (iOS 26+). PUT /widget/push-token
+    # still STORES tokens while this is off.
+    WIDGET_PUSH_ENABLED: bool = False
+    # A device is woken at most this often, and at most WIDGET_PUSH_DAILY_CAP times per ET day
+    # (both also checked against the grant row, so a restart does not reset them).
+    WIDGET_PUSH_MIN_INTERVAL_SECONDS: int = Field(3600, ge=900, le=86400)
+    WIDGET_PUSH_DAILY_CAP: int = Field(12, ge=1, le=48)
+    # One sweeper pass spends at most this long waking widgets (`asyncio.wait_for`), sends at
+    # most this many, paced at this rate; the rest stay pending for the next pass.
+    WIDGET_PUSH_PASS_BUDGET_SECONDS: int = Field(20, ge=5, le=60)
+    WIDGET_PUSH_MAX_SENDS_PER_PASS: int = Field(200, ge=10, le=2000)
+    WIDGET_PUSH_SENDS_PER_SECOND: int = Field(20, ge=1, le=100)
+    # The shared widget crypto board (owner: "Every 10 minutes (Recommended)"): at most one
+    # CoinGecko refresh per WIDGET_CRYPTO_MAX_AGE_SECONDS for every extension build, at most
+    # WIDGET_CRYPTO_BOARD_MAX_COINS coins (LRU), at most WIDGET_CRYPTO_BOARD_PER_USER admitted per
+    # user. A coin off the board is "no price" on EXTENSION builds only; app builds are unchanged.
+    WIDGET_CRYPTO_MAX_AGE_SECONDS: int = Field(600, ge=60, le=3600)
+    WIDGET_CRYPTO_BOARD_MAX_COINS: int = Field(250, ge=1, le=1000)
+    WIDGET_CRYPTO_BOARD_PER_USER: int = Field(20, ge=1, le=100)
+
     # Per-user daily ceiling on ALERTS, across every ticker.
     #
     # The dedup key is per (user, ticker, day), which stops the SAME alert repeating

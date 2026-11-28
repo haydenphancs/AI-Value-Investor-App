@@ -2,7 +2,7 @@
 //  WidgetAPIConfig.swift
 //  Caydex
 //
-//  Where the widget extension sends its one request.
+//  Where the widget extension sends its requests: the Market tile's, and the Holdings tile's.
 //
 
 import Foundation
@@ -49,11 +49,34 @@ public enum WidgetAPIConfig {
         WidgetSharedDefaults.store?.set(url.absoluteString, forKey: baseURLOverrideKey)
     }
 
-    /// Market mode only. Portfolio needs a SESSION the extension must never hold —
-    /// see the header of `WidgetSnapshotStore`.
+    /// The Market tile's route, authenticated with the market widget token below.
     public static var marketMoverURL: URL {
         baseURL.appendingPathComponent("api/v1/widget/market-mover")
     }
+
+    // MARK: - The Holdings grant's two routes
+
+    /// The Holdings tile's route. It answers what `/widget/portfolio-mover` gives the app, for the
+    /// account a HOLDINGS GRANT names (`WidgetHoldingsGrant`) — never for a session, which the
+    /// extension still must never hold (the header of `WidgetSnapshotStore`). The app's own route
+    /// stays session-only; this one sits on a third backend router whose only credential is the
+    /// grant key.
+    public static var holdingsMoverURL: URL {
+        baseURL.appendingPathComponent("api/v1/widget/holdings-mover")
+    }
+
+    /// Revoke-by-key, called by the APP (renewal, session end, last widget removed). Answers even
+    /// while the server's grant switch is off: a revocation is never gated.
+    public static var holdingsGrantRevokeURL: URL {
+        baseURL.appendingPathComponent("api/v1/widget/holdings-grant/revoke")
+    }
+
+    /// The header both grant routes authenticate with — its own, never `Authorization`, so the
+    /// grant cannot be mistaken for a session anywhere.
+    ///
+    /// Must match `HOLDINGS_GRANT_HEADER` in `backend/app/dependencies.py`
+    /// (`test_ios_widget_holdings_grant.py` pins it).
+    public static let holdingsTokenHeader = "X-Caydex-Holdings-Token"
 
     // MARK: - The widget's credential
 
@@ -79,12 +102,15 @@ public enum WidgetAPIConfig {
 
     /// Called by the APP when it mints or renews the token. The app is the only writer.
     ///
-    /// ⚠️ This is the one credential that crosses into the extension, and it is safe ONLY
-    /// because of what it can reach: `/widget/market-mover` returns a market-wide roll-up and
-    /// nothing about the caller. It is not a session — the backend refuses it as a bearer on
-    /// every authenticated route (`_decode_access_token` allow-lists `type == "access"`). Do
-    /// not publish the session token here; it would expire in an hour and the extension cannot
-    /// refresh one.
+    /// ⚠️ This token is safe in the App Group (which travels in backups) ONLY because of what it
+    /// can reach: `/widget/market-mover` returns a market-wide roll-up and nothing about the
+    /// caller. It is not a session — the backend refuses it as a bearer on every authenticated
+    /// route (`_decode_access_token` allow-lists `type == "access"`). Do not publish the session
+    /// token here; it would expire in an hour and the extension cannot refresh one.
+    ///
+    /// The extension's OTHER credential, the Holdings grant, reads the account's holdings, so it
+    /// is held to more: a ThisDeviceOnly Keychain item, a server-side revocation list, one route.
+    /// It never lives here — see `WidgetHoldingsGrant`.
     ///
     /// Reloads the tiles: a token arriving is the moment a signed-out tile can become a
     /// signed-in one. The first refresh after sign-in writes its snapshots BEFORE the token is

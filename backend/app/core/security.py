@@ -198,6 +198,15 @@ def decode_token(token: str) -> Optional[dict[str, Any]]:
 # sessions, and this is not one. The proportionality argument rests entirely on the scope, so if
 # this token ever authorises a route carrying user data, that reasoning collapses and it needs a
 # server-side revocation list first.
+#
+# The HOLDINGS tile (2026-11-27, migration 216; owner "Own key, 30-day life (Recommended)") did not
+# widen this token — it got a DIFFERENT credential that has exactly that revocation list: an
+# opaque per-device grant key (`cwh1_…`), minted only inside a `POST /auth/refresh` rotation,
+# stored server-side only as a SHA-256, sent in its own `X-Caydex-Holdings-Token` header to a
+# third router, and checked against `widget_holdings_grants` on EVERY call (logout, refresh reuse,
+# sign-out-all, the password stamps and account deletion all kill it). See
+# `app/services/widget_holdings_grant_service.py` and auth.md §8c. This market JWT must never
+# gain a holdings scope.
 
 WIDGET_TOKEN_TYPE = "widget"
 WIDGET_TOKEN_SCOPE = "widget:market"

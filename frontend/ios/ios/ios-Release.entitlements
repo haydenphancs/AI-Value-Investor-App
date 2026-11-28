@@ -57,8 +57,9 @@
 	<true/>
 	<key>aps-environment</key>
 	<string>production</string>
-	<!-- App Group — see the long note in ios.entitlements for why the widget reads a
-	     snapshot instead of calling the API itself. Duplicated here because THIS FILE
+	<!-- App Group — see the long note in ios.entitlements: the shared snapshot channel,
+	     and the Keychain access group of the Holdings grant item (never add
+	     `keychain-access-groups`). Duplicated here because THIS FILE
 	     REPLACES the Debug one rather than extending it; a capability that exists only
 	     in Debug is absent from every shipped build. That has already happened once to
 	     `applesignin`, which is why this file carries the warning at the top.

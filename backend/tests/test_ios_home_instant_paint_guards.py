@@ -620,19 +620,28 @@ def _check_preflight_threshold(s):
     )
 
 
+_WIDGET_GRANT_HEADER = "func refreshForWidgetGrant() async -> TokenRefreshOutcome"
+
+
 def _check_single_flight_caller_set(s):
     """Every caller of the single-flight, `self.`-prefixed or not: the four 401 interceptors
     (test_ios_transient_refresh_keeps_session.py T1 counts the literal `await
-    refreshTokenSingleFlight()` there) plus the pre-flight. A sixth would be a refresh nobody
-    reviewed against auth.md §3/§5."""
+    refreshTokenSingleFlight()` there), the pre-flight, and — since 2026-11-27 (migration 216) —
+    the Holdings widget's grant refresh, `refreshForWidgetGrant()` (pinned there as T1c). A
+    seventh would be a refresh nobody reviewed against auth.md §3/§5."""
     api = s["api"]
     assert api.count("private func refreshTokenSingleFlight(") == 1, "the single-flight moved — scan drifted"
     total = len(_SINGLE_FLIGHT_CALL.findall(api)) - 1  # minus the declaration
     per = {name: len(_SINGLE_FLIGHT_CALL.findall(_block(api, header))) for name, header in _TRANSPORTS.items()}
     per["pre-flight"] = len(_SINGLE_FLIGHT_CALL.findall(_preflight(s)))
+    assert api.count(_WIDGET_GRANT_HEADER) == 1, (
+        "the widget-grant refresh is gone or changed shape — re-derive the single-flight caller set"
+    )
+    per["widget-grant"] = len(_SINGLE_FLIGHT_CALL.findall(_block(api, _WIDGET_GRANT_HEADER)))
     assert all(n == 1 for n in per.values()), f"single-flight calls per site: {per}"
-    assert total == sum(per.values()) == 5, (
-        f"a refresh call site outside the four transports and the pre-flight ({total} calls, {per})"
+    assert total == sum(per.values()) == 6, (
+        f"a refresh call site outside the four transports, the pre-flight and the widget-grant "
+        f"refresh ({total} calls, {per})"
     )
 
 
@@ -1273,10 +1282,14 @@ MUTATIONS: list[tuple[str, str, str, Callable[[str], str]]] = [
     ("preflight-threshold-flipped", "preflight_threshold", "api",
      _sub(r"secondsLeft <= Self\.proactiveRefreshSkew", "secondsLeft >= Self.proactiveRefreshSkew"),
      "the pre-flight refreshes a token that is NOT about to expire"),
-    ("sixth-single-flight-caller", "single_flight_callers", "api",
+    ("seventh-single-flight-caller", "single_flight_callers", "api",
      _sub(r"(private func refreshArmedTokenIfExpired\(for endpoint: APIEndpoint\) async \{)",
           r"func probe() async { _ = await self.refreshTokenSingleFlight() }\n    \1"),
-     "a refresh call site outside the four transports and the pre-flight"),
+     "a refresh call site outside the four transports, the pre-flight and the widget-grant refresh"),
+    ("widget-grant-calls-twice", "single_flight_callers", "api",
+     _sub(r"(\n\s*return await refreshTokenSingleFlight\(\)\n)",
+          r"\n        _ = await refreshTokenSingleFlight()\1"),
+     "single-flight calls per site"),
     # ── A4 ──
     ("retry-third-delay", "retry_bounded", "vm",
      _sub(r"\[\.seconds\(2\), \.seconds\(5\)\]", "[.seconds(2), .seconds(5), .seconds(10)]"),

@@ -4,10 +4,12 @@
 //
 //  The ONE channel between the app and the Movers widget extension.
 //
-//  The app fetches (it owns the auth token) and writes; the widget reads and renders.
-//  The widget performs no network call and no identity read.
+//  The app fetches (it owns the session) and writes; the widget reads and renders. The widget's
+//  own network calls never touch a session: Market mode uses the market WIDGET TOKEN, and
+//  Holdings mode the per-device HOLDINGS GRANT — and it may only REFRESH a Holdings slot the app
+//  created for the grant's account, never create or re-own one.
 //
-//  ⚠️ WHY NOT JUST LET THE WIDGET CALL THE API
+//  ⚠️ WHY THE WIDGET NEVER HOLDS A SESSION
 //  `.claude/rules/auth.md` §8 makes `APIClient` the single token source because the
 //  client token and the Keychain deliberately DIVERGE during `.restoring`: a Keychain
 //  reader authenticates as the real account while the app UI says guest. A widget is a
@@ -23,17 +25,19 @@
 //  watchlist, portfolios, chats and Learn progress, with no recovery (the old rows are
 //  service-role-only). Do not add an access group to GuestIdentity.
 //
-//  ⚠️ MARKET MODE NOW FETCHES ITSELF — the paragraph above still governs, narrowly.
-//  `/widget/market-mover` is no longer a `.public` route (End-User Display Rights permit FMP
-//  data only through an authenticated platform), so the extension authenticates it with a
-//  WIDGET TOKEN: long-lived, scoped to that one market-wide route, published into this App
-//  Group by the app, and refused as a session bearer everywhere else. That does not weaken §8
-//  — the extension still never reads the Keychain and still holds no session, so it cannot
-//  diverge from `APIClient` and has nothing to refresh. See `WidgetMarketFetcher` and the
-//  WIDGET TOKEN block in `backend/app/core/security.py`.
+//  ⚠️ MARKET MODE FETCHES ITSELF with a WIDGET TOKEN: long-lived, scoped to the one
+//  market-wide route `/widget/market-mover`, published into this App Group by the app, and
+//  refused as a session bearer everywhere else (End-User Display Rights permit FMP data only
+//  through an authenticated platform). See `WidgetMarketFetcher` and the WIDGET TOKEN block in
+//  `backend/app/core/security.py`.
 //
-//  PORTFOLIO MODE NEVER CAN, and the widget token cannot reach it — that is precisely why a
-//  long-lived credential is defensible for the other route.
+//  ⚠️ HOLDINGS MODE FETCHES ITSELF TOO (2026-11-27), with a credential held to more: the
+//  HOLDINGS GRANT (`WidgetHoldingsGrant`). The widget token still cannot reach anyone's
+//  holdings. The grant is a ThisDeviceOnly Keychain item (never this App Group, which travels in
+//  backups), minted only inside a refresh-token rotation, revoked server-side with the session
+//  that minted it, and good for one route. The extension's write is `writeHoldingsFromExtension`:
+//  an EXISTING slot of the grant's account only, fenced on the widget token and the grant marker
+//  at the last moment, with a compensating delete if either moved during the store.
 //
 //  ONE KEY PER MODE (v2)
 //  The two modes used to share one envelope that both processes read, modified and wrote
@@ -780,11 +784,13 @@ public enum WidgetSnapshotStore {
         return storedPortfolio(defaults)?.owner
     }
 
-    /// Whether ANY widget state exists — a snapshot under any key, or a widget token.
+    /// Whether ANY widget state exists — a snapshot under any key, a widget token, or a Holdings
+    /// grant marker.
     ///
-    /// The backup-restore check: a restore to a new phone carries the App Group (token and
-    /// snapshots) but not the `ThisDeviceOnly` Keychain session, so a launch with no stored
-    /// session and `hasAnyState` true has someone else's market access and holdings on it.
+    /// The backup-restore check: a restore to a new phone carries the App Group (token, snapshots
+    /// and the grant MARKER) but not the `ThisDeviceOnly` Keychain session or grant, so a launch
+    /// with no stored session and `hasAnyState` true has someone else's market access and
+    /// holdings on it — and a marker naming a key this device never held.
     ///
     /// `nonisolated`: `AppState.performRestore` reads it OFF the main thread on a signed-out
     /// launch — the first App Group read is a cfprefsd round trip, and a stall must not freeze
@@ -796,6 +802,7 @@ public enum WidgetSnapshotStore {
             WidgetSharedConfig.snapshotKey,
             WidgetSharedConfig.snapshotKeyV2Market,
             WidgetSharedConfig.snapshotKeyV2Portfolio,
+            WidgetHoldingsGrant.markerKey,
         ]
         return keys.contains { defaults.object(forKey: $0) != nil }
     }
@@ -813,7 +820,8 @@ public enum WidgetSnapshotStore {
     }
 
     /// The same write, from the WIDGET process, WITHOUT asking WidgetKit to redraw — and
-    /// for the MARKET slot only.
+    /// for the MARKET slot only (Holdings has its own, owner- and grant-fenced write:
+    /// `writeHoldingsFromExtension`).
     ///
     /// ⚠️ THE RELOAD IS THE WHOLE REASON THIS EXISTS. The extension fetches from inside
     /// `timeline(for:in:)`; calling `reloadTimelines()` there asks WidgetKit for a new
@@ -835,6 +843,109 @@ public enum WidgetSnapshotStore {
             return false
         }
         return write(mode: .market, snapshot: snapshot, owner: nil, reloading: false, fromExtension: true)
+    }
+
+    /// The HOLDINGS refresh from the WIDGET process, with the device's Holdings grant — WITHOUT
+    /// a reload, for `writeFromExtension`'s reason (it runs inside `timeline(for:in:)`).
+    ///
+    /// ⚠️ THE EXTENSION NEVER CREATES OR RE-OWNS THE SLOT. It stores only over an EXISTING slot
+    /// whose owner is the grant's account: a sign-in, an account switch or a first install is the
+    /// app's (`writePortfolio`, the only writer that may change an owner). It also keeps the
+    /// app's rules — a market-scoped payload or a degraded one never replaces a good snapshot —
+    /// and never replaces a NEWER one (`asOf` older than the stored build).
+    ///
+    /// ⚠️ AND IT IS FENCED TWICE. Right before storing: a widget token for the grant's account,
+    /// and the grant marker still naming this grant (a session that ended during the 12 s fetch
+    /// removed the marker first). Right after: if either moved while the bytes were written, they
+    /// are removed again — but only if the slot still holds exactly these bytes, so an app write
+    /// that landed in between is never undone. Two processes cannot share a lock here; the
+    /// compensating delete is what closes the window the check alone leaves open.
+    ///
+    /// - Returns: whether the payload was stored (and kept).
+    @discardableResult
+    static func writeHoldingsFromExtension(
+        _ snapshot: WidgetMoverSnapshot, grant: WidgetHoldingsGrant.Grant
+    ) -> Bool {
+        guard let defaults else {
+            log.error("cannot write the widget holdings refresh — App Group unavailable")
+            return false
+        }
+        guard let existing = storedPortfolio(defaults) else {
+            log.info("widget: holdings refresh not stored — there is no Holdings slot (only the app creates one)")
+            return false
+        }
+        guard let slotOwner = existing.owner,
+              slotOwner.lowercased() == grant.userId.lowercased() else {
+            log.warning("widget: holdings refresh not stored — the slot belongs to another account")
+            return false
+        }
+        guard snapshot.mode == "portfolio" else {
+            log.warning("widget: ignoring \(snapshot.mode, privacy: .public)-scope payload for the Holdings slot (extension)")
+            return false
+        }
+        if !snapshot.hasContent(for: .portfolio), existing.snapshot.hasContent(for: .portfolio) {
+            log.warning("widget: ignoring a degraded holdings refresh — keeping the last good snapshot")
+            return false
+        }
+        guard snapshot.asOf >= existing.snapshot.asOf else {
+            log.info("widget: holdings refresh older than the stored snapshot — kept the stored one")
+            return false
+        }
+        let data: Data
+        do {
+            data = try encoder.encode(WidgetPortfolioSlot(owner: slotOwner, snapshot: snapshot))
+        } catch {
+            log.error("widget holdings refresh encode failed: \(String(describing: error), privacy: .public)")
+            return false
+        }
+        // The last-moment fence, after everything that could have taken time.
+        guard let tokenAtStore = WidgetAPIConfig.widgetToken,
+              WidgetAPIConfig.jwtSubject(of: tokenAtStore)?.lowercased() == grant.userId.lowercased(),
+              WidgetHoldingsGrant.markerFingerprint == grant.fp
+        else {
+            log.warning("widget: holdings refresh discarded — the session or the grant ended while it was in flight")
+            return false
+        }
+        defaults.set(data, forKey: WidgetSharedConfig.snapshotKeyV2Portfolio)
+        // The compensating delete: the app's session-end path removes the marker, then the token,
+        // then every slot. A store that landed after its clear would outlive the session.
+        if WidgetAPIConfig.widgetToken != tokenAtStore
+            || WidgetHoldingsGrant.markerFingerprint != grant.fp {
+            if defaults.data(forKey: WidgetSharedConfig.snapshotKeyV2Portfolio) == data {
+                defaults.removeObject(forKey: WidgetSharedConfig.snapshotKeyV2Portfolio)
+            }
+            log.warning("widget: holdings refresh removed again — the session or the grant changed during the store")
+            return false
+        }
+        return true
+    }
+
+    /// Removes the Holdings slot from the WIDGET process when the server refused the grant (or it
+    /// expired) — the tile then says "Open Caydex to load your holdings" (owner 2026-11-27: a
+    /// remotely revoked grant HIDES the holdings; sign out of all devices is the lost-phone
+    /// lever). No reload: it runs inside `timeline(for:in:)`, so never `clearPortfolio()`.
+    ///
+    /// Fenced: only while the marker still names the refused grant (one the app renewed
+    /// meanwhile keeps its slot) and only a slot owned by that grant's account.
+    ///
+    /// - Returns: whether the slot was removed.
+    @discardableResult
+    static func dropPortfolioFromExtension(owner: String, fingerprint: String) -> Bool {
+        guard let defaults else {
+            log.error("cannot drop the widget Holdings snapshot — App Group unavailable")
+            return false
+        }
+        guard WidgetHoldingsGrant.markerFingerprint == fingerprint else {
+            log.info("widget: Holdings slot kept — the app replaced the refused grant")
+            return false
+        }
+        guard let slotOwner = storedPortfolio(defaults)?.owner,
+              slotOwner.lowercased() == owner.lowercased() else {
+            return false
+        }
+        defaults.removeObject(forKey: WidgetSharedConfig.snapshotKeyV2Portfolio)
+        log.info("widget: Holdings slot removed — its grant was refused")
+        return true
     }
 
     private enum SlotWrite {

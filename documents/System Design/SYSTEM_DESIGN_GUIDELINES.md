@@ -593,9 +593,11 @@ The `CaydexWidgets` extension answers two different questions, and each has its 
   of "No clear catalyst". Since 2026-10-30 the card is tried FIRST, ahead of earnings, analyst
   actions, classified news and the group move (INTC −30.6%: an EPS beat had hidden the Bearish
   card that explained the fall). The industry arithmetic rides beside an established cause as
-  `cause.note`. Installed builds render the headline; only the new build shows the note. Only the APP can fetch
-  `GET /widget/portfolio-mover` (`.signInRequired`; the widget token cannot reach it). It
-  writes the result into the App Group, where it is stamped with the owning user id. A new
+  `cause.note`. Installed builds render the headline; only the new build shows the note. The APP
+  fetches `GET /widget/portfolio-mover` (`.signInRequired`; the market widget token cannot reach
+  it) and writes the result into the App Group, where it is stamped with the owning user id. Since
+  migration 216 (2026-11-27) the EXTENSION refreshes that same slot itself with the device's
+  Holdings grant, so the tile moves with the app closed or force-quit (below). A new
   card run reaches the tile while the app is open: the Updates screen hands every AI card it
   fetches to `WidgetRefreshService.insightCardArrived`, which refreshes (a content change, past
   the 60 s throttle) when the card is the head mover's or the market's and newer than the
@@ -616,6 +618,73 @@ background (under a background-task assertion), and active-group / watchlist / h
 changes (debounced). A session end clears both App Group slots, the widget token and the
 in-tile mode override; with no widget token the extension renders a "Sign in" state in both
 modes.
+
+**The extension refreshes Holdings itself (2026-11-27, migration 216).** The owner reported the
+medium tile showing a stale NVDA move while the Updates Insights card had moved on, catching up
+only when the app was opened. Three things kept it stale: the extension fetched only in Market
+mode, it could not write the Holdings slot, and `GET /widget/portfolio-mover` is session-only.
+Owner decisions, 2026-11-27: "Own key, 30-day life (Recommended)", "Yes, issue it in refresh
+(Recommended)", "Every 90 min (Recommended)", "Every 10 minutes (Recommended)", "Yes, add push
+too", "Fold into 1.04" (the iOS half ships in 1.04; the backend's two switches default off).
+- **The fetch.** The app obtains a per-device Holdings grant inside a refresh-token rotation
+  (§9.1; the rules are `.claude/rules/auth.md` §8c). In Holdings mode the extension sends it to
+  `GET /widget/holdings-mover` (`Shared/WidgetHoldingsFetcher.swift`), which serves exactly the
+  `GET /widget/portfolio-mover` build for the grant row's own account with the extension's upstream budget
+  (below). The answer is written by `WidgetSnapshotStore.writeHoldingsFromExtension`, which never
+  creates or re-owns the slot: it stores only over a slot the APP stamped with the grant's
+  account, never over a newer snapshot, fenced on the widget token's subject and the grant marker
+  before and after the write. A refusal (only `AUTH_TOKEN_INVALID`, `AUTH_SESSION_EXPIRED` or
+  `AUTH_ACCOUNT_NOT_FOUND`) drops the slot and renders "Open Caydex to load your holdings"; every
+  other failure keeps the last snapshot. The Market branch is unchanged.
+- **The reload cadence** (`Shared/WidgetRefreshSchedule.swift`): +20 min in the regular session
+  (09:30-16:00 ET), +60 min in pre-market and after-hours, +90 min in every quiet hour
+  (overnight, weekends, and the rest of a day the server has called closed), never stepping past
+  a weekday's 04:00 ET or 09:30 ET. The tile used to sleep from 20:00 ET to the next weekday's
+  04:00, which was harmless while only Market fetched; with Holdings fetching, a sleeping tile
+  kept Friday evening's portfolio until Monday and kept a remotely signed-out account's holdings
+  on screen. The closed-for-the-day hint: a snapshot whose `market_session` is exactly "closed",
+  built on now's ET weekday between 04:00 and 20:00 ET (5 minutes of clock skew allowed), puts the
+  rest of that day on the quiet cadence — a holiday, or a half day after its 13:00 close. No
+  client-side holiday table. 35 reload requests on a trading day, 15 on a weekend day, 16 on a
+  full holiday, 27 on a half day, pinned by `frontend/ios/scripts/widget-refresh-schedule-check.sh`. A
+  signed-out timeline is one entry with a reload six hours out.
+- **Renders between reloads** (`renderDates`): the +20/+60/+180-minute renders that fall before
+  the reload, plus the next ET 00:01 — ALWAYS, even past the reload. With a 90-minute quiet reload
+  no timeline built before 22:31 ET reaches midnight, so one deferred reload would otherwise leave
+  yesterday's evening render presented as today's.
+- **The footer**: an after-hours or closed snapshot older than two hours
+  (`WidgetSessionLabel.offHoursAgeLimit`) reads "As of …" on the same day — at that age a fetch
+  failed, was deferred or was refused. The compact footer keeps no AM/PM.
+- **Wakes**: on iOS 26+ the Insights sweeper can ask WidgetKit to rerun the timeline after it
+  stores a card the tile cares about (§11.9). The timeline stays the source of truth.
+
+**The upstream budget of an extension build.** A closed-app tile is built about 35 times a
+trading day, plus wakes, per device, so three levers keep upstream calls flat:
+- **The widget crypto board** (`price_service.get_crypto_board_quotes`, process memory only —
+  a live price is never persisted): one per-symbol table for every extension build, at most
+  `WIDGET_CRYPTO_BOARD_MAX_COINS` (250) coins, least-recently-requested out, at most
+  `WIDGET_CRYPTO_BOARD_PER_USER` (20) admitted per request. It refreshes in ONE CoinGecko
+  `GET /coins/markets` call per 250 coins (so one at the default cap) with `per_page` set (the
+  default page silently dropped coins past 100), and only when a requested coin is stale AND the
+  last refresh STARTED at least `WIDGET_CRYPTO_MAX_AGE_SECONDS` (600) ago — at most one refresh
+  per 10 minutes whatever the number of users, ≤ 144 a day (a symbol the coin-id resolver has
+  never seen also costs its one CoinGecko search lookup). Every coin asked about gets its row or
+  a NO_PRICE marker, so a coin with no price is not re-asked on every build. A coin outside the board is left unpriced on
+  extension builds only (the tile counts it "no price"); the app's own builds are unchanged and
+  write their priced rows through to the board. The payload memo key is suffixed for an extension
+  build only when it holds a coin, so a board-priced payload is never served to the app.
+- **The industry memo** (`widget_movers_service`): the head mover's industry is memoised 24 h when
+  found, 1 h when the profile names none and 5 min on an empty answer (an empty answer can be an
+  outage); never on an error. It removes the per-build FMP profile call, for app builds too.
+- **The closed-window quote tier** (`price_service._QUOTE_CLOSED_TTL`, 900 s): a single-symbol
+  quote — the off-universe path every holding outside the screener universe pays — is served up to
+  15 minutes when its stamp and the read both fall in the US closed window, only for a listing on a
+  US exchange that FMP does not flag as not actively trading; anything else, an unknown exchange
+  included, keeps 30 s. No app-visible freshness changes while any US session trades.
+
+Each extension build logs one INFO line (`widget holdings build user=…`) with its FMP profile
+calls, CoinGecko calls, board size, off-board and stale coins, holdings and outcome; each board
+refresh logs `price_service: crypto board refreshed`.
 
 ---
 
@@ -2175,7 +2244,7 @@ whether any of it runs:
 | whale profile pre-warm | once, after the first politician sweep | `WHALE_PREWARM_ENABLED` (on) |
 | research reconciliation (refunds) | every 5 min | — |
 | subscription expiry sweep | hourly | — |
-| Updates insight sweeper | 5 min in the market day; crypto-only every 30 min when closed | — |
+| Updates insight sweeper (since 2026-11-27 its pass ends with the WidgetKit push wakes for the cards it stored, §11.9 — a step inside this loop, not a loop of its own) | 5 min in the market day; crypto-only every 30 min when closed | — (the wake step: `WIDGET_PUSH_ENABLED` and `WIDGET_HOLDINGS_GRANTS_ENABLED`, both **off**) |
 | chat starter warm | 15 min while the market is active | `CHAT_STARTER_WARM_ENABLED` (on) |
 | news-sentiment backfill (90 days per watched ticker, then a nightly 21:00 ET top-up) | every ~3 min, or at once when a ticker is added | `SENTIMENT_BACKFILL_ENABLED` (**off**) |
 | theme rotation / theme insights | 1st trading day 18:30 ET / trading days 18:15 ET | `THEME_ROTATION_ENABLED`, `THEME_INSIGHTS_ENABLED` (**off**) |
@@ -2184,6 +2253,11 @@ whether any of it runs:
 | marketing publisher (+ the Telegram review sweep and publish feed, §12.9-§12.10, then four day-keyed jobs, §12.11: measure `marketing_metrics_daily` 06:00 ET; run health `marketing_run_health` on a posting day at the run hour + `MARKETING_MAX_RUN_ATTEMPTS`, capped at 23:00 (22:00 ET by default), and `marketing_run_health_final` the day after at the run hour (16:00 ET by default; the run hour is `MARKETING_RUN_HOUR_ET`, the web's mirror of the worker's; since 2026-11-15 both judge every lane of the day in one message, timed from the latest enabled lane's hour, §12.19); the weekly digest `marketing_digest_weekly` Monday 09:00 ET, Tuesday catch-up) / link-hit flush | 10 min, woken at once by an Approve or a confirmed Retract / 60 s | expiry, auto-approved posts back to review, and confirmed retracts: always; reconcile: `MARKETING_ENABLED` (**off**), any queued post with an adapter (billed X reads; it never resends under dry run); publishing: `MARKETING_ENABLED` and a platform listed in `MARKETING_PUBLISH_PLATFORMS` with its credentials (none by default); the review sweep, feed and both run-health checks: the `MARKETING_TELEGRAM_*` settings (unset = off); measure: `MARKETING_ENABLED` and `MARKETING_METRICS_ENABLED` (**off**); digest: the review bot and `MARKETING_DIGEST_ENABLED` (**off**) / — |
 | push dispatch, scheduled senders, price alerts | 60 s, but 1 s after a flush that claimed a full `NOTIFICATION_DISPATCH_BATCH` (100) and settled at least one row of it, since more are due now (a night hold's 07:00 wakes a whole time zone at once); always 60 s after a failed flush / hourly wake (earnings 16:00, smart money 18:00, profile match 19:00 ET) / 60 s | the notification trio (§11.4) |
 | live earnings (§11.8): two forever-loops under one task (`run_earnings_live_loop`), the first tick of either in a new process taking back `earnings_filing_cache` (migration 209). The FMP tick, for everyone's watched tickers: folds the Tracking memo, paying it a round only at 06:00 and 15:30 ET on a trading day, after a restart, for a held row too old to open its record, or for a report its own fetches ended (§7.1); asks FMP about a report day only while a watched report on it still wants FMP — every 3 min inside a release window (06:00–09:35 or 15:55–18:30 ET) that one of that day's waiting watched companies uses, every 15 min otherwise, 06:00–22:00 ET, nothing after on that day; the previous trading day's reports the same way from 06:00 ET on the next trading day, with only the morning window counted (the owner's design, 2026-11-11); any other day before today (a report dated on a closed day, or every day while today is closed) every 30 min, or every 2 h while today is closed, at any hour, while a watched report on it still wants FMP; and a first look at a live day before today it has not read, whatever is watched (§11.8 Costs); then the `earnings_live` / live-timed `earnings_result` pushes. The filing tick reads each watched company reporting today on SEC every minute inside its own release windows and in EDGAR's last minute (21:59 ET), every 15 min otherwise, 06:00–22:00 ET, never on a weekend, 25 tickers at a time, most-watched first, and at most 25 submissions reads a minute, each read counted at its round's start (§11.8 Costs) | 60 s each (`EARNINGS_LIVE_INTERVAL_SECONDS`, 15–300) | `EARNINGS_LIVE_ENABLED` (on), `EARNINGS_LIVE_FILINGS_ENABLED` (on; inert without `SEC_EDGAR_USER_AGENT`), `EARNINGS_LIVE_PUSH_ENABLED` (**off**), `EARNINGS_LIVE_RESULT_PUSH_ENABLED` (**off**) |
+
+The Holdings widget work of 2026-11-27 (migration 216, §3.6, §11.9) adds NO lifespan loop and no
+claim: the push wakes run as the sweeper's last step under its own time budget, and grant rows
+dead (revoked or expired) for more than a day are pruned by the mint itself (at most 500 a call,
+skipping locked rows), so the count above is unchanged.
 
 A quarterly or weekly phase that does not complete is retried inside the same run's 20-hour
 catch-up window (30 min apart, at most 3 times); phases that already ran are skipped by
@@ -2398,6 +2472,32 @@ and `auth_refresh_tokens`, four SECURITY DEFINER RPCs that each take a per-user 
   route reads the session row per request (that would be a second database read on every
   authenticated call); the short access token is the bound. Expired rows are pruned per account by
   the RPCs themselves, no job.
+
+**The Holdings widget grant (migration 216, 2026-11-27; not applied or switched on yet).** The
+second non-session credential, beside the market widget token, so the Home Screen extension can
+read its own account's holdings with the app closed (§3.6). Owner: "Own key, 30-day life
+(Recommended)" and "Yes, issue it in refresh (Recommended)". The rules are
+`.claude/rules/auth.md` §8c; the shape:
+- **Minted only inside `/auth/refresh`**, when the body opts in (`widget_holdings_grant: true`) and
+  the rotation is `rotated` — never `grace` or `degraded`, never from a bare access token, best
+  effort under a 3 s bound so it can never fail or slow the refresh. Old builds never send the
+  flag, and an older backend ignores it.
+- **An opaque 256-bit key per device**, stored server-side only as its SHA-256 in
+  `widget_holdings_grants` (service-role only, `user_id` FK with ON DELETE CASCADE), sent by the
+  extension in its own header to a third router of exactly two routes
+  (`dependencies.py::get_holdings_grant_caller`). The grants switch sits on the data route only,
+  so a device can always revoke its key.
+- **It dies with the session, in the same transaction**: a trigger on `auth_refresh_families`
+  (AFTER UPDATE OF `revoked_at`) revokes every grant of the session at logout, refresh-token
+  reuse and sign-out-all, so 214's reuse detection now runs that trigger — which is written so it
+  cannot fail on data. One SQL predicate (not revoked, not expired, the users row present, minted
+  no earlier than the later of the password and sign-out-all stamps) is applied at every check,
+  push registration and push target read; an evicted grant is revoked at its first check and at
+  the account's next mint. Account deletion cascades. A renewal supersedes its predecessor, which
+  keeps working at most 24 h so a lost answer never darkens the tile.
+- **Life 30 days**; the app renews when fewer than 29 are left, so the tile keeps refreshing up to
+  29-30 days after the app was last opened. Sign out of all devices hides every other device's
+  tile at its next reload: the lost-phone lever.
 
 **Re-authentication before account deletion (SEC-11, 2026-11-26).** `POST /auth/reauthenticate`
 checks a FRESH credential of the caller's own account — the password (on the isolated auth
@@ -6624,6 +6724,71 @@ lag and row order, Railway's timing from an 8-K to a figure on the card, one pus
 production, the Preliminary-to-FMP flip on a device, or SEC's limits shared with the 18:30 ET stake
 finder.
 
+### 11.9 Widget push wakes (2026-11-27)
+
+Owner, 2026-11-27: "Yes, add push too". On iOS 26 and later the server can ask WidgetKit to rerun
+the Movers widget's timeline after the Insights sweeper stores a card the tile cares about. It is
+not a notification: no kind in the registry, no preference, no quiet hours, nothing the user sees
+but a fresher tile. The wake carries NO data (`{"aps":{"content-changed":true}}`); the woken
+extension fetches with its own Holdings grant (§3.6), exactly as on its schedule, so a lost wake
+costs nothing the timeline does not cover. Both switches ship **off**: `WIDGET_PUSH_ENABLED`, and
+no wake is ever sent while `WIDGET_HOLDINGS_GRANTS_ENABLED` is off either (the woken tile would get
+a 503).
+- **The token.** The deployment target stays iOS 18; `MoversPushHandler` (iOS 26 only, behind
+  `@available` / `#available`) only logs. The APP reads WidgetKit's push token and uploads it with
+  `PUT /widget/push-token` (the strict router) onto the device's grant row, re-sent when the grant,
+  the token or the environment changes and at least daily. The token lives on the grant row, so
+  every revocation of the grant stops its wakes with no extra hook. The widget extension has its
+  own `aps-environment` entitlement (development for Debug, production for Release).
+- **Who.** A ticker card wakes the grants whose `last_head_ticker` — the head mover the holdings
+  route last served that device — is that ticker; a market card wakes every live grant. Targets
+  come only from the `widget_push_targets` RPC, which applies the one liveness predicate, so a
+  grant revoked since its wake was queued is never pushed.
+- **When.** Never in the regular session (09:30-16:00 ET), when the timeline already reloads every
+  20 minutes; a regular-session pass clears the pending wakes. At most one wake per device per
+  `WIDGET_PUSH_MIN_INTERVAL_SECONDS` (3600) and `WIDGET_PUSH_DAILY_CAP` (12) per ET day, both
+  gated on the later of the process's own stamps and the row's (`push_last_sent_at`,
+  `push_sent_day`, `push_sent_count`), so a restart never resets the throttle. A device inside its
+  interval is coalesced into a pending set and flushed on a later pass (dropped after 6 h). At most
+  `WIDGET_PUSH_MAX_SENDS_PER_PASS` (200) sends a pass, paced at `WIDGET_PUSH_SENDS_PER_SECOND`
+  (20), ten in flight; the rest stay pending. Within a pass the send order is SHUFFLED after the
+  cut (owed wakes still win the cut), so no fixed set of devices always forms the topic probe below.
+- **The hook.** `updates_insight_sweeper.py::_wake_widgets` runs once per pass, LAST — after the
+  cards, the jump alerts and the enrichment — with the scopes whose card this pass actually stored
+  (also with none, which flushes the pending set). It returns before any import while the push
+  switch is off. It is bounded by `WIDGET_PUSH_PASS_BUDGET_SECONDS` (20) with `asyncio.wait` plus
+  cancel-and-park, never `asyncio.wait_for`: on a timeout `wait_for` waits for the cancelled task to
+  FINISH cancelling, so a wake that swallowed its cancellation would hold the sweep. A timed-out
+  wake is cancelled and referenced until it ends, never awaited; `wake` catches only `Exception`,
+  so a shutdown's cancellation propagates. The sweep summary carries `widget_push=`.
+- **Delivery** (`push_service.py::send_widget_pushes`): `apns-push-type: widgets`, topic
+  `<APNS_BUNDLE_ID>.push-type.widgets`, `apns-expiration: 0` (a stale wake is worthless), no
+  priority header, each token to its own environment's host, never `_prune_token` (these tokens
+  are not in `device_tokens`). Per-DEVICE failures stay per device: BadDeviceToken and
+  DeviceTokenNotForTopic mark that device bad. Per-ENVIRONMENT failures stop that environment for
+  the call with one ERROR: 403, BadTopic, TopicDisallowed, MissingTopic or InvalidPushType — and
+  also when the environment's first three devices ALL answer DeviceTokenNotForTopic (the topic is
+  wrong, not the devices, so no valid token is cleared for our mistake). 429, 5xx, transport errors
+  and unnamed answers are retried later; five in a row open that environment's circuit for the
+  call. A token is never logged in full; `log_redaction` also shortens the device token in the
+  APNs request URL of httpx's own INFO line, for alert pushes too.
+- **Settlement** (`widget_push_settle`, batches of at most 100, flushed at least once a second
+  while the pass sends, so a pass cut short still records what it sent; a cancelled pass's writes
+  keep running unawaited). Every element is keyed on the grant AND the exact token sent, so a token
+  re-registered meanwhile is never touched. accepted → stamped and counted (the count restarts on a
+  new ET day); 410 → cleared only if the token was not re-registered after APNs' timestamp; bad →
+  counted, and cleared once it has been bad for 24 h. Under `PUSH_DRY_RUN` nothing is POSTed and
+  the due targets are settled accepted without counting. One INFO summary for each pass that
+  reads its targets (`widget push: phase=… due=… sent=… accepted=…`); a pass that skips — the
+  regular session, a switch off, nothing to wake — writes none, and the sweep summary's
+  `widget_push=` says why (`-` while the push switch is off, else `skipped:<why>`).
+- **Scale.** Per device about 9-10 wakes a weekday in practice (a hard 12); a market card at 1,000
+  devices wakes everyone over about five passes (~25 minutes). Each woken build costs what a
+  scheduled one does (§3.6's budget levers bound FMP and CoinGecko).
+
+Not yet proven on a device: the topic, `apns-expiration: 0` and the omitted priority against real
+APNs, and a wake reaching a force-quit app (OWNER_TASKS §2.1).
+
 ---
 
 ## 12. Marketing Content Engine
@@ -9061,6 +9226,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-11-20 | Live earnings after the first report day (owner, that day: "Fix both now", "Fix inbox text", "LIVE all day until midnight", "Yes, read it once"): EPS lands on its own (`eps_seen_pending`); FMP's figures are logged at a watched report's landing (`EARNINGS_LIVE_LANDING`) and when FMP changes them after (`EARNINGS_LIVE_CHANGED`); a push FMP contradicts later has its inbox rows corrected, "Updated: …", with no second buzz (`revise_sent_text`); the LIVE label stays on a report's own day to midnight ET beside its results (`live_label`, a flag, not a status); a release FMP beat is still read once, late, for its outlook and link. After a review of that change the same day: corrections speak in the card's words, count "reported" turning into a verdict as news, wait while a stated metric is held, rewrite a row read before its wake, and stop at the first failed write; a late read keeps its outlook and link and drops its figures, makes one model call a round, cut at 20 s, and skips EDGAR's holidays; FMP's leftover row never wears the label; the logs name a restatement apart from a first fill; two switches, `EARNINGS_LIVE_INBOX_CORRECTIONS_ENABLED` and `EARNINGS_LIVE_LATE_READS_ENABLED`, both on. A second review of those fixes: a correction keeps the push's words for a figure now held (it no longer waits for it), and its retry writes only rows still holding what they held, never over a wake's words; a failed write waits 5 min; a late read's link-only row is restored (the deadline doubling written here was replaced by the third review's 20 s cut while busy); the strip is judged when the figure arrives; the label and the late list follow the push about a stale earlier row; the logs carry FMP's later revenue. A third review: a correction now rewrites only rows holding words the sender knows a row can hold, each in its own merged words (never a figure a woken row's phone was spared), and follows the report's result rows; a late read is cut at 20 s only while a waiting ticker is in its window and a cut waits for a calm round without spending an attempt; the strip is judged from the record when the figure arrives; a late read keeps its link even when every figure failed. A fourth review: a look keeps the texts it may have written before its write, and reads the held rows first; result rows a wake wrote in the live words are followed; a late call is judged busy over its whole span; every release found keeps its link; a release with no figure closes no landing. A fifth review: the live-words track reads and writes nothing until a wake writes such a row, and looks a record change owes go before held re-looks, longest due first; a late call is judged busy as it starts, after its own SEC reads, and a cut one is served from the memo once a twin has read its release; a release with no figure clears neither landing flag. Then, the owner's calls on the research ("Add the check", "Follow FMP", "Backend only"): a revenue 25%+ off consensus whose EPS does not move the same way by half as much goes in the live push with no verdict; corrections keep following FMP's newest answer; the web redeploys only for `/backend/**` changes (`watchPatterns`), so an iOS- or docs-only push no longer restarts it (a backend push, a variable change or a crash still does, and a restart forgets what was pushed). A sixth review, after the owner's "fix what you need to fix first": the revenue check gains its $100M floor (unfloored it withheld 7.1% of all US reports against the "about 1%" quoted) and lets a release's GAAP EPS neither raise nor settle it (4 of the 9 real surprises lost their verdict when the release came first); a passing EPS hold corrects nothing; a correction's own "Updated: " rows follow FMP; a correction never pairs a revenue verdict with an EPS that no longer bears it out; the WITHHELD line is written once, after the send; `EARNINGS_LIVE_REVENUE_CHECK_ENABLED`; a deleted held row marks nothing; a cut filing settled another way leaves nothing waiting. A seventh review, of the whole branch (2026-11-26): the result track spells a result past 5% as `result_copy` does (a woken, re-kinded or 16:00-pass row printed "7%" where the track read "8%", or a percent from 1,000% where it read none); a correction keeping the release's figure keeps its sentence; a revenue verdict FMP moves before any EPS is out is corrected; a correction judges a row's own revenue at every two-decimal surprise the row's text was written at, as the push judged it (never the whole percent it printed), withholding where the push would at any; every report this process told is followed, its ticker watched or not; FMP's leftover row filling the day after a report reads `reported`, not `live`; a waiting ticker whose watch ended earlier in the round makes no late call busy; a cut is kept per filing, so a late twin waits instead of paying its own cut call; a restored row with no figure is never memoised for a twin; the figure logs say `eps_no_landing`, "(no landing)" and `via=daily_pass` where they apply; while the feed build fails in price hours the iOS round asks the LIVE cards through their own routes, one still labelled or `live` from an earlier day included, never handing a refusal back to the feed that just failed (a card older than the route's window waits for the feed). An eighth and a ninth review of those fixes: a leftover with no figures reads as its own, LIVE, until its own fold notes the report before (a read noting it froze a true report's sheet on a stale row); the `reported` change needs figures of its own; FMP's change lines are written after the landing is noted; a failed read keeps a cut, a waiting twin logs `late_wait`; a text keeps every revenue surprise it was written at, the record's own round by round, and a correction withholds where a push would at any; the failed-feed round asks report-day cards still drawn `upcoming` too. A tenth review: a report that has shown figures of its own never reads through a stale row that does not stand (a guard holding its figures had let that row's figures into its inbox corrections and wakes); a row of today reading as an earlier report keeps a 30 s poll while its day is read; once a held read finds no live row held, a moved surprise is no longer kept for the live words; a moved surprise is kept through a failed write's wait; the sheet's retry counts are pinned write by write | 2026-11-20 (BJ, BKE, FRO, IESC watched): BKE pre-announces quarterly sales, so its record was born holding a revenue and its EPS never landed (no push, no log line); FRO's first FMP answer set IFRS revenue against a TCE consensus and an off-basis EPS ("revenue +31%, EPS +10%"), restated within two hours to "EPS missed 12%", with no figure logged to check either; LIVE ended at the results, so a 06:54 MT look saw none; FMP beat every 8-K (BJ by 13 min, IESC by 39 s), so no sheet showed Guidance | A blanket "no % when revenue is 25%+ off consensus" rule (research: 9 of 16 such US reports were real surprises, so it would hide real news; the owner chose the EPS cross-check instead); a 2nd-FMP-answer confirmation delay (FRO's wrong answer stood 10+ min, so it would not have caught it); a server-only LIVE flip of the status (the app would say "is reporting" and poll every 30 s beside finished results); reading late releases every minute (no figure left to win, so a slot's minute is not spent) |
 | 2026-11-26 | Marketing v2 final review, not deployed: AI art used NOWHERE (`post_art.ART_SERIES` empty, the Money Map in `NEVER_ART_SERIES`; §12.21, §12.23); a Form 4 record holds 3-5 companies, the five largest (`INSIDER_MAX_ROWS` 5; §12.23); an older worker re-claiming a built run keeps a stake's basis label and the earnings table, so it fails loudly (`template_onscreen.PRE_V23_ROW_DROPS`; §12.23); a theme row's disc of a missing logo draws its ticker chip (§12.22) | The owner's 2026-11-20 answers were "Drop it from insider posts (Recommended) :: Keep the code but use it nowhere for now; the switch stays off" (not "Put it on Money Map covers") and "At least 3 companies, at most 5 (the 5 largest purchases when more qualify)"; the build had kept the Money Map cover's art and a cap of 8. A rollback re-claim sent a stake amount without its basis and earnings names without figures, which the server accepted | Refusing the read-back with 409 (an older worker retries a 409 six times, and it would also refuse a resume past `rendered`); stripping more keys; a theme reserved for Wednesday (an open owner call); drawing the name at 9 px or skipping the disc on a theme row |
 | 2026-11-27 | Marketing v2 deployed (2026-11-27 00:20 UTC, every switch off; the owner switched the spotlight, the theme, the 13F spotlight and the first-line prefixes on that evening; the 13F prefix became "🐋 13F filing:"). The first spotlight post found three faults, fixed the same night: a NEW spotlight run starts only before `MARKETING_RUN_HOUR_ET` of its date (the lane switched on at 20:00 ET of a spotlight Thursday had posted that evening; §12.19); a Storage LIST or upload that dies on a dropped connection is tried once more (its four logo calls had failed together, §12.13 storage); a Form 4 company whose lines span two share classes is refused `share_class_overlap` (Biglari's Class A and B had been summed into one range). |
+| 2026-11-27 | The Holdings tile updates with the app closed, REVERSING the 2026-10-30 rejection of "a holdings-capable widget token or silent pushes so a CLOSED app updates the tile". A per-device Holdings grant (migration 216: an opaque 256-bit key, stored as its SHA-256, 30-day life, minted only inside a `POST /auth/refresh` rotation, killed with its session by a trigger on `auth_refresh_families` and checked by one SQL predicate on every call; §9.1, `.claude/rules/auth.md` §8c) lets the extension fetch `GET /widget/holdings-mover` itself; the reload cadence no longer sleeps (+90 min overnight and at weekends, the closed-for-the-day hint, the next ET 00:01 render always kept, an "As of …" footer past 2 h off hours; §3.6); WidgetKit push wakes on iOS 26+ after the sweeper stores a card (§11.9); budget levers keep upstream calls flat (the widget crypto board: at most one CoinGecko price refresh per 10 minutes; the industry memo; a 15-minute closed-window quote tier). Owner choices: "Own key, 30-day life (Recommended)", "Yes, add push too", "Yes, issue it in refresh (Recommended)", "Every 90 min (Recommended)", "Every 10 minutes (Recommended)", "Fold into 1.04". Both switches ship off | Owner report, 2026-11-27: the medium widget ("REAL · 10 HOLDINGS", NVDA +31.48%) was out of step with the Updates Insights card that had moved on, and often caught up only after the app was opened. The 2026-10-30 fix had made a new card reach the tile only while the app runs; the extension fetched only in Market mode, could not write the Holdings slot, `GET /widget/portfolio-mover` is session-only, and the schedule slept 20:00-04:00 ET and all weekend | Widening the market widget token to holdings (it is defensible only because it reaches market-wide data and has no revocation list); a standalone mint route authenticated by the access token (a stolen 60-minute token would become a 30-day credential); revoking the predecessor at mint instead of a ≤ 24 h overlap (a lost refresh answer or a slow extension would darken the tile); the key in App Group defaults (it travels in backups) or a `keychain-access-groups` entitlement (it would move the session's refresh token into a group the extension reads); silent background pushes to the APP (iOS does not launch an app the user force-quit, which is the case the owner asked for; a WidgetKit push addresses the widget, not the app — still to be proven on a device after a force-quit, §11.9); 180-minute or no overnight reloads; a per-request CoinGecko call per tile (about 141k calls a month at 100 coin holders, over the plan's 100k) |
 
 ---
 

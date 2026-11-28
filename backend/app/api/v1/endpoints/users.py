@@ -1666,7 +1666,8 @@ async def delete_account(
        Independent of step 3 (it reads `apple_sign_in_grants`, not `auth.*`); after it because
        the fingerprint is a fast database call and the Apple call can take up to 8 s.
     5. `auth.users` — cascades to `public.users` and every FK-linked child table
-       (user_credits, subscriptions, apple_sign_in_grants,
+       (user_credits, subscriptions, apple_sign_in_grants, widget_holdings_grants (216: every
+       Home Screen Holdings key of the account dies here; no code step),
        user_settings, device_tokens, whale_follows, …). NOT chat_sessions: migration 111
        dropped its FK, so it is purged explicitly in step 2 via _UNLINKED_USER_TABLES
        (chat_messages still cascades from chat_sessions(id)).

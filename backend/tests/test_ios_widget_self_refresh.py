@@ -31,15 +31,18 @@ meaning anything. `tests/test_widget_token_auth.py` now covers it behaviourally 
 issues the real request and asserts the status code — and this file keeps only the
 questions a scan can honestly answer.
 
-WHAT IS *NOT* FIXED, DELIBERATELY: holdings mode still renders what the app wrote. The
-extension authenticates market mode with a WIDGET TOKEN — long-lived, scoped to that one
-market-wide route, published into the App Group by the app. Portfolio resolves the
-caller's own holdings, the widget token cannot reach it, and `WidgetSnapshotStore.swift`
-documents three reasons the extension must never hold a SESSION — `auth.md` §8 (the client
-token and the Keychain deliberately diverge during `.restoring`), the inability to refresh
-an expired token from an extension, and that giving `GuestIdentity` a Keychain access
-group would make the existing read miss and silently abandon that install's data. A test
-that let portfolio fetch would be a test that broke all three.
+**4. HOLDINGS NOW FETCHES TOO (2026-11-27) — WITHOUT A SESSION.** The owner reported the
+Holdings tile out of step with the Updates card until the app was opened: only Market
+fetched. The extension authenticates market mode with a WIDGET TOKEN (long-lived, scoped to
+one market-wide route) and holdings mode with a per-device HOLDINGS GRANT — an opaque key
+minted only inside a refresh-token rotation, revoked server-side with its session, held in a
+ThisDeviceOnly Keychain item, good for `/widget/holdings-mover` alone. The reasons the
+extension must never hold a SESSION all still stand — `auth.md` §8 (the client token and the
+Keychain deliberately diverge during `.restoring`), no refresh from an extension, and that
+giving `GuestIdentity` a Keychain access group would orphan that install's data — so the
+grant is not one, and `portfolio-mover` (the app's session route) is still never called from
+here. The grant's own guards are `tests/test_ios_widget_holdings_grant.py`; these scans pin
+only that both fetches are WIRED and GATED.
 
 The CADENCE arithmetic is proven separately and properly by
 `frontend/ios/scripts/widget-refresh-schedule-check.sh`, which compiles the real
@@ -64,6 +67,7 @@ _IOS = _ROOT / "frontend/ios"
 _WIDGET = _IOS / "CaydexWidgets/MoversWidget.swift"
 _INTENT = _IOS / "CaydexWidgets/MoversConfigurationIntent.swift"
 _FETCHER = _IOS / "Shared/WidgetMarketFetcher.swift"
+_HOLDINGS_FETCHER = _IOS / "Shared/WidgetHoldingsFetcher.swift"
 _SCHEDULE = _IOS / "Shared/WidgetRefreshSchedule.swift"
 _STORE = _IOS / "Shared/WidgetSnapshotStore.swift"
 _APICONFIG = _IOS / "Shared/WidgetAPIConfig.swift"
@@ -139,7 +143,7 @@ def _fetch_gate_problems(body: str) -> list[str]:
 
 
 def test_the_fetch_is_gated_on_market_mode():
-    """Holdings needs an identity the extension must never hold.
+    """The widget token reaches the market route only; Holdings has its own fetch, below.
 
     This used to assert only that `mode == .market` appeared somewhere BEFORE the call, which
     passed with the gate widened to `|| mode == .portfolio`, made a tautology, or joined by a
@@ -147,9 +151,8 @@ def test_the_fetch_is_gated_on_market_mode():
     """
     body = _timeline()
     assert _fetch_gate_problems(body) == [], (
-        "the fetch is no longer restricted to market mode. Portfolio would need a "
-        f"credential in the extension, breaking auth.md §8 and GuestIdentity both: "
-        f"{_fetch_gate_problems(body)}"
+        "the market fetch is no longer restricted to market mode — a Holdings tile would "
+        f"render market data under its header: {_fetch_gate_problems(body)}"
     )
 
 
@@ -172,14 +175,74 @@ def test_the_fetch_gate_scan_bites(mutate):
     assert _fetch_gate_problems(mutated), "a widened fetch gate passed the scan"
 
 
+# The Holdings fetch, pinned the same way: ONE call, inside `if mode == .portfolio {`, behind a
+# LIVE grant read off the main thread, not already refused, whose account owns the stored slot —
+# all of it captured before the await, and running straight into the call.
+_HOLDINGS_GATE = re.compile(
+    r"\bif\s+mode\s*==\s*\.portfolio\s*\{\s*"
+    r"let\s+held\s*=\s*await\s+Task\.detached\([^)]*\)\s*\{\s*WidgetHoldingsGrant\.lookup\(\)\s*\}\.value\s*"
+    r"if\s+case\s+\.live\(let\s+grantAtFetch\)\s*=\s*held\s*,"
+    r"\s*!WidgetHoldingsGrant\.isRefused\(grantAtFetch\.fp\)\s*,"
+    r"\s*let\s+ownerAtFetch\s*=\s*WidgetSnapshotStore\.portfolioOwner\(\)\s*,"
+    r"\s*ownerAtFetch\.lowercased\(\)\s*==\s*grantAtFetch\.userId\.lowercased\(\)\s*\{\s*"
+    r"switch\s+await\s+WidgetHoldingsFetcher\.fetchHoldings\(grantAtFetch\)"
+)
+
+
+def _holdings_gate_problems(body: str) -> list[str]:
+    problems = []
+    calls = body.count("WidgetHoldingsFetcher.fetchHoldings(")
+    if calls != 1:
+        problems.append(f"expected exactly ONE fetchHoldings( call in timeline(), found {calls}")
+    if not _HOLDINGS_GATE.search(body):
+        problems.append(
+            "the Holdings fetch is not `if mode == .portfolio {` → an off-main grant lookup → "
+            "`if case .live(let grantAtFetch) = held, !isRefused, <slot owner == grant user> {` → "
+            "`switch await WidgetHoldingsFetcher.fetchHoldings(grantAtFetch)`"
+        )
+    return problems
+
+
+def test_the_holdings_fetch_is_gated_on_holdings_mode_and_a_live_grant():
+    """The extension fetches Holdings only with a grant for the account the APP wrote the slot
+    for. Without the owner gate a grant left from an earlier account would refresh into the
+    current account's tile; without the refusal gate a dead key spends a request per reload."""
+    body = _timeline()
+    assert _holdings_gate_problems(body) == [], _holdings_gate_problems(body)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda b: b.replace("if mode == .portfolio {", "if true || mode == .portfolio {"),
+        lambda b: b.replace("if mode == .portfolio {", "if mode == .market {"),
+        lambda b: b.replace("!WidgetHoldingsGrant.isRefused(grantAtFetch.fp),", ""),
+        lambda b: b.replace("ownerAtFetch.lowercased() == grantAtFetch.userId.lowercased() {", "true {"),
+        lambda b: b + "\nlet extra = await WidgetHoldingsFetcher.fetchHoldings(grant)\n",
+    ],
+    ids=["or-true", "swapped-mode", "refusal-not-checked", "owner-gate-dropped", "second-ungated-call"],
+)
+def test_the_holdings_gate_scan_bites(mutate):
+    body = _timeline()
+    mutated = mutate(body)
+    assert mutated != body, "the mutation did not apply — the source moved under this test"
+    assert _holdings_gate_problems(mutated), "a widened Holdings fetch gate passed the scan"
+
+
 def test_only_the_market_route_is_ever_called():
     """Renamed from `test_only_the_public_route_is_ever_called` — there is no public route
     any more, and the old name is what made the false premise above read as settled fact."""
-    src = _strip_comments(_APICONFIG.read_text()) + _strip_comments(_FETCHER.read_text())
-    assert "market-mover" in src
+    src = (
+        _strip_comments(_APICONFIG.read_text()) + _strip_comments(_FETCHER.read_text())
+        + _strip_comments(_HOLDINGS_FETCHER.read_text()) + _strip_comments(_WIDGET.read_text())
+    )
+    assert "market-mover" in src and "holdings-mover" in src
     assert "portfolio-mover" not in src, (
         "the extension now references the portfolio route, which requires a session "
-        "it cannot hold — and which its widget token deliberately cannot reach"
+        "it cannot hold — and which neither of its credentials can reach"
+    )
+    assert '"Authorization"' not in src, (
+        "the extension sets Authorization — neither the widget token nor the grant is a bearer"
     )
 
 
@@ -194,6 +257,10 @@ def test_the_extension_fetch_is_authenticated():
     assert "forHTTPHeaderField: WidgetAPIConfig.tokenHeader" in body, (
         "the extension's request goes out with no credential — the route answers 401 and the "
         "tile silently freezes on whatever the app last wrote, with no error surface anywhere"
+    )
+    holdings = _decl_block(_HOLDINGS_FETCHER.read_text(), "private static func holdingsRequest(")
+    assert "forHTTPHeaderField: WidgetAPIConfig.holdingsTokenHeader" in holdings, (
+        "the Holdings request goes out without the grant — every refresh answers 401 AUTH_REQUIRED"
     )
 
 
@@ -213,14 +280,99 @@ def test_a_failed_fetch_falls_back_to_the_stored_snapshot():
 # ── 2. The cadence is wired, and cannot loop ──────────────────────────
 
 
+# The ONE reload call, with the final snapshot's phase hint (2026-11-27: a holiday or a half day
+# the server has already called closed puts the rest of the ET day on the 90-minute cadence).
+_RELOAD_CALL = re.compile(
+    r"let\s+reload\s*=\s*WidgetRefreshSchedule\.nextRefresh\(\s*after:\s*now,\s*"
+    r"marketSession:\s*snap\?\.marketSession,\s*builtAt:\s*snap\?\.asOf\s*\)"
+)
+
+
+def _reload_policy_problems(body: str) -> list[str]:
+    problems = []
+    calls = body.count("WidgetRefreshSchedule.nextRefresh(")
+    if calls != 1:
+        problems.append(f"expected exactly ONE nextRefresh( call in timeline(), found {calls}")
+    m = _RELOAD_CALL.search(body)
+    if not m:
+        problems.append(
+            "the reload is not `let reload = WidgetRefreshSchedule.nextRefresh(after: now, "
+            "marketSession: snap?.marketSession, builtAt: snap?.asOf)` — the closed-for-the-day "
+            "hint no longer reaches the schedule"
+        )
+    else:
+        # Decided only once `snap` is final: after BOTH fetches, before the entry dates.
+        for fetch in ("WidgetMarketFetcher.fetchMarket()", "WidgetHoldingsFetcher.fetchHoldings("):
+            at = body.find(fetch)
+            if at == -1 or at > m.start():
+                problems.append(f"the reload is decided before (or without) {fetch}")
+        dates = body.find("WidgetRefreshSchedule.renderDates(now: now, reload: reload)")
+        if dates == -1 or dates < m.end():
+            problems.append("the entry dates are built before the reload is known")
+    if "policy: .after(reload)" not in body:
+        problems.append(
+            "the policy no longer uses the computed reload date. It used to be the last "
+            "ENTRY's date, which was the next 00:01 — WidgetKit was told to go away until "
+            "tomorrow, and nothing could wake the extension during the day."
+        )
+    return problems
+
+
 def test_the_reload_policy_is_the_market_hours_schedule():
+    """Re-anchored 2026-11-27: it used to look for the literal `nextRefresh(after: now)`, which
+    the hint-carrying call no longer contains (and which a signed-out return could satisfy on
+    its own). The schedule's own arithmetic is pinned by `widget-refresh-schedule-check.sh` and
+    `tests/test_ios_widget_schedule_footer.py`."""
     body = _timeline()
-    assert "WidgetRefreshSchedule.nextRefresh(after: now)" in body
-    assert "policy: .after(reload)" in body, (
-        "the policy no longer uses the computed reload date. It used to be the last "
-        "ENTRY's date, which was the next 00:01 — WidgetKit was told to go away until "
-        "tomorrow, and nothing could wake the extension during the day."
-    )
+    assert _reload_policy_problems(body) == [], _reload_policy_problems(body)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        # The hint dropped: the holiday runs on the 20-minute cadence again.
+        lambda b: b.replace(
+            "marketSession: snap?.marketSession, builtAt: snap?.asOf", "marketSession: nil, builtAt: nil", 1
+        ),
+        # Decided before the fetches, from the stale stored snapshot.
+        lambda b: b.replace(
+            "var snap = snapshot(for: mode)",
+            "var snap = snapshot(for: mode)\n"
+            "let early = WidgetRefreshSchedule.nextRefresh(after: now, marketSession: nil, builtAt: nil)",
+            1,
+        ),
+        # The one call MOVED above the fetches: it reads the stale stored snapshot's phase.
+        lambda b: _RELOAD_CALL.sub("let reload = now", b, 1).replace(
+            "var snap = snapshot(for: mode)",
+            "var snap = snapshot(for: mode)\nlet reload = WidgetRefreshSchedule.nextRefresh("
+            "after: now, marketSession: snap?.marketSession, builtAt: snap?.asOf)",
+            1,
+        ),
+        # The policy back on an entry date.
+        lambda b: b.replace("policy: .after(reload)", "policy: .after(entryDates.last ?? now)", 1),
+    ],
+    ids=["hint-dropped", "second-early-call", "moved-above-the-fetches", "policy-on-an-entry"],
+)
+def test_the_reload_policy_scan_bites(mutate):
+    body = _timeline()
+    mutated = mutate(body)
+    assert mutated != body, "the mutation did not apply — the source moved under this test"
+    assert _reload_policy_problems(mutated), "a regressed reload policy passed the scan"
+
+
+def test_a_signed_out_tile_asks_for_little():
+    """Signed out there is nothing to age and nothing to fetch: ONE entry and a six-hour
+    reload. The app's sign-in publishes the widget token and reloads the tiles at once — that,
+    not this timer, is what ends the signed-out state."""
+    body = _timeline()
+    early = _decl_block(body, "guard let tokenAtFetch = WidgetAPIConfig.widgetToken else")
+    assert "entries: [signedOutEntry(at: now, mode: mode, configuration: configuration)]" in early
+    assert ".after(now.addingTimeInterval(Self.signedOutReloadInterval))" in early
+    assert "renderDates" not in early and "nextRefresh" not in early
+    assert re.search(
+        r"private static let signedOutReloadInterval: TimeInterval = 6 \* 60 \* 60",
+        _strip_comments(_WIDGET.read_text()),
+    ), "the signed-out reload is no longer six hours"
 
 
 def test_the_extension_never_asks_for_a_reload_while_building_a_timeline():
@@ -231,10 +383,17 @@ def test_the_extension_never_asks_for_a_reload_while_building_a_timeline():
         "the extension no longer stores its fetch, so the next FAILED fetch falls back "
         "to whenever the app was last opened rather than to the last good response"
     )
+    assert "WidgetSnapshotStore.writeHoldingsFromExtension(" in body, (
+        "the extension no longer stores its Holdings fetch"
+    )
     write = _decl_block(_STORE.read_text(), "public static func writeFromExtension(")
     assert "reloading: false" in write, (
         "writeFromExtension now reloads, which is exactly the loop it exists to avoid"
     )
+    for fn in ("static func writeHoldingsFromExtension(", "static func dropPortfolioFromExtension("):
+        assert "reloadTimelines" not in _decl_block(_STORE.read_text(), fn), (
+            f"{fn} now reloads — a loop inside timeline()"
+        )
 
 
 def test_the_schedule_harness_exists_and_is_executable():
@@ -303,11 +462,16 @@ def test_the_label_harness_covers_the_new_label_rules():
     it — a swiftc compile); this pins that the cases are still there."""
     src = _LABEL_HARNESS.read_text()
     for token in ("compactAgedLabel(", "isPriorETDay(", "ageBoundary(", '"premarket"',
-                  "for tz in "):
+                  '"afterhours"', "agedOff(", "for tz in "):
         assert token in src, f"the label harness lost its {token!r} cases"
 
 
 def test_the_cadence_spends_its_budget_in_market_hours():
+    """2026-11-27 (owner: "Every 90 min (Recommended)"): the quiet hours reload every 90 minutes
+    instead of sleeping to the next weekday's 04:00 ET, so this no longer asserts that
+    `nextPremarketOpen` exists — it was deleted with the sleep. The quiet branch, its 04:00
+    clamp, the closed-for-the-day hint and the always-kept ET 00:01 rollover are pinned, with an
+    executable mutation table, by `tests/test_ios_widget_schedule_footer.py`."""
     src = _strip_comments(_SCHEDULE.read_text())
 
     def _interval(name: str) -> float:
@@ -316,15 +480,22 @@ def test_the_cadence_spends_its_budget_in_market_hours():
         return eval(m.group(1))  # a literal arithmetic expression from our own source
 
     regular, extended = _interval("regularInterval"), _interval("extendedInterval")
-    assert regular < extended, (
-        f"the cadences collapsed (regular={regular}s, extended={extended}s). A flat "
-        "interval around the clock asks for more refreshes than WidgetKit grants, gets "
+    quiet = _interval("quietInterval")
+    assert regular < extended < quiet, (
+        f"the cadences collapsed (regular={regular}s, extended={extended}s, quiet={quiet}s). A "
+        "flat interval around the clock asks for more refreshes than WidgetKit grants, gets "
         "throttled, and can leave the tile STALER than a modest cadence would."
     )
-    # Both must actually be USED, or one of them is decoration.
-    body = _decl_block(_SCHEDULE.read_text(), "public static func nextRefresh(after now: Date)")
-    assert "regularInterval" in body and "extendedInterval" in body
-    assert "nextPremarketOpen" in src, "the overnight/weekend quiet period is gone"
+    # All three must actually be USED, or one of them is decoration.
+    body = _decl_block(_SCHEDULE.read_text(), "public static func nextRefresh(")
+    for name in ("regularInterval", "extendedInterval", "quietInterval"):
+        assert name in body, f"nextRefresh no longer uses {name}"
+    assert "premarketStart" in body, (
+        "the quiet branch no longer stops at a weekday's 04:00 ET pre-market open"
+    )
+    assert "nextPremarketOpen" not in src, (
+        "the sleep-to-the-next-weekday helper is back — the night and the weekend sleep again"
+    )
 
 
 # ── 3. Config the extension can actually reach ────────────────────────
@@ -342,11 +513,12 @@ def test_the_app_publishes_its_base_url_for_the_extension():
 def test_the_fetcher_has_a_bounded_timeout():
     src = _strip_comments(_APICONFIG.read_text())
     assert "requestTimeout" in src
-    fetcher = _strip_comments(_FETCHER.read_text())
-    assert "timeoutInterval = WidgetAPIConfig.requestTimeout" in fetcher, (
-        "an unbounded request in a timeline callback burns the extension's budget and "
-        "still ends with the stored snapshot"
-    )
+    for path in (_FETCHER, _HOLDINGS_FETCHER):
+        fetcher = _strip_comments(path.read_text())
+        assert "timeoutInterval = WidgetAPIConfig.requestTimeout" in fetcher, (
+            f"{path.name}: an unbounded request in a timeline callback burns the extension's "
+            "budget and still ends with the stored snapshot"
+        )
 
 
 # ── 4. The toggle ─────────────────────────────────────────────────────
@@ -519,5 +691,5 @@ def test_the_scanners_are_not_vacuous():
     block = _decl_block(tricky, "func timeline(for configuration:")
     assert "A()" in block and "B()" not in block, "_decl_block counted braces inside comments"
 
-    for path in (_WIDGET, _INTENT, _FETCHER, _SCHEDULE, _STORE, _APICONFIG, _APPSTATE):
+    for path in (_WIDGET, _INTENT, _FETCHER, _HOLDINGS_FETCHER, _SCHEDULE, _STORE, _APICONFIG, _APPSTATE):
         assert path.exists(), f"{path} moved — every scan above would silently pass"

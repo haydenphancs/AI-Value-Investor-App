@@ -2,19 +2,28 @@
 //  WidgetRefreshService.swift
 //  Caydex
 //
-//  Fetches the widget payloads and writes them into the shared App Group.
+//  Fetches the widget payloads and writes them into the shared App Group, and looks after the
+//  two credentials the widget extension holds.
 //
-//  This exists because the WIDGET CANNOT FETCH HOLDINGS FOR ITSELF — see the long note in
-//  `Shared/WidgetSnapshotStore.swift`. `.claude/rules/auth.md` §8 makes `APIClient` the
-//  single token source, and a widget extension is a separate process that cannot reach
-//  it. So the app, which does hold the token, does the fetching, and the widget renders
-//  whatever it last found in the container. (The extension refreshes MARKET mode itself
-//  with the market-scoped widget token this service mints — auth.md §8a.)
+//  `.claude/rules/auth.md` §8 makes `APIClient` the single token source, and a widget extension
+//  is a separate process that cannot reach it — so the extension holds NO session. The app,
+//  which does, fetches both modes on every trigger below and writes the slots; the extension
+//  renders whatever it finds in the container, and refreshes on its own with two NARROW keys
+//  this service obtains:
+//    • MARKET mode with the market-scoped widget token (`renewWidgetTokenIfNeeded`, auth.md §8a);
+//    • HOLDINGS mode with the per-device Holdings grant (migration 216, auth.md §8c): a 30-day
+//      opaque key the server mints ONLY inside a refresh-token rotation (`POST /auth/refresh`
+//      with `widget_holdings_grant: true`), revocable server-side, kept in a ThisDeviceOnly
+//      Keychain item in the App Group access group (`WidgetHoldingsGrant`). It is wanted only
+//      while a Movers widget is installed; this service sets the refresh flag when the grant is
+//      missing, refused, someone else's, from another session or due for renewal, forces a
+//      refresh for it in the foreground when it is urgent, adopts what the refresh hands back,
+//      and revokes every key the device should no longer hold. On iOS 26+ it also uploads the
+//      WidgetKit push token so the Insights sweeper can wake the tile.
 //
-//  The freshness cost of that is real and is handled honestly rather than hidden: the
-//  payload carries `as_of` and `market_session`, and the widget renders "At the close"
-//  rather than implying live data. The insight sweeper is asleep 20:00–04:00 ET and all
-//  weekend anyway, so on a Saturday there is nothing newer to show.
+//  The freshness cost of the extension's schedule is handled honestly rather than hidden: the
+//  payload carries `as_of` and `market_session`, and the widget renders "At the close" / "As of"
+//  rather than implying live data.
 //
 //  Triggers: the cold-launch seed and the sign-in force (`AppState`), every foreground and
 //  background (`iosApp`), and a content change — the active group, its holdings or the
@@ -22,9 +31,11 @@
 //  (`insightCardArrived`). Every one of them is gated on `sessionOpen`.
 //
 
+import CryptoKit
 import Foundation
 import OSLog
 import UIKit
+import WidgetKit
 
 @MainActor
 final class WidgetRefreshService {
@@ -405,6 +416,14 @@ final class WidgetRefreshService {
             return
         }
         lastRefresh = Date()
+
+        // The Holdings grant, last: only after a run whose HOLDINGS leg answered (the session is
+        // known good for exactly the data the grant serves), with the market token in place (no
+        // token, the extension renders signed-out in both modes and needs no grant), and behind
+        // the epoch fence just above. Never delays the stamp; never fails the run.
+        if p != nil {
+            await assessHoldingsGrant(client: client, epoch: epoch)
+        }
     }
 
     /// The JWT subject (the user id) of a bearer, or nil when there is none.
@@ -642,6 +661,596 @@ final class WidgetRefreshService {
         }
     }
 
+    // MARK: - The Holdings grant (migration 216, auth.md §8c)
+
+    /// Renew when fewer than this many seconds of the grant's 30 days remain: about one renewal
+    /// a day for an app opened daily, so the tile keeps refreshing 29-30 days past the last open.
+    private static let grantRenewWindow: TimeInterval = 29 * 24 * 60 * 60
+
+    /// When a forced grant refresh retries, measured from its FIRST attempt. Both inside the
+    /// server's 120 s refresh grace window: a refresh whose answer was lost has already rotated
+    /// the token server-side, and only a replay inside that window gets the session back (a
+    /// sibling). Outside it the replay is REUSE, and the server ends the session (auth.md §8b).
+    /// While the access token is still good nothing else would refresh for up to 60 minutes —
+    /// which is why these retries exist, and why they are not gated on the foreground.
+    private static let forcedGrantRetryOffsets: [TimeInterval] = [20, 90]
+
+    /// How long forced grant refreshes wait after flagged refreshes came back without a grant
+    /// (the switch is off, the migration is not applied, the mint limiter tripped, a grace
+    /// replay): 10 min → 1 h → 6 h → 24 h. Reset by an adoption. Natural refreshes keep
+    /// carrying the flag regardless — they cost nothing extra.
+    private static let grantBackoffSteps: [TimeInterval] = [10 * 60, 60 * 60, 6 * 60 * 60, 24 * 60 * 60]
+    private static let grantBackoffStepKey = "widget.holdings.grant.backoff.step.v1"
+    private static let grantBackoffUntilKey = "widget.holdings.grant.backoff.until.v1"
+
+    /// The last push-token upload that STORED: sha256(grant id | token | environment), and when.
+    /// Re-sent when either changes, and at least daily: the daily re-send keeps the server's
+    /// `push_token_updated_at` fresh (its APNs-410 fence) and heals a server-side clear.
+    private static let pushFingerprintKey = "widget.push.fingerprint.v1"
+    private static let pushFingerprintAtKey = "widget.push.fingerprint.at.v1"
+    private static let pushTokenResendInterval: TimeInterval = 24 * 60 * 60
+
+    /// A push-token answer calling a grant adopted less than this long ago unusable is a server
+    /// anomaly, not a revocation: back off instead of re-minting at once (a re-mint loop).
+    private static let freshGrantUnusableWindow: TimeInterval = 10 * 60
+
+    /// The fingerprint this process knows to be the LIVE marker: set by an adoption and whenever
+    /// `assessHoldingsGrant` reads the live grant back; cleared with the session. Never swept.
+    private var liveGrantFingerprint: String?
+
+    /// Grants between their Keychain write and their marker. A sweep that enumerated the Keychain
+    /// in that window would otherwise take them for leftovers and revoke them.
+    private var adoptingGrantFingerprints: Set<String> = []
+
+    /// A grant the server called unusable on a push-token upload (`grant_usable: false`).
+    private var unusableGrantFingerprint: String?
+
+    /// When this process last adopted a grant, for `freshGrantUnusableWindow`.
+    private var lastGrantAdoption: Date?
+
+    /// The forced refresh for an urgent grant, with its retries — one at a time, owned by id so a
+    /// run cancelled at sign-out cannot clear the next session's handle.
+    private var forcedGrantRefresh: Task<Void, Never>?
+    private var forcedGrantRefreshID = 0
+
+    /// What the device's grant needs. Every case but `.current` and `.renewal` is URGENT.
+    private enum HoldingsGrantNeed: String {
+        case current
+        case renewal
+        case missing
+        case otherAccount = "another account's"
+        case refused = "refused by the server"
+        case expired
+        case otherSession = "minted for another session"
+        case unusable = "no longer accepted by the server"
+
+        var isUrgent: Bool { self != .current && self != .renewal }
+    }
+
+    /// Decide what the device's Holdings grant needs, after a run whose Holdings leg answered.
+    ///
+    /// • No Movers widget installed — a SUCCESSFUL WidgetKit answer with no Movers entry: no grant
+    ///   is wanted, so the marker goes and every key is revoked as `widget_removed`. A THROWN
+    ///   query keeps everything as it is: a transient WidgetKit error must never kill a live grant.
+    /// • URGENT — none, another account's, refused, expired, minted for another session (a
+    ///   password change starts a new family) or called unusable by the server: flag the next
+    ///   refresh AND force one now, foreground only.
+    /// • RENEWAL — fewer than 29 days left: flag the next refresh; it rides the next natural one.
+    /// • Live (or renewing): retry any revocation still pending, keep the push token in sync.
+    private func assessHoldingsGrant(client: APIClient, epoch: Int) async {
+        let installed: Bool
+        do {
+            let configurations = try await WidgetCenter.shared.currentConfigurations()
+            installed = configurations.contains { $0.kind == WidgetSharedConfig.moversKind }
+        } catch {
+            log.warning("widget holdings grant: WidgetKit could not list the installed widgets — grant state kept as is: \(String(describing: error), privacy: .public)")
+            return
+        }
+        guard epoch == sessionEpoch, sessionOpen, !Task.isCancelled else { return }
+        guard installed else {
+            retireHoldingsGrantForRemovedWidget()
+            return
+        }
+
+        let bearer = await client.currentAuthToken()
+        guard epoch == sessionEpoch, sessionOpen, !Task.isCancelled else { return }
+        guard let bearer, let owner = Self.subject(of: bearer), let sid = Self.sessionId(of: bearer) else {
+            log.info("widget holdings grant: the armed bearer names no account or no session — not assessed")
+            return
+        }
+
+        // OFF main: the grant is a Keychain item (securityd never on the main actor).
+        let read = await Task.detached(priority: .utility) { () -> (grant: WidgetHoldingsGrant.Grant?, refused: Bool) in
+            let grant = WidgetHoldingsGrant.current()
+            return (grant, grant.map { WidgetHoldingsGrant.isRefused($0.fp) } ?? false)
+        }.value
+        guard epoch == sessionEpoch, sessionOpen, !Task.isCancelled else { return }
+
+        let need = Self.holdingsGrantNeed(
+            grant: read.grant, refused: read.refused, unusableFingerprint: unusableGrantFingerprint,
+            owner: owner, sessionId: sid, now: Date()
+        )
+        guard let grant = read.grant, !need.isUrgent else {
+            if need == .otherAccount {
+                // An account switch the session teardown never saw (a sign-in from `.restoring`):
+                // the previous account's key must not stay presented to the extension, nor live.
+                WidgetHoldingsGrant.removeMarker()
+                liveGrantFingerprint = nil
+                unusableGrantFingerprint = nil
+                Self.clearPushFingerprint()
+                sweepHoldingsGrantKeys(keeping: nil, reason: "app_revoked")
+            } else if let grant = read.grant {
+                liveGrantFingerprint = grant.fp
+            }
+            WidgetHoldingsGrant.requestOnNextRefresh = true
+            startForcedGrantRefreshIfAllowed(why: need.rawValue)
+            return
+        }
+        liveGrantFingerprint = grant.fp
+        if need == .renewal {
+            if !WidgetHoldingsGrant.requestOnNextRefresh {
+                log.info("widget holdings grant \(grant.grantId, privacy: .public): under 29 days left — the next refresh asks for a renewal")
+            }
+            WidgetHoldingsGrant.requestOnNextRefresh = true
+        } else {
+            WidgetHoldingsGrant.requestOnNextRefresh = false
+        }
+        // Revocations a previous pass could not confirm (offline sign-out, a dropped answer).
+        sweepHoldingsGrantKeys(keeping: grant.fp, reason: "app_revoked")
+        await syncWidgetPushTokenIfNeeded(client: client, epoch: epoch, grant: grant)
+    }
+
+    /// The pure decision behind `assessHoldingsGrant`. Accounts and sessions are UUIDs, compared
+    /// without regard to case.
+    private static func holdingsGrantNeed(
+        grant: WidgetHoldingsGrant.Grant?, refused: Bool, unusableFingerprint: String?,
+        owner: String, sessionId: String, now: Date
+    ) -> HoldingsGrantNeed {
+        guard let grant else { return .missing }
+        if grant.userId.lowercased() != owner.lowercased() { return .otherAccount }
+        if refused { return .refused }
+        if grant.expiresAt <= now { return .expired }
+        if grant.sessionId.lowercased() != sessionId.lowercased() { return .otherSession }
+        if let unusableFingerprint, grant.fp == unusableFingerprint { return .unusable }
+        if grant.expiresAt.timeIntervalSince(now) < grantRenewWindow { return .renewal }
+        return .current
+    }
+
+    /// No Movers widget is installed: no grant is wanted (D10). The marker goes synchronously,
+    /// then every key is revoked as `widget_removed` and deleted once the server confirms.
+    private func retireHoldingsGrantForRemovedWidget() {
+        let removed = WidgetHoldingsGrant.removeMarker()
+        liveGrantFingerprint = nil
+        unusableGrantFingerprint = nil
+        WidgetHoldingsGrant.requestOnNextRefresh = false
+        Self.clearPushFingerprint()
+        if let removed {
+            log.info("widget holdings grant retired — no Movers widget is installed (marker \(String(removed.prefix(8)), privacy: .public)…)")
+        }
+        sweepHoldingsGrantKeys(keeping: nil, reason: "widget_removed")
+    }
+
+    // MARK: Forced refresh for an urgent grant
+
+    /// Force a refresh that asks for a grant — ONLY in the foreground (never from a background
+    /// trigger: the refresh rotates the session, and a lost answer must be replayable inside the
+    /// grace window), one at a time, and not while backing off.
+    private func startForcedGrantRefreshIfAllowed(why: String) {
+        guard sessionOpen else { return }
+        guard forcedGrantRefresh == nil else { return }
+        guard UIApplication.shared.applicationState == .active else {
+            log.info("widget holdings grant needed (\(why, privacy: .public)) — no forced refresh outside the foreground; the next refresh asks for it")
+            return
+        }
+        if let until = Self.grantBackoffUntil(), until > Date() {
+            log.info("widget holdings grant needed (\(why, privacy: .public)) — forced refresh backing off until \(until, privacy: .public)")
+            return
+        }
+        forcedGrantRefreshID &+= 1
+        let id = forcedGrantRefreshID
+        let epoch = sessionEpoch
+        log.info("widget holdings grant needed (\(why, privacy: .public)) — forcing a refresh that asks for one")
+        forcedGrantRefresh = Task { [weak self] in
+            await self?.runForcedGrantRefresh(epoch: epoch)
+            guard let self, self.forcedGrantRefreshID == id else { return }
+            self.forcedGrantRefresh = nil
+        }
+    }
+
+    /// Its own background-task assertion, ended on completion AND on expiration (the same shape
+    /// as `holdBackgroundAssertionUntilSettled`): a retry that a swipe home would freeze is the
+    /// one replaying a lost answer.
+    private func runForcedGrantRefresh(epoch: Int) async {
+        let app = UIApplication.shared
+        let log = self.log
+        var assertion: UIBackgroundTaskIdentifier = .invalid
+        assertion = app.beginBackgroundTask(withName: "caydex.widget.holdings-grant") {
+            log.warning("widget holdings grant: the forced refresh ran out of background time — ending the assertion")
+            guard assertion != .invalid else { return }
+            app.endBackgroundTask(assertion)
+            assertion = .invalid
+        }
+        await attemptForcedGrantRefreshes(epoch: epoch)
+        guard assertion != .invalid else { return }
+        app.endBackgroundTask(assertion)
+        assertion = .invalid
+    }
+
+    /// One attempt, then retries at +20 s and +90 s on `.transientFailure` only. The outcome is
+    /// only ever matched here: a rejected refresh never ends the session from this path — the
+    /// 401 interceptor alone does that (auth.md §3/§5).
+    private func attemptForcedGrantRefreshes(epoch: Int) async {
+        let client = APIClient.shared
+        let started = Date()
+        let bearerAtStart = await client.currentAuthToken()
+        for attempt in 0...Self.forcedGrantRetryOffsets.count {
+            if attempt > 0 {
+                let wait = Self.forcedGrantRetryOffsets[attempt - 1] - Date().timeIntervalSince(started)
+                if wait > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                }
+                // A retry exists only to replay a lost answer. A bearer that moved means a refresh
+                // landed meanwhile (another request's, a restore): nothing is left to replay.
+                guard await client.currentAuthToken() == bearerAtStart else {
+                    log.info("widget holdings grant: a refresh landed during the retry wait — no retry needed")
+                    return
+                }
+            }
+            guard !Task.isCancelled, epoch == sessionEpoch, sessionOpen else {
+                log.info("widget holdings grant: forced refresh stopped — the session ended")
+                return
+            }
+            let outcome = await client.refreshForWidgetGrant()
+            guard !Task.isCancelled, epoch == sessionEpoch else { return }
+            switch outcome {
+            case .refreshed:
+                // `AuthService.refreshToken()` handed a minted grant to `adoptHoldingsGrant`, or
+                // reported none (`noteHoldingsGrantNotIssued`). Either way this refresh is done.
+                return
+            case .credentialRejected:
+                log.warning("widget holdings grant: the forced refresh was rejected — no grant; the next request's 401 path decides the session")
+                stepGrantBackoff()
+                return
+            case .transientFailure:
+                log.info("widget holdings grant: forced refresh attempt \(attempt + 1, privacy: .public) did not complete")
+            }
+        }
+        stepGrantBackoff()
+    }
+
+    private func stepGrantBackoff() {
+        let defaults = UserDefaults.standard
+        let step = min(max(0, defaults.integer(forKey: Self.grantBackoffStepKey)), Self.grantBackoffSteps.count - 1)
+        let delay = Self.grantBackoffSteps[step]
+        defaults.set(step + 1, forKey: Self.grantBackoffStepKey)
+        defaults.set(Date().addingTimeInterval(delay).timeIntervalSince1970, forKey: Self.grantBackoffUntilKey)
+        log.info("widget holdings grant: forced refreshes back off \(Int(delay / 60), privacy: .public) min")
+    }
+
+    private static func resetGrantBackoff() {
+        UserDefaults.standard.removeObject(forKey: grantBackoffStepKey)
+        UserDefaults.standard.removeObject(forKey: grantBackoffUntilKey)
+    }
+
+    /// nil when no back-off is set — or when the stored instant is further ahead than the longest
+    /// step allows (a device clock moved backwards must not freeze the grant for days).
+    private static func grantBackoffUntil() -> Date? {
+        let raw = UserDefaults.standard.double(forKey: grantBackoffUntilKey)
+        guard raw > 0 else { return nil }
+        let until = Date(timeIntervalSince1970: raw)
+        guard let longest = grantBackoffSteps.last,
+              until.timeIntervalSinceNow <= longest + 60 else { return nil }
+        return until
+    }
+
+    // MARK: Adoption
+
+    /// A refresh that asked for a grant came back without one. Called by `AuthService`.
+    func noteHoldingsGrantNotIssued() {
+        guard sessionOpen else { return }
+        log.info("widget holdings grant: the refresh asked for one and none was issued (switch off, migration not applied, limiter, or not a rotation)")
+        stepGrantBackoff()
+    }
+
+    /// The grant `POST /auth/refresh` just minted, handed over by `AuthService.refreshToken()`
+    /// AFTER its epoch fence, `saveTokens` and `setAuthToken`. Synchronous and non-throwing: the
+    /// refresh never waits on the widget. Fenced again before anything is stored — the widget
+    /// session must be open, under the same epoch, and the ARMED bearer's subject and session
+    /// must be the grant's. A fenced-out key is LIVE on the server, so it is revoked, not dropped.
+    func adoptHoldingsGrant(_ payload: WidgetHoldingsGrantPayload, owner: String) {
+        let epoch = sessionEpoch
+        guard WidgetHoldingsGrant.isWellFormedToken(payload.grantToken) else {
+            log.error("widget holdings grant \(payload.grantId, privacy: .public): the refresh answer carried a malformed key — not adopted")
+            stepGrantBackoff()
+            return
+        }
+        let expiresAt = Self.parseGrantExpiry(payload.expiresAt)
+        let grant = Self.grant(from: payload, owner: owner, expiresAt: expiresAt ?? Date())
+        guard let expiresAt, expiresAt > Date(), !payload.grantId.isEmpty, !payload.sessionId.isEmpty, !owner.isEmpty else {
+            log.error("widget holdings grant \(payload.grantId, privacy: .public): unreadable expiry, id, session or owner (expires_at \(payload.expiresAt, privacy: .public)) — not adopted")
+            discardHoldingsGrant(grant, why: "its fields are malformed")
+            stepGrantBackoff()
+            return
+        }
+        guard sessionOpen else {
+            discardHoldingsGrant(grant, why: "no widget session is open")
+            return
+        }
+        adoptingGrantFingerprints.insert(grant.fp)
+        Task { [weak self] in
+            guard let self else { return }
+            await self.publishHoldingsGrant(grant, epoch: epoch)
+            self.adoptingGrantFingerprints.remove(grant.fp)
+        }
+    }
+
+    /// Keychain item first, then the marker, then a reload — the order the extension relies on:
+    /// a marker never names a key that is not there yet. Then every OTHER key is revoked by key
+    /// (the predecessor of a renewal, an earlier account's, a leftover), and the push token
+    /// follows the new grant.
+    private func publishHoldingsGrant(_ grant: WidgetHoldingsGrant.Grant, epoch: Int) async {
+        let bearer = await APIClient.shared.currentAuthToken()
+        guard epoch == sessionEpoch, sessionOpen else {
+            discardHoldingsGrant(grant, why: "the widget session ended before adoption")
+            return
+        }
+        guard let bearer, Self.subject(of: bearer)?.lowercased() == grant.userId.lowercased() else {
+            discardHoldingsGrant(grant, why: "it names another account than the armed session")
+            return
+        }
+        guard let sid = Self.sessionId(of: bearer), sid.lowercased() == grant.sessionId.lowercased() else {
+            discardHoldingsGrant(grant, why: "it names another session than the armed one")
+            stepGrantBackoff()
+            return
+        }
+
+        let failure = await Task.detached(priority: .utility) { () -> String? in
+            do {
+                try WidgetHoldingsGrant.store(grant)
+                return nil
+            } catch {
+                return String(describing: error)
+            }
+        }.value
+        if let failure {
+            log.error("widget holdings grant \(grant.grantId, privacy: .public): the Keychain refused the key — not adopted: \(failure, privacy: .public)")
+            discardHoldingsGrant(grant, why: "it could not be stored")
+            stepGrantBackoff()
+            return
+        }
+        // Re-fenced after the Keychain await: a session that ended meanwhile gets no marker, and
+        // the key it stored is revoked and deleted (the compensating half of the write above).
+        guard epoch == sessionEpoch, sessionOpen else {
+            log.info("widget holdings grant \(grant.grantId, privacy: .public): the session ended during the Keychain write — revoking it")
+            revokeThenDeleteDetached([grant], reason: "app_revoked")
+            return
+        }
+        WidgetHoldingsGrant.setMarker(grant.fp)
+        liveGrantFingerprint = grant.fp
+        unusableGrantFingerprint = nil
+        lastGrantAdoption = Date()
+        WidgetHoldingsGrant.requestOnNextRefresh = false
+        Self.resetGrantBackoff()
+        WidgetSnapshotStore.reloadTimelines()
+        log.info("widget holdings grant \(grant.grantId, privacy: .public) adopted — expires \(grant.expiresAt, privacy: .public)")
+        sweepHoldingsGrantKeys(keeping: grant.fp, reason: "app_revoked")
+        await syncWidgetPushTokenIfNeeded(client: APIClient.shared, epoch: epoch, grant: grant)
+    }
+
+    /// A grant the refresh carried for a session that changed while it was in flight. Called by
+    /// `AuthService.refreshToken()` after its epoch fence refused the answer.
+    func discardHoldingsGrant(_ payload: WidgetHoldingsGrantPayload, owner: String) {
+        guard WidgetHoldingsGrant.isWellFormedToken(payload.grantToken) else {
+            log.error("widget holdings grant \(payload.grantId, privacy: .public): a malformed key arrived for an ended session — nothing to revoke")
+            return
+        }
+        let grant = Self.grant(from: payload, owner: owner, expiresAt: Self.parseGrantExpiry(payload.expiresAt) ?? Date())
+        discardHoldingsGrant(grant, why: "the session changed while the refresh was in flight")
+    }
+
+    /// Revoke a key this device will not use. It is stored first (no marker: the extension never
+    /// sees it), so a revoke that is not confirmed leaves it for a later sweep instead of
+    /// stranding a live key nobody can revoke.
+    private func discardHoldingsGrant(_ grant: WidgetHoldingsGrant.Grant, why: String) {
+        log.warning("widget holdings grant \(grant.grantId, privacy: .public) not adopted — \(why, privacy: .public); revoking it by key")
+        let log = self.log
+        Task.detached(priority: .utility) {
+            do {
+                try WidgetHoldingsGrant.store(grant)
+            } catch {
+                log.warning("widget holdings grant \(grant.grantId, privacy: .public): not kept for a revoke retry: \(String(describing: error), privacy: .public)")
+            }
+            await Self.revokeThenDelete([grant], reason: "app_revoked", log: log)
+        }
+    }
+
+    // MARK: Revocation
+
+    /// Revoke by key, off main, every grant item but `keep`, the live one and any being adopted.
+    /// The enumeration is detached; the decision is made back on the main actor, after it, so
+    /// an adoption that stored its key meanwhile is seen (`adoptingGrantFingerprints`).
+    private func sweepHoldingsGrantKeys(keeping keep: String?, reason: String) {
+        let log = self.log
+        Task { [weak self] in
+            let keys = await Task.detached(priority: .utility) {
+                WidgetHoldingsGrant.pendingKeys(excluding: keep)
+            }.value
+            guard let self else { return }
+            let doomed = keys.filter { key in
+                key.fp != keep && key.fp != self.liveGrantFingerprint
+                    && !self.adoptingGrantFingerprints.contains(key.fp)
+            }
+            guard !doomed.isEmpty else { return }
+            log.info("widget holdings grant: revoking \(doomed.count, privacy: .public) key(s) this device no longer uses (\(reason, privacy: .public))")
+            self.revokeThenDeleteDetached(doomed, reason: reason)
+        }
+    }
+
+    /// `revokeThenDelete` on a detached task: the delete is a Keychain write, never on the main actor.
+    private func revokeThenDeleteDetached(_ grants: [WidgetHoldingsGrant.Grant], reason: String) {
+        let log = self.log
+        Task.detached(priority: .utility) {
+            await Self.revokeThenDelete(grants, reason: reason, log: log)
+        }
+    }
+
+    /// Revoke THEN delete (D16): the item stays until the server answers 2xx or a refusal code
+    /// (`WidgetHoldingsFetcher.revoke` → true), so an offline sign-out keeps the key for the next
+    /// retry instead of stranding a live server row for 30 days. Call it only from a detached
+    /// task: the delete is a Keychain write.
+    nonisolated private static func revokeThenDelete(
+        _ grants: [WidgetHoldingsGrant.Grant], reason: String, log: Logger
+    ) async {
+        for grant in grants {
+            if await WidgetHoldingsFetcher.revoke(grant, reason: reason) {
+                WidgetHoldingsGrant.delete(fingerprint: grant.fp)
+                log.info("widget holdings grant \(grant.grantId, privacy: .public) revoked (\(reason, privacy: .public)) and deleted")
+            } else {
+                log.warning("widget holdings grant \(grant.grantId, privacy: .public): revoke not confirmed — key kept for a retry at a later refresh")
+            }
+        }
+    }
+
+    /// `AuthService.purgeSessionLeftByAnEarlierInstall()`'s `.fresh` branch: Keychain items outlive
+    /// the app, so an earlier install's grant keys are still here — inert (the App Group, with its
+    /// marker, went with the app) but live on the server. Revoked by key, then deleted, off main.
+    nonisolated static func revokeHoldingsGrantKeysLeftByAnEarlierInstall() {
+        let log = Logger(subsystem: "com.phan.caydex", category: "widget")
+        Task.detached(priority: .utility) {
+            let keys = WidgetHoldingsGrant.pendingKeys(excluding: nil)
+            guard !keys.isEmpty else { return }
+            log.notice("fresh install: revoking \(keys.count, privacy: .public) Holdings widget grant key(s) an earlier install left in the Keychain")
+            await Self.revokeThenDelete(keys, reason: "app_revoked", log: log)
+        }
+    }
+
+    /// `clearForEndedSession`'s half for the grant, AFTER the marker is gone and the slots are
+    /// cleared: drop every per-session flag (auth.md §7 — device-global keys die with the
+    /// session), stop a forced refresh, and revoke every key — none belongs to a live session.
+    private func endHoldingsGrantForEndedSession(endedFingerprint: String?) {
+        forcedGrantRefresh?.cancel()
+        forcedGrantRefresh = nil
+        forcedGrantRefreshID &+= 1
+        liveGrantFingerprint = nil
+        unusableGrantFingerprint = nil
+        lastGrantAdoption = nil
+        WidgetHoldingsGrant.requestOnNextRefresh = false
+        Self.resetGrantBackoff()
+        Self.clearPushFingerprint()
+        if let endedFingerprint {
+            log.info("widget holdings grant marker removed (\(String(endedFingerprint.prefix(8)), privacy: .public)…) — revoking the ended session's keys")
+        }
+        sweepHoldingsGrantKeys(keeping: nil, reason: "app_revoked")
+    }
+
+    // MARK: Push token (iOS 26+)
+
+    /// Upload the WidgetKit push token onto the grant's row (`PUT /widget/push-token`), when the
+    /// grant, the token or the environment changed, or a day has passed. The APP uploads it; the
+    /// extension's push handler only logs (it holds no session). Best-effort: logged, never
+    /// surfaced — nobody tapped anything (auth.md §6).
+    private func syncWidgetPushTokenIfNeeded(client: APIClient, epoch: Int, grant: WidgetHoldingsGrant.Grant) async {
+        guard #available(iOS 26.0, *) else { return }
+        let info = await WidgetCenter.shared.currentPushInfo
+        guard epoch == sessionEpoch, sessionOpen, !Task.isCancelled else { return }
+        let token: String? = info.flatMap { info in
+            info.token.isEmpty ? nil : info.token.map { String(format: "%02x", $0) }.joined()
+        }
+        // The server stores 32-400 hex characters; anything else would be refused (422) on every
+        // refresh. Not sent, and never silent.
+        if let token, !(32...400).contains(token.count) {
+            log.error("widget push token has \(token.count, privacy: .public) hex characters — outside what the server stores; not uploaded")
+            return
+        }
+        let environment = PushNotificationManager.apnsEnvironment
+        let fingerprint = Self.pushFingerprint(grantId: grant.grantId, token: token, environment: environment)
+        let defaults = UserDefaults.standard
+        if defaults.string(forKey: Self.pushFingerprintKey) == fingerprint {
+            let at = defaults.double(forKey: Self.pushFingerprintAtKey)
+            let age = Date().timeIntervalSince1970 - at
+            if at > 0, age >= 0, age < Self.pushTokenResendInterval { return }
+        }
+        do {
+            let response = try await client.request(
+                endpoint: .registerWidgetPushToken(grantId: grant.grantId, token: token, environment: environment),
+                responseType: WidgetPushTokenResponse.self
+            )
+            guard epoch == sessionEpoch, sessionOpen, !Task.isCancelled else {
+                log.info("widget push token answer discarded — the session ended mid-request")
+                return
+            }
+            if response.stored {
+                defaults.set(fingerprint, forKey: Self.pushFingerprintKey)
+                defaults.set(Date().timeIntervalSince1970, forKey: Self.pushFingerprintAtKey)
+                log.info("widget push token \(token == nil ? "cleared" : "stored", privacy: .public) for grant \(grant.grantId, privacy: .public)")
+            } else {
+                log.warning("widget push token not stored for grant \(grant.grantId, privacy: .public) — retried at the next refresh")
+            }
+            if response.grantUsable == false {
+                grantCalledUnusable(grant)
+            }
+        } catch {
+            guard !Task.isCancelled else { return }
+            log.warning("widget push token upload failed for grant \(grant.grantId, privacy: .public): \(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// The server's register answered `grant_usable: false` — the grant is revoked, expired,
+    /// evicted or superseded there. Urgent, unless this process adopted it moments ago: a fresh
+    /// grant the server already rejects is an anomaly, and re-minting at once would loop.
+    private func grantCalledUnusable(_ grant: WidgetHoldingsGrant.Grant) {
+        unusableGrantFingerprint = grant.fp
+        WidgetHoldingsGrant.requestOnNextRefresh = true
+        if let adopted = lastGrantAdoption, Date().timeIntervalSince(adopted) < Self.freshGrantUnusableWindow {
+            log.error("widget holdings grant \(grant.grantId, privacy: .public): the server rejects a grant adopted under 10 minutes ago — backing off instead of re-minting")
+            stepGrantBackoff()
+            return
+        }
+        log.warning("widget holdings grant \(grant.grantId, privacy: .public): the server no longer accepts it — asking for a new one")
+        startForcedGrantRefreshIfAllowed(why: HoldingsGrantNeed.unusable.rawValue)
+    }
+
+    private static func clearPushFingerprint() {
+        UserDefaults.standard.removeObject(forKey: pushFingerprintKey)
+        UserDefaults.standard.removeObject(forKey: pushFingerprintAtKey)
+    }
+
+    private static func pushFingerprint(grantId: String, token: String?, environment: String) -> String {
+        let material = "\(grantId)|\(token ?? "none")|\(environment)"
+        return SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    // MARK: Grant helpers
+
+    /// The `sid` claim (the 214 session family) of a bearer, or nil. Reads only; verifies nothing.
+    private static func sessionId(of bearer: String) -> String? {
+        WidgetAPIConfig.jwtClaims(of: bearer)?["sid"] as? String
+    }
+
+    /// `expires_at` is text ("YYYY-MM-DDTHH:MM:SSZ"), parsed here — never by the client's
+    /// `.iso8601` date strategy, so a format drift drops the grant, never the refresh. A
+    /// fractional-seconds stamp is accepted too: one serializer change on the server must not
+    /// turn every mint into a revoke.
+    private static func parseGrantExpiry(_ raw: String) -> Date? {
+        if let date = ISO8601DateFormatter().date(from: raw) { return date }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: raw)
+    }
+
+    private static func grant(
+        from payload: WidgetHoldingsGrantPayload, owner: String, expiresAt: Date
+    ) -> WidgetHoldingsGrant.Grant {
+        WidgetHoldingsGrant.Grant(
+            token: payload.grantToken,
+            grantId: payload.grantId,
+            userId: owner,
+            sessionId: payload.sessionId,
+            expiresAt: expiresAt,
+            fp: WidgetHoldingsGrant.fingerprint(of: payload.grantToken)
+        )
+    }
+
     // MARK: - Session end
 
     /// Called when a session ends. See `.claude/rules/auth.md` §7: a device-global store
@@ -656,8 +1265,17 @@ final class WidgetRefreshService {
     ///
     /// Closes the session gate too: until `AppState` opens it again for a settled identity,
     /// no trigger — foreground, background, content change, a queued force — can fetch.
+    ///
+    /// ⚠️ The Holdings grant MARKER goes first, synchronously, right after the epoch bump and
+    /// BEFORE the token and the snapshots: the extension uses a key only while the App Group's
+    /// marker names it, so from this line on no reload can fetch the ended account's holdings
+    /// (the slot clear below reloads the timelines). The KEY itself is revoked by key and only
+    /// then deleted, off main — a revoke that is not confirmed keeps it for the next retry,
+    /// because an offline sign-out (where the logout, and so the server's trigger, never ran)
+    /// would otherwise strand a live 30-day key no device can revoke.
     func clearForEndedSession() {
         sessionEpoch &+= 1
+        let endedGrantFingerprint = WidgetHoldingsGrant.removeMarker()
         sessionOpen = false
         inFlight?.cancel()
         // Drop any queued forced refresh and any pending content change too — otherwise the
@@ -672,7 +1290,8 @@ final class WidgetRefreshService {
         widgetTokenExpiry = nil
         WidgetAPIConfig.clearWidgetToken()
         WidgetSnapshotStore.clearAll()
-        log.info("widget session closed — snapshots and token cleared")
+        endHoldingsGrantForEndedSession(endedFingerprint: endedGrantFingerprint)
+        log.info("widget session closed — snapshots, token and holdings grant marker cleared")
     }
 
     /// Called by `AppState` when a launch finds widget state but NO stored session: a restore
@@ -696,5 +1315,46 @@ struct WidgetTokenResponse: Codable, Sendable {
     enum CodingKeys: String, CodingKey {
         case token
         case expiresAt = "expires_at"
+    }
+}
+
+/// The Holdings widget grant inside `POST /auth/refresh`'s answer (`TokenResponse
+/// .widget_holdings_grant`) — mirrors `WidgetHoldingsGrantOut` in `backend/app/schemas/auth.py`
+/// (migration 216). Decoded only by the APP, LOSSILY, inside `AuthResponse`, and handed to
+/// `WidgetRefreshService.adoptHoldingsGrant`. `nonisolated`: `AuthResponse`'s decoder runs on
+/// `APIClient`'s actor. `grantToken` is the key itself — never logged; `description` omits it.
+nonisolated struct WidgetHoldingsGrantPayload: Decodable, Sendable, CustomStringConvertible {
+    let grantToken: String
+    let grantId: String
+    /// "YYYY-MM-DDTHH:MM:SSZ", kept as text and parsed by `ISO8601DateFormatter` in adoption —
+    /// never by the client's `.iso8601` date strategy.
+    let expiresAt: String
+    /// The 214 session family the grant was minted in (the bearer's `sid`).
+    let sessionId: String
+
+    enum CodingKeys: String, CodingKey {
+        case grantToken = "grant_token"
+        case grantId = "grant_id"
+        case expiresAt = "expires_at"
+        case sessionId = "session_id"
+    }
+
+    var description: String {
+        "WidgetHoldingsGrantPayload(grant_id: \(grantId), expires_at: \(expiresAt), grant_token: <redacted>)"
+    }
+}
+
+/// `PUT /widget/push-token` — mirrors `WidgetPushTokenResponse` in `backend/app/schemas/widget.py`.
+nonisolated struct WidgetPushTokenResponse: Decodable, Sendable {
+    /// The token is on the grant row now. false: a store error — retried at the next refresh.
+    let stored: Bool
+    /// false: the grant is no longer live server-side (revoked, expired, evicted, superseded) —
+    /// the app asks for a new one. Optional on purpose: an absent field reads as usable, so a
+    /// backend that ever omits it can never push every device into a re-mint.
+    let grantUsable: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case stored
+        case grantUsable = "grant_usable"
     }
 }

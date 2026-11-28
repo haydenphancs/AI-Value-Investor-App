@@ -483,3 +483,115 @@ def test_the_ranking_cap_covers_every_holding_a_user_can_have():
     from app.config import settings
 
     assert widget._MAX_HOLDINGS >= int(settings.WATCHLIST_MAX_ITEMS)
+
+
+# ── the extension's Holdings route builds EXACTLY this payload (migration 216) ─────────────────
+#
+# `/holdings-mover` (grant key) and `/portfolio-mover` (session) share `_portfolio_payload`, so
+# the two can never disagree about a user's holdings. Driven here branch by branch, the
+# extension's call through `get_holdings_mover` with the grant dependency's output passed in.
+
+
+async def _call_extension() -> WidgetMoverPayload:
+    from fastapi import Response
+
+    from app.dependencies import HoldingsGrantCaller
+
+    class _NoSupabase:
+        def rpc(self, *_a, **_k):
+            raise AssertionError("note_head is stubbed out in these tests")
+
+    return await widget.get_holdings_mover(
+        response=Response(),
+        caller=HoldingsGrantCaller(user_id=UID, grant_id="g-1"),
+        _enabled=None, _rate_limit=None, _app_version=None, supabase=_NoSupabase(),
+    )
+
+
+@pytest.fixture
+def _quiet_note_head(monkeypatch):
+    async def _skip(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(widget, "_note_head", _skip)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("branch", ["group", "empty_group", "degraded_group", "watchlist",
+                                    "watchlist_down", "service_down"])
+async def test_the_extension_and_the_app_get_the_same_payload(monkeypatch, branch,
+                                                              _quiet_note_head):
+    group, group_raises, movers = None, None, None
+    if branch == "group":
+        group = _group("Tech", ["AAPL", "MSFT"])
+    elif branch == "empty_group":
+        group = _group("Tech", [])
+    elif branch == "degraded_group":
+        group_raises = ActiveGroupUnavailable("read failed")
+    elif branch == "service_down":
+        group = _group(None, ["AAPL"])
+        movers = _FakeMovers(raises=RuntimeError("upstream"))
+    elif branch == "watchlist_down":
+        _supabase(monkeypatch, raises=RuntimeError("down"))
+    else:
+        _supabase(monkeypatch, rows=[{"ticker": "nvda"}, {"ticker": "amd"}])
+
+    seen: Dict[str, Any] = {}
+    for caller in ("app", "extension"):
+        fake = _FakeMovers(raises=movers._raises) if movers else _FakeMovers()
+        # `_FakeMovers` declares only `links_web_only`: accept the extension's extra keyword.
+        orig = fake.get_portfolio_mover
+
+        async def _accepting(user_id, tickers, *, links_web_only=False, for_extension=False,
+                             _orig=orig, _fake=fake):
+            _fake.for_extension = for_extension
+            return await _orig(user_id, tickers, links_web_only=links_web_only)
+
+        fake.get_portfolio_mover = _accepting
+        _install(monkeypatch, group=group, group_raises=group_raises, movers=fake)
+        out = await (_call() if caller == "app" else _call_extension())
+        seen[caller] = out.model_dump(exclude={"as_of", "session_label", "market_session",
+                                               "session_date"})
+        seen[f"{caller}_ext"] = getattr(fake, "for_extension", None)
+    assert seen["app"] == seen["extension"], branch
+    if branch in ("group", "watchlist", "service_down"):
+        assert seen["app_ext"] is False and seen["extension_ext"] is True
+
+
+def test_the_holdings_route_carries_its_own_per_grant_limiter():
+    from app.dependencies import WidgetHoldingsRateLimit, WidgetHoldingsRateLimitChecker
+
+    params = inspect.signature(widget.get_holdings_mover).parameters
+    limiter = params["_rate_limit"].default
+    assert limiter is WidgetHoldingsRateLimit
+    assert isinstance(limiter.dependency, WidgetHoldingsRateLimitChecker)
+    assert limiter is not widget.WidgetPortfolioRateLimit
+
+
+def test_the_new_limiter_buckets_are_unique_key_spaces():
+    """`widget_holdings` (per grant), `widget_holdings_ip` (per address) and
+    `widget_holdings_mint` (per account, in the refresh route) must never collide with each
+    other or with any identity limiter's bucket."""
+    import importlib
+    import pkgutil
+    import re as _re
+    from pathlib import Path
+
+    import app.api.v1.endpoints as endpoints_pkg
+    import app.dependencies as deps
+    from app.dependencies import IdentityRateLimitChecker, WidgetHoldingsRateLimitChecker
+
+    identity_buckets = set()
+    for mod in [deps] + [importlib.import_module(f"{endpoints_pkg.__name__}.{m.name}")
+                         for m in pkgutil.iter_modules(endpoints_pkg.__path__)]:
+        for obj in vars(mod).values():
+            if isinstance(obj, DependsParam) and isinstance(obj.dependency, IdentityRateLimitChecker):
+                identity_buckets.add(obj.dependency.bucket)
+    ours = {WidgetHoldingsRateLimitChecker.bucket, "widget_holdings_ip", "widget_holdings_mint"}
+    assert len(ours) == 3 and not ours & identity_buckets
+    assert "widget_push_token" in identity_buckets
+    # The two inline keys are spelled exactly once each, where they are used.
+    backend = Path(deps.__file__).resolve().parents[1]
+    sources = "\n".join(p.read_text() for p in (backend / "app").rglob("*.py"))
+    assert len(_re.findall(r'f"widget_holdings_ip:', sources)) == 1
+    assert len(_re.findall(r'f"widget_holdings_mint:', sources)) == 1

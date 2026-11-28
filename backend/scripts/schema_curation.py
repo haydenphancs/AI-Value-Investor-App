@@ -218,6 +218,18 @@ CURATION: dict[str, TableDoc] = {
              "every token. Revoked by /auth/logout, by reuse of a retired refresh token, or by "
              "sign-out-all (migration 214). Written only by the 214 RPCs, under a per-user "
              "advisory lock."),
+    "public.widget_holdings_grants": T("identity",
+        purpose="The Home Screen widget's per-device Holdings credential (owner 2026-11-27, "
+                "\"Own key, 30-day life\"): the SHA-256 of an opaque cwh1_ key the extension "
+                "sends to GET /widget/holdings-mover, plus the device's WidgetKit push token.",
+        key=("grant_id", "user_id", "key_hash", "sid", "minted_iat", "expires_at", "revoked_at",
+             "revoke_reason", "superseded_by", "last_head_ticker", "push_token",
+             "push_environment", "push_sent_count"),
+        note="Minted only inside a POST /auth/refresh rotation (migration 216). Killed by the "
+             "auth_refresh_families trigger (logout, reuse, sign-out-all), evicted by the users "
+             "stamps (one predicate, widget_holdings_grant_is_live), superseded on renewal (≤ 24 h "
+             "overlap), revoked by key from the device, and cascades with the account. Every "
+             "revocation nulls the push token and head ticker. The key itself is never stored."),
     "public.auth_refresh_tokens": T("identity",
         key=("jti", "family_id", "user_id", "parent_jti", "expires_at", "revoked_at",
              "replaced_by", "child_count"),

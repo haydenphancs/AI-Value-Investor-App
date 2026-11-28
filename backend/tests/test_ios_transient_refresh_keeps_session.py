@@ -29,6 +29,14 @@ What this pins (T1-T9):
       task's it joins) is discarded or pattern-matched — never stored, passed on or compared,
       which would hand it to a transport without a return value. The test passes with the
       pre-flight absent too;
+  T1c the SECOND allow-listed caller, `refreshForWidgetGrant()` (2026-11-27, migration 216: the
+      Holdings widget grant is minted only inside a refresh rotation, so the widget service asks
+      for one), allow-listed BY NAME: exactly `func refreshForWidgetGrant() async ->
+      TokenRefreshOutcome`, refusing to run on a disarmed client (`.transientFailure`), then
+      `return await refreshTokenSingleFlight()` — the outcome handed back untouched, nothing
+      else returned, never `.credentialRejected` of its own, no throw, no session touch. Its
+      caller's use of the outcome (retries, never a sign-out) is pinned in
+      `test_ios_widget_holdings_grant_app.py`;
   T2  each transport's interceptor has exactly one UNCONDITIONAL `.transientFailure` arm, the
       first thing done with the refresh outcome and before the dead-credential path, that
       throws only `Self.transientRefreshError()` and never touches the credential;
@@ -109,6 +117,11 @@ _HUAF_DECL = "private func handleUnrecoverableAuthFailure("
 _PREFLIGHT_ANY_DECL = re.compile(r"\bfunc\s+refreshArmedTokenIfExpired\b")
 _PREFLIGHT_DECL = re.compile(r"func\s+refreshArmedTokenIfExpired\s*\(\s*for\s+\w+\s*:\s*[^,()]+\)")
 _PREFLIGHT = "refreshArmedTokenIfExpired(for:)"
+# The widget-grant refresh (T1c), allow-listed BY NAME too: `\b` keeps `refreshForWidgetGrantNow`
+# out, and the exact signature keeps `throws`, a parameter or another return type out.
+_WIDGET_GRANT_ANY_DECL = re.compile(r"\bfunc\s+refreshForWidgetGrant\b")
+_WIDGET_GRANT_DECL = re.compile(r"func\s+refreshForWidgetGrant\s*\(\s*\)\s*async\s*->\s*TokenRefreshOutcome\s*(?=\{)")
+_WIDGET_GRANT = "refreshForWidgetGrant()"
 _AUTH_TOKEN_WRITE = re.compile(r"\b(?:self\.)?authToken\s*=(?!=)")
 _OUTCOME_NAME = re.compile(r"\.(?:refreshed|transientFailure|credentialRejected)\b")
 _NOT_REFRESHED = re.compile(r"\.(?:transientFailure|credentialRejected)\b")
@@ -285,6 +298,23 @@ def _preflight(scan: str) -> tuple[str, tuple[int, int]] | None:
     return scan[m.end(): brace], (brace, _balanced_end(scan, brace) + 1)
 
 
+def _widget_grant_refresh(scan: str) -> tuple[int, int] | None:
+    """Body span of the allow-listed `refreshForWidgetGrant()`, or None when it is absent."""
+    decls = list(_WIDGET_GRANT_ANY_DECL.finditer(scan))
+    assert len(decls) <= 1, (
+        f"`refreshForWidgetGrant` is declared {len(decls)}× — the allow-list names exactly one "
+        f"method, `{_WIDGET_GRANT}`; an overload would share its exemption")
+    if not decls:
+        return None
+    m = _WIDGET_GRANT_DECL.match(scan, decls[0].start())
+    assert m, (
+        f"the allow-listed widget-grant refresh must be exactly `func {_WIDGET_GRANT} async -> "
+        f"TokenRefreshOutcome`, got `{_line_at(scan, decls[0].start())}` — `throws` or a parameter "
+        "is not exempt")
+    brace = scan.index("{", m.end())
+    return brace, _balanced_end(scan, brace) + 1
+
+
 def test_every_refresh_call_site_is_one_of_the_four_guarded_transports():  # T1
     """A fifth transport that refreshes without the transient arm would bring the bug back.
 
@@ -301,12 +331,13 @@ def test_every_refresh_call_site_is_one_of_the_four_guarded_transports():  # T1
         k = sum(start <= p < end for p in refs)
         assert k == 1, f"{name}: expected exactly one refresh call in its 401 interceptor, found {k}"
     pre = _preflight(scan)
-    allowed = list(interceptors.values()) + ([pre[1]] if pre else [])
+    grant = _widget_grant_refresh(scan)
+    allowed = list(interceptors.values()) + ([pre[1]] if pre else []) + ([grant] if grant else [])
     outside = [_line_at(scan, p) for p in refs if not _inside(p, allowed)]
     assert not outside, (
         "a refresh call site outside the four guarded transports' 401 interceptors and the "
-        f"allow-listed `{_PREFLIGHT}` ({len(outside)}: {outside}) — a refresh nobody guarded "
-        "against the transient-failure sign-out")
+        f"allow-listed `{_PREFLIGHT}` / `{_WIDGET_GRANT}` ({len(outside)}: {outside}) — a refresh "
+        "nobody guarded against the transient-failure sign-out")
 
     # The refresher itself: only the single-flight calls it (the setter stores it), so no
     # transport can run a refresh — and interpret its outcome — behind the single-flight's back.
@@ -484,6 +515,48 @@ def test_the_pre_flight_refresh_can_never_end_a_session():  # T1b
         f"`{_PREFLIGHT}` lets a refresh outcome out of a pattern match ({escaped}) — stored or "
         "passed on, it hands a failed refresh to code that can end the session; the pre-flight "
         "may only discard it (`_ =`) or match on it (`switch` / `if case` / `guard case`)")
+
+
+def test_the_widget_grant_refresh_hands_back_the_outcome_untouched():  # T1c
+    """The sixth caller of the single-flight may RETURN the outcome (its caller schedules the
+    grace-window retries with it), but it may not shape it: one `return await
+    refreshTokenSingleFlight()`, every other return `.transientFailure` (the disarmed-client
+    guard), no `.credentialRejected` of its own, no throw, no credential or session touch.
+    Absent, there is nothing to check (T1 still forbids any other call site)."""
+    scan = _scan(_CLIENT)
+    span = _widget_grant_refresh(scan)
+    if span is None:
+        return
+    body = scan[span[0]:span[1]]
+    refs = list(_SF_REF.finditer(body))
+    assert len(refs) == 1 and re.search(
+            r"\breturn\s+await\s+(?:self\.)?refreshTokenSingleFlight\(\s*\)", body), (
+        f"`{_WIDGET_GRANT}` must reach the single-flight exactly once, as `return await "
+        f"refreshTokenSingleFlight()` — the outcome handed back untouched (got {len(refs)} "
+        "reference(s))")
+    assert not re.search(r"\bthrow\b", body), (
+        f"`{_WIDGET_GRANT}` must never throw — a thrown error reaches a caller that can end the "
+        "session with it; the 401 interceptor alone may turn a failed refresh into an error")
+    for touch in ("handleUnrecoverableAuthFailure", "authFailureHandler", "setAuthToken",
+                  "disarmAuthToken", "Keychain", "refreshInFlight", "tokenRefresher?(",
+                  "tokenRefresher!("):
+        assert touch not in body, (
+            f"`{_WIDGET_GRANT}` touches the session (`{touch}`) — a refresh the WIDGET asked for "
+            "says nothing about the credential the 401 path has not already decided")
+    assert not _AUTH_TOKEN_WRITE.search(body), (
+        f"`{_WIDGET_GRANT}` writes authToken — only the single-flight's own task may arm a "
+        "refreshed token")
+    assert not re.search(r"\.credentialRejected\b", body), (
+        f"`{_WIDGET_GRANT}` names `.credentialRejected` — it may never answer a rejection of its "
+        "own; only the refresher (iosApp) classifies a refresh error")
+    others = [r.strip() for r in re.findall(r"\breturn\b([^\n]*)", body)
+              if not re.match(r"\s*await\s+(?:self\.)?refreshTokenSingleFlight\(", r)]
+    assert others and all(o == ".transientFailure" for o in others), (
+        f"`{_WIDGET_GRANT}` returns {others} besides the single-flight's outcome — only the "
+        "disarmed-client guard may answer, and only `.transientFailure`")
+    assert re.search(r"guard\s+authToken\s*!=\s*nil\b[^{]*else\s*\{", body), (
+        f"`{_WIDGET_GRANT}` no longer refuses to run on a disarmed client — the refresher would "
+        "read the Keychain's token and re-arm the session behind AppState's back (.restoring)")
 
 
 def test_a_transient_refresh_surfaces_auth_unavailable_never_the_original_401():  # T2
@@ -888,7 +961,7 @@ _TASK_REFRESH = "            let outcome = await refresher()\n"
 _IS_AUTH_TRUE = "case .unauthorized, .tokenExpired, .sessionEnded:\n            return true"
 _REFRESH_REQ = (
     "        let response = try await apiClient.request(\n"
-    "            endpoint: .refreshToken(refreshToken: refreshToken),\n"
+    "            endpoint: .refreshToken(refreshToken: refreshToken, widgetHoldingsGrant: wantsHoldingsGrant),\n"
     "            responseType: AuthResponse.self\n"
     "        )\n")
 
@@ -897,7 +970,7 @@ def _refresh_req_caught(catch_body: str) -> str:
     """`_REFRESH_REQ` wrapped in `do { } catch { <catch_body> }` (12-space indented lines)."""
     return ("        let response: AuthResponse\n        do {\n"
             "            response = try await apiClient.request(\n"
-            "                endpoint: .refreshToken(refreshToken: refreshToken),\n"
+            "                endpoint: .refreshToken(refreshToken: refreshToken, widgetHoldingsGrant: wantsHoldingsGrant),\n"
             "                responseType: AuthResponse.self\n"
             "            )\n"
             f"        }} catch {{\n{catch_body}        }}\n")
@@ -942,6 +1015,7 @@ _LOG_ONLY = 'Self.preflightLog.info("auth-preflight: did not complete (\\(endpoi
 _CLIENT_TESTS = (
     test_every_refresh_call_site_is_one_of_the_four_guarded_transports,
     test_the_pre_flight_refresh_can_never_end_a_session,
+    test_the_widget_grant_refresh_hands_back_the_outcome_untouched,
     test_a_transient_refresh_surfaces_auth_unavailable_never_the_original_401,
     test_the_transient_error_is_auth_unavailable_with_honest_copy,
     test_the_single_flight_hands_back_every_outcome_untouched,
@@ -1005,6 +1079,7 @@ _COMPLIANT = [
 
 _T1 = test_every_refresh_call_site_is_one_of_the_four_guarded_transports
 _T1B = test_the_pre_flight_refresh_can_never_end_a_session
+_T1C = test_the_widget_grant_refresh_hands_back_the_outcome_untouched
 _T2 = test_a_transient_refresh_surfaces_auth_unavailable_never_the_original_401
 _T8 = test_the_single_flight_hands_back_every_outcome_untouched
 _T9 = test_only_the_401_interceptors_can_end_the_session
@@ -1372,8 +1447,8 @@ _MUTATIONS = [
      test_the_refresher_rejects_only_on_a_genuine_auth_failure,
      "AuthService.refreshToken catches its refresh error"),
     ("m75-refreshToken-throws-on-session-change", _AUTH_SERVICE,
-     "        guard epoch == sessionEpoch else { return }\n\n        // Store new tokens\n",
-     "        guard epoch == sessionEpoch else { throw APIError.unauthorized }\n\n        // Store new tokens\n",
+     "            return\n        }\n\n        // Store new tokens\n",
+     "            throw APIError.unauthorized\n        }\n\n        // Store new tokens\n",
      test_the_refresher_rejects_only_on_a_genuine_auth_failure,
      "AuthService.refreshToken throws ['throw APIError.unauthorized', 'throw APIError.unauthorized'] "
      "beyond the no-refresh-token guard"),
@@ -1408,6 +1483,29 @@ _MUTATIONS = [
      test_app_state_never_signs_out_on_auth_unavailable,
      "reportMutationFailure ends the session on .authUnavailable (arm `.authUnavailable`: "
      "['endSessionForDeadCredential('])"),
+    # 80-85 (T1c, 2026-11-27): the widget-grant refresh shapes or acts on its outcome.
+    ("m80-widget-grant-ends-session", _CLIENT, "        return await refreshTokenSingleFlight()\n",
+     "        _ = await handleUnrecoverableAuthFailure(.unauthorized, endpoint: .getCurrentUser)\n"
+     "        return await refreshTokenSingleFlight()\n",
+     _T1C, "`refreshForWidgetGrant()` touches the session (`handleUnrecoverableAuthFailure`)"),
+    ("m81-widget-grant-throws", _CLIENT, "func refreshForWidgetGrant() async -> TokenRefreshOutcome {",
+     "func refreshForWidgetGrant() async throws -> TokenRefreshOutcome {",
+     _T1C, "the allow-listed widget-grant refresh must be exactly"),
+    ("m82-widget-grant-escalates-transient", _CLIENT, "        return await refreshTokenSingleFlight()\n",
+     "        let outcome = await refreshTokenSingleFlight()\n"
+     "        if case .transientFailure = outcome { return .credentialRejected }\n"
+     "        return outcome\n",
+     _T1C, "must reach the single-flight exactly once, as `return await refreshTokenSingleFlight()`"),
+    ("m83-widget-grant-runs-disarmed", _CLIENT,
+     re.compile(r"guard authToken != nil, tokenRefresher != nil else \{\n[^{}]*widget-grant refresh skipped[^{}]*\}\n\s*"),
+     "", _T1C, "returns [] besides the single-flight's outcome"),
+    ("m84-widget-grant-clears-token", _CLIENT, "        return await refreshTokenSingleFlight()\n",
+     "        authToken = nil\n        return await refreshTokenSingleFlight()\n",
+     _T1C, "`refreshForWidgetGrant()` writes authToken"),
+    ("m85-widget-grant-renamed-copy", _CLIENT, "    // MARK: - Request Methods\n",
+     "    // MARK: - Request Methods\n\n    func refreshForWidgetGrantNow() async -> TokenRefreshOutcome {"
+     " await refreshTokenSingleFlight() }\n",
+     _T1, _MSG_OUTSIDE),
 ]
 
 

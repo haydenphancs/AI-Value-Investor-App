@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import logging
 
+import pytest
+
 from app.log_redaction import (
     SecretRedactingFilter,
     redact_secrets,
@@ -1021,3 +1023,175 @@ def test_the_address_key_names_match_what_run_gotrue_actually_uses():
                 f"run_gotrue holds the address as {ast.unparse(target)!r}: add it to _PII_KEYS "
                 "and SENTRY_PII_DENYLIST_EXTRA")
     assert "client_ip" in assigned and "client_ip" in SENTRY_PII_DENYLIST_EXTRA
+
+
+# ── The Holdings widget grant key (migration 216, 2026-11-27) ─────────────────────────────────
+
+_HOLDINGS_KEY = "cwh1_" + "Ab9_-" * 8 + "Xyz"          # 43-char tail: a real key's shape
+
+
+def test_a_holdings_grant_key_is_redacted_whole_and_truncated():
+    assert len(_HOLDINGS_KEY) == 48
+    assert redact_secrets(f"grant {_HOLDINGS_KEY} refused") == "grant cwh1_*** refused"
+    # A key cut short by a repr or a clipped log line is still a credential.
+    truncated = _HOLDINGS_KEY[:20]
+    assert len(truncated) == 20
+    assert redact_secrets(f"value={truncated}…") == "value=cwh1_***…"
+    assert redact_secrets(f"X-Caydex-Holdings-Token: {_HOLDINGS_KEY}") == (
+        "X-Caydex-Holdings-Token: cwh1_***")
+
+
+def test_holdings_lookalikes_are_left_alone():
+    for text in ("cwh1-AbCdEfGhIjKl", "cwh1_short", "cwh1_1234567", "cwh2_AbCdEfGhIjKl"):
+        assert redact_secrets(text) == text, text
+
+
+def test_the_holdings_header_is_redacted_in_a_sentry_event():
+    event = {"request": {"headers": {
+        "X-Caydex-Holdings-Token": _HOLDINGS_KEY, "Accept": "application/json",
+    }}}
+    h = scrub_sentry_event(event)["request"]["headers"]
+    assert h["X-Caydex-Holdings-Token"] == "[redacted]" and h["Accept"] == "application/json"
+
+
+def test_a_grant_service_frame_keeps_no_locals():
+    """The service holds the freshly minted raw key as a local; its frames keep no locals."""
+    event = _through_sentry("app.services.widget_holdings_grant_service", {
+        "grant_token": _HOLDINGS_KEY, "hashed": "a" * 64, "user": _UUID,
+    })
+    frame = _frame_of(event, "app.services.widget_holdings_grant_service")
+    assert list(frame["vars"]) == ["auth_handler"], frame["vars"]
+    assert _HOLDINGS_KEY not in str(event)
+
+
+def test_the_holdings_header_parameter_loses_its_value_in_a_dependency_frame():
+    """`app.dependencies` keeps its diagnostic locals — except the key, by NAME (every local
+    whose name contains `token`: the dependency's `x_holdings_token` / `presented_token`) and by
+    VALUE (the `cwh1_` pattern, whatever the local is called)."""
+    event = _through_sentry("app.dependencies", {
+        "x_holdings_token": "not-even-key-shaped", "presented_token": _HOLDINGS_KEY,
+        "route": "/api/v1/widget/holdings-mover",
+    })
+    frame = _frame_of(event, "app.dependencies")
+    assert frame["vars"]["x_holdings_token"] == "[redacted]"
+    assert frame["vars"]["presented_token"] == "[redacted]"
+    assert "/api/v1/widget/holdings-mover" in str(frame["vars"]["route"]), "triage locals survive"
+    assert _HOLDINGS_KEY not in str(event) and "not-even-key-shaped" not in str(event)
+    # By value, under a name no key rule knows.
+    event = _through_sentry("app.dependencies", {"header_value": _HOLDINGS_KEY})
+    assert _HOLDINGS_KEY not in str(event)
+
+
+def test_the_holdings_pattern_is_linear():
+    import time
+
+    start = time.perf_counter()
+    redact_secrets("cwh1_" + "a" * 200_000 + "!")
+    redact_secrets(("cwh1_ " * 20_000))
+    assert time.perf_counter() - start < 1.0
+
+
+# ── APNs device tokens: the push URL and a Postgres key detail (2026-11-27) ──────────────────
+#
+# Every push is an httpx POST to `…/3/device/<token>`; httpx logs that URL at INFO (the production
+# root level) and Sentry's LoggingIntegration keeps the line as a breadcrumb. Migration 216 says a
+# widget push token is never logged in full. The token keeps its last 6 hex (push_service's
+# `widget_token_label`), nothing more.
+
+_APNS_TOKEN = "0123456789abcdef" * 4                       # 64 hex: today's iPhone token size
+_APNS_LONG = ("fedcba9876543210" * 13)[:200]              # Apple: never assume a size
+
+
+def _httpx_request_line(url: str) -> logging.LogRecord:
+    """The record httpx itself emits for one request, captured from the REAL client (a mock
+    transport: no socket is opened, the suite's network block is untouched)."""
+    import httpx
+
+    captured: list[logging.LogRecord] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            captured.append(record)
+
+    log = logging.getLogger("httpx")
+    grab, old_level, old_propagate = _Grab(level=logging.INFO), log.level, log.propagate
+    log.addHandler(grab)
+    log.setLevel(logging.INFO)
+    # Not propagated: once app.main is imported (another test file), the ROOT handlers'
+    # SecretRedactingFilter rewrites the same record object — this test wants it raw.
+    log.propagate = False
+    try:
+        with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as c:
+            c.post(url, json={"aps": {"content-changed": True}})
+    finally:
+        log.removeHandler(grab)
+        log.setLevel(old_level)
+        log.propagate = old_propagate
+    lines = [r for r in captured if "HTTP Request" in r.getMessage()]
+    assert len(lines) == 1, [r.getMessage() for r in captured]
+    return lines[0]
+
+
+@pytest.mark.parametrize("host", ["https://api.push.apple.com", "https://api.sandbox.push.apple.com"])
+@pytest.mark.parametrize("token", [_APNS_TOKEN, _APNS_LONG, _APNS_TOKEN.upper()])
+def test_the_httpx_request_line_of_a_push_keeps_only_the_tokens_tail(host, token):
+    record = _httpx_request_line(f"{host}/3/device/{token}")
+    assert token in record.getMessage(), "the raw httpx line really carries the token"
+    SecretRedactingFilter().filter(record)
+    line = record.getMessage()
+    assert token not in line and token[:20] not in line
+    assert f"{host}/3/device/…{token[-6:]}" in line, line
+    assert line.startswith("HTTP Request: POST ") and '"HTTP/1.1 200 OK"' in line
+
+
+def test_a_push_url_is_cut_in_an_exception_and_in_a_sentry_breadcrumb():
+    url = f"https://api.push.apple.com/3/device/{_APNS_TOKEN}"
+    assert redact_secrets(f"Client error '410 Gone' for url '{url}'") == (
+        f"Client error '410 Gone' for url 'https://api.push.apple.com/3/device/…{_APNS_TOKEN[-6:]}'")
+    event = {"breadcrumbs": {"values": [
+        {"category": "httpx", "message": f'HTTP Request: POST {url} "HTTP/2 200 OK"'},
+        {"type": "http", "data": {"url": url, "method": "POST", "http.query": ""}},
+    ]}}
+    scrubbed = scrub_sentry_event(event)
+    assert _APNS_TOKEN not in str(scrubbed)
+    assert scrubbed["breadcrumbs"]["values"][1]["data"]["url"].endswith(f"/3/device/…{_APNS_TOKEN[-6:]}")
+
+
+def test_a_postgres_unique_violation_on_a_token_column_keeps_only_the_tail():
+    for col in ("push_token", "token"):
+        detail = (f'duplicate key value violates unique constraint "uq_x"\n'
+                  f"DETAIL:  Key ({col})=({_APNS_TOKEN}) already exists.")
+        red = redact_secrets(detail)
+        assert _APNS_TOKEN not in red and f"Key ({col})=(…{_APNS_TOKEN[-6:]}) already exists." in red
+    # A composite key naming a token: the uuid (no long hex run) survives, the token is cut.
+    composite = redact_secrets(f"Key (user_id, token)=({_UUID}, {_APNS_TOKEN}) already exists.")
+    assert composite == f"Key (user_id, token)=({_UUID}, …{_APNS_TOKEN[-6:]}) already exists."
+    # postgrest's APIError dict repr carries it the same way.
+    err = {"code": "23505", "details": f"Key (push_token)=({_APNS_LONG}) already exists."}
+    assert _APNS_LONG not in redact_secrets(repr(err))
+
+
+def test_hex_that_is_not_a_device_token_is_left_alone():
+    sha = "a" * 64
+    for text in (
+        f"/3/device/{'ab' * 12}",                       # 24 hex: too short to be a token
+        f"/storage/v1/object/{sha}.jpg",                 # a content hash in another path
+        f"commit {sha}",
+        f"Key (key_hash)=({sha}) already exists.",       # not a TOKEN column
+        f"Key (user_id, ticker)=({_UUID}, AAPL) already exists.",
+        "Key (push_token)=(abcdef) already exists.",     # already cut: idempotent
+    ):
+        assert redact_secrets(text) == text, text
+    once = redact_secrets(f"/3/device/{_APNS_TOKEN}")
+    assert redact_secrets(once) == once
+
+
+def test_the_apns_patterns_are_linear():
+    import time
+
+    start = time.perf_counter()
+    redact_secrets("/3/device/" + "a" * 200_000 + "!")
+    redact_secrets("/3/device/ab" * 20_000)
+    redact_secrets("Key (" + "a" * 199 + " " + "Key (" * 20_000)
+    redact_secrets("Key (push_token)=(" + ("a" * 25 + " ") * 2_000 + ")")
+    assert time.perf_counter() - start < 1.0

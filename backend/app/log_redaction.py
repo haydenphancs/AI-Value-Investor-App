@@ -108,14 +108,48 @@ _APP_PASSWORD_RE = re.compile(r"(?<![A-Za-z0-9-])[a-z0-9]{4}(?:-[a-z0-9]{4}){3}(
 # variable can be echoed by a settings check, and a bare key matches no pattern above.
 _ANTHROPIC_KEY_RE = re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{8,}")
 
+# The Home Screen widget's Holdings grant keys (`cwh1_` + 43 base64url characters; migration 216,
+# 2026-11-27). They travel in the `X-Caydex-Holdings-Token` header and once in the refresh answer
+# (`grant_token`), never in a URL — but a key echoed into an exception or a log line must still
+# never reach Sentry. Eight characters of tail are enough to match: a TRUNCATED key (a repr cut
+# short, a log line clipped) is still redacted. `cwh1-…` (a hyphen) and a shorter tail are not keys.
+_HOLDINGS_KEY_RE = re.compile(r"\bcwh1_[A-Za-z0-9_\-]{8,}")
+
+# APNs DEVICE TOKENS (2026-11-27, the widget push sender): every push is an httpx POST to
+# `https://api[.sandbox].push.apple.com/3/device/<token>`, and httpx logs that full URL at INFO
+# ("HTTP Request: POST …") — the root level in production — so each alert push and each WidgetKit
+# wake (up to WIDGET_PUSH_MAX_SENDS_PER_PASS a pass) wrote a whole device token to the Railway log
+# and, through LoggingIntegration, into a Sentry breadcrumb. Migration 216 promises the widget push
+# token is "never logged in full". The token is cut to its LAST 6 hex (what
+# `push_service.widget_token_label` logs, enough to tie a line to a device); a hex run too short
+# to be a token (< 26) is left alone. Linear: one literal anchor, one greedy run, a 6-char tail.
+_APNS_DEVICE_PATH_RE = re.compile(r"(/3/device/)[0-9A-Fa-f]{20,}([0-9A-Fa-f]{6})")
+
+# ...and the same token in a Postgres UNIQUE-violation detail — `Key (push_token)=(<hex>) already
+# exists.` (216's `uq_widget_holdings_grants_push_token`; `device_tokens.token` the same way) —
+# which postgrest's APIError carries into the typed exception the routes log with exc_info. Only a
+# key whose COLUMN LIST names a token is touched; its long hex runs keep their last 6. Two bounded,
+# negated-class captures and a decision in Python (as `_FRAME_FIELD_RE`), so it stays linear.
+_PG_KEY_DETAIL_RE = re.compile(r"(Key \()([^()\n]{1,200})(\)=\()([^()\n]{0,2000})(\))")
+_LONG_HEX_RUN_RE = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{20,}([0-9A-Fa-f]{6})(?![0-9A-Fa-f])")
+
+
+def _pg_key_detail_sub(m: "re.Match") -> str:
+    if "token" not in m.group(2).lower():
+        return m.group(0)
+    values = _LONG_HEX_RUN_RE.sub(r"…\1", m.group(4))
+    return m.group(1) + m.group(2) + m.group(3) + values + m.group(5)
+
 
 def redact_secrets(text: Any) -> str:
     """Return ``str(text)`` with secrets and no-diagnostic-value PII replaced by ``***``.
 
     Covers: secret query params (``apikey=``…), email addresses, bearer tokens, bare JWTs,
     inline Postgres DSN passwords, Telegram bot tokens (in a URL path or bare), OAuth 1.0a
-    parameters, ``Apikey <key>`` headers, Bluesky app passwords and Anthropic ``sk-ant-`` keys. Does NOT touch `user_id` UUIDs — see the module
-    docstring for why.
+    parameters, ``Apikey <key>`` headers, Bluesky app passwords, Anthropic ``sk-ant-`` keys,
+    the widget's Holdings grant keys (``cwh1_``) and APNs device tokens (in a ``/3/device/`` URL
+    path or a Postgres ``Key (…token)=(…)`` detail: cut to their last 6 hex). Does NOT touch
+    `user_id` UUIDs — see the module docstring for why.
     """
     try:
         s = str(text)
@@ -124,6 +158,9 @@ def redact_secrets(text: Any) -> str:
         s = _APIKEY_HEADER_RE.sub(r"\1***", s)
         s = _APP_PASSWORD_RE.sub("***", s)
         s = _ANTHROPIC_KEY_RE.sub("sk-ant-***", s)
+        s = _HOLDINGS_KEY_RE.sub("cwh1_***", s)
+        s = _APNS_DEVICE_PATH_RE.sub(r"\1…\2", s)
+        s = _PG_KEY_DETAIL_RE.sub(_pg_key_detail_sub, s)
         s = _SECRET_QS_RE.sub(_qs_sub, s)
         s = _SECRET_KV_RE.sub(r"\1***\4", s)
         s = _DSN_RE.sub(r"\1***\2", s)
@@ -298,7 +335,12 @@ _CREDENTIAL_FRAME_MODULES = frozenset({
     # secret and the .p8 key itself are locals in these two.
     "app.integrations.apple_id",
     "app.services.apple_sign_in_service",
+    # The Holdings widget grant (migration 216): the freshly minted raw key is a local there.
+    "app.services.widget_holdings_grant_service",
 })
+# `app.dependencies` is deliberately NOT listed (its frames keep their diagnostic locals): the
+# holdings key's locals there are named `x_holdings_token` / `presented_token`, and every local
+# whose name contains `token` loses its value through `_redact_strings_in_place`'s key rule.
 _CREDENTIAL_VARS_DROPPED = {
     "auth_handler": "[locals dropped: auth handler frames hold passwords, codes and tokens]",
 }
@@ -535,6 +577,9 @@ def _redact_strings_in_place(node: Any, _depth: int = 0) -> None:
 _CREDENTIAL_HEADERS = {
     "x-marketing-worker-token", "x-admin-token", "authorization", "apikey", "x-api-key",
     "x-guest-id", "cookie", "set-cookie",
+    # The widget's Holdings grant key (migration 216). The `token` fragment below matches it too;
+    # named so the intent survives an edit to the fragments.
+    "x-caydex-holdings-token",
 }
 _CREDENTIAL_HEADER_FRAGMENTS = ("token", "secret", "apikey", "api-key", "api_key", "password")
 

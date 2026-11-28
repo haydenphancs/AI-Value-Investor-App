@@ -13,9 +13,13 @@
 //    biggest |%| mover and why, how many rose and fell, and the top riser and faller.
 //
 //  WHO FETCHES WHAT. Market mode fetches for itself with the widget token (see
-//  `WidgetMarketFetcher`). Holdings mode renders what the APP last wrote — the extension
-//  holds no session and must never hold one (the long note in `WidgetSnapshotStore.swift`).
-//  With no widget token at all, BOTH modes render the sign-in state and no stored data.
+//  `WidgetMarketFetcher`). Holdings mode fetches for itself too (2026-11-27) with the device's
+//  Holdings grant (`WidgetHoldingsGrant`, `WidgetHoldingsFetcher`), and only to REFRESH a slot
+//  the app wrote for the grant's account; with no grant it renders what the app last wrote.
+//  The extension still holds no session and must never hold one (the long note in
+//  `WidgetSnapshotStore.swift`). With no widget token at all, BOTH modes render the sign-in
+//  state, store nothing and fetch nothing. On iOS 26+ a WidgetKit push from the server may also
+//  ask for a timeline (`MoversPushHandler.swift`); it carries no data and runs the same code.
 //
 //  THE ONE RULE FOR CAUSES
 //  A tag badge appears ONLY when `cause.kind.isEstablished` — i.e. the backend found a
@@ -61,6 +65,11 @@ struct MoversEntry: TimelineEntry {
 struct MoversProvider: AppIntentTimelineProvider {
     private static let log = Logger(subsystem: "com.phan.caydex", category: "widget")
 
+    /// A signed-out tile has nothing to age and nothing to fetch, so it asks for little: the
+    /// app's sign-in publishes the widget token and reloads the tiles at once, which is what
+    /// actually ends the signed-out state. Six hours only bounds a missed reload.
+    private static let signedOutReloadInterval: TimeInterval = 6 * 60 * 60
+
     func placeholder(in context: Context) -> MoversEntry {
         MoversEntry(date: Date(), snapshot: .preview, isPlaceholderRender: true)
     }
@@ -86,19 +95,18 @@ struct MoversProvider: AppIntentTimelineProvider {
     func timeline(for configuration: MoversConfigurationIntent, in context: Context) async -> Timeline<MoversEntry> {
         let mode = effectiveMode(for: configuration, family: context.family)
         let now = Date()
-        let reload = WidgetRefreshSchedule.nextRefresh(after: now)
-        // SEVERAL entries over ONE snapshot — they buy an honest, self-ageing LABEL, not new
-        // data. The day rollover is ET 00:01; see `WidgetRefreshSchedule.renderDates`.
-        let dates = WidgetRefreshSchedule.renderDates(now: now, reload: reload)
 
-        // Signed out: nothing stored may render and nothing may be fetched.
+        // Signed out: nothing stored may render and nothing may be fetched. ONE entry — the
+        // sign-in state does not age — and a long reload: see `signedOutReloadInterval`.
         guard let tokenAtFetch = WidgetAPIConfig.widgetToken else {
-            let entries = dates.map { signedOutEntry(at: $0, mode: mode, configuration: configuration) }
-            return Timeline(entries: entries, policy: .after(reload))
+            return Timeline(
+                entries: [signedOutEntry(at: now, mode: mode, configuration: configuration)],
+                policy: .after(now.addingTimeInterval(Self.signedOutReloadInterval))
+            )
         }
 
-        // THE EXTENSION FETCHES — Market mode only (see `WidgetMarketFetcher`). Holdings needs
-        // an identity the extension must never hold, so it renders what the app last wrote.
+        // THE EXTENSION FETCHES — Market with the widget token (see `WidgetMarketFetcher`),
+        // Holdings with the device's Holdings grant (below). Neither is a session.
         var snap = snapshot(for: mode)
 
         if mode == .market, let fresh = await WidgetMarketFetcher.fetchMarket() {
@@ -117,13 +125,80 @@ struct MoversProvider: AppIntentTimelineProvider {
             }
         }
 
+        // HOLDINGS — with the device's Holdings grant, and only to REFRESH the slot the app wrote
+        // for the grant's account (captured before the await). The grant is read off the main
+        // thread: it is a Keychain item.
+        if mode == .portfolio {
+            let held = await Task.detached(priority: .userInitiated) { WidgetHoldingsGrant.lookup() }.value
+            if case .live(let grantAtFetch) = held,
+               !WidgetHoldingsGrant.isRefused(grantAtFetch.fp),
+               let ownerAtFetch = WidgetSnapshotStore.portfolioOwner(),
+               ownerAtFetch.lowercased() == grantAtFetch.userId.lowercased() {
+                switch await WidgetHoldingsFetcher.fetchHoldings(grantAtFetch) {
+                case .payload(let fresh):
+                    // ⚠️ THE SAME WINDOW AS THE MARKET FETCH, AND ONE MORE: the session can end
+                    // (token cleared) or the app can replace the grant (marker moved) during the
+                    // await. The store fences both again at the last moment.
+                    if WidgetAPIConfig.widgetToken == tokenAtFetch,
+                       WidgetHoldingsGrant.markerFingerprint == grantAtFetch.fp {
+                        if !WidgetSnapshotStore.writeHoldingsFromExtension(fresh, grant: grantAtFetch) {
+                            Self.log.info("widget: holdings refresh not stored — the tile keeps the stored slot")
+                        }
+                        // Render only what the store accepted.
+                        snap = snapshot(for: .portfolio)
+                    } else {
+                        Self.log.warning("widget: holdings refresh discarded — the session or the grant changed while it was in flight")
+                    }
+                case .refused(let code):
+                    // The server looked the key up and found it dead (logout, reuse, sign out of
+                    // all devices, a password stamp, account deletion): HIDE the holdings
+                    // (owner 2026-11-27) — but only a grant the app has not replaced meanwhile.
+                    if WidgetAPIConfig.widgetToken == tokenAtFetch,
+                       WidgetHoldingsGrant.markerFingerprint == grantAtFetch.fp {
+                        WidgetHoldingsGrant.noteRefused(grantAtFetch.fp)
+                        let dropped = WidgetSnapshotStore.dropPortfolioFromExtension(
+                            owner: grantAtFetch.userId, fingerprint: grantAtFetch.fp
+                        )
+                        snap = dropped ? nil : snapshot(for: .portfolio)
+                        Self.log.warning("widget: Holdings grant refused (\(code, privacy: .public)) — holdings hidden until the app renews it")
+                    } else {
+                        Self.log.info("widget: a refusal of a grant the app already replaced — ignored")
+                    }
+                case .unavailable:
+                    // Offline, throttled, the switch off, a rolled-back backend: keep the snapshot.
+                    break
+                }
+            } else if case .expired(let lapsed) = held,
+                      !WidgetHoldingsGrant.isRefused(lapsed.fp),
+                      WidgetAPIConfig.widgetToken == tokenAtFetch,
+                      WidgetHoldingsGrant.markerFingerprint == lapsed.fp {
+                // Past its own 30 days: the server would refuse it, so the tile hides the
+                // holdings without spending a request on hearing so. The app re-mints at its next
+                // foreground refresh.
+                WidgetHoldingsGrant.noteRefused(lapsed.fp)
+                let dropped = WidgetSnapshotStore.dropPortfolioFromExtension(
+                    owner: lapsed.userId, fingerprint: lapsed.fp
+                )
+                snap = dropped ? nil : snapshot(for: .portfolio)
+            }
+        }
+
+        // The reload, decided only now that `snap` is final: the schedule reads the snapshot's
+        // own session phase (a holiday or a half day the server has already called closed).
+        let reload = WidgetRefreshSchedule.nextRefresh(
+            after: now, marketSession: snap?.marketSession, builtAt: snap?.asOf
+        )
+        // SEVERAL entries over ONE snapshot — they buy an honest, self-ageing LABEL, not new
+        // data. The day rollover is ET 00:01; see `WidgetRefreshSchedule.renderDates`.
+        let dates = WidgetRefreshSchedule.renderDates(now: now, reload: reload)
+
         let signedOut = WidgetAPIConfig.widgetToken == nil
 
         // ONE MORE RENDER, AT THE INSTANT THE LABEL STARTS SPEAKING. During regular hours
-        // `dates` is just [now] (the 20-minute reload replaces the rest), so a snapshot crossed
-        // its 45-minute "As of 10:05 AM ET" line only at a reload built after it — up to a
-        // reload interval late, and indefinitely late when WidgetKit deferred one. Decided
-        // here, after the fetch, because only now is `snap` final. NOT filtered against the
+        // `dates` is just [now, next ET 00:01] (the 20-minute reload replaces the rest), so a
+        // snapshot crossed its 45-minute "As of 10:05 AM ET" line only at a reload built after
+        // it — up to a reload interval late, and indefinitely late when WidgetKit deferred one.
+        // Decided here, after the fetch, because only now is `snap` final. NOT filtered against the
         // reload: an entry past it costs nothing (a reload that runs replaces the timeline)
         // and is exactly what a deferred one needs.
         var entryDates: [Date] = dates
@@ -188,10 +263,20 @@ struct MoversProvider: AppIntentTimelineProvider {
     /// Holdings used to fall back to the market snapshot when it had none — so an emptied
     /// group, a new account or a signed-out device showed market movers under "My
     /// Holdings". A Holdings tile with no Holdings snapshot now says so instead.
+    ///
+    /// ⚠️ AND THE HOLDINGS SLOT RENDERS ONLY FOR ITS OWN ACCOUNT. Two processes now write it, and
+    /// a check-then-set across processes can leave a slot behind after an account switch; the
+    /// widget token names the account signed in now (its `sub`), so a slot owned by anyone else
+    /// — or by nobody — is not shown.
     private func snapshot(for mode: MoversMode) -> WidgetMoverSnapshot? {
         let envelope = WidgetSnapshotStore.read()
         switch mode {
         case .portfolio:
+            guard let token = WidgetAPIConfig.widgetToken,
+                  let subject = WidgetAPIConfig.jwtSubject(of: token),
+                  let owner = WidgetSnapshotStore.portfolioOwner(),
+                  owner.lowercased() == subject.lowercased()
+            else { return nil }
             return envelope?.portfolio
         case .market:
             return envelope?.market
@@ -219,6 +304,9 @@ struct MoversWidget: Widget {
             .systemSmall, .systemMedium, .systemLarge,
             .accessoryRectangular, .accessoryInline,
         ])
+        // iOS 26+: lets the server's data-free WidgetKit push ask for a timeline. A no-op below
+        // 26 (see `caydexPushHandler()` in MoversPushHandler.swift).
+        .caydexPushHandler()
     }
 }
 
@@ -1200,9 +1288,10 @@ private struct CauseView: View {
 /// Says when the data is from, so "−4.8%" is never mistaken for live.
 ///
 /// Derived at RENDER time from `session_date` (see `WidgetSessionLabel`) rather than read
-/// from the frozen `market_session` string. Holdings cannot fetch for itself, so a stored
-/// wording decays with nothing to update it: this footer used to render nothing during
-/// regular hours and "After hours" all weekend.
+/// from the frozen `market_session` string. A stored wording decays with nothing to update it:
+/// this footer used to render nothing during regular hours and "After hours" all weekend.
+/// Both modes fetch for themselves now, but a fetch can fail, be deferred by WidgetKit or be
+/// refused — and this footer is what says so ("As of …").
 private struct SessionFooter: View {
     let snapshot: WidgetMoverSnapshot
     /// Supplied by the timeline entry, so each entry re-derives against ITS date.

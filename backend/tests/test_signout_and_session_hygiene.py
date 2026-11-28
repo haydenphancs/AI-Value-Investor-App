@@ -30,6 +30,14 @@ person to use the device:
    `Mutex` — and only then moves the identity; `finishSignOut(_:)` sends the two calls with the
    captured token passed explicitly (`APIClient.requestAuthenticated(as:)`), never re-arming.
 
+6. **The widget's Holdings key outlived the session's first instant** (2026-11-27, migration 216).
+   The CaydexWidgets extension refreshes the Holdings tile with a per-device grant key, and uses
+   a key only while the App Group's MARKER names it. `WidgetRefreshService.clearForEndedSession()`
+   removes that marker SYNCHRONOUSLY, right after its epoch bump and BEFORE it clears the market
+   widget token and the snapshots (whose clear reloads the timelines): a reload landing between
+   them would otherwise fetch the ended account's holdings with a key that is still live. The key
+   itself is then revoked by key and deleted off main (`test_ios_widget_holdings_grant_app.py`).
+
 Backend tests cover (1)'s server half directly; the iOS halves are pinned by source parity,
 which is the only mechanism available (there is no iOS test target). The (5) guards strip
 comments, brace-bound every scan, and are mutation-tested in memory on every pass
@@ -156,6 +164,8 @@ _AUTH_SERVICE = _IOS / "Core" / "Services" / "AuthService.swift"
 _CLIENT = _IOS / "Core" / "Services" / "APIClient.swift"
 _PUSH = _IOS / "Core" / "Services" / "PushNotificationManager.swift"
 _REPO_SWIFT = _IOS / "Core" / "Repositories" / "AccountRepository.swift"
+_WIDGET = _IOS / "Core" / "Services" / "WidgetRefreshService.swift"
+_WIDGET_CLEAR = "func clearForEndedSession()"
 
 _APP_SIGN_OUT = "func signOut() {"
 _BEGIN = "func beginSignOut() -> SignOutHandoff"
@@ -435,6 +445,31 @@ def test_keychain_is_cleared_before_the_awaited_logout_call():
     assert "clearToken()" in begin, "the durable token clear still sits after the network round-trip"
 
 
+def test_the_widget_grant_marker_goes_first_at_session_end():
+    """(6) The Holdings grant marker is the extension's licence to use its key: it goes right after
+    the epoch bump, synchronously, before anything else the session end touches — above all
+    before the widget token and the snapshots, whose clears reload the timelines."""
+    body = _block(_code(_WIDGET), _WIDGET_CLEAR)
+    assert "WidgetAPIConfig.clearWidgetToken()" in body and "WidgetSnapshotStore.clearAll()" in body, (
+        "not WidgetRefreshService.clearForEndedSession — re-derive this scan")
+    marker = re.search(r"\bWidgetHoldingsGrant\.removeMarker\(\)", body)
+    assert marker, (
+        "clearForEndedSession no longer removes the Holdings grant marker — the extension keeps "
+        "fetching the ended account's holdings with a live key")
+    bump = re.search(r"sessionEpoch\s*&\+=\s*1\s*\n", body)
+    assert bump and re.match(r"\s*(?:let\s+\w+\s*=\s*)?WidgetHoldingsGrant\.removeMarker\(\)",
+                             body[bump.end():]), (
+        "the Holdings grant marker is not removed right after the session epoch bump — every "
+        "statement in between runs with the ended account's key still presented to the extension")
+    for later in ("WidgetAPIConfig.clearWidgetToken()", "WidgetSnapshotStore.clearAll()",
+                  "inFlight?.cancel()", "sessionOpen = false"):
+        assert marker.start() < body.index(later), (
+            f"the Holdings grant marker is removed after `{later}` — a timeline reload in between "
+            "fetches the ended account's holdings with a key that is still live")
+    assert not _AWAIT.search(body) and "Task" not in body[: marker.start()], (
+        "clearForEndedSession suspends or defers the marker removal — it must be synchronous")
+
+
 def test_transient_launch_failure_disarms_the_client_token():
     """The UI renders a guest; the wire identity must agree, or writes land on the real account."""
     src = _read("Core/State/AppState.swift")
@@ -504,6 +539,9 @@ _T_EXPLICIT = test_finish_signout_sends_the_detach_and_logout_with_the_ended_tok
 _T_TRANSPORT = test_the_explicit_token_transport_never_touches_the_shared_session
 _T_BACKSTOP = test_finish_signout_keeps_the_rearm_backstop
 _T_KEYCHAIN = test_keychain_is_cleared_before_the_awaited_logout_call
+_T_GRANT_MARKER = test_the_widget_grant_marker_goes_first_at_session_end
+_W_MARKER = f"{_I8}let endedGrantFingerprint = WidgetHoldingsGrant.removeMarker()\n"
+_W_SLOTS = f"{_I8}WidgetSnapshotStore.clearAll()\n"
 
 # (name, file, ((old, new), ...), guard, message the guard must fail with)
 _MUTATIONS = [
@@ -592,6 +630,13 @@ _MUTATIONS = [
     ("keychain-after-logout", _AUTH_SERVICE,
      ((_B_CLEAR, ""), (_F_BACKSTOP, f"{_I8}clearToken()\n{_F_BACKSTOP}")),
      _T_KEYCHAIN, "the durable token clear still sits after the network round-trip"),
+    ("grant-marker-after-slots", _WIDGET, ((_W_MARKER, ""), (_W_SLOTS, f"{_W_SLOTS}{_W_MARKER}")),
+     _T_GRANT_MARKER, "is not removed right after the session epoch bump"),
+    ("grant-marker-kept", _WIDGET, ((_W_MARKER, f"{_I8}let endedGrantFingerprint: String? = nil\n"),),
+     _T_GRANT_MARKER, "clearForEndedSession no longer removes the Holdings grant marker"),
+    ("grant-marker-deferred", _WIDGET,
+     ((_W_MARKER, f"{_I8}let endedGrantFingerprint: String? = nil\n{_I8}Task {{ WidgetHoldingsGrant.removeMarker() }}\n"),),
+     _T_GRANT_MARKER, "is not removed right after the session epoch bump"),
 ]
 
 
@@ -621,7 +666,7 @@ def test_each_mutation_is_killed(monkeypatch, name, path, edits, guard, message)
 def test_the_mutation_table_covers_every_signout_guard():
     covered = {m[3] for m in _MUTATIONS}
     for guard in (_T_APP, _T_BEGIN, _T_DISARM, _T_SLOT, _T_REARM, _T_EXPLICIT, _T_TRANSPORT,
-                  _T_BACKSTOP, _T_KEYCHAIN):
+                  _T_BACKSTOP, _T_KEYCHAIN, _T_GRANT_MARKER):
         assert guard in covered, f"{guard.__name__} has no mutation in _MUTATIONS"
 
 

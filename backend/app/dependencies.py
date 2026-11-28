@@ -4,6 +4,7 @@ Auth, rate limiting, and utility dependencies.
 """
 
 import asyncio
+from dataclasses import dataclass
 from typing import Optional
 from datetime import datetime, timezone
 import uuid
@@ -23,6 +24,7 @@ from app.core.security import (
 )
 from app.api.error_response import ErrorCode, auth_error
 from app.config import settings
+from app.services import widget_holdings_grant_service as holdings_grants
 
 logger = logging.getLogger(__name__)
 
@@ -255,8 +257,12 @@ async def get_widget_caller(
 ) -> str:
     """Resolve the caller of the widget's market-data route: a session OR a widget token.
 
-    ⚠️ **This is the only dependency in the app that accepts a non-session credential, and it
-    must stay attached to exactly one route.** `tests/test_widget_token_auth.py` pins that.
+    ⚠️ **One of exactly TWO dependencies that accept a non-session credential, and it must stay
+    attached to exactly one route** (`/widget/market-mover`). The other is
+    `get_holdings_grant_caller` below — a DIFFERENT credential (an opaque, server-revocable
+    Holdings grant, migration 216) on a different header and a third router. The market widget
+    token must never gain a holdings scope. `tests/test_widget_token_auth.py` pins both
+    allow-lists.
 
     Why it exists: `CaydexWidgets` is a separate process with no credential and no way to refresh
     one, but the route it calls serves FMP data, which End-User Display Rights permit only
@@ -298,6 +304,144 @@ async def get_widget_caller(
         ErrorCode.AUTH_REQUIRED,
         message=f"No authentication credential presented for {route}",
     )
+
+
+# ── The Holdings widget grant (migration 216) ──────────────────────────────────────────────
+#
+# The header the Home Screen extension sends its HOLDINGS key in. Its own header — never
+# `Authorization`, never the market widget token's — so no route can accept it by accident just
+# because it reads a bearer, and the key can never be mistaken for either other credential.
+# `frontend/ios/Shared/WidgetAPIConfig.swift` `holdingsTokenHeader` must equal it.
+HOLDINGS_GRANT_HEADER = "X-Caydex-Holdings-Token"
+
+#: Per-source-address bound, BEFORE any database read, on the holdings router. Raised from 120
+#: because woken extensions share carrier NAT; the per-grant limiter is the real bound (a 256-bit
+#: key cannot be guessed, so this only caps the cost of a garbage-key flood).
+HOLDINGS_GRANT_IP_LIMIT = 300
+HOLDINGS_GRANT_IP_WINDOW_SECONDS = 60
+
+_HOLDINGS_SESSION_ENDED_COPY = "Open Caydex to load your holdings."
+
+
+@dataclass(frozen=True)
+class HoldingsGrantCaller:
+    """Who a Holdings grant belongs to. The user comes from the GRANT ROW, never a header."""
+    user_id: str
+    grant_id: str
+
+
+def _holdings_refusal(code: ErrorCode, *, route: str, why: str, key: str = "") -> HTTPException:
+    """Log (WARNING, never the key) and build one holdings-grant refusal (auth.md §3)."""
+    logger.warning(
+        "widget holdings: refused on %s — %s (%s)%s",
+        route, code.value, why, f" key={key}" if key else "",
+    )
+    return auth_error(
+        code,
+        message=f"Holdings grant refused on {route}: {why}",
+        user_message=_HOLDINGS_SESSION_ENDED_COPY if code != ErrorCode.AUTH_REQUIRED else None,
+    )
+
+
+async def get_holdings_grant_caller(
+    request: Request = None,
+    x_holdings_token: Optional[str] = Header(None, alias=HOLDINGS_GRANT_HEADER),
+    supabase: Client = Depends(get_supabase),
+) -> HoldingsGrantCaller:
+    """Resolve the caller of the Holdings widget routes from the device's grant key.
+
+    The router dependency of `widget.widget_holdings_router` — exactly two routes,
+    `GET /widget/holdings-mover` and `POST /widget/holdings-grant/revoke`. It takes NO
+    `HTTPBearer` and never reads `Authorization`: a session bearer alongside changes nothing, and
+    the grant row alone decides the user. It also NEVER reads `WIDGET_HOLDINGS_GRANTS_ENABLED`
+    (that switch sits on the data route only), so a device can always revoke its key — and it
+    never calls `_decode_access_token` / `_reject_if_password_changed_since_issue`: liveness and
+    eviction are decided by migration 216's ONE SQL predicate, never by the fail-open Python
+    helper (`tests/test_widget_holdings_grant_auth.py` scans this body for all three).
+
+      1. no header (or blank)       → 401 AUTH_REQUIRED (first: the licence gate's contract)
+      2. not `cwh1_` + 43 base64url → 401 AUTH_TOKEN_INVALID, no database read
+      3. per-IP bound               → 429, before any database read
+      4. `check_widget_holdings_grant`:
+           unknown                           → 401 AUTH_TOKEN_INVALID
+           revoked / expired / evicted       → 401 AUTH_SESSION_EXPIRED
+           account_missing                   → 401 AUTH_ACCOUNT_NOT_FOUND
+           a store error, schema missing, an
+           unusable answer                   → 503 AUTH_UNAVAILABLE (ERROR, with the stack)
+
+    The client's "key refused" allow-list is exactly {AUTH_TOKEN_INVALID, AUTH_SESSION_EXPIRED,
+    AUTH_ACCOUNT_NOT_FOUND}; anything else keeps the tile's last snapshot.
+    """
+    route = _route_of(request)
+    presented_token = (x_holdings_token or "").strip()
+    if not presented_token:
+        raise _holdings_refusal(ErrorCode.AUTH_REQUIRED, route=route, why="no holdings key")
+
+    if not holdings_grants.is_well_formed(presented_token):
+        raise _holdings_refusal(ErrorCode.AUTH_TOKEN_INVALID, route=route, why="malformed key")
+
+    if not rate_limiter.is_allowed(
+        f"widget_holdings_ip:{trusted_client_ip(request)}",
+        HOLDINGS_GRANT_IP_LIMIT, HOLDINGS_GRANT_IP_WINDOW_SECONDS,
+    ):
+        logger.warning("widget holdings: per-IP limit reached on %s", route)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded. Please try again later.",
+            headers={"Retry-After": str(HOLDINGS_GRANT_IP_WINDOW_SECONDS)},
+        )
+
+    hashed = holdings_grants.key_hash(presented_token)
+    label = holdings_grants.hash_label(hashed)
+    try:
+        result = await asyncio.to_thread(holdings_grants.check, supabase, hashed)
+    except Exception as e:  # noqa: BLE001 — every store failure is a 503, never "allowed"
+        logger.error(
+            "widget holdings: grant check failed on %s key=%s (%s: %s) — 503",
+            route, label, type(e).__name__, e, exc_info=True,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"Holdings grant check unavailable on {route}: {type(e).__name__}",
+        )
+
+    if result.status == "live" and result.user_id and result.grant_id:
+        return HoldingsGrantCaller(user_id=result.user_id, grant_id=result.grant_id)
+    if result.status == "unknown":
+        raise _holdings_refusal(
+            ErrorCode.AUTH_TOKEN_INVALID, route=route, why="unknown key", key=label,
+        )
+    if result.status in ("revoked", "expired", "evicted"):
+        raise _holdings_refusal(
+            ErrorCode.AUTH_SESSION_EXPIRED, route=route, why=f"grant {result.status}", key=label,
+        )
+    if result.status == "account_missing":
+        raise _holdings_refusal(
+            ErrorCode.AUTH_ACCOUNT_NOT_FOUND, route=route, why="account missing", key=label,
+        )
+    logger.error(
+        "widget holdings: grant check answered %r on %s key=%s — 503",
+        result.status, route, label,
+    )
+    raise auth_error(
+        ErrorCode.AUTH_UNAVAILABLE,
+        message=f"Holdings grant check answered {result.status!r} on {route}",
+    )
+
+
+async def require_holdings_grants_enabled() -> None:
+    """503 AUTH_UNAVAILABLE while `WIDGET_HOLDINGS_GRANTS_ENABLED` is off.
+
+    On the DATA route only (`GET /widget/holdings-mover`), never on the holdings router: a
+    router-level dependency runs for every route, so the switch there would 503 the revoke and
+    leave an offline sign-out's grant alive. Read at call time (a restart applies a change).
+    """
+    if not settings.WIDGET_HOLDINGS_GRANTS_ENABLED:
+        logger.info("widget holdings: the grants switch is off — 503")
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message="Holdings widget grants are switched off (WIDGET_HOLDINGS_GRANTS_ENABLED)",
+        )
 
 
 def _latest_eviction_stamp(user_row: dict) -> tuple[Optional[str], Optional[str]]:
@@ -944,6 +1088,45 @@ class WidgetRateLimitChecker:
 # anything the extension can legitimately produce; the window exists to bound a stolen token, not
 # to shape normal traffic.
 WidgetRateLimit = Depends(WidgetRateLimitChecker(60, 60))
+
+
+class WidgetHoldingsRateLimitChecker:
+    """Per-GRANT sliding window for `GET /widget/holdings-mover` (migration 216).
+
+    ⚠️ Never a `UserIdRateLimitChecker`: that one depends on `get_current_user_id`, which would
+    401 every extension call (the extension holds no session) — the trap recorded for the market
+    route in `tests/test_widget_token_auth.py`. It depends on `get_holdings_grant_caller` instead,
+    which FastAPI resolves once per request, and keys on the server's grant id, so two tiles on
+    one device share one window and a stolen key cannot spend its owner's other devices' budget.
+    The bucket `widget_holdings` is distinct from every other limiter's key space.
+    """
+
+    bucket = "widget_holdings"
+
+    def __init__(self, max_requests: int = 30, window_seconds: int = 60):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+
+    async def __call__(
+        self, caller: HoldingsGrantCaller = Depends(get_holdings_grant_caller),
+    ) -> None:
+        if not rate_limiter.is_allowed(
+            f"{self.bucket}:{caller.grant_id}", self.max_requests, self.window_seconds
+        ):
+            logger.warning(
+                "widget holdings: per-grant limit reached grant=%s user=%s",
+                caller.grant_id, caller.user_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Rate limit exceeded. Please try again later.",
+                headers={"Retry-After": str(self.window_seconds)},
+            )
+
+
+# WidgetKit refreshes a tile ~35 times on a weekday plus ≤ 12 pushes; 30/min per grant is far
+# above that and bounds a stolen key.
+WidgetHoldingsRateLimit = Depends(WidgetHoldingsRateLimitChecker(30, 60))
 
 # Analytics gets its OWN bucket. Sharing StandardRateLimit's window would let a burst
 # of telemetry flushes 429 the user's REAL requests — instrumentation degrading the

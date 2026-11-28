@@ -31,6 +31,14 @@ Insights card named the fall): established causes only, drawn whole or dropped, 
 is short the TAG gives way first, then the note (owner decisions "Headline + context" and
 "Drop the tag").
 
+2026-11-27 (the Holdings grant + WidgetKit push) adds: section 9 now reads EVERY Swift file under
+`CaydexWidgets/` (`test_every_extension_file_is_scanned` keeps the list honest) and forbids the
+APP's grant calls there (mint, store, mark, sweep, delete, revoke); section 18 pins the iOS 26 push
+handler — attached to the widget, behind `#available` with the configuration returned unchanged
+below 26, and a file that only logs (a helper elsewhere in it is caught too, not just the
+callback's body). The grant itself is `test_ios_widget_holdings_grant.py`; the ET 00:01 rollover
+that guard 10's schedule half relies on is `test_ios_widget_schedule_footer.py`.
+
 There is no XCTest target, so these are pinned from Python by reading the Swift. Per
 `.claude/rules/testing.md` §3 every scan strips comments first and is brace-bound to the
 declaration it means. Rule 3 (mutation-test by hand) is EXECUTABLE here: each guard is a pure
@@ -55,6 +63,8 @@ _IOS = _REPO / "frontend" / "ios"
 _PATHS = {
     "widget": _IOS / "CaydexWidgets" / "MoversWidget.swift",
     "intent": _IOS / "CaydexWidgets" / "MoversConfigurationIntent.swift",
+    "push": _IOS / "CaydexWidgets" / "MoversPushHandler.swift",
+    "bundle": _IOS / "CaydexWidgets" / "CaydexWidgetsBundle.swift",
     "store": _IOS / "Shared" / "WidgetSnapshotStore.swift",
     "fetcher": _IOS / "Shared" / "WidgetMarketFetcher.swift",
     "schedule": _IOS / "Shared" / "WidgetRefreshSchedule.swift",
@@ -187,7 +197,7 @@ def _problems_token_recheck(src: dict[str, str]) -> list[str]:
         problems.append("the entries are not rebuilt as signed-out when the token went away")
 
     ext = _block(src["store"], "public static func writeFromExtension(")
-    if "fromExtension: true" not in ext or not re.search(r"guard\s+mode\s*==\s*\.market\b", ext):
+    if "fromExtension: true" not in ext or not re.search(r"guard\s+mode\s*==\s*\.market\s+else\b", ext):
         problems.append("writeFromExtension no longer fences its writes (market only, token check)")
     market = _block(src["store"], "private static func writeMarket(")
     fence = re.search(r"if\s+fromExtension\s*,\s*WidgetAPIConfig\.widgetToken\s*==\s*nil", market)
@@ -447,11 +457,31 @@ def _problems_privacy(src: dict[str, str]) -> list[str]:
 
 # ── 9. The extension writes only the market slot, and never manages the session ──────
 
+_EXTENSION_DIR = _IOS / "CaydexWidgets"
+
+# What only the APP may do: write a slot the ordinary way, clear the store, manage the widget
+# token, and mint / store / mark / sweep / delete / revoke a Holdings grant (the extension has its
+# own fenced Holdings write and drop, and its refusal note).
+_EXTENSION_NEVER = (
+    "WidgetSnapshotStore.write(", "clearAll(", "clearPortfolio(", "migrateLegacyIfNeeded(",
+    "publishWidgetToken", "clearWidgetToken",
+    "WidgetHoldingsGrant.store(", "WidgetHoldingsGrant.setMarker(", "WidgetHoldingsGrant.removeMarker(",
+    "WidgetHoldingsGrant.pendingKeys(", "WidgetHoldingsGrant.delete(", "requestOnNextRefresh",
+    "WidgetHoldingsFetcher.revoke(",
+)
+
+
+def _extension_keys() -> list[str]:
+    """Every `_PATHS` entry that is a Swift file of the extension target."""
+    return sorted(k for k, p in _PATHS.items() if p.parent == _EXTENSION_DIR and p.suffix == ".swift")
+
+
 def _problems_extension_writes(src: dict[str, str]) -> list[str]:
     problems = []
-    code = _strip_comments(src["widget"]) + _strip_comments(src["intent"])
-    for call in ("WidgetSnapshotStore.write(", "clearAll(", "clearPortfolio(",
-                 "migrateLegacyIfNeeded(", "publishWidgetToken", "clearWidgetToken"):
+    # EVERY extension file, not two named ones: a call placed in a new file (the push handler
+    # was the first) used to be invisible to this scan.
+    code = "\n".join(_strip_comments(src[k]) for k in _extension_keys())
+    for call in _EXTENSION_NEVER:
         if call in code:
             problems.append(f"the extension calls {call} — only the app may")
     for m in re.finditer(r"writeFromExtension\(mode:\s*\.(\w+)", code):
@@ -474,7 +504,8 @@ def _problems_render_dates(src: dict[str, str]) -> list[str]:
         problems.append("renderDates no longer rolls over on the ET calendar")
 
     # The render at the instant the "As of" label starts speaking (2026-09-30 review): during
-    # regular hours `dates` is [now] alone, so without it the label waited for a reload.
+    # regular hours `dates` is [now, next ET 00:01] (since 2026-11-27; [now] alone before), so
+    # without it the label waited for a reload.
     fetch = timeline.find("WidgetMarketFetcher.fetchMarket()")
     boundary = timeline.find("WidgetSessionLabel.ageBoundary(")
     if boundary == -1 or fetch == -1 or boundary < fetch:
@@ -892,6 +923,68 @@ def _problems_cause_note(src: dict[str, str]) -> list[str]:
     return problems
 
 
+# ── 18. WidgetKit push (iOS 26+): attached, gated, and a handler that only logs ──────
+
+# Anything a push handler could use to fetch, write, read a credential or ask for a reload. The
+# WHOLE file is scanned, not the callback's body: a helper beside it would otherwise slip past.
+_PUSH_FILE_BANNED = re.compile(
+    r"\b(?:URLSession|URLRequest|WidgetMarketFetcher|WidgetHoldingsFetcher|WidgetHoldingsGrant|"
+    r"WidgetAPIConfig|WidgetSnapshotStore|WidgetSharedDefaults|UserDefaults|WidgetCenter|"
+    r"reloadTimelines|reloadAllTimelines|SecItem\w*)\b"
+)
+
+
+def _problems_push_handler(src: dict[str, str]) -> list[str]:
+    """The push is data-free: it only makes WidgetKit ask for the same timeline. The extension
+    holds no session, so the token upload is the APP's (`PUT /widget/push-token`); the handler
+    logs and nothing else. And the deployment target is still iOS 18: `pushHandler(_:)` is iOS 26
+    API, so it is reached only through `caydexPushHandler()`'s `#available` branch, and below 26
+    the configuration comes back unchanged."""
+    problems = []
+    widget = _block(src["widget"], "struct MoversWidget: Widget")
+    families = widget.find(".supportedFamilies(")
+    attach = widget.find(".caydexPushHandler()")
+    if attach == -1 or families == -1 or attach < families:
+        problems.append("MoversWidget no longer attaches the push handler (after .supportedFamilies)")
+    push = _strip_comments(src["push"])
+    every = "\n".join(_strip_comments(src[k]) for k in _extension_keys())
+    calls = list(re.finditer(r"\bpushHandler\(", every))
+    helper = re.search(r"func\s+caydexPushHandler\(\)\s*->\s*some\s+WidgetConfiguration\s*\{", push)
+    if not helper:
+        problems.append("caydexPushHandler() is gone from MoversPushHandler.swift")
+    else:
+        body = _balanced(push, helper.end() - 1)
+        gate = re.search(r"if\s+#available\(iOS\s+26(?:\.0)?\s*,\s*\*\)\s*\{", body)
+        if not gate:
+            problems.append(
+                "pushHandler(_:) is not behind `if #available(iOS 26.0, *)` — the iOS 18 target "
+                "would not build, or iOS 18-25 would lose the widget"
+            )
+        else:
+            branch = _balanced(body, gate.end() - 1)
+            rest = body[gate.end() - 1 + len(branch):]
+            if len(calls) != 1 or "pushHandler(MoversPushHandler.self)" not in branch:
+                problems.append(
+                    f"expected ONE pushHandler( call under CaydexWidgets/, inside the #available "
+                    f"branch; found {len(calls)}"
+                )
+            if not re.match(r"\s*else\s*\{\s*return\s+self\s*\}\s*\}\s*$", rest):
+                problems.append("below iOS 26 the configuration is not returned unchanged (`else { return self }`)")
+    if not re.search(
+        r"@available\(iOS\s+26(?:\.0)?\s*,\s*\*\)\s*nonisolated\s+struct\s+MoversPushHandler\s*:"
+        r"\s*WidgetPushHandler\b",
+        push,
+    ):
+        problems.append("MoversPushHandler is not `@available(iOS 26.0, *) nonisolated struct …: WidgetPushHandler`")
+    hit = _PUSH_FILE_BANNED.search(push)
+    if hit:
+        problems.append(f"MoversPushHandler.swift uses {hit.group(0)} — the handler only logs")
+    for m in re.finditer(r"\\\(([^)]*)\)", push):
+        if re.search(r"\bpushInfo\b|\.token\b", m.group(1)):
+            problems.append(f"the push token is interpolated: \\({m.group(1)})")
+    return problems
+
+
 _GUARDS: dict[str, Callable[[dict[str, str]], list[str]]] = {
     "token_recheck": _problems_token_recheck,
     "holdings_isolation": _problems_holdings_isolation,
@@ -910,6 +1003,7 @@ _GUARDS: dict[str, Callable[[dict[str, str]], list[str]]] = {
     "no_today_in_states": _problems_no_today_in_states,
     "rolling_ages_by_build_day": _problems_rolling_ages_by_build_day,
     "cause_note": _problems_cause_note,
+    "push_handler": _problems_push_handler,
 }
 
 
@@ -977,6 +1071,42 @@ _MUTATIONS: list[tuple[str, str, str, str]] = [
     ("extension_writes", "widget",
      "WidgetSnapshotStore.writeFromExtension(mode: .market, snapshot: fresh)",
      "WidgetSnapshotStore.write(mode: .market, snapshot: fresh)"),
+    # 2026-11-27 — section 9 now reads every extension file, and the grant is the app's to manage.
+    ("extension_writes", "push",
+     "    init() {}\n", "    init() { WidgetSnapshotStore.write(mode: .market, snapshot: .preview) }\n"),
+    ("extension_writes", "push",
+     "    init() {}\n", "    init() { WidgetHoldingsGrant.setMarker(\"x\") }\n"),
+    ("extension_writes", "widget",
+     "                        WidgetHoldingsGrant.noteRefused(grantAtFetch.fp)\n",
+     "                        WidgetHoldingsGrant.noteRefused(grantAtFetch.fp)\n"
+     "                        Task { _ = await WidgetHoldingsFetcher.revoke(grantAtFetch, reason: \"app_revoked\") }\n"),
+    ("token_recheck", "store",
+     "        guard mode == .market else {\n", "        guard mode == .market || mode == .portfolio else {\n"),
+    # 2026-11-27 — the push handler.
+    ("push_handler", "widget",
+     "        // iOS 26+: lets the server's data-free WidgetKit push ask for a timeline. A no-op below\n"
+     "        // 26 (see `caydexPushHandler()` in MoversPushHandler.swift).\n"
+     "        .caydexPushHandler()\n",
+     ""),
+    ("push_handler", "push",
+     "        if #available(iOS 26.0, *) {\n            return pushHandler(MoversPushHandler.self)\n"
+     "        } else {\n            return self\n        }\n",
+     "        return pushHandler(MoversPushHandler.self)\n"),
+    ("push_handler", "push",
+     "        } else {\n            return self\n        }\n",
+     "        } else {\n            return self.configurationDisplayName(\"x\")\n        }\n"),
+    ("push_handler", "push",
+     "@available(iOS 26.0, *)\nnonisolated struct MoversPushHandler",
+     "nonisolated struct MoversPushHandler"),
+    ("push_handler", "push", "    init() {}\n", "    init() { _ = URLSession.shared }\n"),
+    ("push_handler", "push",
+     "for \\(widgets.count, privacy: .public) widget(s)",
+     "for \\(pushInfo.token.count, privacy: .public) widget(s)"),
+    ("push_handler", "push",
+     "    func pushTokenDidChange(",
+     "    func upload() { WidgetCenter.shared.reloadAllTimelines() }\n\n    func pushTokenDidChange("),
+    ("push_handler", "widget",
+     "        .caydexPushHandler()\n", "        .caydexPushHandler()\n        .pushHandler(MoversPushHandler.self)\n"),
     ("render_dates", "widget",
      "let dates = WidgetRefreshSchedule.renderDates(now: now, reload: reload)",
      "let dates = [now, Calendar.current.date(byAdding: .minute, value: 20, to: now)!]"),
@@ -1221,6 +1351,17 @@ def test_the_signed_out_and_empty_states_name_themselves():
         assert phrase in holdings, f"the Holdings tile lost the {phrase!r} state"
     root = _block(_sources()["widget"], "private var homeContent: some View")
     assert root.index("entry.isSignedOut") < root.index("MarketView(")
+
+
+def test_every_extension_file_is_scanned():
+    """Section 9 reads the extension files `_PATHS` names. A new file under CaydexWidgets/ that is
+    not named there would be outside it — the gap the push handler opened (2026-11-27 review)."""
+    on_disk = {p.resolve() for p in _EXTENSION_DIR.glob("*.swift")}
+    named = {_PATHS[k].resolve() for k in _extension_keys()}
+    assert on_disk == named, (
+        f"CaydexWidgets/ Swift files not in _PATHS: {sorted(p.name for p in on_disk - named)}; "
+        f"named but missing: {sorted(p.name for p in named - on_disk)}"
+    )
 
 
 def test_the_scanner_helpers_are_not_vacuous():

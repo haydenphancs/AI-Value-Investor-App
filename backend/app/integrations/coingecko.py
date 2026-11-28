@@ -32,6 +32,10 @@ from app.utils.inflight import fail_shared_future
 
 logger = logging.getLogger(__name__)
 
+#: `/coins/markets`' largest page. Its DEFAULT page is 100 rows, applied even when `ids`
+#: names every coin wanted — see `CoinGeckoClient.get_markets(per_page=)`.
+MARKETS_MAX_PER_PAGE = 250
+
 
 # ── Typed failures ───────────────────────────────────────────────
 #
@@ -757,7 +761,11 @@ class CoinGeckoClient:
         )
 
     async def get_markets(
-        self, symbols: List[str], *, sparkline: bool = False
+        self,
+        symbols: List[str],
+        *,
+        sparkline: bool = False,
+        per_page: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """One call for many coins: price, 24h change, volume, 24h high/low, market cap —
         and, with `sparkline=True`, a 7-day hourly series (168 points) in the SAME call.
@@ -765,7 +773,24 @@ class CoinGeckoClient:
         Replaces the per-symbol quote fan-out. Ids resolve from the hardcoded map for the
         110 symbols we ship, so a batch of six normally costs exactly one HTTP request.
         Unresolvable symbols are dropped rather than failing the batch.
+
+        `per_page` (1..`MARKETS_MAX_PER_PAGE`) is sent ONLY when given. `/coins/markets`
+        pages its answer even when `ids` names every coin, and its default page holds 100
+        rows: a call naming 101+ ids silently loses the rest. The widget crypto board
+        (`price_service`, up to 250 ids a call) passes 250; every other caller asks for a
+        handful and keeps today's exact request. A value outside the range is a caller bug
+        and raises `ValueError` before any I/O (nothing sent, nothing billed).
         """
+        if per_page is not None:
+            if (
+                isinstance(per_page, bool)
+                or not isinstance(per_page, int)
+                or not 1 <= per_page <= MARKETS_MAX_PER_PAGE
+            ):
+                raise ValueError(
+                    f"get_markets: per_page must be an int in 1..{MARKETS_MAX_PER_PAGE}, "
+                    f"got {per_page!r}"
+                )
         ids: List[str] = []
         for sym in symbols:
             coin_id = await self.resolve_coin_id(sym)
@@ -773,15 +798,15 @@ class CoinGeckoClient:
                 ids.append(coin_id)
         if not ids:
             return []
-        rows = await self._make_request(
-            "coins/markets",
-            params={
-                "vs_currency": "usd",
-                "ids": ",".join(ids),
-                "price_change_percentage": "24h",
-                "sparkline": "true" if sparkline else "false",
-            },
-        )
+        params: Dict[str, Any] = {
+            "vs_currency": "usd",
+            "ids": ",".join(ids),
+            "price_change_percentage": "24h",
+            "sparkline": "true" if sparkline else "false",
+        }
+        if per_page is not None:
+            params["per_page"] = per_page
+        rows = await self._make_request("coins/markets", params=params)
         return rows if isinstance(rows, list) else []
 
     async def get_simple_prices(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:

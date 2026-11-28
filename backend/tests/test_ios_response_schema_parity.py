@@ -9,7 +9,8 @@ guard rail, not a nice-to-have." The decoder is a plain `JSONDecoder` with hand-
 dropping one, or letting one go null that Swift declares non-optional is an instant crash on
 that screen — sign-in, credits, or a completed purchase.
 
-⚠️ ALL TEN PAIRS AGREE TODAY. This module is REGRESSION INSURANCE, not a bug report. If a
+⚠️ ALL TWELVE PAIRS AGREE (the eleventh, the nested Holdings widget grant, and the twelfth, the
+widget push-token answer, since migration 216 lands with its backend). This module is REGRESSION INSURANCE, not a bug report. If a
 test here is red the first time you run it, the test is wrong — do not "fix" a correct backend
 to satisfy it.
 
@@ -71,7 +72,7 @@ class Pair:
         return f"{self.model}->{self.swift_struct}"
 
 
-# TEN pairs for nine models: `UserCreditsResponse` has TWO independent decoders for one
+# TWELVE pairs for eleven models: `UserCreditsResponse` has TWO independent decoders for one
 # endpoint. `CreditInfo` and `BackendCreditsResponse` are byte-identical shapes maintained in
 # two files — if either drifts, one of the two call paths breaks and the other does not. That
 # duplication is a latent bug in itself, and listing both is what makes it visible.
@@ -98,7 +99,29 @@ _PAIRS = (
     # `refund_confirmed` (migration 195) decides "Refunded N credits" vs "Refund pending".
     Pair("ResearchReportListItem", "app.schemas.research",
          "Core/Services/TaskPollingManager.swift", "BackendReportListItem"),
+    # The Holdings widget grant NESTED in `TokenResponse.widget_holdings_grant` (migration 216,
+    # 2026-11-27). Decoded LOSSILY inside `AuthResponse` (`try?`, pinned below), so drift here
+    # cannot fail a refresh — it silently stops every widget from self-refreshing, which is
+    # exactly the kind of failure nobody reports. `_NESTED_DTOS` ties the two pairs together.
+    Pair("WidgetHoldingsGrantOut", "app.schemas.auth",
+         "Core/Services/WidgetRefreshService.swift", "WidgetHoldingsGrantPayload"),
+    # `PUT /widget/push-token` (migration 216). `{stored, grant_usable}` decides whether the app
+    # keeps the grant (`{false, true}`: a store error, retry later) or re-mints it at once
+    # (`grant_usable: false`). A renamed key would decode-fail every upload — logged, never shown,
+    # so the widget silently never gets a push. `grantUsable` is deliberately Optional (pinned below).
+    Pair("WidgetPushTokenResponse", "app.schemas.widget",
+         "Core/Services/WidgetRefreshService.swift", "WidgetPushTokenResponse"),
 )
+
+# A Swift property whose type is ANOTHER paired DTO: Swift type → the backend model the field's
+# annotation must name. Compared by model, not skipped — an unmapped nested type would otherwise
+# be "compared as nothing", and `test_every_swift_type_is_one_we_can_compare` forces this entry.
+_NESTED_DTOS = {"WidgetHoldingsGrantPayload": "WidgetHoldingsGrantOut"}
+
+# A DTO that really has fewer than three fields, with its EXACT count: the anti-vacuity floor
+# below is per pair, so a parser gone blind on this one still fails (2 ≠ 0), and nothing else
+# loses the default floor of three.
+_SMALL_DTOS = {"WidgetPushTokenResponse": 2}
 
 _IDS = [f"{p.model}->{p.swift_struct}" for p in _PAIRS]
 
@@ -235,6 +258,15 @@ def _findings(wire: dict, props: dict[str, bool], keys: dict[str, str],
         if not is_opt and _may_be_null(wire[key]):
             out.append(f"`{key}` is nullable on the backend but non-Optional in Swift — "
                        f"a single null crashes this screen")
+        nested = _NESTED_DTOS.get(types.get(prop, ""))
+        if nested is not None:
+            ann = wire[key].annotation
+            base = next((a for a in get_args(ann) if a is not type(None)), ann)
+            if getattr(base, "__name__", None) != nested:
+                name = getattr(base, "__name__", str(base))
+                out.append(f"`{key}` is {name} on the backend, {types[prop]} (pairs with "
+                           f"{nested}) in Swift")
+            continue
         want = _SWIFT_TO_PY.get(types.get(prop, ""), None)
         if want is not None:
             ann = wire[key].annotation
@@ -292,8 +324,61 @@ def test_every_swift_type_is_one_we_can_compare(pair):
     """An unmapped base type must force a decision rather than be silently skipped — that is
     how a nested DTO would slip in and be compared as nothing."""
     body, props, _ = _parsed(pair)
-    unmapped = {_swift_type_base(body, p) for p in props} - set(_SWIFT_TO_PY)
+    unmapped = {_swift_type_base(body, p) for p in props} - set(_SWIFT_TO_PY) - set(_NESTED_DTOS)
     assert not unmapped, f"{pair.swift_struct}: unmapped Swift types {unmapped}"
+
+
+def test_every_nested_dto_is_itself_a_pair():
+    """A nested DTO is compared field by field only through its OWN pair; without one, the
+    nested mapping above would vouch for a struct nobody parses."""
+    paired = {(p.swift_struct, p.model) for p in _PAIRS}
+    for swift, model in _NESTED_DTOS.items():
+        assert (swift, model) in paired, f"{swift} -> {model} is nested but not in _PAIRS"
+
+
+_GRANT_DECODE = re.compile(
+    r"let\s+(\w+)\s*=\s*try\?\s*container\.decodeIfPresent\(\s*WidgetHoldingsGrantPayload\.self\s*,"
+    r"\s*forKey:\s*\.widgetHoldingsGrant\s*\)")
+
+
+def test_the_widget_grant_is_the_only_lossy_field_of_the_token_response():
+    """`AuthResponse` decodes the refresh answer, and tokens are saved only after it decodes. A
+    grant that throws would turn a ROTATED refresh into a "failed" one: the app keeps the retired
+    refresh token, and its next use outside the 120 s grace window is reuse — the server ends
+    the session (auth.md §8b). So the grant is `try?` and assigned from that, and every OTHER
+    field stays strict (a `try?` there would invent a session out of a broken answer)."""
+    src = _code(_IOS / "Core/Services/AuthService.swift")
+    m = re.search(r"extension[ \t]+AuthResponse[ \t]*:[ \t]*Decodable[ \t]*\{", src)
+    assert m, "AuthResponse no longer hand-rolls its decoder in `extension AuthResponse: Decodable`"
+    body = _struct_body(src[m.start():].replace("extension AuthResponse", "struct AuthResponse", 1),
+                        "AuthResponse")
+    assert body and "init(from decoder: Decoder)" in body, "not AuthResponse's init(from:)"
+    grant = _GRANT_DECODE.search(body)
+    assert grant, (
+        "the widget grant is not decoded with `try? container.decodeIfPresent(WidgetHoldingsGrantPayload"
+        ".self, forKey: .widgetHoldingsGrant)` — a malformed grant would fail the refresh carrying it")
+    assert re.search(rf"self\.widgetHoldingsGrant\s*=\s*{grant.group(1)}\b", body), (
+        "widgetHoldingsGrant is not assigned from the lossy decode")
+    # Every token answer now carries `"widget_holdings_grant": null` (and an older backend none):
+    # both are the normal "no grant", so the drift ERROR may fire only for a key that is PRESENT
+    # and NOT null — else it logs on every sign-in and refresh and buries real contract drift.
+    drift = re.search(
+        rf"if\s+{grant.group(1)}\s*==\s*nil\s*,\s*container\.contains\(\s*\.widgetHoldingsGrant\s*\)\s*,"
+        r"\s*\(\s*try\?\s*container\.decodeNil\(\s*forKey:\s*\.widgetHoldingsGrant\s*\)\s*\)\s*==\s*false\s*\{", body)
+    assert drift and ".error(" in body[drift.end(): body.find("}", drift.end())], (
+        "the undecodable-grant ERROR is no longer limited to a PRESENT, non-null grant — a `null` "
+        "(every token answer since migration 216) or an absent key would log an error on every refresh")
+    lossy = re.findall(r"\btry\?", body)
+    assert len(lossy) == 2 and "decodeNil(forKey: .widgetHoldingsGrant)" in body, (
+        f"AuthResponse.init(from:) has {len(lossy)} `try?` — only the grant decode and its "
+        "present-but-undecodable probe may be lossy; a session field must fail the call")
+    _, props, _ = _parsed(next(p for p in _PAIRS if p.swift_struct == "AuthResponse"))
+    for prop in props:
+        if prop == "widgetHoldingsGrant":
+            continue
+        how = "decodeIfPresent" if props[prop] else "decode"
+        assert re.search(rf"self\.{prop}\s*=\s*try\s+container\.{how}\(", body), (
+            f"AuthResponse.{prop} is no longer decoded strictly with `try container.{how}(`")
 
 
 def test_manual_decoders_agree_with_their_optionality():
@@ -335,6 +420,24 @@ def test_the_over_tolerant_trio_stays_over_tolerant():
         assert not _may_be_null(model.model_fields[f]), \
             f"{f} became nullable — the Swift side declares it Optional, so this is now SAFE, " \
             f"but the comment claiming the backend always sends it is wrong"
+
+
+def test_the_push_token_answer_reads_a_missing_grant_usable_as_usable():
+    """`WidgetPushTokenResponse.grantUsable` is `Bool?` against a backend-REQUIRED `grant_usable`,
+    on purpose: `false` makes the app throw its grant away and force a session rotation, so a
+    backend that ever omits the field must read as "usable", never push every device into a
+    re-mint. That holds only while EVERY read is the explicit `== false` — `!= true`, `?? false`
+    or `!` would each turn an absent field back into "unusable"."""
+    _, props, _ = _parsed(next(p for p in _PAIRS if p.swift_struct == "WidgetPushTokenResponse"))
+    assert props == {"stored": False, "grantUsable": True}, props
+    model = _model(next(p for p in _PAIRS if p.model == "WidgetPushTokenResponse"))
+    assert not _may_be_null(model.model_fields["grant_usable"]) and not _may_be_null(model.model_fields["stored"])
+    src = _code(_IOS / "Core/Services/WidgetRefreshService.swift")
+    reads = re.findall(r"[^\n]*\.grantUsable\b[^\n]*", src)
+    assert reads, "nothing reads grantUsable — the re-mint signal is dropped"
+    for line in reads:
+        assert re.search(r"\.grantUsable\s*==\s*false\b", line), (
+            f"`{line.strip()}` reads grantUsable other than `== false` — an absent field would mean 'unusable'")
 
 
 # ── Assumptions this module rests on ─────────────────────────────────────────
@@ -390,6 +493,7 @@ def test_endpoints_still_declare_these_response_models():
         "app/api/v1/endpoints/research.py": {"ResearchGenerationResponse", "ResearchStatusResponse",
                                              "ResearchReportListItem"},
         "app/api/v1/endpoints/billing.py": {"VerifyPurchaseResponse"},
+        "app/api/v1/endpoints/widget.py": {"WidgetPushTokenResponse"},
     }
     for rel, names in expected.items():
         src = (_REPO / "backend" / rel).read_text()
@@ -398,12 +502,13 @@ def test_endpoints_still_declare_these_response_models():
         assert not missing, f"{rel} no longer declares {missing}"
 
 
-def test_pair_table_covers_all_nine_models():
+def test_pair_table_covers_all_eleven_models():
     assert {p.model for p in _PAIRS} == {
         "TokenResponse", "SignUpResponse", "PasswordChangedResponse", "VerifyPurchaseResponse",
         "UserCreditsResponse", "UserResponse", "ResearchGenerationResponse",
-        "ResearchStatusResponse", "ResearchReportListItem"}
-    assert len(_PAIRS) == 10, "UserCreditsResponse has two decoders; both must stay listed"
+        "ResearchStatusResponse", "ResearchReportListItem", "WidgetHoldingsGrantOut",
+        "WidgetPushTokenResponse"}
+    assert len(_PAIRS) == 12, "UserCreditsResponse has two decoders; both must stay listed"
 
 
 def test_the_response_model_scan_reads_list_wrapped_models():
@@ -422,9 +527,10 @@ def test_swift_parser_finds_the_real_population():
     total = 0
     for pair in _PAIRS:
         _, props, _ = _parsed(pair)
-        assert len(props) >= 3, f"{pair.swift_struct}: only {len(props)} properties parsed"
+        floor = _SMALL_DTOS.get(pair.swift_struct, 3)
+        assert len(props) >= floor, f"{pair.swift_struct}: only {len(props)} properties parsed"
         total += len(props)
-    assert total >= 52, f"only {total} properties across all ten pairs — parser went blind"
+    assert total >= 59, f"only {total} properties across all twelve pairs — parser went blind"
 
 
 def test_the_struct_resolver_does_not_invent_structs():

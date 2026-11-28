@@ -1,22 +1,41 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DEBUG entitlements of the widget extension. RELEASE uses CaydexWidgets-Release.entitlements,
+  which REPLACES this file rather than extending it — add every new capability to BOTH (the
+  app's applesignin was once lost in exactly that split; see ios/ios-Release.entitlements).
+-->
 <plist version="1.0">
 <dict>
-	<!-- App Group — the ONLY thing this extension needs, and the only channel it has to
-	     the app. It performs no Keychain read and holds no SESSION.
+	<!-- WidgetKit push (iOS 26+, owner 2026-11-27: "Yes, add push too"). Apple: "Add the
+	     capability to use remote push notifications to your widget extension target." The
+	     server's data-free push only asks WidgetKit to rebuild the Movers timeline
+	     (MoversPushHandler.swift); it is sent to the APNs sandbox for a Debug build, hence
+	     `development` here and `production` in the Release file. The token is uploaded by the
+	     APP; this extension still holds no session.
 
-	     ⚠️ It DOES make one network call, as of 2026-09-07: `WidgetMarketFetcher` fetches
-	     `/widget/market-mover` so the tile stays fresh between app opens, authenticated with
-	     the market-scoped widget token the app publishes into this group. That token is not a
-	     session and cannot become one — the backend allow-lists `type == "access"` for bearers.
-	     The extension still needs no Keychain entitlement and no access group, which is what
-	     this file not growing a `keychain-access-groups` key is protecting.
+	     ⚠️ Requires Push Notifications on the App ID com.phan.caydex.CaydexWidgets in the
+	     Developer portal: without it a device build of this target FAILS TO SIGN. -->
+	<key>aps-environment</key>
+	<string>development</string>
+	<!-- App Group — the channel to the app, and (since 2026-11-27) the Keychain ACCESS GROUP of
+	     the one Holdings-grant item (`WidgetHoldingsGrant`), which an app group may serve as
+	     with no other entitlement. The extension holds no SESSION.
 
-	     Must be byte-identical to ios.entitlements, ios-Release.entitlements and
-	     `WidgetSharedConfig.appGroupIdentifier`, and registered on BOTH App IDs
-	     (com.phan.caydex and com.phan.caydex.CaydexWidgets) in the Developer portal.
-	     A mismatch is silent: UserDefaults(suiteName:) returns nil and the widget shows
-	     its placeholder forever, with nothing logged where anyone would look.
+	     It makes two kinds of request: `WidgetMarketFetcher` (the market-scoped widget token the
+	     app publishes into this group) and `WidgetHoldingsFetcher` (the per-device Holdings
+	     grant, read from that Keychain item). Neither is a session; the backend allow-lists
+	     `type == "access"` for bearers.
+
+	     ⚠️ NEVER add `keychain-access-groups` here or to the app. Its first entry would become a
+	     DEFAULT Keychain group, and listing the app's own group would hand this process the
+	     session's refresh token (auth.md §8). `test_ios_widget_holdings_grant.py` pins it.
+
+	     Must be byte-identical to ios.entitlements, ios-Release.entitlements,
+	     CaydexWidgets-Release.entitlements and `WidgetSharedConfig.appGroupIdentifier`, and
+	     registered on BOTH App IDs (com.phan.caydex and com.phan.caydex.CaydexWidgets) in the
+	     Developer portal. A mismatch is silent: UserDefaults(suiteName:) returns nil and the
+	     widget shows its placeholder forever, with nothing logged where anyone would look.
 	     `backend/tests/test_ios_widget_parity.py` fails the build if the copies drift. -->
 	<key>com.apple.security.application-groups</key>
 	<array>

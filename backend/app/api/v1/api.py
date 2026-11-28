@@ -62,6 +62,12 @@ api_router.include_router(widget.router, prefix="/widget", tags=["Widget"])
 api_router.include_router(
     widget.widget_client_router, prefix="/widget", tags=["Widget"]
 )
+# `/widget/holdings-mover` + `/widget/holdings-grant/revoke`: the extension's HOLDINGS calls,
+# authenticated ONLY by the per-device Holdings grant key (migration 216) — never a session or
+# the market widget token. See `widget.py`'s module docstring.
+api_router.include_router(
+    widget.widget_holdings_router, prefix="/widget", tags=["Widget"]
+)
 api_router.include_router(research.router, prefix="/research", tags=["Research"])
 api_router.include_router(crypto.router, prefix="/crypto", tags=["Crypto"])
 api_router.include_router(commodities.router, prefix="/commodities", tags=["Commodities"])

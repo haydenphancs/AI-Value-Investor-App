@@ -57,6 +57,8 @@ from app.dependencies import (
     SearchPickRateLimit,
     SearchTrendingRateLimit,
     StandardRateLimit,
+    WidgetHoldingsRateLimit,
+    WidgetHoldingsRateLimitChecker,
     WidgetRateLimit,
     WidgetRateLimitChecker,
     MarketFanoutRateLimit,
@@ -64,13 +66,15 @@ from app.dependencies import (
     UserIdRateLimitChecker,
 )
 
-# Every per-caller checker class in app/dependencies.py. `WidgetRateLimitChecker` is listed
-# explicitly because it is NOT a subclass of the other two; `IdentityOnlyRateLimitChecker` is
-# a subclass of `IdentityRateLimitChecker` and is listed anyway so the intent is legible.
+# Every per-caller checker class in app/dependencies.py. `WidgetRateLimitChecker` and
+# `WidgetHoldingsRateLimitChecker` are listed explicitly because neither is a subclass of the
+# other two; `IdentityOnlyRateLimitChecker` is a subclass of `IdentityRateLimitChecker` and is
+# listed anyway so the intent is legible.
 _LIMITER_CLASSES = (
     RateLimitChecker,
     IdentityRateLimitChecker,
     WidgetRateLimitChecker,
+    WidgetHoldingsRateLimitChecker,
     IdentityOnlyRateLimitChecker,
     UserIdRateLimitChecker,
 )
@@ -89,6 +93,12 @@ GUARDED_ROUTES = [
     (users, "upload_my_avatar", "router", AvatarRateLimit),
     (users, "delete_my_avatar", "router", AvatarRateLimit),
     (widget, "get_market_mover", "widget_client_router", WidgetRateLimit),
+    # The extension's HOLDINGS route (migration 216): its own per-GRANT limiter, on the THIRD
+    # router. Moved onto the strict `router` it would 401 every WidgetKit wake; given a
+    # `UserIdRateLimitChecker` it would 401 too (that one depends on a session).
+    (widget, "get_holdings_mover", "widget_holdings_router", WidgetHoldingsRateLimit),
+    # The app's widget push-token upload: strict router, its own per-account bucket.
+    (widget, "register_widget_push_token", "router", widget.WidgetPushTokenRateLimit),
     # F15-3: the Tracking feed fans out one FMP call per watchlist ticker (sparkline +
     # insider) on every cache miss, and every watchlist add costs a profile call and grows
     # that fan-out. Neither route carried a limiter; a scripted free account could burn
@@ -157,6 +167,7 @@ def _limiter_instances_on(func):
         RateLimitChecker(1, 60),
         IdentityRateLimitChecker("t-identity", 1, 60),
         WidgetRateLimitChecker(1, 60),
+        WidgetHoldingsRateLimitChecker(1, 60),
         IdentityOnlyRateLimitChecker("t-identity-only", 1, 60),
     ],
     ids=lambda c: type(c).__name__,
@@ -356,6 +367,24 @@ async def test_widget_limiter_refuses_per_caller_not_globally():
     checker = WidgetRateLimitChecker(1, 60)
     assert await _drive(lambda: checker(caller_id="a"), 2) == ["ok", (429, "60")]
     assert await _drive(lambda: checker(caller_id="b"), 1) == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_holdings_limiter_refuses_per_grant_not_per_account():
+    """The Holdings route (migration 216) buckets on the server's GRANT id: one device's tiles
+    share a window, and a stolen key exhausting its own window leaves the owner's other devices
+    (other grants of the same account) untouched."""
+    from app.dependencies import HoldingsGrantCaller
+
+    checker = WidgetHoldingsRateLimitChecker(1, 60)
+    a = HoldingsGrantCaller(user_id="u1", grant_id="g-a")
+    b = HoldingsGrantCaller(user_id="u1", grant_id="g-b")
+    assert await _drive(lambda: checker(caller=a), 2) == ["ok", (429, "60")]
+    assert await _drive(lambda: checker(caller=b), 1) == ["ok"]
+    # Its key space is its own: never the market widget's `widget:` prefix.
+    assert checker.bucket == "widget_holdings"
+    assert WidgetHoldingsRateLimit.dependency.max_requests == 30
+    assert WidgetHoldingsRateLimit.dependency.window_seconds == 60
 
 
 @pytest.mark.asyncio

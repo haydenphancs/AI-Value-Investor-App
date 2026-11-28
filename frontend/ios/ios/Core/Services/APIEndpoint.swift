@@ -102,7 +102,11 @@ enum APIEndpoint: Sendable {
     // MARK: - Auth
     case signIn(email: String, password: String)
     case signUp(email: String, password: String, displayName: String)
-    case refreshToken(refreshToken: String)
+    /// `POST /auth/refresh`. `widgetHoldingsGrant` asks the server to mint this device's Holdings
+    /// widget grant inside the rotation (migration 216): the ONLY place one is ever minted, so a
+    /// stolen access token alone can never become a 30-day credential. Encoded only when true —
+    /// a backend that predates the grant ignores the field, and so does every older build.
+    case refreshToken(refreshToken: String, widgetHoldingsGrant: Bool = false)
     /// `POST /auth/logout`. Carries the device's REFRESH token (migration 214) so the server can
     /// end exactly this session; nil sends no body (the server then uses the bearer's `sid`).
     case signOut(refreshToken: String?)
@@ -416,6 +420,11 @@ enum APIEndpoint: Sendable {
     /// Mints the market-scoped credential the `CaydexWidgets` extension authenticates with.
     /// The APP calls this; the extension only ever reads the result out of the App Group.
     case getWidgetToken
+    /// `PUT /widget/push-token`: the WidgetKit push token (iOS 26+) of the device holding Holdings
+    /// grant `grantId`, stored on that grant row so the sweeper can wake this tile. Uploaded by
+    /// the APP with its session — never by the extension, which holds no session (auth.md §8a).
+    /// A nil `token` clears it (the widget was removed, or WidgetKit has none).
+    case registerWidgetPushToken(grantId: String, token: String?, environment: String)
 
     // MARK: - Chat
     /// Daily-rotating starter questions for the empty chat state and the detail AI bars.
@@ -751,6 +760,8 @@ enum APIEndpoint: Sendable {
             return "/api/v1/widget/portfolio-mover"
         case .getWidgetToken:
             return "/api/v1/widget/token"
+        case .registerWidgetPushToken:
+            return "/api/v1/widget/push-token"
         case .enrichUpdatesNews:
             return "/api/v1/updates/news/enrich"
         case .getSentimentTrend:
@@ -884,7 +895,9 @@ enum APIEndpoint: Sendable {
              .activatePortfolio,
              .updateMySettings, .updateMyInvestorProfile,
              // PUT, not POST: the saved topic is a single-valued resource and this REPLACES it.
-             .setMoneyMoveBookmark:
+             .setMoneyMoveBookmark,
+             // PUT: the grant row holds ONE push token, and this replaces (or clears) it.
+             .registerWidgetPushToken:
             return .PUT
 
         case .registerDevice, .markNotificationsRead, .createPriceAlert:
@@ -1066,8 +1079,11 @@ enum APIEndpoint: Sendable {
         case .signUp(let email, let password, let displayName):
             return SignUpRequest(email: email, password: password, displayName: displayName)
 
-        case .refreshToken(let refreshToken):
-            return RefreshTokenRequest(refreshToken: refreshToken)
+        case .refreshToken(let refreshToken, let widgetHoldingsGrant):
+            // nil, not false, when the widget does not ask: the field is then absent on the wire.
+            return RefreshTokenRequest(
+                refreshToken: refreshToken, widgetHoldingsGrant: widgetHoldingsGrant ? true : nil
+            )
 
         case .signOut(let refreshToken):
             // No body at all when there is nothing to send: the server reads the bearer's `sid`.
@@ -1133,6 +1149,9 @@ enum APIEndpoint: Sendable {
         case .unregisterDevice(let token):
             // Same body shape; the backend reads only `token` and scopes the delete to the caller.
             return DeviceRegisterRequestBody(token: token, platform: "ios", environment: nil)
+
+        case .registerWidgetPushToken(let grantId, let token, let environment):
+            return WidgetPushTokenRequestBody(grantId: grantId, token: token, environment: environment)
 
         case .markNotificationsRead(let ids, let dedupKeys, let all):
             return MarkNotificationsReadRequestBody(ids: ids, dedupKeys: dedupKeys, all: all)
@@ -1401,7 +1420,15 @@ enum APIEndpoint: Sendable {
         // `get_widget_caller`. Do not weaken this to `.public` to "make the widget work" — the
         // widget does not come through here, and the route serves FMP data, which End-User
         // Display Rights forbid serving to an unauthenticated caller.
-        case .getWidgetMarketMover, .getWidgetPortfolioMover, .getWidgetToken:
+        //
+        // `.registerWidgetPushToken` belongs here for the same reason: the APP uploads the
+        // WidgetKit push token with its session (`PUT /widget/push-token` sits on the strict
+        // router). The Holdings grant's two routes (`/widget/holdings-mover`,
+        // `/widget/holdings-grant/revoke`) have NO case at all: the grant key authenticates them,
+        // `WidgetHoldingsFetcher` sends them outside this client, and the public list stays at
+        // eleven.
+        case .getWidgetMarketMover, .getWidgetPortfolioMover, .getWidgetToken,
+             .registerWidgetPushToken:
             return .signInRequired
 
         // The caller's own data. Was `.guestAllowed`, partitioned per install off `X-Guest-Id`
@@ -1597,8 +1624,33 @@ nonisolated struct SignUpRequest: Encodable, Sendable {
     let displayName: String
 }
 
+/// `widgetHoldingsGrant` is Optional so the synthesised encoder OMITS it (`encodeIfPresent`) unless
+/// the widget asked: the encoder's `.convertToSnakeCase` sends it as `widget_holdings_grant`.
 nonisolated struct RefreshTokenRequest: Encodable, Sendable {
     let refreshToken: String
+    var widgetHoldingsGrant: Bool? = nil
+}
+
+/// `PUT /widget/push-token`. Encoded by hand so a nil `token` goes out as an explicit JSON
+/// `null` (the server's "clear it"), never as an absent key — the backend model forbids unknown
+/// fields and must not have to guess what a missing one meant.
+nonisolated struct WidgetPushTokenRequestBody: Encodable, Sendable {
+    let grantId: String
+    let token: String?
+    let environment: String
+
+    enum CodingKeys: String, CodingKey {
+        case grantId = "grant_id"
+        case token
+        case environment
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(grantId, forKey: .grantId)
+        try container.encode(token, forKey: .token)
+        try container.encode(environment, forKey: .environment)
+    }
 }
 
 nonisolated struct LogoutRequest: Encodable, Sendable {

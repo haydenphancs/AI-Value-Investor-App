@@ -1505,11 +1505,15 @@ class InsightSweeper:
 
                 return card is not None
 
+        # The scopes whose card was STORED this pass (`_run` is True only then; a price-guard
+        # refusal, a failure or a raise is not) — the only ones a widget wake concerns.
+        stored: List[str] = []
         if admitted:
             results = await asyncio.gather(
                 *[_run(s, d) for s, d in admitted], return_exceptions=True
             )
             generated = sum(1 for r in results if r is True)
+            stored = [s for (s, _d), r in zip(admitted, results) if r is True]
 
         # 6b. A JUMPER's alert, whatever happened to its card — capped, cooling down,
         #     refused, claimed by another instance, out of budget, or not admitted this
@@ -1543,19 +1547,52 @@ class InsightSweeper:
                 corpora, scopes, now
             )
 
+        # 8. WidgetKit push wakes (iOS 26+) for the cards stored above — LAST, after the jump
+        #    alerts and enrichment, so a slow APNs never delays a card or an alert, and bounded
+        #    by WIDGET_PUSH_PASS_BUDGET_SECONDS so it never delays this summary or the next pass.
+        #    `asyncio.wait`, not `wait_for`: on a timeout `wait_for` waits for the cancelled task
+        #    to FINISH cancelling, so a wake that swallowed the cancellation would hold the pass.
+        widget_push = "-"
+        wake: Optional["asyncio.Task[Dict[str, Any]]"] = None
+        try:
+            budget = float(settings.WIDGET_PUSH_PASS_BUDGET_SECONDS)
+            wake = asyncio.ensure_future(self._wake_widgets(stored, phase))
+            done, _ = await asyncio.wait({wake}, timeout=budget)
+            if wake in done:
+                widget_push = self._widget_push_label(wake.result())
+            else:
+                self._park_widget_wake(wake)
+                widget_push = "timeout"
+                logger.warning(
+                    "widget push wake exceeded its %.0fs budget — cancelled; cards are stored "
+                    "and unsent wakes stay pending for the next pass", budget,
+                )
+        except asyncio.CancelledError:
+            if wake is not None:
+                wake.cancel()
+            raise
+        except Exception as e:
+            if wake is not None and not wake.done():
+                self._park_widget_wake(wake)
+            widget_push = "error"
+            logger.warning(
+                "widget push wake failed (%s: %s) — cards are stored; tiles fall back to "
+                "their timeline", type(e).__name__, e,
+            )
+
         logger.info(
             "Insight sweep (%s) scopes=%d generated=%d touched=%d deferred=%d "
             "enriched=%d enrich_deferred=%d prior_session=%d earnings_boosted=%d "
             "earnings_status=%d earnings_hot=%d jumpers=%d jump_alerts=%d "
             "extra_news=%d web=%s web_only=%d mwcb=%s market=%s active=%s phase=%s "
-            "reasons=%s",
+            "widget_push=%s reasons=%s",
             ("crypto " if crypto_only else "") + ("news+price" if refresh_news else "price"),
             len(scopes), generated, len(touches), dropped,
             enriched_rows, enrich_deferred, prior_session, boosted,
             len(statuses), sum(1 for v in hot.values() if v),
             len(jumpers), jump_alerts, extra_news, web_counts or "-", web_only, mwcb,
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
-            market_active, phase, dict(reasons.most_common(8)),
+            market_active, phase, widget_push, dict(reasons.most_common(8)),
         )
         return {
             "scopes": len(scopes), "generated": generated,
@@ -1564,6 +1601,51 @@ class InsightSweeper:
             "earnings_boosted": boosted,
             "earnings_status": len(statuses),
         }
+
+    # ── WidgetKit push wakes (iOS 26+) ────────────────────────────────
+
+    #: Wakes that outlived their budget: cancelled, never awaited, referenced here until they end
+    #: so a wake that ignores its cancellation is neither garbage-collected mid-run nor waited on.
+    _widget_wakes: "set[asyncio.Task[Any]]" = set()
+
+    async def _wake_widgets(self, scopes: List[str], phase: str) -> Dict[str, Any]:
+        """Wake the Movers widgets the cards stored this pass concern (spec §3 "Push").
+
+        Returns before ANY import while `WIDGET_PUSH_ENABLED` is off, so a sweep with the switch
+        off (and every test stub) touches neither APNs nor Supabase. Called once per pass — also
+        with no stored scope, which flushes the wakes coalesced on earlier passes. This is the ONLY
+        `generate_and_store` caller, so a card stored anywhere else would wake no widget.
+        """
+        if not settings.WIDGET_PUSH_ENABLED:
+            return {}
+        from app.services.widget_push_service import get_widget_push_service
+
+        return await get_widget_push_service().wake(scopes, phase)
+
+    @classmethod
+    def _park_widget_wake(cls, task: "asyncio.Task[Any]") -> None:
+        task.cancel()
+        cls._widget_wakes.add(task)
+
+        def _done(t: "asyncio.Task[Any]") -> None:
+            cls._widget_wakes.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("widget push wake ended after its budget with %s: %s",
+                               type(t.exception()).__name__, t.exception())
+
+        task.add_done_callback(_done)
+
+    @staticmethod
+    def _widget_push_label(result: Any) -> str:
+        """The sweep summary's `widget_push=` value: `-` (off), `skipped:<why>`, `error:<kind>`,
+        or `<accepted>/<due>`."""
+        if not isinstance(result, dict) or not result:
+            return "-"
+        if "skipped" in result:
+            return f"skipped:{result['skipped']}"
+        if "error" in result:
+            return f"error:{result['error']}"
+        return f"{result.get('accepted', 0)}/{result.get('due', 0)}"
 
     async def _refresh_news(self, scopes: List[str]) -> None:
         """Pull recent articles for every scope, bounded concurrency."""

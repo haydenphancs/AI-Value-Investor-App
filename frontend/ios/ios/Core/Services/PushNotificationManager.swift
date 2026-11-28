@@ -274,7 +274,7 @@ final class PushNotificationManager {
             pendingToken = token   // register once the user signs in
             return
         }
-        let environment = apnsEnvironment
+        let environment = Self.apnsEnvironment
         let epoch = registrationEpoch
         Task {
             do {
@@ -313,7 +313,11 @@ final class PushNotificationManager {
         }
     }
 
-    private var apnsEnvironment: String {
+    /// The APNs environment this build's entitlement registers in. `static` and `nonisolated`
+    /// so the widget's push-token upload (`WidgetRefreshService`) shares this ONE `#if DEBUG`
+    /// mapping with alert registration — both match the entitlement pairs (`aps-environment`
+    /// development in Debug, production in Release), for the app and the widget extension alike.
+    nonisolated static var apnsEnvironment: String {
         #if DEBUG
         return "sandbox"
         #else

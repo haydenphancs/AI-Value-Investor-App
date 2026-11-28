@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  RELEASE entitlements of the widget extension (TestFlight + App Store).
+
+  Split from CaydexWidgets.entitlements because `aps-environment` must differ per configuration,
+  exactly as the app's pair does: a Debug build's widget push token belongs to the APNs sandbox,
+  a distribution build's to production, and a token is valid only in the environment named here.
+  A `development` value in a TestFlight build makes every widget push fail silently.
+
+  EVERY OTHER ENTITLEMENT MUST BE DUPLICATED HERE. This file is not a delta over
+  CaydexWidgets.entitlements — it REPLACES it for Release. A capability present only in Debug is
+  absent from every shipped build (the app lost `applesignin` that way once). Add new
+  capabilities to BOTH files. `backend/tests/test_ios_widget_parity.py` pins the pair and the
+  project's per-configuration paths.
+
+  ⚠️ NEVER add `keychain-access-groups` (see the Debug file and WidgetHoldingsGrant.swift).
+-->
+<plist version="1.0">
+<dict>
+	<!-- WidgetKit push, production APNs. Requires Push Notifications on the App ID
+	     com.phan.caydex.CaydexWidgets in the Developer portal, or the build fails to sign. -->
+	<key>aps-environment</key>
+	<string>production</string>
+	<!-- App Group — duplicated from the Debug file, byte-identical (see its note). Also the
+	     Keychain access group of the Holdings-grant item. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>group.com.phan.caydex</string>
+	</array>
+</dict>
+</plist>

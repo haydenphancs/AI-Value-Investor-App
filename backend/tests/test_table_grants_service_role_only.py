@@ -170,6 +170,11 @@ _SERVICE_ROLE_ONLY: dict[str, tuple[str, ...]] = {
     # refresh token. Credential state: a client grant would let any holder of a user JWT plus
     # the shipped anon key read or revoke sessions. Only the backend's RPCs touch them.
     "214": ("auth_refresh_families", "auth_refresh_tokens"),
+    # 216: the Home Screen widget's Holdings grants — the SHA-256 of each device's key, the 214
+    # session it belongs to, its WidgetKit push token and head ticker. Credential state: a client
+    # grant would let any holder of a user JWT plus the shipped anon key read, mint or revoke
+    # holdings credentials. Only the backend's RPCs (service_role) touch it.
+    "216": ("widget_holdings_grants",),
 }
 
 # Tables that DO grant anon or authenticated on purpose. Each needs the reason; an entry

@@ -473,6 +473,13 @@ class SessionExchangeRequest(BaseModel):
 
 class RefreshTokenRequest(BaseModel):
     refresh_token: str = Field(max_length=TOKEN_MAX_LENGTH, repr=False)
+    # Opt-in (migration 216): ask for a Home Screen widget Holdings grant with this refresh. The
+    # grant is minted ONLY when this rotation retired the presented token (status `rotated`) —
+    # never on a grace re-issue, never from a bare access token — and only while
+    # WIDGET_HOLDINGS_GRANTS_ENABLED is on. Builds up to 1.03 (and 1.04 builds before the widget
+    # Holdings self-refresh) never send it; unknown body fields
+    # are ignored, so a backend revert is safe.
+    widget_holdings_grant: bool = False
 
 
 class LogoutRequest(BaseModel):
@@ -534,6 +541,22 @@ class ReauthenticateResponse(BaseModel):
     expires_in: int
 
 
+class WidgetHoldingsGrantOut(BaseModel):
+    """A freshly minted Home Screen widget Holdings grant (migration 216).
+
+    `grant_token` is the raw `cwh1_` key, shown exactly once: the server keeps only its SHA-256.
+    The app stores it in a ThisDeviceOnly Keychain item for the widget extension. `expires_at` is
+    `YYYY-MM-DDTHH:MM:SSZ` (no fractional seconds — iOS parses it with a formatter, never
+    `.iso8601`); `session_id` is the 214 session (`sid`) it is bound to, so the app can tell when
+    a password change moved it onto a new session.
+    """
+
+    grant_token: str = Field(repr=False)
+    grant_id: str
+    expires_at: str
+    session_id: str
+
+
 class TokenResponse(BaseModel):
     access_token: str = Field(repr=False)
     refresh_token: str = Field(repr=False)
@@ -545,6 +568,11 @@ class TokenResponse(BaseModel):
     # not a verified credential, auth.md §3a). Optional so an older client's decoder never
     # sees a required key it does not know.
     device_token: Optional[str] = Field(default=None, repr=False)
+    # Only on `/auth/refresh`, only when the request opted in (`widget_holdings_grant: true`), the
+    # rotation was `rotated` and the mint succeeded inside its 3 s bound. Optional: a failed mint
+    # never fails the refresh, and an older client's decoder never sees a required key. The app
+    # decodes it LOSSILY (a malformed grant must never fail the refresh that carries it).
+    widget_holdings_grant: Optional[WidgetHoldingsGrantOut] = Field(default=None, repr=False)
 
 
 class AuthUserResponse(BaseModel):

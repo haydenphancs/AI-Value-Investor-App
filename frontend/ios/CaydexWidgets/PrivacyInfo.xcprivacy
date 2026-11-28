@@ -25,11 +25,16 @@
   Tracking: false. The extension links no SDK at all — its only dependencies are WidgetKit,
   SwiftUI, AppIntents and Foundation.
 
-  NSPrivacyCollectedDataTypes is EMPTY, and that is a statement, not an oversight: the
-  extension SENDS nothing about the user. Its one request carries a market-scoped widget token
-  and returns a market-wide roll-up; it writes only to the shared container. Everything the app
-  collects is declared in the app target's manifest, which is where it belongs — Apple merges
-  the declarations across binaries, and restating them here would make the two drift.
+  NSPrivacyCollectedDataTypes is EMPTY, and that is a statement, not an oversight. The
+  extension makes two requests:
+  - one carries the market-scoped widget token and returns a market-wide roll-up;
+  - since the Holdings self-refresh (migration 216), one carries the per-device Holdings grant
+    key and returns the user's OWN holdings movers.
+  The app already collects and declares that data in the app target's manifest. Apple merges
+  the declarations across binaries, and restating them here would make the two drift. The
+  extension writes only to the shared container (and reads the grant from a ThisDeviceOnly
+  Keychain item in the App Group access group). The UserDefaults reason stays 1C8F.1 only:
+  `WidgetHoldingsGrant` deliberately uses the App Group, never `.standard`.
 -->
 <plist version="1.0">
 <dict>

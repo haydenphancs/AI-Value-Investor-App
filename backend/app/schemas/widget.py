@@ -39,9 +39,11 @@ CONTRACT NOTES
   close. Labelling that is honest; hiding it makes the widget look broken.
 """
 
-from typing import List, Optional
+import re
+from typing import List, Literal, Optional
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 
@@ -282,7 +284,10 @@ class WidgetMoverPayload(BaseModel):
     # Keeping those two separate is the whole fix below.
     as_of: str
     # 'premarket' | 'regular' | 'afterhours' | 'closed', from `market_hours.session_phase`.
-    # Unchanged — an already-installed widget still switches on exactly this.
+    # Unchanged — an already-installed widget still switches on exactly this. Since the Holdings
+    # self-refresh (migration 216) the extension's reload schedule also reads it: a 'closed'
+    # reading after the session marks the rest of the day as quiet (90-minute cadence), and an
+    # 'afterhours' / 'closed' reading older than 2 h is footed "As of …".
     market_session: str
 
     # ── Session LABELLING. NOT a staleness flag; see the class docstring. ──
@@ -356,6 +361,60 @@ class WidgetMoverPayload(BaseModel):
     # The Home Market Pulse in its own order — S&P 500, Nasdaq, Dow, Russell 2000, Gold
     # ETFs, then Bitcoin. Empty is valid (every leg failed); never fabricated.
     market_assets: List[WidgetIndexResponse] = Field(default_factory=list)
+
+
+class WidgetHoldingsGrantRevokeRequest(BaseModel):
+    """`POST /widget/holdings-grant/revoke` — the device revokes the key it presents.
+
+    `app_revoked`: the app ended the session or replaced the key; `widget_removed`: the last Movers
+    widget was removed from the Home Screen.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Literal["app_revoked", "widget_removed"] = "app_revoked"
+
+
+class WidgetHoldingsGrantRevokeResponse(BaseModel):
+    # True when this call revoked a live grant; False when it was already revoked (a retry).
+    revoked: bool
+
+
+_PUSH_TOKEN_RE = re.compile(r"^[0-9a-f]+$")
+
+
+class WidgetPushTokenRequest(BaseModel):
+    """`PUT /widget/push-token` — the APP uploads the widget's WidgetKit push token (iOS 26+).
+
+    `token` None (or absent) means "this device holds no widget push token" and clears it.
+    Lower-case hex, even length, 32..400 characters (Apple: never assume the size). Never logged.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant_id: UUID
+    token: Optional[str] = Field(default=None, repr=False)
+    environment: Literal["sandbox", "production"]
+
+    @field_validator("token", mode="before")
+    @classmethod
+    def _normalise_token(cls, value):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("token must be a string or null")
+        token = value.strip().lower()
+        if not (32 <= len(token) <= 400) or len(token) % 2 or not _PUSH_TOKEN_RE.fullmatch(token):
+            raise ValueError("token must be 32-400 hex characters of even length")
+        return token
+
+
+class WidgetPushTokenResponse(BaseModel):
+    # True: the server now holds exactly what was sent (a token, or none).
+    stored: bool
+    # False: the grant is unknown, foreign, dead or superseded — the app re-mints (urgent). A
+    # database error answers stored=False with grant_usable=True (retry later, keep the grant).
+    grant_usable: bool
 
 
 class WidgetTokenResponse(BaseModel):

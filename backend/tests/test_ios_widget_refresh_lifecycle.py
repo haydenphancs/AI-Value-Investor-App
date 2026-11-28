@@ -36,6 +36,13 @@ never again:
      `epoch == sessionEpoch` before the FIRST write: an `await` moved between the two writes, or a
      log-only `if`, stayed green. Every write / stamp / publish site is now checked for a
      returning `guard` after the last await before it.
+  10. **The Holdings grant assessed outside a good run** (2026-11-27, migration 216). The grant
+     the extension refreshes Holdings with is assessed — minted, renewed, forced, retired — only
+     AFTER the throttle stamp of a run whose Holdings leg answered, behind that stamp's epoch and
+     widget-token fences; and every grant state change inside the assessment sits behind an
+     epoch fence after the last await before it, so a sign-out during the WidgetKit query, the
+     bearer read or the Keychain read never re-asks for, forces or revokes on the ended session's
+     behalf. The rest of the grant's app half: `test_ios_widget_holdings_grant_app.py`.
   9. **A failed mint stamping the throttle** (the tile said "Sign in to Caydex" to a signed-in
      user until a foreground a minute later), and **a failed content-change portfolio leg never
      retried** (the switched group kept the old name). Fixed by the token guard before the stamp
@@ -102,6 +109,9 @@ added by the second review round, same day — all killed):
   sync-any-group      the syncTickers hook made unconditional (`if true`)   -> killed
   sync-no-hook        the syncTickers contentChanged() call deleted         -> killed
   background-no-hook  refreshOnBackground() deleted from didEnterBackground -> killed
+  grant-before-stamp  (10) the grant assessment moved above the throttle stamp   -> killed
+  grant-any-run       (10) the `if p != nil` around the assessment dropped       -> killed
+  grant-unfenced      (10) the fence after the Keychain read deleted             -> killed
 CONTROL: every guarded token written into a `//` and a `/* */` comment is stripped
 (`test_the_comment_stripper_actually_strips`).
 """
@@ -145,6 +155,8 @@ _ON_AUTH = "private func onAuthenticated(userId: String? = nil, identity: Int) a
 _SETTLE = "private func settleWidgetSession(userId: String?, identity: Int)"
 _SETTLE_CALL = "settleWidgetSession(userId: userId, identity: identity)"
 _RESTORE = "private func performRestore(trigger: String) async"
+_ASSESS = "private func assessHoldingsGrant(client: APIClient, epoch: Int) async"
+_ASSESS_CALL = "await assessHoldingsGrant(client: client, epoch: epoch)"
 _SYNC = "private func syncTickers(for portfolioId: String, tickers: [String], ticket: Int, epoch: Int) async throws -> MembershipLinkResult"
 
 
@@ -668,6 +680,43 @@ def _check_background_hook(s: dict[str, str]) -> None:
     )
 
 
+def _check_grant_assessed_after_a_good_run(s: dict[str, str]) -> None:
+    """(10) The Holdings grant is assessed only after the run is complete and stamped, only when
+    its HOLDINGS leg answered, behind the stamp's epoch and widget-token fences — and every grant
+    state change inside the assessment is fenced on the run's epoch after its last await."""
+    svc = s["svc"]
+    body = _block(svc, _PERFORM)
+    calls = _sites(body, _ASSESS_CALL)
+    assert len(calls) == 1 and svc.count("assessHoldingsGrant(client:") == 2, (
+        "the grant assessment is not reached exactly once, from performRefresh")
+    call = calls[0]
+    stamp = _idx(body, "lastRefresh = Date()")
+    assert stamp < call, (
+        "the grant is assessed before the throttle stamp — outside the stamp's epoch and "
+        "widget-token fences, and it delays the stamp")
+    window = body[body.rfind("await", 0, call):call]
+    assert _EPOCH_FENCE.search(window) and _TOKEN_FENCE.search(window), (
+        "the grant assessment is not behind the run's epoch fence and the widget-token fence "
+        "after the last await — a sign-out during the renewal assesses for the ended session")
+    cond = None
+    for m in re.finditer(r"if\s+p\s*!=\s*nil\s*\{", body):
+        if m.start() < call < m.start() + len(_block_at(body, m.start())):
+            cond = m
+    assert cond, (
+        "the grant is assessed after a run whose HOLDINGS leg failed — the session was never "
+        "shown good for the data the grant serves")
+    assess = _block(svc, _ASSESS)
+    for token in ("retireHoldingsGrantForRemovedWidget()", "WidgetHoldingsGrant.removeMarker()",
+                  "WidgetHoldingsGrant.requestOnNextRefresh =", "startForcedGrantRefreshIfAllowed(",
+                  "sweepHoldingsGrantKeys("):
+        _assert_every_site_fenced(
+            assess, token,
+            "a sign-out during the WidgetKit query, the bearer read or the Keychain read acts on "
+            "the ended session's grant",
+            cancel=True,
+        )
+
+
 GUARDS: dict[str, Callable[[dict[str, str]], None]] = {
     "refresh_gate": _gate_on(_REFRESH),
     "content_gate": _gate_on("func contentChanged()"),
@@ -694,6 +743,7 @@ GUARDS: dict[str, Callable[[dict[str, str]], None]] = {
     "dead_refresh_forgets_user": _check_the_dead_refresh_branch_forgets_the_user,
     "sync_tickers_hook": _check_sync_tickers_reaches_the_widget,
     "background_hook": _check_background_hook,
+    "grant_assessed_after_a_good_run": _check_grant_assessed_after_a_good_run,
 }
 
 
@@ -764,6 +814,15 @@ def _open_after_seed(s: dict[str, str]) -> dict[str, str]:
     out = dict(s)
     out["app"] = _edit_block(s["app"], _CONFIGURE, edit)
     return out
+
+
+def _assess_before_stamp(body: str) -> str:
+    m = re.search(r"\n\s*if\s+p\s*!=\s*nil\s*\{\s*await assessHoldingsGrant\(client: client, epoch: epoch\)\s*\}", body)
+    assert m, "mutation target (the grant assessment) not found"
+    block = body[m.start():m.end()]
+    body = body[:m.start()] + body[m.end():]
+    stamp = _idx(body, "lastRefresh = Date()")
+    return body[:stamp] + block.strip() + "\n        " + body[stamp:]
 
 
 MUTATIONS: list[tuple[str, str, Callable[[dict[str, str]], dict[str, str]]]] = [
@@ -866,6 +925,12 @@ MUTATIONS: list[tuple[str, str, Callable[[dict[str, str]], dict[str, str]]]] = [
      _in("ps", _SYNC, _replace_once("if portfolioId == activePortfolioId {", "if true {"))),
     ("sync-no-hook", "sync_tickers_hook",
      _in("ps", _SYNC, _replace_once("WidgetRefreshService.shared.contentChanged()", ""))),
+    ("grant-before-stamp", "grant_assessed_after_a_good_run", _in("svc", _PERFORM, _assess_before_stamp)),
+    ("grant-any-run", "grant_assessed_after_a_good_run",
+     _in("svc", _PERFORM, _sub_once(r"if\s+p\s*!=\s*nil\s*\{(\s*await assessHoldingsGrant\(client: client, epoch: epoch\)\s*)\}",
+                                    r"\1"))),
+    ("grant-unfenced", "grant_assessed_after_a_good_run",
+     _in("svc", _ASSESS, _sub_once(r"(\}\.value\n\s*)guard epoch == sessionEpoch, sessionOpen, !Task\.isCancelled else \{ return \}", r"\1"))),
     ("background-no-hook", "background_hook",
      lambda s: {**s, "ios": s["ios"].replace("WidgetRefreshService.shared.refreshOnBackground()", "", 1)}),
 ]

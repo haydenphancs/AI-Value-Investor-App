@@ -254,9 +254,10 @@ actor APIClient {
     ///   • an unreadable `exp` means "the server decides" (unlike `WidgetJWT`'s
     ///     unknown = expired), so a token it cannot parse never causes a refresh.
     ///
-    /// `self.refreshTokenSingleFlight()` is the fifth call site of the single-flight, the only
-    /// one outside the four 401 interceptors (`test_ios_transient_refresh_keeps_session.py` T1
-    /// counts those); `test_ios_home_instant_paint_guards.py` pins the full caller set.
+    /// `self.refreshTokenSingleFlight()` is the fifth call site of the single-flight, one of the
+    /// two outside the four 401 interceptors — the other is `refreshForWidgetGrant()`
+    /// (`test_ios_transient_refresh_keeps_session.py` T1/T1c count and pin them);
+    /// `test_ios_home_instant_paint_guards.py` pins the full caller set.
     private func refreshArmedTokenIfExpired(for endpoint: APIEndpoint) async {
         guard !endpoint.isAuthEndpoint, tokenRefresher != nil else { return }
         if let inFlight = refreshInFlight {
@@ -297,6 +298,32 @@ actor APIClient {
             // refreshes again and decides what the failure means.
             Self.preflightLog.info("auth-preflight: refresh before \(path, privacy: .public) did not complete — sending as is, the 401 path decides")
         }
+    }
+
+    /// A refresh the Holdings WIDGET asks for: the only way to mint its grant (migration 216) is
+    /// inside a refresh-token rotation, and while the access token is still good no request
+    /// would refresh for up to 60 minutes. `WidgetRefreshService` sets
+    /// `WidgetHoldingsGrant.requestOnNextRefresh` first, so the refresh it runs carries the flag,
+    /// and `AuthService.refreshToken()` hands the minted grant to the widget service itself.
+    ///
+    /// The SIXTH caller of the single-flight, and like the pre-flight it can never end a session:
+    ///   • it rides the single-flight, so it shares one refresh with every 401 and pre-flight;
+    ///   • it never throws, never clears or writes the credential, never reports an auth failure;
+    ///     the outcome goes back UNTOUCHED, and the 401 interceptor stays the only code that turns
+    ///     a failed refresh into a sign-out (auth.md §3/§5) — a rejected refresh token is seen
+    ///     there on the next request that needs one;
+    ///   • it does nothing on a DISARMED client (`.restoring`, mid sign-out): the refresher would
+    ///     read the Keychain's token and re-arm the session behind `AppState`'s back. That answers
+    ///     `.transientFailure` — it says nothing about the credential.
+    /// Its only caller, `WidgetRefreshService`, uses the outcome to schedule retries inside the
+    /// server's 120 s grace window (a lost answer must be replayed before it closes), never to
+    /// end a session (`test_ios_widget_holdings_grant_app.py`).
+    func refreshForWidgetGrant() async -> TokenRefreshOutcome {
+        guard authToken != nil, tokenRefresher != nil else {
+            Self.preflightLog.info("widget-grant refresh skipped — the client holds no credential")
+            return .transientFailure
+        }
+        return await refreshTokenSingleFlight()
     }
 
     // MARK: - Request Methods

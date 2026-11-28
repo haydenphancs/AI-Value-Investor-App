@@ -1,9 +1,27 @@
 """
-Home-screen widget endpoints.
+Home-screen widget endpoints, on THREE routers (one auth policy each):
 
-  GET  /api/v1/widget/market-mover        the day's most unusual tracked move
-  GET  /api/v1/widget/portfolio-mover     the same, over the caller's holdings
-  GET  /api/v1/widget/token               the extension's market-scoped credential
+  strict `router` (a real session, `get_current_user_id`):
+    GET  /api/v1/widget/portfolio-mover         the caller's holdings (the APP's call)
+    GET  /api/v1/widget/token                   mint the extension's market-scoped credential
+    PUT  /api/v1/widget/push-token              the app uploads the widget's WidgetKit push token
+  `widget_client_router` (a session OR the market widget token, `get_widget_caller`):
+    GET  /api/v1/widget/market-mover            the day's most unusual tracked move
+  `widget_holdings_router` (the Holdings grant key ONLY, `get_holdings_grant_caller`):
+    GET  /api/v1/widget/holdings-mover          the holdings payload, for the EXTENSION
+    POST /api/v1/widget/holdings-grant/revoke   the device revokes the key it presents
+
+THE THIRD ROUTER (migration 216; owner 2026-11-27 "Own key, 30-day life (Recommended)")
+-----------------------------------------------------------------------------------------
+The Holdings tile used to change only while the app ran: the extension holds no session, and the
+market widget token is defensible only because it reaches market-wide data (auth.md §8a). The
+extension now holds a per-device Holdings GRANT — an opaque key minted only inside a
+`POST /auth/refresh` rotation, stored server-side only as a SHA-256 and checked against
+migration 216's revocation list on EVERY call. Its router holds exactly the two routes above;
+its dependency reads no bearer and never reads the grants switch, which sits on the data route
+alone (`require_holdings_grants_enabled`) so a device can always revoke its key.
+`tests/test_ios_auth_policy_parity.py` and `tests/test_widget_token_auth.py` pin the route sets:
+a data route added to the holdings router without a test change fails the build.
 
 DESIGN NOTE — the read path never calls Gemini, same as `updates.py`. Everything
 served here was produced by the background insight sweeper; these handlers read
@@ -37,26 +55,42 @@ explicit `mode="portfolio"` payload with `holdings_count=0`, and an unreadable o
 snapshot over.
 """
 
+import asyncio
 import logging
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Response
 
+from app.api.error_response import ErrorCode, auth_error
 from app.core.client_app_version import (
     WEB_ONLY_CAUSE_MIN_APP_VERSION,
     capture_client_app_version,
     client_is_at_least,
 )
 from app.core.security import create_widget_token, widget_token_expires_at
+from app.database import get_supabase
 from app.dependencies import (
+    HoldingsGrantCaller,
     UserIdRateLimitChecker,
+    WidgetHoldingsRateLimit,
     WidgetRateLimit,
     get_current_user,
     get_current_user_id,
+    get_holdings_grant_caller,
     get_watchlist_identity,
     get_widget_caller,
+    require_holdings_grants_enabled,
 )
-from app.schemas.widget import WidgetMoverPayload, WidgetTokenResponse
+from app.schemas.widget import (
+    WidgetHoldingsGrantRevokeRequest,
+    WidgetHoldingsGrantRevokeResponse,
+    WidgetMoverPayload,
+    WidgetPushTokenRequest,
+    WidgetPushTokenResponse,
+    WidgetTokenResponse,
+)
+from app.services import widget_holdings_grant_service as holdings_grants
 from app.services.active_group_service import (
     ActiveGroupUnavailable,
     get_active_group,
@@ -94,6 +128,16 @@ router = APIRouter(dependencies=[Depends(get_current_user_id)])
 # `tests/test_widget_token_auth.py` pins that this router holds exactly one route.
 widget_client_router = APIRouter(dependencies=[Depends(get_widget_caller)])
 
+# The THIRD router: the extension's HOLDINGS calls, authenticated by the per-device grant key
+# alone (migration 216). Exactly two routes — the data route and revoke-by-key — pinned by
+# `tests/test_ios_auth_policy_parity.py` and `tests/test_widget_token_auth.py`.
+#
+# ⚠️ The grants switch is NOT a dependency here. A router-level dependency runs for every route
+# on the router, so the switch here would 503 the revoke and leave the grant of a device that
+# signed out while offline alive. It sits on `GET /holdings-mover` only.
+# ⚠️ Declared AFTER `router`: the auth-policy scanner anchors on the line `router = APIRouter(`.
+widget_holdings_router = APIRouter(dependencies=[Depends(get_holdings_grant_caller)])
+
 # How many of the caller's holdings are RANKED.
 #
 # This is a cap on the ranking input, not on what is rendered — and that distinction is
@@ -121,6 +165,15 @@ _MAX_SCOPE_LEN = 32
 # stay distinct from every other limiter's (`widget` is `WidgetRateLimitChecker`'s key space).
 # Keyed on the token's user id (`get_current_user_id`) — the route is account-only anyway.
 WidgetPortfolioRateLimit = Depends(UserIdRateLimitChecker("widget_portfolio", 30, 60))
+
+# `PUT /push-token`'s own per-account window (the app uploads at most once a day per grant, plus
+# a retry). A distinct bucket, per the note above.
+WidgetPushTokenRateLimit = Depends(UserIdRateLimitChecker("widget_push_token", 10, 60))
+
+# The head-ticker memo for `note_head`: one RPC only when a grant's head ticker CHANGES, not on
+# every extension build. Bounded LRU; a restart only costs one RPC per grant.
+_HEAD_MEMO_MAX = 4096
+_head_memo: "OrderedDict[str, Optional[str]]" = OrderedDict()
 
 
 def _valid_ticker(t: str) -> bool:
@@ -257,7 +310,16 @@ async def get_portfolio_mover(
     * an empty group → `holdings_count=0` and the name ("No holdings in <name> yet");
     * an unreadable group or watchlist → `_empty("portfolio")`, `holdings_count=None`.
     """
-    user_id = user["id"]
+    return await _portfolio_payload(user["id"])
+
+
+async def _portfolio_payload(user_id: str, *, for_extension: bool = False) -> WidgetMoverPayload:
+    """The holdings payload for `user_id` — the body of BOTH holdings routes.
+
+    `/portfolio-mover` (the app, a session) and `/holdings-mover` (the extension, a grant) build
+    exactly this, so the two can never disagree; `for_extension` only selects the extension's
+    upstream budget (the crypto board, the tiered TTL). DEGRADE, never error (module docstring).
+    """
     try:
         group_name: Optional[str] = None
         try:
@@ -296,9 +358,15 @@ async def get_portfolio_mover(
                 user_id, precap_n, _MAX_HOLDINGS,
             )
 
+        service_kw: Dict[str, Any] = {
+            "links_web_only": client_is_at_least(WEB_ONLY_CAUSE_MIN_APP_VERSION),
+        }
+        if for_extension:
+            # The extension's build: the shared crypto board (coins off it are unpriced) and the
+            # tiered off-universe TTL. Passed ONLY when set, so the app's call is unchanged.
+            service_kw["for_extension"] = True
         payload = await get_widget_movers_service().get_portfolio_mover(
-            user_id, tickers[:_MAX_HOLDINGS],
-            links_web_only=client_is_at_least(WEB_ONLY_CAUSE_MIN_APP_VERSION),
+            user_id, tickers[:_MAX_HOLDINGS], **service_kw,
         )
         # A COPY. `payload` may be the cached object every caller in the TTL shares.
         return payload.model_copy(
@@ -310,8 +378,8 @@ async def get_portfolio_mover(
         )
     except Exception as e:
         logger.error(
-            "widget portfolio-mover failed for user=%s: %s: %s",
-            user_id, type(e).__name__, e, exc_info=True,
+            "widget portfolio payload failed for user=%s (extension=%s): %s: %s",
+            user_id, for_extension, type(e).__name__, e, exc_info=True,
         )
         return _empty("portfolio")
 
@@ -353,3 +421,155 @@ async def _watchlist_tickers(user_id: str) -> List[str]:
         for r in rows
         if r.get("ticker") and _valid_ticker(str(r["ticker"]).upper())
     ]
+
+
+# ── The Holdings grant: the extension's own calls (migration 216) ────────────────────────
+
+
+def _remember_head(grant_id: str, ticker: Optional[str]) -> bool:
+    """True when `ticker` is NEW for this grant (the RPC is then worth a round trip).
+
+    A bounded LRU: at most `_HEAD_MEMO_MAX` grants, least-recently-built first out. Losing an
+    entry only costs one idempotent RPC.
+    """
+    if grant_id in _head_memo and _head_memo[grant_id] == ticker:
+        _head_memo.move_to_end(grant_id)
+        return False
+    _head_memo[grant_id] = ticker
+    _head_memo.move_to_end(grant_id)
+    while len(_head_memo) > _HEAD_MEMO_MAX:
+        _head_memo.popitem(last=False)
+    return True
+
+
+def _forget_head(grant_id: str) -> None:
+    _head_memo.pop(grant_id, None)
+
+
+async def _note_head(supabase: Any, caller: HoldingsGrantCaller, payload: WidgetMoverPayload) -> None:
+    """Best-effort: record the ticker the tile now leads with, for push targeting. Never raises.
+
+    A DEGRADED build (`holdings_count` None) says nothing about the head: the client keeps its
+    last snapshot, so the last noted head stays too. An authoritative empty group clears it.
+    """
+    if payload.holdings_count is None:
+        return
+    head = payload.headline_mover.ticker.upper() if payload.headline_mover else None
+    if head is not None and not _valid_ticker(head):
+        head = None
+    if not _remember_head(caller.grant_id, head):
+        return
+    try:
+        await asyncio.to_thread(holdings_grants.note_head, supabase, caller.grant_id, head)
+    except Exception as e:  # noqa: BLE001 — push targeting is best-effort; the payload is served
+        _forget_head(caller.grant_id)
+        logger.warning(
+            "widget holdings: note_head failed grant=%s user=%s (%s: %s) — push targeting uses "
+            "the previous head until the next build",
+            caller.grant_id, caller.user_id, type(e).__name__, e,
+        )
+
+
+@widget_holdings_router.get("/holdings-mover", response_model=WidgetMoverPayload)
+async def get_holdings_mover(
+    response: Response,
+    # The router's dependency already resolved this; FastAPI caches it per request.
+    caller: HoldingsGrantCaller = Depends(get_holdings_grant_caller),
+    # The kill switch — on THIS route only, never on the router (the revoke must keep working).
+    _enabled: None = Depends(require_holdings_grants_enabled),
+    _rate_limit=WidgetHoldingsRateLimit,
+    # The extension sends X-App-Version (WidgetMarketFetcher.appVersion): the web-only cause gate.
+    _app_version: None = Depends(capture_client_app_version),
+    supabase: Any = Depends(get_supabase),
+) -> WidgetMoverPayload:
+    """The Holdings tile's payload for the EXTENSION, authenticated by its grant key alone.
+
+    Exactly `/portfolio-mover`'s build (`_portfolio_payload`) for the grant's own account —
+    the user comes from the grant row, never from a header — with the extension's upstream
+    budget (`for_extension=True`). `Cache-Control: no-store`: holdings must never sit in an
+    intermediary or the extension's URL cache. DEGRADE, never error, past the grant check.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    payload = await _portfolio_payload(caller.user_id, for_extension=True)
+    await _note_head(supabase, caller, payload)
+    return payload
+
+
+@widget_holdings_router.post(
+    "/holdings-grant/revoke", response_model=WidgetHoldingsGrantRevokeResponse,
+)
+async def revoke_holdings_grant(
+    response: Response,
+    body: Optional[WidgetHoldingsGrantRevokeRequest] = Body(default=None),
+    caller: HoldingsGrantCaller = Depends(get_holdings_grant_caller),
+    supabase: Any = Depends(get_supabase),
+) -> WidgetHoldingsGrantRevokeResponse:
+    """The device revokes the key it presents: at session end (`app_revoked`), after a renewal
+    (the old key), or when the last Movers widget is removed (`widget_removed`).
+
+    NOT gated by `WIDGET_HOLDINGS_GRANTS_ENABLED`: revocation must always work. A dead key never
+    reaches here — the dependency answers 401, which the client reads as "already dead". A store
+    failure is a 503 AUTH_UNAVAILABLE so the client keeps the key and retries.
+    """
+    response.headers["Cache-Control"] = "no-store"
+    reason = body.reason if body is not None else "app_revoked"
+    try:
+        outcome = await asyncio.to_thread(
+            holdings_grants.revoke, supabase, caller.grant_id, caller.user_id, reason,
+        )
+    except Exception as e:  # noqa: BLE001 — surfaced as a retryable 503, never a fake success
+        logger.error(
+            "widget holdings: revoke failed grant=%s user=%s reason=%s (%s: %s)",
+            caller.grant_id, caller.user_id, reason, type(e).__name__, e, exc_info=True,
+        )
+        raise auth_error(
+            ErrorCode.AUTH_UNAVAILABLE,
+            message=f"Holdings grant revoke unavailable: {type(e).__name__}",
+        )
+    _forget_head(caller.grant_id)
+    logger.info(
+        "widget holdings: device revoked grant=%s user=%s reason=%s outcome=%s",
+        caller.grant_id, caller.user_id, reason, outcome,
+    )
+    return WidgetHoldingsGrantRevokeResponse(revoked=outcome == "revoked")
+
+
+@router.put("/push-token", response_model=WidgetPushTokenResponse)
+async def register_widget_push_token(
+    body: WidgetPushTokenRequest,
+    # STRICT: a real users row — an evicted session or a deleted account must not bind a token.
+    user: dict = Depends(get_current_user),
+    _rate_limit=WidgetPushTokenRateLimit,
+    supabase: Any = Depends(get_supabase),
+) -> WidgetPushTokenResponse:
+    """The APP uploads the widget's WidgetKit push token (iOS 26+) onto the device's grant.
+
+    On the STRICT router, never on either widget router: it carries no market data and never
+    accepts a widget or grant credential. The token rides on the grant row, so every revocation
+    of the grant stops its pushes with no extra hook.
+
+      * stored → `{stored: true, grant_usable: true}`;
+      * an unknown, foreign, dead or superseded grant → `{false, false}` (one answer, so nothing
+        is enumerable) — the app re-mints;
+      * a database error → `{false, true}` + ERROR (retry later; never a 5xx the app would treat
+        as a reason to drop the grant). DEGRADE, never error — no new ErrorCode.
+    """
+    user_id = user["id"]
+    grant_id = str(body.grant_id)
+    try:
+        stored, usable = await asyncio.to_thread(
+            holdings_grants.register_push_token,
+            supabase, user_id, grant_id, body.token, body.environment,
+        )
+    except Exception as e:  # noqa: BLE001 — degrade (docstring); the token is never logged
+        logger.error(
+            "widget push: token registration failed user=%s grant=%s env=%s (%s: %s)",
+            user_id, grant_id, body.environment, type(e).__name__, e, exc_info=True,
+        )
+        return WidgetPushTokenResponse(stored=False, grant_usable=True)
+    if not usable:
+        logger.info(
+            "widget push: registration refused user=%s grant=%s (unknown, foreign, dead or "
+            "superseded grant)", user_id, grant_id,
+        )
+    return WidgetPushTokenResponse(stored=stored, grant_usable=usable)

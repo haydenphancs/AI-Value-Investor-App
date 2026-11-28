@@ -218,7 +218,10 @@ def test_a_real_access_token_still_works():
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/v1/widget/portfolio-mover", "/api/v1/widget/token", "/api/v1/users/me/credits"],
+    ["/api/v1/widget/portfolio-mover", "/api/v1/widget/token", "/api/v1/users/me/credits",
+     # The Holdings route (migration 216) takes ONLY the holdings grant key — a market widget
+     # token, as a bearer or anywhere else, must never read holdings.
+     "/api/v1/widget/holdings-mover"],
 )
 def test_a_widget_token_opens_no_session_route(client, path):
     """End to end, through the real app, on the route that mints it and on one that holds the
@@ -348,8 +351,33 @@ def test_the_strict_widget_routes_are_still_strict():
     strict = _routes_using("get_current_user_id")
     assert "/api/v1/widget/portfolio-mover" in strict
     assert "/api/v1/widget/token" in strict
+    # The app's WidgetKit push-token upload (migration 216): a session, never a widget credential.
+    assert "/api/v1/widget/push-token" in strict
     assert _MARKET not in strict, (
         "the market route is on the strict router again — the extension cannot call it"
+    )
+    assert _HOLDINGS not in strict, (
+        "the holdings route demands a session again — the extension cannot call it"
+    )
+
+
+# ── 4b. The Holdings grant (migration 216): exactly two routes take it ──────────────────────
+
+_HOLDINGS = "/api/v1/widget/holdings-mover"
+_HOLDINGS_REVOKE = "/api/v1/widget/holdings-grant/revoke"
+
+
+def test_only_the_two_holdings_routes_accept_a_holdings_grant():
+    """The grant reads the account's HOLDINGS, so the set of routes it opens is pinned as
+    tightly as the market token's: the data route and revoke-by-key, nothing else. A route that
+    also resolves a session or the market token would be contradictory — the strict dependency
+    raises first, so the extension would be 401'd while the wiring looked right."""
+    accepting = _routes_using("get_holdings_grant_caller")
+    assert accepting == {_HOLDINGS, _HOLDINGS_REVOKE}
+    assert not accepting & _routes_using("get_current_user_id")
+    assert not accepting & _routes_using("get_widget_caller")
+    assert _routes_using("require_holdings_grants_enabled") == {_HOLDINGS}, (
+        "the switch belongs on the data route only — on the revoke it would strand a key"
     )
 
 
@@ -583,6 +611,23 @@ def test_only_the_app_writes_the_token():
         assert f"func {fn}(" in src or f"func {fn}()" in src
 
 
+# ── 7. The Holdings grant key in the wrong slots ────────────────────────────
+
+def test_a_holdings_key_in_the_market_header_is_refused(client):
+    from app.services.widget_holdings_grant_service import new_token
+
+    r = client.get(_MARKET, headers={WIDGET_TOKEN_HEADER: new_token()})
+    assert r.status_code == 401
+
+
+def test_a_market_token_in_the_holdings_header_is_refused_before_any_read(client):
+    from app.dependencies import HOLDINGS_GRANT_HEADER
+
+    r = client.get(_HOLDINGS, headers={HOLDINGS_GRANT_HEADER: create_widget_token(_UID)})
+    assert r.status_code == 401
+    assert r.json()["error_code"] == "AUTH_TOKEN_INVALID"
+
+
 # ── MUTATION_LOG ────────────────────────────────────────────────────────────
 #
 # Every guard here was broken by hand and observed to fail, per `.claude/rules/testing.md` §3.
@@ -621,6 +666,15 @@ def test_only_the_app_writes_the_token():
 #          test_the_mint_checks_the_account_not_just_the_token FAILED ✅
 #          (test_the_strict_widget_routes_are_still_strict stays green on the revert: the
 #          router's own dependency keeps `get_current_user_id` in the tree either way)
+#
+# 10. (2026-11-27, migration 216) — recorded by intent; the holdings-router pins above are the
+#     guards, and test_widget_holdings_grant_auth.py's `_MUTATIONS` table executes its own:
+#       * `/holdings-mover` moved onto the strict `router` → test_only_the_two_holdings_routes_…
+#         and test_the_strict_widget_routes_are_still_strict FAIL (the route is then strict);
+#       * a third route added to `widget_holdings_router` → test_only_the_two_holdings_routes_…
+#         FAILS on the set;
+#       * `Depends(require_holdings_grants_enabled)` moved onto the router → the switch set is
+#         {holdings, revoke} and the same test FAILS.
 #
 # CONTROL: appending "groundingLines tokenHeader clearAll" to a COMMENT in the fetcher left
 # every scan green ✅ — the comment strippers are doing their job.

@@ -14,10 +14,12 @@
 #
 # WHAT IT GUARDS
 # --------------
-# The widget extension cannot fetch. The app refreshes on cold launch, foreground and
-# auth transition only, so between two app opens the SAME bytes re-render
-# indefinitely. Any freshness wording baked in at WRITE time is therefore a claim
-# that decays with nothing to update it — which is exactly what shipped:
+# Between two successful builds the SAME bytes re-render, for as long as it takes.
+# When this was written the extension could not fetch at all; it now fetches both
+# modes every 20/60/90 minutes, but a fetch can fail, be deferred by WidgetKit, or be
+# refused (a revoked Holdings grant). Any freshness wording baked in at WRITE time is
+# therefore a claim that decays with nothing to update it — which is exactly what
+# shipped:
 #
 #   * `market_session` is captured when the snapshot is written, so a Friday 18:00
 #     write rendered "After hours" all weekend, and
@@ -35,6 +37,10 @@
 #   2. An OLD backend (no `session_date`) behaves EXACTLY as before — this ships in
 #      an app update while the backend deploys independently, and a regression here
 #      would be a silent behaviour change for every user on the old payload.
+#   3. A same-day snapshot that has stopped being current SAYS WHEN it is from: a
+#      regular one past 45 minutes, a pre-market one past the bell, and (2026-11-27)
+#      an after-hours or closed one past 2 hours — longer than every off-hours reload,
+#      so a tile that keeps up stays silent.
 #
 # It compiles the REAL source file (not a copy), so a signature change fails the
 # harness rather than letting it drift silently.
@@ -156,8 +162,14 @@ checkNil("live, same session → nothing", aged(d("2026-08-14 15:59")))
 checkNil("40 min later, inside the grace → still nothing", aged(d("2026-08-14 16:38")))
 check("46 min later → the instant, not silence",
       aged(d("2026-08-14 16:44")) ?? "<nil>", "As of 3:58 PM ET")
-checkNil("that evening, after the close → still today's numbers",
-         aged(d("2026-08-14 21:00"), phase: "closed", server: "Fri close"))
+// FLIPPED 2026-11-27 (owner: after-hours and closed tiles say "As of …" past 2 h). This row
+// used to be nil: the tile slept until 04:00, so the evening render could not be stale. It now
+// reloads every 90 minutes, and one five hours old is a fetch that kept failing — say so.
+check("that evening, five hours on, closed → the instant, not silence",
+      aged(d("2026-08-14 21:00"), phase: "closed", server: "Fri close") ?? "<nil>", "As of 3:58 PM ET")
+checkNil("…but a closed build 50 minutes old is still current",
+         WidgetSessionLabel.agedLabel(asOf: d("2026-08-14 20:10"), sessionDate: "2026-08-14",
+           marketSession: "closed", sessionLabel: "Fri close", now: d("2026-08-14 21:00")))
 check("read on Saturday → speaks up", aged(d("2026-08-15 11:00")) ?? "<nil>", "Fri close")
 check("read on Sunday → speaks up", aged(d("2026-08-16 11:00")) ?? "<nil>", "Fri close")
 check("read Monday pre-market → speaks up", aged(d("2026-08-17 08:00")) ?? "<nil>", "Fri close")
@@ -220,6 +232,37 @@ checkNil("a pre-market snapshot is not aged within its own day",
          WidgetSessionLabel.agedLabel(asOf: d("2026-08-11 07:31"), sessionDate: "2026-08-11",
            marketSession: "premarket", sessionLabel: "Pre-market 7:31 AM ET",
            now: d("2026-08-11 09:00")))
+
+// THE OFF-HOURS RULE (2026-11-27). The tile reloads every 60 minutes after hours and every 90
+// overnight, so a same-day after-hours or closed reading older than `offHoursAgeLimit` (2 h) is
+// one a fetch failed to replace. It reuses the existing "As of" claim: no new wording.
+print("— a same-day after-hours or closed snapshot says WHEN past 2 hours —")
+func agedOff(_ asOfS: String, _ sessionDate: String, _ phase: String, _ nowS: String) -> String? {
+    WidgetSessionLabel.agedLabel(asOf: d(asOfS), sessionDate: sessionDate, marketSession: phase,
+                                 sessionLabel: nil, now: d(nowS))
+}
+checkNil("after hours 17:02, read 19:02 → exactly 2 h, still silent (the rule is strictly past it)",
+         agedOff("2026-08-11 17:02", "2026-08-11", "afterhours", "2026-08-11 19:02"))
+check("after hours 17:02, read 19:03 → the instant",
+      agedOff("2026-08-11 17:02", "2026-08-11", "afterhours", "2026-08-11 19:03") ?? "<nil>",
+      "As of 5:02 PM ET")
+check("closed 21:00, read 23:01 → the instant",
+      agedOff("2026-08-11 21:00", "2026-08-11", "closed", "2026-08-11 23:01") ?? "<nil>",
+      "As of 9:00 PM ET")
+checkNil("closed 22:30, read 23:59 → under 2 h, silent",
+         agedOff("2026-08-11 22:30", "2026-08-11", "closed", "2026-08-11 23:59"))
+check("closed 22:30, read the next day → the previous session's close, as before",
+      agedOff("2026-08-11 22:30", "2026-08-11", "closed", "2026-08-12 00:01") ?? "<nil>", "Tue close")
+// A half day leaves "regular" at 13:00 and is "closed" from then on, on its own session date.
+checkNil("half day, closed 13:10, read 15:10 → silent",
+         agedOff("2026-11-27 13:10", "2026-11-27", "closed", "2026-11-27 15:10"))
+check("half day, closed 13:10, read 15:11 → the instant",
+      agedOff("2026-11-27 13:10", "2026-11-27", "closed", "2026-11-27 15:11") ?? "<nil>",
+      "As of 1:10 PM ET")
+check("half day, closed 13:10, read the next day → 'Fri close' (the existing path)",
+      agedOff("2026-11-27 13:10", "2026-11-27", "closed", "2026-11-28 11:00") ?? "<nil>", "Fri close")
+checkNil("pre-market is NOT in the rule: before the bell the reading is still the latest",
+         agedOff("2026-08-11 04:30", "2026-08-11", "premarket", "2026-08-11 09:00"))
 
 // `isPriorSession` decides whether the cause may still say "today" — a different question
 // from whether the footer speaks (it also speaks for a same-day stale intraday reading).
@@ -305,6 +348,12 @@ check("…and the full label agrees",
       "Fri 10:05 AM ET")
 check("pre-market build after the bell → the instant",
       compact("2026-08-11 08:30", "2026-08-11", "premarket", "2026-08-11 15:00"), "As of 8:30 ET")
+// No AM/PM here either (owner, 2026-11-27): the full label, tried first, carries it, and the
+// wrong reading of an afternoon or evening time is the morning one — older, not fresher.
+check("after-hours build 2 h on → the instant, in ET, no AM/PM",
+      compact("2026-08-11 17:02", "2026-08-11", "afterhours", "2026-08-11 19:03"), "As of 5:02 ET")
+check("half-day closed build 2 h on → the instant",
+      compact("2026-11-27 13:10", "2026-11-27", "closed", "2026-11-27 15:11"), "As of 1:10 ET")
 check("old backend, closed → the legacy wording, unchanged",
       compact("2026-08-14 21:00", nil, "closed", "2026-08-16 11:00"), "At the close")
 
@@ -318,6 +367,8 @@ let compactFixtures: [(String, String?, String)] = [
     ("2026-08-12 08:30", "2026-08-11", "premarket"),
     ("2026-08-11 17:02", "2026-08-11", "afterhours"),
     ("2026-08-11 21:00", "2026-08-11", "closed"),
+    ("2026-08-11 22:30", "2026-08-11", "closed"),
+    ("2026-11-27 13:10", "2026-11-27", "closed"),
     ("2026-08-11 10:05", nil, "regular"),
     ("2026-08-11 21:00", nil, "closed"),
 ]
@@ -390,16 +441,28 @@ check("pre-market 08:30, now 08:40 → the bell",
       boundary("2026-08-11 08:30", "2026-08-11", "premarket", "2026-08-11 08:40"), "2026-08-11 09:30:00")
 check("pre-market, now past the bell → nil",
       boundary("2026-08-11 08:30", "2026-08-11", "premarket", "2026-08-11 09:31"), "<nil>")
-check("after-hours → nil (nothing changes wording within the day)",
-      boundary("2026-08-11 17:02", "2026-08-11", "afterhours", "2026-08-11 17:10"), "<nil>")
-check("closed → nil",
-      boundary("2026-08-11 21:00", "2026-08-11", "closed", "2026-08-11 21:05"), "<nil>")
+// FLIPPED 2026-11-27: these were nil while no same-day rule spoke off hours. Now the label turns
+// on at 2 h + 1 s, and the timeline must render at that instant.
+check("after-hours 17:02 → one second past 2 hours",
+      boundary("2026-08-11 17:02", "2026-08-11", "afterhours", "2026-08-11 17:10"), "2026-08-11 19:02:01")
+check("closed 21:00 → one second past 2 hours",
+      boundary("2026-08-11 21:00", "2026-08-11", "closed", "2026-08-11 21:05"), "2026-08-11 23:00:01")
+check("closed 21:59 → 23:59:01, still the same ET day",
+      boundary("2026-08-11 21:59", "2026-08-11", "closed", "2026-08-11 22:00"), "2026-08-11 23:59:01")
+check("closed 22:30 → nil: 2 h lands tomorrow, where the 00:01 rollover entry takes over",
+      boundary("2026-08-11 22:30", "2026-08-11", "closed", "2026-08-11 22:35"), "<nil>")
+check("after-hours, already past 2 h → nil (the label is already on)",
+      boundary("2026-08-11 17:02", "2026-08-11", "afterhours", "2026-08-11 19:10"), "<nil>")
+check("half day, closed 13:10 → 15:10:01",
+      boundary("2026-11-27 13:10", "2026-11-27", "closed", "2026-11-27 13:15"), "2026-11-27 15:10:01")
 check("a previous session → nil (already aged)",
       boundary("2026-08-11 10:05", "2026-08-11", "regular", "2026-08-12 06:50"), "<nil>")
 check("old backend → nil",
       boundary("2026-08-11 10:05", nil, "regular", "2026-08-11 10:25"), "<nil>")
 for (asOfS, phase, nowS) in [("2026-08-11 10:05", "regular", "2026-08-11 10:25"),
-                             ("2026-08-11 08:30", "premarket", "2026-08-11 08:40")] {
+                             ("2026-08-11 08:30", "premarket", "2026-08-11 08:40"),
+                             ("2026-08-11 17:02", "afterhours", "2026-08-11 17:10"),
+                             ("2026-08-11 21:00", "closed", "2026-08-11 21:05")] {
     guard let b = WidgetSessionLabel.ageBoundary(
         asOf: d(asOfS), sessionDate: "2026-08-11", marketSession: phase, now: d(nowS)
     ) else {

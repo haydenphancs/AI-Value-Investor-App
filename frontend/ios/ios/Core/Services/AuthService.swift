@@ -22,7 +22,10 @@ import Security
 /// the user object or an `expires_in` here — an earlier DTO that required those two
 /// fields made every login/register/refresh throw `DecodingError`. The canonical
 /// profile is fetched separately via `GET /users/me` after the token is stored.
-struct AuthResponse: Decodable, Sendable {
+///
+/// `nonisolated`, with `Decodable` in an extension: its `init(from:)` is hand-written (below) and
+/// runs on `APIClient`'s actor, like the other hand-rolled decoders in this pairing table.
+nonisolated struct AuthResponse: Sendable {
     let accessToken: String
     let refreshToken: String
     let tokenType: String
@@ -30,6 +33,10 @@ struct AuthResponse: Decodable, Sendable {
     /// The install's lockout exemption for this address — see `DeviceProofStore`. Optional:
     /// a refresh carries none, and an older backend sends none.
     let deviceToken: String?
+    /// The Holdings widget grant a `POST /auth/refresh` minted because the request asked for it
+    /// (`widget_holdings_grant: true`, migration 216). nil on every other route, on a refresh that
+    /// did not ask or was not a rotation, from an older backend — and when it failed to decode.
+    let widgetHoldingsGrant: WidgetHoldingsGrantPayload?
 
     enum CodingKeys: String, CodingKey {
         case accessToken = "access_token"
@@ -37,6 +44,34 @@ struct AuthResponse: Decodable, Sendable {
         case tokenType = "token_type"
         case userId = "user_id"
         case deviceToken = "device_token"
+        case widgetHoldingsGrant = "widget_holdings_grant"
+    }
+}
+
+/// Every session field is decoded STRICTLY — a token response that cannot be read must still
+/// fail the call exactly as before. The widget grant is the one LOSSY field: `try?`, so a
+/// malformed grant can never fail the refresh that carries it. Tokens are saved only after this
+/// decodes, and a refresh that "failed" after the server rotated would leave the app holding a
+/// retired refresh token — its next use outside the 120 s grace window is reuse, and the server
+/// ends the session (auth.md §8b). A widget nicety must never cost the session.
+extension AuthResponse: Decodable {
+    nonisolated init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.accessToken = try container.decode(String.self, forKey: .accessToken)
+        self.refreshToken = try container.decode(String.self, forKey: .refreshToken)
+        self.tokenType = try container.decode(String.self, forKey: .tokenType)
+        self.userId = try container.decode(String.self, forKey: .userId)
+        self.deviceToken = try container.decodeIfPresent(String.self, forKey: .deviceToken)
+        let grant = try? container.decodeIfPresent(WidgetHoldingsGrantPayload.self, forKey: .widgetHoldingsGrant)
+        self.widgetHoldingsGrant = grant
+        // Absent and `null` are the normal "no grant"; a PRESENT value that did not decode is a
+        // contract drift — never silent (the grant is dropped, the session is not).
+        if grant == nil, container.contains(.widgetHoldingsGrant),
+           (try? container.decodeNil(forKey: .widgetHoldingsGrant)) == false {
+            Logger(subsystem: "com.phan.caydex", category: "auth").error(
+                "auth: the refresh answer carried a widget holdings grant that did not decode — grant dropped, session kept"
+            )
+        }
     }
 }
 
@@ -574,21 +609,40 @@ final class AuthService {
         // leaving that session holding a dead one.
         guard epoch == sessionEpoch else { return }
 
+        // Read once, here, and judged against the answer below: whether THIS refresh asked the
+        // server for the Holdings widget grant (`WidgetRefreshService.assessHoldingsGrant` sets
+        // it while a grant is missing, refused or due for renewal; adoption clears it).
+        let wantsHoldingsGrant = WidgetHoldingsGrant.requestOnNextRefresh
         let response = try await apiClient.request(
-            endpoint: .refreshToken(refreshToken: refreshToken),
+            endpoint: .refreshToken(refreshToken: refreshToken, widgetHoldingsGrant: wantsHoldingsGrant),
             responseType: AuthResponse.self
         )
 
         // Discard the refreshed tokens if the session changed mid-flight (sign-out
         // or a new sign-in) — otherwise a stale refresh could re-arm a signed-out
-        // session or clobber a newer one.
-        guard epoch == sessionEpoch else { return }
+        // session or clobber a newer one. A grant it carried is LIVE on the server for a
+        // session this device no longer holds, so it is revoked by key, not just dropped.
+        guard epoch == sessionEpoch else {
+            if let grant = response.widgetHoldingsGrant {
+                WidgetRefreshService.shared.discardHoldingsGrant(grant, owner: response.userId)
+            }
+            return
+        }
 
         // Store new tokens
         saveTokens(accessToken: response.accessToken, refreshToken: response.refreshToken)
 
         // Update API client
         await apiClient.setAuthToken(response.accessToken)
+
+        // The widget's grant, AFTER the session is stored and armed: adoption fences on the
+        // bearer's subject and session id. Neither call throws or awaits — the widget can never
+        // fail, delay or undo the refresh that carried it.
+        if let grant = response.widgetHoldingsGrant {
+            WidgetRefreshService.shared.adoptHoldingsGrant(grant, owner: response.userId)
+        } else if wantsHoldingsGrant {
+            WidgetRefreshService.shared.noteHoldingsGrantNotIssued()
+        }
     }
 
     // MARK: - Token Management
@@ -662,10 +716,15 @@ final class AuthService {
     /// chats, credits — for as long as the refresh token lived. Called first thing in the
     /// launch Task, before the one launch read.
     ///
-    /// ONLY the two session tokens, through `clearToken()`. Never `KeychainService.deleteAll`,
-    /// never `DeviceProofStore` (the lockout exemption is meant to survive, auth.md §3a) and
-    /// never `GuestIdentity` (the install id is meant to survive a reinstall). The widget token
-    /// lives in the App Group container, which iOS deletes with the app.
+    /// ONLY the two session tokens, through `clearToken()`, plus the Holdings widget grant keys.
+    /// Never `KeychainService.deleteAll`, never `DeviceProofStore` (the lockout exemption is meant
+    /// to survive, auth.md §3a) and never `GuestIdentity` (the install id is meant to survive a
+    /// reinstall). The MARKET widget token lives in the App Group container, which iOS deletes with
+    /// the app. The Holdings grant keys do NOT: they are Keychain items (in the App Group access
+    /// group, migration 216), so an earlier install's key survives — inert, with no marker and no
+    /// slot, but LIVE on the server for up to 30 days. A fresh install revokes each by key, then
+    /// deletes it; one whose revoke is not confirmed stays for the next retry
+    /// (`WidgetRefreshService`). Detached: Keychain work never runs on the main actor here.
     ///
     /// An UPDATE must not sign anyone out, and an update from a build that predates this marker
     /// also arrives without it. So a missing marker counts as a fresh install only when the App
@@ -686,6 +745,7 @@ final class AuthService {
             return
         case .fresh:
             Self.log.notice("fresh install: clearing any session tokens an earlier install left in the Keychain")
+            WidgetRefreshService.revokeHoldingsGrantKeysLeftByAnEarlierInstall()
             self.clearToken()
         case .updated:
             Self.log.info("install marker missing but this install has run before (an update) — session kept")

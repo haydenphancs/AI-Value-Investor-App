@@ -269,3 +269,89 @@ def test_the_art_models_defaults_are_a_priced_claude_model_and_a_stable_image_mo
     assert claude.startswith("claude-") and not image.startswith("claude-")
     for model in (claude, image):
         assert not model.endswith(("-preview", "-latest")) and model == model.strip()
+
+
+# ── The Home Screen widget switches (migration 216, 2026-11-27) ──────────────────────────────
+#
+# Every one defaults to today's behaviour (OFF / the owner's numbers) and every tuning field is
+# BOUNDED, so a bad Railway value fails the deploy instead of silently widening a cap.
+
+_WIDGET_SETTINGS = {
+    # name: (default, ge, le) — None bounds for the two switches
+    "WIDGET_HOLDINGS_GRANTS_ENABLED": (False, None, None),
+    "WIDGET_PUSH_ENABLED": (False, None, None),
+    "WIDGET_PUSH_MIN_INTERVAL_SECONDS": (3600, 900, 86400),
+    "WIDGET_PUSH_DAILY_CAP": (12, 1, 48),
+    "WIDGET_PUSH_PASS_BUDGET_SECONDS": (20, 5, 60),
+    "WIDGET_PUSH_MAX_SENDS_PER_PASS": (200, 10, 2000),
+    "WIDGET_PUSH_SENDS_PER_SECOND": (20, 1, 100),
+    "WIDGET_CRYPTO_MAX_AGE_SECONDS": (600, 60, 3600),
+    "WIDGET_CRYPTO_BOARD_MAX_COINS": (250, 1, 1000),
+    "WIDGET_CRYPTO_BOARD_PER_USER": (20, 1, 100),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_WIDGET_SETTINGS))
+def test_the_widget_settings_are_declared_with_their_defaults_and_bounds(name):
+    from app.config import Settings
+
+    default, ge, le = _WIDGET_SETTINGS[name]
+    field = Settings.model_fields.get(name)
+    assert field is not None, f"{name} is not declared on Settings"
+    assert field.default == default, (name, field.default)
+    bounds = {type(m).__name__: m for m in field.metadata}
+    if ge is None:
+        assert field.annotation is bool
+        return
+    assert bounds["Ge"].ge == ge and bounds["Le"].le == le, (name, field.metadata)
+
+
+@pytest.mark.parametrize("name,value", [
+    ("WIDGET_PUSH_DAILY_CAP", 0), ("WIDGET_PUSH_DAILY_CAP", 49),
+    ("WIDGET_PUSH_MIN_INTERVAL_SECONDS", 60), ("WIDGET_CRYPTO_BOARD_MAX_COINS", 0),
+    ("WIDGET_PUSH_MAX_SENDS_PER_PASS", 5000),
+])
+def test_an_out_of_bounds_widget_value_fails_validation(name, value):
+    """Pinned to the FIELD: a baseline that stopped validating (a new validator, a masked
+    secret) would otherwise make every row pass whatever the bounds are."""
+    import pydantic
+
+    from app.config import Settings
+
+    with pytest.raises(pydantic.ValidationError) as e:
+        Settings.model_validate({**settings.model_dump(), name: value})
+    locs = [err["loc"] for err in e.value.errors()]
+    assert locs == [(name,)], locs          # locations only: an input may be a secret
+
+
+def test_the_unmodified_settings_dump_validates():
+    """The control for the rows above: the baseline they perturb is itself valid. On failure,
+    only the failing field NAMES are reported — pydantic's message would echo the inputs, and
+    the dump holds every secret."""
+    import pydantic
+
+    from app.config import Settings
+
+    try:
+        Settings.model_validate(settings.model_dump())
+    except pydantic.ValidationError as e:
+        pytest.fail(f"the settings dump does not validate: {[err['loc'] for err in e.errors()]}",
+                    pytrace=False)
+
+
+@pytest.mark.parametrize("name", sorted(n for n, (_d, ge, _le) in _WIDGET_SETTINGS.items() if ge))
+def test_each_widget_bound_is_inclusive(name):
+    """Both ends validate; one past either end fails on that field alone."""
+    import pydantic
+
+    from app.config import Settings
+
+    _default, ge, le = _WIDGET_SETTINGS[name]
+    base = settings.model_dump()
+    for ok in (ge, le):
+        assert getattr(Settings.model_validate({**base, name: ok}), name) == ok
+    for bad in (ge - 1, le + 1):
+        with pytest.raises(pydantic.ValidationError) as e:
+            Settings.model_validate({**base, name: bad})
+        locs = [err["loc"] for err in e.value.errors()]
+        assert locs == [(name,)], locs

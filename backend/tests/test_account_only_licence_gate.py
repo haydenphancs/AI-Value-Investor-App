@@ -213,6 +213,23 @@ def test_the_trillion_club_detail_is_scanned_and_refuses_an_anonymous_caller(cli
     assert r.json().get("error_code") == "AUTH_REQUIRED"
 
 
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/api/v1/widget/holdings-mover"),
+    ("POST", "/api/v1/widget/holdings-grant/revoke"),
+    ("PUT", "/api/v1/widget/push-token"),
+])
+def test_the_holdings_widget_routes_are_scanned_and_refuse_an_anonymous_caller(client, method, path):
+    """Anti-vacuity for migration 216's routes: the holdings payload reaches a NON-session
+    credential (the per-device grant key), so its route must still answer the licence gate's
+    401 AUTH_REQUIRED to a caller presenting nothing — and must be discovered by the sweeps
+    above (a renamed path would silently drop out of both)."""
+    assert (method, path) in _api_routes()
+    assert (method, path) not in _OPEN
+    r = _call(client, method, path)
+    assert r.status_code == 401
+    assert r.json().get("error_code") == "AUTH_REQUIRED"
+
+
 def test_the_allow_list_has_no_stale_entries():
     """An entry naming a route that no longer exists is silent permission for a future route
     that happens to reuse the path."""

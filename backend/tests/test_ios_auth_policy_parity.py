@@ -165,10 +165,15 @@ def _router_level_deps(source: str) -> set[str]:
     default — and a per-route `Depends(...)` scan sees none of it. When that gating landed the
     whole 8,818-test suite stayed green, which is exactly how a guard goes vacuous.
     """
-    marker = "APIRouter("
-    i = source.find("router = " + marker)
-    if i == -1:
+    # ANCHORED at the start of a line, on the RAW source (2026-11-27, migration 216). A bare
+    # `find("router = APIRouter(")` also matches `widget_holdings_router = APIRouter(` (and
+    # `widget_client_router = …`) — the substring is inside the longer name — so the module
+    # docstring quoting a secondary router's declaration, or that router being declared first,
+    # would have every strict widget route scanned with the GRANT dependency instead.
+    m = re.search(r"^router = APIRouter\(", source, re.M)
+    if m is None:
         return set()
+    i = m.start()
     # Paren-BALANCED, not `[^)]*`. The argument list is `dependencies=[Depends(get_current_user_id)]`,
     # which contains nested parens — a non-greedy or negated-class match stops at the FIRST `)`,
     # captures `dependencies=[Depends(get_current_user_id`, and finds no `Depends(...)` in it.
@@ -186,6 +191,104 @@ def _router_level_deps(source: str) -> set[str]:
             if depth == 0:
                 return set(re.findall(r"Depends\((\w+)\)", source[start : j + 1]))
     return set()
+
+
+# ── the secondary routers (widget.py) ────────────────────────────────────────────────
+#
+# `_backend_strict_routes` splits on `@router.` and reads only `router = APIRouter(`, so it is
+# BLIND to any other router. Two exist on purpose, both in widget.py, each authenticated by ONE
+# non-session credential; pinned here so a third router — or a route added to either — cannot
+# land without a test change.
+_SECONDARY_ROUTERS = {
+    # market widget token (auth.md §8a): the one market-wide route
+    "widget_client_router": ({"get_widget_caller"}, {("get", "/market-mover")}),
+    # the Holdings grant (migration 216): the data route and revoke-by-key, nothing else
+    "widget_holdings_router": (
+        {"get_holdings_grant_caller"},
+        {("get", "/holdings-mover"), ("post", "/holdings-grant/revoke")},
+    ),
+}
+
+
+def _strip_py_comments(source: str) -> str:
+    return "\n".join(re.sub(r"(^|\s)#.*$", "", line) for line in source.splitlines())
+
+
+def _secondary_routers(source: str) -> dict[str, tuple[set[str], set[tuple[str, str]]]]:
+    """{name: (router-level deps, {(method, path)})} for every `<name> = APIRouter(` that is not
+    the plain `router`, on comment-stripped source."""
+    code = _strip_py_comments(source)
+    out: dict[str, tuple[set[str], set[tuple[str, str]]]] = {}
+    for m in re.finditer(r"^(\w+) = APIRouter\((.*)$", code, re.M):
+        name = m.group(1)
+        if name == "router":
+            continue
+        deps = set(re.findall(r"Depends\((\w+)\)", m.group(2)))
+        routes = {
+            (rm.group(1), rm.group(2))
+            for rm in re.finditer(
+                rf"^@{name}\.(get|post|put|patch|delete)\(\s*['\"]([^'\"]*)['\"]", code, re.M)
+        }
+        out[name] = (deps, routes)
+    return out
+
+
+def test_the_secondary_routers_are_exactly_the_two_widget_extension_routers():
+    found: dict[str, tuple[set[str], set[tuple[str, str]]]] = {}
+    for py in sorted(_ENDPOINTS_DIR.glob("*.py")):
+        for name, spec in _secondary_routers(py.read_text()).items():
+            assert name not in found, f"{name} declared twice"
+            found[name] = spec
+            assert py.name == "widget.py", f"a secondary router in {py.name}: {name}"
+    assert found == _SECONDARY_ROUTERS, found
+
+
+def test_the_plain_router_is_declared_before_the_secondary_ones():
+    """On the RAW source (docstrings are not comments): the strict router must be the first
+    `router = APIRouter(` line, ahead of both secondary declarations."""
+    src = (_ENDPOINTS_DIR / "widget.py").read_text()
+    strict = re.search(r"^router = APIRouter\(", src, re.M)
+    assert strict is not None
+    for name in _SECONDARY_ROUTERS:
+        sec = re.search(rf"^{name} = APIRouter\(", src, re.M)
+        assert sec is not None and strict.start() < sec.start(), name
+    assert _router_level_deps(src) == {"get_current_user_id"}
+
+
+def test_the_router_scan_survives_a_secondary_declaration_quoted_in_the_docstring():
+    """The mutation the anchor exists for: paste the holdings router's declaration into the
+    module docstring (above the strict router). The un-anchored `find` matched it as `router =
+    APIRouter(` and reported the GRANT dependency for every strict widget route."""
+    src = (_ENDPOINTS_DIR / "widget.py").read_text()
+    pasted = src.replace(
+        '"""\nHome-screen widget endpoints',
+        '"""\nwidget_holdings_router = APIRouter(dependencies=[Depends(get_holdings_grant_caller)])\n'
+        'Home-screen widget endpoints', 1,
+    )
+    assert pasted != src, "mutation anchor drifted"
+    assert _router_level_deps(pasted) == {"get_current_user_id"}
+    # The old, un-anchored scan is fooled by exactly this paste — the reason for the anchor.
+    i = pasted.find("router = APIRouter(")
+    assert "get_holdings_grant_caller" in pasted[i:i + 120]
+
+
+@pytest.mark.parametrize("label,old,new", [
+    ("a third route on the holdings router",
+     '@router.put("/push-token"',
+     '@widget_holdings_router.get("/extra")\nasync def _x():\n    return {}\n\n\n@router.put("/push-token"'),
+    ("a session dependency on the holdings router",
+     "widget_holdings_router = APIRouter(dependencies=[Depends(get_holdings_grant_caller)])",
+     "widget_holdings_router = APIRouter(dependencies=[Depends(get_holdings_grant_caller), "
+     "Depends(get_current_user_id)])"),
+    ("a third secondary router",
+     "widget_client_router = APIRouter(dependencies=[Depends(get_widget_caller)])",
+     "widget_client_router = APIRouter(dependencies=[Depends(get_widget_caller)])\n"
+     "widget_extra_router = APIRouter()"),
+])
+def test_the_secondary_router_pin_catches_each_mutation(label, old, new):
+    src = (_ENDPOINTS_DIR / "widget.py").read_text()
+    assert old in src, f"mutation anchor drifted: {label}"
+    assert _secondary_routers(src.replace(old, new, 1)) != _SECONDARY_ROUTERS, label
 
 
 def _backend_strict_routes() -> set[tuple[str, str]]:
@@ -234,6 +337,10 @@ def test_backend_strict_routes_are_discoverable():
         "getResearchReportPDF", "regenerateResearchReportPDF", "getResearchTickerReport",
         "getMyReports", "rateReport", "deleteReport",
         "getTickerReport", "prewarmReportCollection",
+        # The app's WidgetKit push-token upload (PUT /widget/push-token, migration 216): a strict
+        # `get_current_user` route; the holdings-mover / revoke routes have NO APIEndpoint case
+        # (the extension calls them with its grant key, outside APIClient).
+        "registerWidgetPushToken",
     ],
 )
 def test_strict_endpoints_are_signInRequired(case_name):

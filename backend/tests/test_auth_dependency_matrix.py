@@ -666,3 +666,101 @@ def test_the_trillion_club_detail_is_strict_and_reads_its_tier_from_the_users_ro
     assert deps == [get_watchlist_identity]
     for guest_dep in ("get_current_user_or_guest", "get_optional_user_id", "get_identity_only_user"):
         assert all(getattr(d, "__name__", "") != guest_dep for d in deps), guest_dep
+
+
+# ── The Holdings widget grant (migration 216): the same grid, one more credential ────────────
+#
+# `get_holdings_grant_caller` reads ONE header and the grant row decides the user. Its codes are
+# the extension's contract: only AUTH_TOKEN_INVALID / AUTH_SESSION_EXPIRED /
+# AUTH_ACCOUNT_NOT_FOUND mean "key refused" (hide the tile); AUTH_REQUIRED never clears anything
+# and AUTH_UNAVAILABLE keeps the last snapshot.
+
+from app.dependencies import HoldingsGrantCaller, get_holdings_grant_caller  # noqa: E402
+from app.services import widget_holdings_grant_service as _grants  # noqa: E402
+
+
+class _GrantSB:
+    """A store whose `check_widget_holdings_grant` answers a fixed body; counts calls."""
+
+    def __init__(self, answer=None, raises=False):
+        self.answer, self.raises, self.calls = answer, raises, 0
+
+    def rpc(self, name, params):
+        assert name == "check_widget_holdings_grant"
+        outer = self
+
+        class _C:
+            def execute(self_inner):
+                outer.calls += 1
+                if outer.raises:
+                    raise RuntimeError("transient postgrest blip")
+
+                class _R:
+                    data = outer.answer
+                return _R()
+        return _C()
+
+
+async def _holdings(token, sb):
+    from app.core.security import rate_limiter
+
+    rate_limiter.clear()
+    return await get_holdings_grant_caller(request=None, x_holdings_token=token, supabase=sb)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", [None, "", "  "])
+async def test_holdings_no_key_is_AUTH_REQUIRED(token):
+    sb = _GrantSB()
+    with pytest.raises(HTTPException) as e:
+        await _holdings(token, sb)
+    assert e.value.status_code == 401 and e.value.detail["error_code"] == "AUTH_REQUIRED"
+    assert sb.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_holdings_an_access_jwt_in_the_header_is_INVALID_with_no_read():
+    sb = _GrantSB()
+    with pytest.raises(HTTPException) as e:
+        await _holdings(create_access_token({"sub": _USER_ID}), sb)
+    assert e.value.detail["error_code"] == "AUTH_TOKEN_INVALID" and sb.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,code", [
+    ("unknown", "AUTH_TOKEN_INVALID"),
+    ("revoked", "AUTH_SESSION_EXPIRED"),
+    ("expired", "AUTH_SESSION_EXPIRED"),
+    ("evicted", "AUTH_SESSION_EXPIRED"),
+    ("account_missing", "AUTH_ACCOUNT_NOT_FOUND"),
+])
+async def test_holdings_every_dead_status_has_its_401_code(status, code):
+    with pytest.raises(HTTPException) as e:
+        await _holdings(_grants.new_token(), _GrantSB({"status": status}))
+    assert e.value.status_code == 401 and e.value.detail["error_code"] == code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sb", [
+    _GrantSB(raises=True), _GrantSB(None), _GrantSB({"status": "live"}), _GrantSB({"nope": 1}),
+], ids=["store-down", "no-body", "live-without-ids", "no-status"])
+async def test_holdings_store_trouble_is_503_never_allowed(sb):
+    with pytest.raises(HTTPException) as e:
+        await _holdings(_grants.new_token(), sb)
+    assert e.value.status_code == 503 and e.value.detail["error_code"] == "AUTH_UNAVAILABLE"
+
+
+@pytest.mark.asyncio
+async def test_holdings_live_resolves_the_rows_user_never_a_guest():
+    gid = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    caller = await _holdings(_grants.new_token(), _GrantSB(
+        {"status": "live", "grant_id": gid, "user_id": _USER_ID}))
+    assert caller == HoldingsGrantCaller(user_id=_USER_ID, grant_id=gid)
+    assert caller.user_id != GUEST_USER_ID
+
+
+def test_holdings_dependency_has_no_authorization_parameter():
+    """A garbage (or valid) `Authorization` header cannot change its answer: it never reads one."""
+    import inspect
+
+    assert "credentials" not in inspect.signature(get_holdings_grant_caller).parameters

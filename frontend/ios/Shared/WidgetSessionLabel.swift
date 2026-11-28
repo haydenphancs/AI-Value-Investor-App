@@ -11,16 +11,20 @@
 //  numbers describe — so the tile can name it instead of implying "now".
 //
 //  WHY DERIVED, NOT STORED
-//  The widget extension cannot fetch. The app refreshes on cold launch and foreground
-//  only, so between two app opens the SAME bytes re-render indefinitely. Any freshness
-//  wording baked in at write time is therefore a claim that decays without anything
-//  updating it — which is exactly what went wrong: `market_session` is captured at write
-//  time, so a snapshot written Friday at 18:00 rendered "After hours" on Monday, and one
-//  written during regular hours rendered an EMPTY label forever.
+//  Between two successful builds the SAME bytes re-render, for as long as it takes. When this
+//  was written the extension could not fetch at all and only the app refreshed, on cold launch
+//  and foreground. The extension now fetches both modes on a 20/60/90-minute schedule
+//  (`WidgetRefreshSchedule`), but a fetch can still fail, be deferred by WidgetKit, or be
+//  refused (a revoked Holdings grant keeps nothing new coming). Any freshness wording baked
+//  in at write time is therefore a claim that decays without anything updating it — which
+//  is exactly what went wrong: `market_session` is captured at write time, so a snapshot
+//  written Friday at 18:00 rendered "After hours" on Monday, and one written during regular
+//  hours rendered an EMPTY label forever.
 //
 //  Deriving from `session_date` fixes it structurally. The date does not decay; the
 //  sentence built from it is re-evaluated on every timeline entry, so the tile ages its
 //  own label with no network, no background task, and no flag anyone has to keep true.
+//  The footer is what makes a failed, deferred or refused fetch visible.
 //
 //  Pure and clock-injected so it can be tested. Its failure mode — the widget lying about
 //  time — is not observable by looking at a Home Screen on a Tuesday afternoon; you would
@@ -34,13 +38,28 @@ public enum WidgetSessionLabel {
     private static let liveGrace: TimeInterval = 15 * 60
     /// Beyond this, a same-session intraday snapshot gets its time printed.
     ///
-    /// Longer than the Market tile's 20-minute self-refresh, so a tile that IS keeping up
-    /// stays quiet; a Holdings tile (which only the app can refresh) written at 10:05 and
-    /// still on screen at 15:55 says "As of 10:05 AM ET" instead of passing for current.
+    /// Longer than the 20-minute regular-session reload, so a tile that IS keeping up stays
+    /// quiet; a tile whose fetches stopped succeeding (a deferred reload, an outage, a refused
+    /// Holdings grant, or an older build where only the app refreshed Holdings) written at
+    /// 10:05 and still on screen at 15:55 says "As of 10:05 AM ET" instead of passing for
+    /// current.
     ///
     /// Internal, not private: the timeline schedules a render just past it (`ageBoundary`),
     /// and that must be THIS constant, never a second copy of the 45.
     static let intradayAgeLimit: TimeInterval = 45 * 60
+    /// Beyond this, a same-day AFTER-HOURS or CLOSED snapshot gets its time printed.
+    ///
+    /// Must outlast every off-hours reload — the 60-minute extended one and the 90-minute quiet
+    /// one (`WidgetRefreshSchedule.extendedInterval` / `.quietInterval`) — so a tile that keeps
+    /// up stays silent. Before the extension fetched around the clock these snapshots had no
+    /// rule at all: an after-hours reading from 17:02 sat unlabelled until midnight, which was
+    /// harmless only while the next reload was the 04:00 one anyway.
+    ///
+    /// A literal, not a reference to the schedule, so this file still compiles on its own in
+    /// `scripts/widget-session-label-check.sh`; the relation between the two files is pinned by
+    /// `backend/tests/test_ios_widget_schedule_footer.py`. Internal for the same reason as
+    /// `intradayAgeLimit`: `ageBoundary` schedules a render one second past it.
+    static let offHoursAgeLimit: TimeInterval = 2 * 60 * 60
     /// A regular-session build at or after this ET minute is close enough to the bell to
     /// keep "Tue close". Earlier than that, the numbers were NEVER the close.
     private static let nearCloseMinute = 15 * 60 + 55
@@ -134,13 +153,16 @@ public enum WidgetSessionLabel {
     /// keeps the honesty guarantee while costing zero pixels on the overwhelmingly common
     /// day, which is what makes it affordable on a 155pt tile.
     ///
-    /// Two exceptions within the day, both "As of 10:05 AM ET" — the current session, but not
+    /// Three exceptions within the day, all "As of 10:05 AM ET" — the current session, but not
     /// the current numbers:
-    ///   • a REGULAR-session snapshot older than `intradayAgeLimit` — the case a Holdings tile
-    ///     hits whenever the app was opened once mid-morning;
+    ///   • a REGULAR-session snapshot older than `intradayAgeLimit` — the case a tile hits
+    ///     whenever its reloads stop succeeding mid-morning;
     ///   • a PRE-MARKET snapshot once the opening bell has rung after it. Before the bell a
     ///     07:31 reading is still the latest there is (and stays silent); after it, the 08:30
-    ///     numbers on a tile nothing refreshed are not the session's.
+    ///     numbers on a tile nothing refreshed are not the session's;
+    ///   • an AFTER-HOURS or CLOSED snapshot older than `offHoursAgeLimit` (2 h). The tile now
+    ///     reloads every 60-90 minutes off hours, so one that is two hours old means a fetch
+    ///     failed, was deferred or was refused — exactly when the reader needs telling.
     ///
     /// Absent `sessionDate` (an old backend) is NOT treated as current: we cannot tell,
     /// and the safe answer to "is this today's data" is to say what we know rather than
@@ -205,14 +227,22 @@ public enum WidgetSessionLabel {
             [.day], from: cal.startOfDay(for: day), to: cal.startOfDay(for: now)
         ).day ?? 0
         if daysAgo <= 0 {
-            // Today's session. Silent while it is current — but an intraday reading the app
-            // wrote hours ago is not current, and Holdings cannot refresh itself. Same honest
-            // tense as `displayLabel` step 3; nothing else changes wording within the day.
+            // Today's session. Silent while it is current — but a reading hours old is not
+            // current, whoever wrote it and whatever kept the next one from arriving. Same
+            // honest tense as `displayLabel` step 3; these three are the only rules that change
+            // wording within the day.
             if marketSession == "regular", now.timeIntervalSince(asOf) > intradayAgeLimit {
                 return .asOf(asOf)
             }
             if marketSession == "premarket", let open = regularOpen(on: asOf, cal: cal),
                asOf < open, now >= open {
+                return .asOf(asOf)
+            }
+            // Off hours: the tile reloads every 60-90 minutes, so a reading older than two
+            // hours is one a fetch failed to replace. Owner, 2026-11-27: the after-hours and
+            // closed tile says "As of 7:42 PM ET" rather than passing for current.
+            if marketSession == "afterhours" || marketSession == "closed",
+               now.timeIntervalSince(asOf) > offHoursAgeLimit {
                 return .asOf(asOf)
             }
             return nil
@@ -262,14 +292,22 @@ public enum WidgetSessionLabel {
     /// TODAY's session — or nil when there is none to wait for.
     ///
     /// The label is re-evaluated only at timeline entries, and during regular hours the
-    /// timeline holds ONE (`renderDates` stops at the 20-minute reload). So a Holdings tile
-    /// written at 10:05 kept its unlabelled 10:05 render until the first reload at least 45
-    /// minutes on — 11:05 when every reload ran on time, later whenever WidgetKit deferred one.
-    /// The provider adds an entry here, which is exactly when the wording changes.
+    /// timeline holds ONE before its reload (`renderDates` keeps nothing between now and the
+    /// 20-minute reload; only the ET 00:01 rollover lies past it). So a tile written at 10:05
+    /// whose next build failed kept its unlabelled 10:05 render until a reload at least 45
+    /// minutes on — later still whenever WidgetKit deferred one. The provider adds an entry
+    /// here, which is exactly when the wording changes.
     ///
     /// - regular: one second past `intradayAgeLimit` (the rule is a strict `>`).
     /// - premarket: the opening bell, when the reading stops being the latest.
+    /// - afterhours, closed: one second past `offHoursAgeLimit` (also a strict `>`).
     /// - otherwise nil: no rule changes wording within the day.
+    ///
+    /// Capped to the session's ET day: a closed build at 22:30 would cross 2 h at 00:30:01
+    /// tomorrow, where this function's contract ("the instant the same-day label starts
+    /// speaking") no longer holds — by then the numbers are a previous session's and the
+    /// timeline's ET 00:01 rollover entry (`WidgetRefreshSchedule.renderDates`) already
+    /// renders them as one.
     public static func ageBoundary(
         asOf: Date, sessionDate: String?, marketSession: String, now: Date
     ) -> Date? {
@@ -283,10 +321,13 @@ public enum WidgetSessionLabel {
         case "premarket":
             guard let open = regularOpen(on: asOf, cal: cal), asOf < open else { return nil }
             boundary = open
+        case "afterhours", "closed":
+            boundary = asOf.addingTimeInterval(offHoursAgeLimit + 1)
         default:
             return nil
         }
-        return boundary > now ? boundary : nil
+        guard boundary > now, cal.isDate(boundary, inSameDayAs: day) else { return nil }
+        return boundary
     }
 
     /// Whether `asOf`'s ET calendar day is before `now`'s.
@@ -391,8 +432,20 @@ public enum WidgetSessionLabel {
     }
 
     /// "10:05 ET" — the compact label's time, New York time and saying so, as `clock` does.
-    /// No AM/PM: beside a weekday or "As of" on a market tile, the trading hours make it
-    /// unambiguous. " ET", never a literal "EST": that is wrong whenever New York is on EDT.
+    /// " ET", never a literal "EST": that is wrong whenever New York is on EDT.
+    ///
+    /// No AM/PM (owner, 2026-11-27: kept off when the after-hours and closed "As of" claims
+    /// arrived). It is NOT unambiguous, and used to say it was. What makes it acceptable:
+    ///   • it is only ever a FALLBACK — the Lock Screen's inline line tries the full label,
+    ///     AM/PM included, first, and the Home Screen footer always prints the full one;
+    ///   • for the readings the off-hours rule adds (after hours 16:00-19:59; closed 13:00-
+    ///     21:59 on a half day or an evening) the wrong reading is the MORNING one, which makes
+    ///     the numbers look older than they are — the safe direction for an age label;
+    ///   • the opposite misreading — a morning time ("As of 10:05 ET", "As of 4:30 ET") still
+    ///     on screen that evening, taken for the evening time — needs the tile to have gone
+    ///     about twelve hours with no successful build on a day it reloads every 20-90 minutes.
+    /// The compact claim stays the full claim minus decoration: `widget-session-label-check.sh`'s
+    /// parity sweep pins that the two speak together, the compact one never longer.
     private static func shortClock(_ d: Date) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")

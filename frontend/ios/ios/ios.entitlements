@@ -44,10 +44,18 @@
 	<true/>
 	<key>aps-environment</key>
 	<string>development</string>
-	<!-- App Group. The ONLY channel between this app and the Movers widget extension.
-	     The app fetches (it owns the auth token) and writes a small JSON snapshot into
-	     the shared container; the widget reads it and performs no network call and no
-	     identity read of its own.
+	<!-- App Group. The channel between this app and the Movers widget extension.
+	     The app fetches with its session and writes a small JSON snapshot into the
+	     shared container. Since 2026-09-07 the widget also fetches the MARKET tile itself,
+	     with a market-scoped widget token (auth.md §8a). Since the Holdings self-refresh
+	     (migration 216, auth.md §8c) it also fetches the HOLDINGS tile with a per-device
+	     Holdings grant key. Both are scoped, non-session credentials. The widget still
+	     never reads the session's own Keychain items.
+
+	     This App Group is ALSO the Keychain ACCESS GROUP of the Holdings grant item
+	     (`WidgetHoldingsGrant`, ThisDeviceOnly). An app group works as an access group
+	     WITHOUT a `keychain-access-groups` entitlement. ⚠️ Never add `keychain-access-groups`
+	     here: listing the app-ID group on the widget would expose the session refresh token.
 
 	     ⚠️ That split is deliberate and must not be "simplified" into letting the widget
 	     call the API. `.claude/rules/auth.md` §8 makes APIClient the one token source

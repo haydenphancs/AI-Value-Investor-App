@@ -26,6 +26,7 @@ from app.core.security import (
     rate_limiter, trusted_client_ip, verify_device_proof, verify_supabase_token,
 )
 from app.services import auth_session_service as auth_sessions
+from app.services import widget_holdings_grant_service as holdings_grants
 from app.api.error_response import ErrorCode, auth_error, make_error_response
 from app.services.auth_methods_service import auth_methods_service
 from app.services import apple_sign_in_service
@@ -38,6 +39,7 @@ from app.schemas.auth import (
     OAuthSignInRequest, SessionExchangeRequest, LogoutRequest, LogoutResponse,
     ReauthenticateRequest, ReauthenticateResponse,
     ChangeEmailRequest, ConfirmEmailChangeRequest, EmailChangeResponse,
+    WidgetHoldingsGrantOut,
     EMAIL_CHANGE_CHANGED, EMAIL_CHANGE_CODES_SENT,
     PASSWORD_TOO_LONG_MESSAGE, _validate_password_strength,
 )
@@ -711,6 +713,106 @@ def _refresh_answer(
     raise auth_error(ErrorCode.AUTH_UNAVAILABLE, message=f"refresh: unknown status {status!r}")
 
 
+# ── The Home Screen widget's Holdings grant, minted inside a refresh (migration 216) ─────────
+#
+# Owner 2026-11-27: "Yes, issue it in refresh (Recommended)". The grant is a 30-day credential
+# that reads the account's holdings, so it is minted ONLY where the caller has just proven
+# possession of the session's single-use refresh token — a `rotated` answer from 214 — and never
+# from a bare access token (a stolen one lives ≤ 60 min). A thief who rotates to mint makes the
+# victim's next refresh REUSE, which revokes the session and, through 216's trigger, the grant.
+#
+# Best-effort and bounded: the refresh is the app's lifeline, so the mint can never fail it, slow
+# it past `WIDGET_GRANT_MINT_TIMEOUT_SECONDS`, or change its status. A mint that commits after the
+# bound has no holder; the next mint supersedes it, or it expires.
+WIDGET_GRANT_MINT_TIMEOUT_SECONDS = 3.0
+#: Per-account mint ceiling. The app asks only when its grant is missing, refused or within a day
+#: of renewal, behind a 10 min → 24 h backoff; this bounds a loop.
+WIDGET_GRANT_MINT_PER_HOUR = 10
+
+
+def _access_token_iat(access_token: str) -> Optional[int]:
+    """The `iat` of an access token THIS process just minted, as whole seconds, or None."""
+    try:
+        claims = decode_token(access_token)
+    except Exception as e:  # noqa: BLE001 — our own fresh token; a failure is logged, never raised
+        logger.error(
+            "widget grant: the access token just minted could not be re-read (%s)",
+            type(e).__name__,
+        )
+        return None
+    iat = claims.get("iat") if isinstance(claims, dict) else None
+    if isinstance(iat, bool) or not isinstance(iat, (int, float)) or iat <= 0:
+        return None
+    return int(iat)
+
+
+async def _mint_widget_holdings_grant(
+    supabase: Client, user_id: str, sid: Optional[str], access_token: str,
+) -> Optional[WidgetHoldingsGrantOut]:
+    """Mint a Holdings grant for this rotation, or None. NEVER raises, never exceeds its bound.
+
+    Call only for a request that opted in and a rotation whose status is `rotated`.
+    """
+    try:
+        if not settings.WIDGET_HOLDINGS_GRANTS_ENABLED:
+            logger.info("widget grant: requested by user=%s but the switch is off", user_id)
+            return None
+        session = auth_sessions.parse_uuid(sid)
+        if session is None:
+            logger.warning("widget grant: rotation for user=%s carried no session id", user_id)
+            return None
+        if not rate_limiter.is_allowed(
+            f"widget_holdings_mint:{user_id}", WIDGET_GRANT_MINT_PER_HOUR, 3600,
+        ):
+            logger.warning(
+                "widget grant: mint limit (%d/h) reached for user=%s — skipped",
+                WIDGET_GRANT_MINT_PER_HOUR, user_id,
+            )
+            return None
+        minted_iat = _access_token_iat(access_token)
+        if minted_iat is None:
+            return None
+        outcome = await asyncio.wait_for(
+            asyncio.to_thread(holdings_grants.mint, supabase, user_id, session, minted_iat),
+            WIDGET_GRANT_MINT_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "widget grant: mint for user=%s sid=%s exceeded %.0fs — refresh answered without it "
+            "(a late row has no holder; the next mint supersedes it)",
+            user_id, sid, WIDGET_GRANT_MINT_TIMEOUT_SECONDS,
+        )
+        return None
+    except holdings_grants.GrantSchemaMissing:
+        return None  # logged (throttled ERROR) in the service
+    except holdings_grants.GrantStoreUnavailable as e:
+        logger.error("widget grant: mint failed for user=%s sid=%s (%s)", user_id, sid, e)
+        return None
+    except Exception as e:  # noqa: BLE001 — the refresh must never fail because of the grant
+        logger.error(
+            "widget grant: mint failed unexpectedly for user=%s sid=%s (%s: %s)",
+            user_id, sid, type(e).__name__, e, exc_info=True,
+        )
+        return None
+
+    if outcome.status == "minted" and outcome.grant is not None:
+        grant = outcome.grant
+        return WidgetHoldingsGrantOut(
+            grant_token=grant.grant_token,
+            grant_id=grant.grant_id,
+            expires_at=holdings_grants.format_expires_at(grant.expires_at),
+            session_id=grant.session_id,
+        )
+    if outcome.status in ("evicted", "session_revoked", "account_missing"):
+        logger.info("widget grant: not minted for user=%s sid=%s (%s)", user_id, sid, outcome.status)
+    else:
+        logger.error(
+            "widget grant: not minted for user=%s sid=%s — store answered %s right after a "
+            "rotation of that session", user_id, sid, outcome.status,
+        )
+    return None
+
+
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     request: RefreshTokenRequest,
@@ -834,7 +936,16 @@ async def refresh_token(
             raise auth_error(
                 ErrorCode.AUTH_TOKEN_INVALID, message=f"refresh token claims unusable: {e}",
             )
-        return _refresh_answer(rotation, user_id, email, payload)
+        answer = _refresh_answer(rotation, user_id, email, payload)
+        # The widget grant (migration 216): only on opt-in, only for a REAL rotation (never
+        # `grace`, never `degraded`), and never able to fail or delay this refresh.
+        if request.widget_holdings_grant and rotation.status == "rotated":
+            grant = await _mint_widget_holdings_grant(
+                supabase, user_id, rotation.family_id, answer.access_token,
+            )
+            if grant is not None:
+                answer = answer.model_copy(update={"widget_holdings_grant": grant})
+        return answer
     except HTTPException:
         raise
     except _IdentityStoreUnavailable:

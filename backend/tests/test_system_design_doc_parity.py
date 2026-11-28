@@ -495,6 +495,9 @@ _CURATED_TABLES = {
     # deleted-account fingerprint ledger (211).
     "apple_sign_in_grants", "auth_refresh_families", "auth_refresh_tokens",
     "deleted_account_fingerprints",
+    # 2026-11-27 (later): 216 applied and re-dumped. §3.6 and §9.1 name the Holdings widget
+    # grant table.
+    "widget_holdings_grants",
 }
 
 

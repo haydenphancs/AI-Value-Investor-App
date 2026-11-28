@@ -2,7 +2,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict hqSS8sqVY2710UyJI1d2Khf3rUhc7GZLCIPVNUv0ygzuoMNq8awQU6a9fwSrgxf
+\restrict qCAjKn1CFz4sOoznq9AvB4lF6Fufm8L4gaaavdXYLYplvcDP9YeM0X89Ii9i4lV
 
 -- Dumped from database version 17.6
 -- Dumped by pg_dump version 18.4
@@ -1049,6 +1049,32 @@ $$;
 
 
 --
+-- Name: _revoke_widget_grants_for_session(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public._revoke_widget_grants_for_session() RETURNS trigger
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+BEGIN
+    UPDATE public.widget_holdings_grants g
+       SET revoked_at = now(),
+           revoke_reason = CASE NEW.revoke_reason
+                               WHEN 'logout' THEN 'logout'
+                               WHEN 'reuse' THEN 'reuse'
+                               WHEN 'signout_all' THEN 'signout_all'
+                               ELSE 'session_ended'
+                           END,
+           push_token = NULL, push_environment = NULL, last_head_ticker = NULL
+     WHERE g.sid = NEW.family_id
+       AND g.user_id = NEW.user_id
+       AND g.revoked_at IS NULL;
+    RETURN NULL;
+END;
+$$;
+
+
+--
 -- Name: account_auth_methods(uuid); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -1318,6 +1344,87 @@ $$;
 --
 
 COMMENT ON FUNCTION public.charge_user_credits(p_user_id uuid, p_amount integer) IS 'DEPRECATED (migration 118). Pool-blind: tests and mutates user_credits.used against `total` only and cannot see the purchased pool, so it will refuse a spend the user can afford and bypass the granted-first ordering. Use spend_credits. Unused by application code as of migration 118.';
+
+
+--
+-- Name: check_widget_holdings_grant(text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.check_widget_holdings_grant(p_key_hash text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+DECLARE
+    v       public.widget_holdings_grants%ROWTYPE;
+    v_pw    timestamptz;
+    v_sr    timestamptz;
+    v_stamp timestamptz;
+BEGIN
+    IF p_key_hash IS NULL OR p_key_hash !~ '^[0-9a-f]{64}$' THEN
+        RETURN jsonb_build_object('status', 'unknown');
+    END IF;
+
+    SELECT * INTO v FROM public.widget_holdings_grants g WHERE g.key_hash = p_key_hash;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('status', 'unknown');
+    END IF;
+
+    -- The predicate DECIDES; the branches below only name why a dead grant is dead.
+    IF NOT public.widget_holdings_grant_is_live(v) THEN
+        IF v.revoked_at IS NOT NULL THEN
+            RETURN jsonb_build_object('status', 'revoked');
+        END IF;
+        IF v.expires_at <= now() THEN
+            RETURN jsonb_build_object('status', 'expired');
+        END IF;
+        SELECT u.password_changed_at, u.sessions_revoked_at INTO v_pw, v_sr
+          FROM public.users u WHERE u.id = v.user_id;
+        IF NOT FOUND THEN
+            RETURN jsonb_build_object('status', 'account_missing');
+        END IF;
+        v_stamp := GREATEST(v_pw, v_sr);
+        IF v_stamp IS NOT NULL AND to_timestamp(v.minted_iat) < date_trunc('second', v_stamp) THEN
+            -- An evicted grant is REVOKED the first time it is seen (D4: no holding left behind
+            -- on a dead row). Nothing else would: the device's revoke-by-key is refused before
+            -- the RPC runs (the key no longer authenticates), and the prune keys on revoked_at /
+            -- expires_at. One row, keyed by grant_id: no lock is needed and none is held.
+            UPDATE public.widget_holdings_grants g
+               SET revoked_at = now(), revoke_reason = 'session_ended',
+                   push_token = NULL, push_environment = NULL, last_head_ticker = NULL
+             WHERE g.grant_id = v.grant_id
+               AND g.revoked_at IS NULL;
+            RETURN jsonb_build_object('status', 'evicted');
+        END IF;
+        -- Unreachable while the predicate and the branches agree; a refusal either way.
+        RETURN jsonb_build_object('status', 'revoked');
+    END IF;
+
+    -- The successor's FIRST live use ends its predecessors (renewal overlap, ≤ 24 h).
+    IF v.last_used_at IS NULL THEN
+        UPDATE public.widget_holdings_grants g
+           SET revoked_at = now(), revoke_reason = 'renewed',
+               push_token = NULL, push_environment = NULL, last_head_ticker = NULL
+         WHERE g.superseded_by = v.grant_id
+           AND g.user_id = v.user_id
+           AND g.revoked_at IS NULL;
+    END IF;
+
+    -- At most one write an hour per grant.
+    UPDATE public.widget_holdings_grants g
+       SET last_used_at = now()
+     WHERE g.grant_id = v.grant_id
+       AND g.revoked_at IS NULL
+       AND (g.last_used_at IS NULL OR g.last_used_at < now() - interval '1 hour');
+
+    RETURN jsonb_build_object(
+        'status', 'live',
+        'grant_id', v.grant_id,
+        'user_id', v.user_id,
+        'expires_at', to_char(v.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+        'superseded', v.superseded_by IS NOT NULL
+    );
+END;
+$_$;
 
 
 --
@@ -3034,6 +3141,510 @@ $$;
 
 
 --
+-- Name: marketing_request_replacement(uuid, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.marketing_request_replacement(p_run_id uuid, p_by text, p_not_after timestamp with time zone) RETURNS jsonb
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    -- Pinned equal to app/schemas/marketing.py REPLACEMENTS_PER_DAY / REPLACEABLE_SERIES / RUN_REPLACEMENT_MAX.
+    c_per_day   CONSTANT INTEGER := 2;
+    c_series    CONSTANT TEXT    := 'money_map';
+    c_max       CONSTANT INTEGER := 2;
+    c_zone      CONSTANT TEXT    := 'America/New_York';
+    v_now       TIMESTAMPTZ;
+    v_day       DATE;
+    v_run       public.marketing_runs%ROWTYPE;
+    v_newest    public.marketing_runs%ROWTYPE;
+    v_script    RECORD;
+    v_blocking  TEXT;
+    v_pending   INTEGER;
+    v_today     INTEGER;
+    v_next      SMALLINT;
+    v_new_id    UUID;
+    v_rejected  UUID[];
+    v_messages  JSONB;
+BEGIN
+    IF p_run_id IS NULL OR p_by IS NULL OR length(p_by) NOT BETWEEN 1 AND 64 OR p_not_after IS NULL THEN
+        RAISE EXCEPTION 'marketing_request_replacement: p_run_id, p_by (1-64 chars) and p_not_after are required'
+            USING ERRCODE = '22023';  -- invalid_parameter_value
+    END IF;
+
+    SELECT run_date INTO v_day FROM public.marketing_runs WHERE id = p_run_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('outcome', 'not_found');
+    END IF;
+
+    -- One replacement decision per ET day at a time, over BOTH lanes: the day's cap is counted and spent under it.
+    -- marketing_restore_replaced takes the SAME lock.
+    PERFORM pg_advisory_xact_lock(hashtextextended('marketing_request_replacement:' || v_day::text, 0));
+    v_now := clock_timestamp();   -- after the lock wait: every stamp below and the cutoff use the same instant
+
+    SELECT * INTO v_run FROM public.marketing_runs WHERE id = p_run_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('outcome', 'not_found');
+    END IF;
+
+    -- The (day, lane)'s newest run: a retried request finds its own replacement there and is answered again,
+    -- read back from the ledger, never written twice. A run that was restored is never replayed. The replay is
+    -- answered BEFORE the time check: a request that committed just before its cutoff and lost its response is still
+    -- answered `requested` when the owner taps again after the cutoff (it changes nothing; it only reads back).
+    SELECT * INTO v_newest FROM public.marketing_runs r
+     WHERE r.run_date = v_run.run_date AND r.lane = v_run.lane
+     ORDER BY r.replacement DESC
+     LIMIT 1;
+    IF v_newest.replaces_run_id = v_run.id AND v_newest.replacement = v_run.replacement + 1
+       AND NOT (v_run.metadata ? 'restored_from') THEN
+        RETURN jsonb_build_object(
+            'outcome', 'requested', 'replayed', true,
+            'run_id', v_newest.id,
+            'replacement', v_newest.replacement,
+            'status', v_newest.status,
+            'replacements_today', CASE
+                WHEN jsonb_typeof(v_run.metadata -> 'replaced_by' -> 'replacements_today') = 'number'
+                THEN v_run.metadata -> 'replaced_by' -> 'replacements_today'
+                ELSE to_jsonb((SELECT count(*) FROM public.marketing_runs r2
+                                WHERE r2.run_date = v_run.run_date AND r2.replacement >= 1))
+            END,
+            'rejected_post_ids', COALESCE(
+                (SELECT jsonb_agg(p.id ORDER BY p.id) FROM public.marketing_posts p
+                  WHERE p.run_id = v_run.id
+                    AND p.metadata -> 'review' ->> 'replaced_by_run_id' = v_newest.id::text),
+                '[]'::jsonb),
+            'review_message_ids', COALESCE(
+                (SELECT jsonb_agg(DISTINCT p.metadata -> 'review_message_id') FROM public.marketing_posts p
+                  WHERE p.run_id = v_run.id
+                    AND p.metadata -> 'review' ->> 'replaced_by_run_id' = v_newest.id::text
+                    AND jsonb_typeof(p.metadata -> 'review_message_id') = 'number'
+                    AND NULLIF(p.metadata ->> 'review_preview_at', '') IS NULL),
+                '[]'::jsonb),
+            'from_source_ref', v_newest.metadata -> 'replacement_request' -> 'from_source_ref');
+    END IF;
+
+    IF v_now >= p_not_after OR (v_now AT TIME ZONE c_zone)::date <> v_run.run_date THEN
+        RETURN jsonb_build_object('outcome', 'too_late');
+    END IF;
+    IF v_newest.replacement > v_run.replacement THEN
+        RETURN jsonb_build_object('outcome', 'already_replaced', 'run_id', v_newest.id,
+                                  'replacement', v_newest.replacement, 'status', v_newest.status);
+    END IF;
+    IF v_run.status <> 'media_ready' THEN
+        RETURN jsonb_build_object('outcome', 'not_ready', 'status', v_run.status);
+    END IF;
+
+    SELECT s.status, s.template_id, s.source_ref INTO v_script
+      FROM public.marketing_scripts s WHERE s.run_id = p_run_id;
+    IF NOT FOUND THEN    -- separate IF: plpgsql does not promise to short-circuit OR, and v_script is unset here
+        RETURN jsonb_build_object('outcome', 'not_money_map');
+    END IF;
+    IF v_script.status <> 'accepted' OR v_script.template_id IS DISTINCT FROM c_series THEN
+        RETURN jsonb_build_object('outcome', 'not_money_map');
+    END IF;
+
+    -- Every post of the run, locked in ONE order (id) for every caller of either function.
+    PERFORM 1 FROM public.marketing_posts p WHERE p.run_id = p_run_id ORDER BY p.id FOR UPDATE;
+    -- The blocking set: every status from which a post can reach, or has reached, a platform. Pinned equal to
+    -- app/schemas/marketing.py REPLACEMENT_BLOCKING_POST_STATUSES.
+    SELECT string_agg(DISTINCT p.status, ',' ORDER BY p.status) INTO v_blocking
+      FROM public.marketing_posts p
+     WHERE p.run_id = p_run_id AND p.status IN ('approved', 'queued', 'published', 'failed', 'retracted');
+    IF v_blocking IS NOT NULL THEN
+        RETURN jsonb_build_object('outcome', 'member_decided', 'statuses', v_blocking);
+    END IF;
+    SELECT count(*) INTO v_pending FROM public.marketing_posts p
+     WHERE p.run_id = p_run_id AND p.status = 'pending_review';
+    IF v_pending = 0 THEN
+        RETURN jsonb_build_object('outcome', 'nothing_pending');
+    END IF;
+
+    SELECT count(*) INTO v_today FROM public.marketing_runs r
+     WHERE r.run_date = v_run.run_date AND r.replacement >= 1;
+    IF v_today >= c_per_day OR v_run.replacement >= c_max THEN
+        RETURN jsonb_build_object('outcome', 'cap_reached', 'today', v_today);
+    END IF;
+    v_next := v_run.replacement + 1;
+
+    -- No `p_by` on the new row: it is echoed to the media worker on its claim.
+    INSERT INTO public.marketing_runs
+        (run_date, lane, replacement, replaces_run_id, status, stage, content_class, dry_run, attempts,
+         metadata, created_at, updated_at)
+    VALUES
+        (v_run.run_date, v_run.lane, v_next, v_run.id, 'planned', 'planned', v_run.content_class, v_run.dry_run, 0,
+         jsonb_build_object('replacement_request', jsonb_build_object(
+             'at', v_now, 'from_run_id', v_run.id, 'from_source_ref', v_script.source_ref)),
+         v_now, v_now)
+    RETURNING id INTO v_new_id;
+
+    WITH rejected AS (
+        UPDATE public.marketing_posts p
+           SET status = 'rejected',
+               updated_at = v_now,
+               metadata = p.metadata || jsonb_build_object('review', jsonb_build_object(
+                   'decision', 'rejected', 'by', p_by, 'at', v_now,
+                   'replaced_by_run_id', v_new_id, 'replacement', v_next))
+         WHERE p.run_id = p_run_id AND p.status = 'pending_review'
+        RETURNING p.id,
+                  p.metadata -> 'review_message_id' AS mid,
+                  p.metadata ->> 'review_preview_at' AS preview
+    )
+    SELECT array_agg(id ORDER BY id),
+           COALESCE(jsonb_agg(DISTINCT mid) FILTER (
+               WHERE jsonb_typeof(mid) = 'number' AND NULLIF(preview, '') IS NULL), '[]'::jsonb)
+      INTO v_rejected, v_messages
+      FROM rejected;
+
+    UPDATE public.marketing_runs
+       SET metadata = metadata || jsonb_build_object('replaced_by', jsonb_build_object(
+               'run_id', v_new_id, 'replacement', v_next, 'at', v_now, 'by', p_by,
+               'rejected', coalesce(cardinality(v_rejected), 0),
+               'replacements_today', v_today + 1, 'not_after', p_not_after)),
+           updated_at = v_now
+     WHERE id = p_run_id;
+
+    RETURN jsonb_build_object(
+        'outcome', 'requested', 'replayed', false,
+        'run_id', v_new_id,
+        'replacement', v_next,
+        'replacements_today', v_today + 1,
+        'rejected_post_ids', COALESCE(to_jsonb(v_rejected), '[]'::jsonb),
+        'review_message_ids', v_messages,
+        'from_source_ref', v_script.source_ref);
+END;
+$$;
+
+
+--
+-- Name: FUNCTION marketing_request_replacement(p_run_id uuid, p_by text, p_not_after timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.marketing_request_replacement(p_run_id uuid, p_by text, p_not_after timestamp with time zone) IS 'The review bot''s "🔄 Next company" (owner decision 2026-11-27, Money Map only, 2 a day over both lanes): in one transaction, reject every pending_review post of a media_ready money_map run and insert its planned replacement run, or return why not ({"outcome": not_found | too_late | already_replaced | not_ready | not_money_map | member_decided | nothing_pending | cap_reached | requested}). A retry of a request that already landed answers requested with replayed = true, read back, never a second write. INVOKER; service_role only (migration 215).';
+
+
+--
+-- Name: marketing_restore_replaced(uuid, text, timestamp with time zone); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.marketing_restore_replaced(p_run_id uuid, p_by text, p_now timestamp with time zone) RETURNS jsonb
+    LANGUAGE plpgsql
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+DECLARE
+    -- Pinned equal to app/schemas/marketing.py REPLACEMENT_MAX_ATTEMPTS / RESTORE_FINAL_RUN_STATUSES and to
+    -- app/services/marketing/run_service.py _REVIEW_OFFER_STAMPS (the stamps that mark a post as offered).
+    c_max_attempts CONSTANT INTEGER := 2;
+    c_offer_stamps CONSTANT TEXT[]  := ARRAY['review_bundle', 'review_notified_at', 'review_message_id',
+                                             'review_message_ids'];
+    c_zone         CONSTANT TEXT    := 'America/New_York';
+    c_uuid         CONSTANT TEXT    := '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$';
+    v_now          TIMESTAMPTZ;
+    v_judge        TIMESTAMPTZ;
+    v_day          DATE;
+    v_run          public.marketing_runs%ROWTYPE;
+    v_rep          public.marketing_runs%ROWTYPE;
+    v_rep_text     TEXT;
+    v_rep_id       UUID;
+    v_newest       UUID;
+    v_restored     UUID[];
+BEGIN
+    IF p_run_id IS NULL OR p_by IS NULL OR length(p_by) NOT BETWEEN 1 AND 64 OR p_now IS NULL THEN
+        RAISE EXCEPTION 'marketing_restore_replaced: p_run_id, p_by (1-64 chars) and p_now are required'
+            USING ERRCODE = '22023';  -- invalid_parameter_value
+    END IF;
+
+    SELECT run_date INTO v_day FROM public.marketing_runs WHERE id = p_run_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('outcome', 'not_found');
+    END IF;
+
+    -- The SAME per-ET-day lock as marketing_request_replacement: a restore and a request never interleave.
+    PERFORM pg_advisory_xact_lock(hashtextextended('marketing_request_replacement:' || v_day::text, 0));
+    v_now := clock_timestamp();
+
+    SELECT * INTO v_run FROM public.marketing_runs WHERE id = p_run_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('outcome', 'not_found');
+    END IF;
+
+    -- (1) the replaced run is still media_ready
+    IF v_run.status <> 'media_ready' THEN
+        RETURN jsonb_build_object('outcome', 'not_restorable', 'status', v_run.status);
+    END IF;
+
+    -- (2) its replaced_by names the NEWEST run of its (day, lane), which replaces it, and that run is over
+    v_rep_text := v_run.metadata -> 'replaced_by' ->> 'run_id';
+    IF COALESCE(v_rep_text ~ c_uuid, false) = false THEN
+        RETURN jsonb_build_object('outcome', 'not_restorable');
+    END IF;
+    v_rep_id := v_rep_text::uuid;
+    SELECT r.id INTO v_newest FROM public.marketing_runs r
+     WHERE r.run_date = v_run.run_date AND r.lane = v_run.lane
+     ORDER BY r.replacement DESC
+     LIMIT 1;
+    IF v_newest IS DISTINCT FROM v_rep_id THEN
+        RETURN jsonb_build_object('outcome', 'not_restorable');
+    END IF;
+    SELECT * INTO v_rep FROM public.marketing_runs WHERE id = v_rep_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('outcome', 'not_restorable');
+    END IF;
+    IF v_rep.replaces_run_id IS DISTINCT FROM v_run.id THEN
+        RETURN jsonb_build_object('outcome', 'not_restorable');
+    END IF;
+    -- Over = it can never post: skipped / published / media_ready (no claim takes those again), or failed at its
+    -- 2-attempt cap. A failed run below its cap may still be re-claimed and make posts, so it is "running".
+    IF NOT (v_rep.status IN ('skipped', 'published', 'media_ready')
+            OR (v_rep.status = 'failed' AND v_rep.attempts >= c_max_attempts)) THEN
+        RETURN jsonb_build_object('outcome', 'replacement_running', 'status', v_rep.status,
+                                  'attempts', v_rep.attempts);
+    END IF;
+
+    -- (3) the replacement made NO post at all, of any status: at most one PUBLISHING run per (day, lane)
+    IF EXISTS (SELECT 1 FROM public.marketing_posts p WHERE p.run_id = v_rep.id) THEN
+        RETURN jsonb_build_object('outcome', 'replacement_has_posts');
+    END IF;
+
+    -- (5) already restored: answer again, read back, never a second write. Answered BEFORE the day check (4): a
+    -- restore that committed just before midnight and lost its response is still answered `restored` on a retry.
+    IF v_run.metadata ? 'restored_from' THEN
+        RETURN jsonb_build_object(
+            'outcome', 'restored', 'replayed', true,
+            'post_ids', COALESCE(
+                (SELECT jsonb_agg(p.id ORDER BY p.id) FROM public.marketing_posts p
+                  WHERE p.run_id = v_run.id
+                    AND p.metadata -> 'restored' ->> 'by_run_id' = v_rep.id::text),
+                '[]'::jsonb));
+    END IF;
+
+    -- (4) the run's own ET day (the later of the two clocks judges). Its END, not the lane's tap cutoff: a replacement
+    -- asked for late (its first start tick, 22:15 ET main / 15:15 ET spotlight, is already past the 22:10 / 15:10 tap
+    -- cutoff) or one that was never started ends after that cutoff, and the original must still come back. The
+    -- original's posts stay fresh for the publisher through the next ET day (run_service.is_fresh).
+    v_judge := GREATEST(v_now, p_now);
+    IF (v_judge AT TIME ZONE c_zone)::date <> v_run.run_date THEN
+        RETURN jsonb_build_object('outcome', 'too_late');
+    END IF;
+
+    -- Every post of the run, locked in ONE order (id), as marketing_request_replacement locks them.
+    PERFORM 1 FROM public.marketing_posts p WHERE p.run_id = v_run.id ORDER BY p.id FOR UPDATE;
+
+    WITH restored AS (
+        UPDATE public.marketing_posts p
+           SET status = 'pending_review',
+               updated_at = v_now,
+               metadata = (p.metadata - 'review' - c_offer_stamps)
+                          || jsonb_build_object('restored', jsonb_build_object(
+                                 'by_run_id', v_rep.id, 'at', v_now, 'by', p_by))
+         WHERE p.run_id = v_run.id
+           AND p.status = 'rejected'
+           AND p.metadata -> 'review' ->> 'replaced_by_run_id' = v_rep.id::text
+        RETURNING p.id
+    )
+    SELECT array_agg(id ORDER BY id) INTO v_restored FROM restored;
+
+    UPDATE public.marketing_runs
+       SET metadata = metadata || jsonb_build_object('restored_from', jsonb_build_object(
+               'run_id', v_rep.id, 'at', v_now)),
+           updated_at = v_now
+     WHERE id = v_run.id;
+
+    RETURN jsonb_build_object(
+        'outcome', 'restored', 'replayed', false,
+        'post_ids', COALESCE(to_jsonb(v_restored), '[]'::jsonb));
+END;
+$_$;
+
+
+--
+-- Name: FUNCTION marketing_restore_replaced(p_run_id uuid, p_by text, p_now timestamp with time zone); Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON FUNCTION public.marketing_restore_replaced(p_run_id uuid, p_by text, p_now timestamp with time zone) IS 'The review bot''s "↩ Post {SYM} after all" (owner decision 2026-11-27): when the replacement of a media_ready run ended with NO post (skipped, published, media_ready, or failed at its 2-attempt cap), put back to pending_review exactly the posts its request rejected, until the end of the run''s own ET day, or return why not ({"outcome": not_found | not_restorable | replacement_running | replacement_has_posts | too_late | restored}). A replay answers restored with replayed = true, read back. INVOKER; service_role only (migration 215).';
+
+
+--
+-- Name: mint_widget_holdings_grant(uuid, uuid, bigint, text, integer, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.mint_widget_holdings_grant(p_user_id uuid, p_sid uuid, p_minted_iat bigint, p_key_hash text, p_ttl_days integer, p_max_live integer) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+DECLARE
+    v_now       timestamptz;
+    v_pw        timestamptz;
+    v_sr        timestamptz;
+    v_stamp     timestamptz;
+    v_fam       public.auth_refresh_families%ROWTYPE;
+    v_pred      public.widget_holdings_grants%ROWTYPE;
+    v_has_pred  boolean := false;
+    v_new       uuid := gen_random_uuid();
+    v_expires   timestamptz;
+    v_capped    uuid[];
+BEGIN
+    IF p_user_id IS NULL OR p_sid IS NULL OR p_minted_iat IS NULL OR p_key_hash IS NULL
+       OR p_ttl_days IS NULL OR p_max_live IS NULL THEN
+        RAISE EXCEPTION 'mint_widget_holdings_grant: a required argument is NULL'
+            USING ERRCODE = '22004';
+    END IF;
+    IF p_key_hash !~ '^[0-9a-f]{64}$' THEN
+        RAISE EXCEPTION 'mint_widget_holdings_grant: p_key_hash is not 64 lower-case hex'
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_ttl_days < 1 OR p_ttl_days > 30 THEN
+        RAISE EXCEPTION 'mint_widget_holdings_grant: p_ttl_days % outside 1..30', p_ttl_days
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_max_live < 1 OR p_max_live > 10 THEN
+        RAISE EXCEPTION 'mint_widget_holdings_grant: p_max_live % outside 1..10', p_max_live
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_minted_iat <= 0 THEN
+        RAISE EXCEPTION 'mint_widget_holdings_grant: p_minted_iat must be positive'
+            USING ERRCODE = '22023';
+    END IF;
+
+    -- Serialised with rotation, logout and sign-out-all of the same account (214:147-154): a
+    -- revocation that commits while this waits must win.
+    PERFORM public._lock_refresh_sessions(p_user_id);
+    -- Read AFTER the lock: `now()` is the transaction start, which can precede a mint that
+    -- committed while this one waited — and the cap below orders by created_at.
+    v_now := clock_timestamp();
+
+    -- Bounded CROSS-USER prune of rows dead for more than a day. SKIP LOCKED: a mint never waits
+    -- on another account's row (it runs under a 3 s client bound).
+    DELETE FROM public.widget_holdings_grants
+     WHERE ctid IN (
+         SELECT d.ctid
+           FROM public.widget_holdings_grants d
+          WHERE COALESCE(d.revoked_at, d.expires_at) < now() - interval '1 day'
+          LIMIT 500
+          FOR UPDATE SKIP LOCKED
+     );
+
+    SELECT u.password_changed_at, u.sessions_revoked_at INTO v_pw, v_sr
+      FROM public.users u WHERE u.id = p_user_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('status', 'account_missing');
+    END IF;
+    v_stamp := GREATEST(v_pw, v_sr);
+
+    -- Every grant of the account the stamps evicted is REVOKED here, under the lock (D4: no
+    -- holding left behind on a dead row). A password change / reset / set or a sign-out-all
+    -- whose family was already pruned evicts a grant without revoking it, and an evicted device
+    -- can no longer revoke by key — so a later mint by ANY device of the account sweeps them
+    -- (the check revokes one the first time it is presented). The same comparison as the
+    -- predicate: whole seconds, minted_iat.
+    IF v_stamp IS NOT NULL THEN
+        UPDATE public.widget_holdings_grants g
+           SET revoked_at = v_now, revoke_reason = 'session_ended',
+               push_token = NULL, push_environment = NULL, last_head_ticker = NULL
+         WHERE g.user_id = p_user_id
+           AND g.revoked_at IS NULL
+           AND to_timestamp(g.minted_iat) < date_trunc('second', v_stamp);
+    END IF;
+
+    IF v_stamp IS NOT NULL AND to_timestamp(p_minted_iat) < date_trunc('second', v_stamp) THEN
+        RETURN jsonb_build_object('status', 'evicted');
+    END IF;
+
+    SELECT * INTO v_fam
+      FROM public.auth_refresh_families f
+     WHERE f.family_id = p_sid AND f.user_id = p_user_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('status', 'session_unknown');
+    END IF;
+    IF v_fam.revoked_at IS NOT NULL THEN
+        RETURN jsonb_build_object('status', 'session_revoked');
+    END IF;
+
+    -- Older superseded rows of this session → 'renewed' (at most two keys per session live).
+    UPDATE public.widget_holdings_grants g
+       SET revoked_at = v_now, revoke_reason = 'renewed',
+           push_token = NULL, push_environment = NULL, last_head_ticker = NULL
+     WHERE g.sid = p_sid
+       AND g.user_id = p_user_id
+       AND g.revoked_at IS NULL
+       AND g.superseded_by IS NOT NULL;
+
+    -- The live predecessor: its push columns and head ticker move to the successor.
+    SELECT * INTO v_pred
+      FROM public.widget_holdings_grants g
+     WHERE g.sid = p_sid
+       AND g.user_id = p_user_id
+       AND g.revoked_at IS NULL
+       AND g.superseded_by IS NULL
+       AND g.expires_at > v_now
+     ORDER BY g.created_at DESC
+     LIMIT 1
+     FOR UPDATE;
+    v_has_pred := FOUND;
+
+    -- Every non-superseded row of the session is superseded (normally exactly one). Push
+    -- columns are nulled BEFORE the INSERT: the push token is UNIQUE.
+    UPDATE public.widget_holdings_grants g
+       SET superseded_by = v_new,
+           expires_at = LEAST(g.expires_at, v_now + interval '24 hours'),
+           push_token = NULL, push_environment = NULL, push_token_updated_at = NULL,
+           push_last_sent_at = NULL, push_sent_day = NULL, push_sent_count = 0,
+           push_bad_since = NULL, push_last_error = NULL, last_head_ticker = NULL
+     WHERE g.sid = p_sid
+       AND g.user_id = p_user_id
+       AND g.revoked_at IS NULL
+       AND g.superseded_by IS NULL;
+
+    v_expires := v_now + make_interval(days => p_ttl_days);
+    INSERT INTO public.widget_holdings_grants (
+        grant_id, user_id, key_hash, sid, minted_iat, created_at, expires_at,
+        last_head_ticker, push_token, push_environment, push_token_updated_at,
+        push_last_sent_at, push_sent_day, push_sent_count, push_bad_since, push_last_error
+    ) VALUES (
+        v_new, p_user_id, p_key_hash, p_sid, p_minted_iat, v_now, v_expires,
+        CASE WHEN v_has_pred THEN v_pred.last_head_ticker END,
+        CASE WHEN v_has_pred THEN v_pred.push_token END,
+        CASE WHEN v_has_pred THEN v_pred.push_environment END,
+        CASE WHEN v_has_pred THEN v_pred.push_token_updated_at END,
+        CASE WHEN v_has_pred THEN v_pred.push_last_sent_at END,
+        CASE WHEN v_has_pred THEN v_pred.push_sent_day END,
+        CASE WHEN v_has_pred THEN v_pred.push_sent_count ELSE 0 END,
+        CASE WHEN v_has_pred THEN v_pred.push_bad_since END,
+        CASE WHEN v_has_pred THEN v_pred.push_last_error END
+    );
+
+    -- The per-account cap counts live NON-superseded rows; the new row is never capped. A capped
+    -- row's own superseded predecessors die with it.
+    SELECT array_agg(c.grant_id) INTO v_capped
+      FROM (
+          SELECT g.grant_id
+            FROM public.widget_holdings_grants g
+           WHERE g.user_id = p_user_id
+             AND g.revoked_at IS NULL
+             AND g.superseded_by IS NULL
+             AND g.expires_at > v_now
+             AND g.grant_id <> v_new
+           ORDER BY g.created_at DESC, g.grant_id DESC
+          OFFSET p_max_live - 1
+      ) c;
+    IF v_capped IS NOT NULL THEN
+        UPDATE public.widget_holdings_grants g
+           SET revoked_at = v_now, revoke_reason = 'cap',
+               push_token = NULL, push_environment = NULL, last_head_ticker = NULL
+         WHERE g.user_id = p_user_id
+           AND g.revoked_at IS NULL
+           AND (g.grant_id = ANY(v_capped) OR g.superseded_by = ANY(v_capped));
+    END IF;
+
+    RETURN jsonb_build_object(
+        'status', 'minted',
+        'grant_id', v_new,
+        'expires_at', to_char(v_expires AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+    );
+END;
+$_$;
+
+
+--
 -- Name: news_sentiment_daily(text, date); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -3065,6 +3676,37 @@ $$;
 --
 
 COMMENT ON FUNCTION public.news_sentiment_daily(p_scope text, p_since date) IS 'Per-ET-day counts of bullish / bearish / neutral labels for one scope since p_since (never more than 400 days back), counting only rows the chart gate keeps (skip_reason IS NULL). Days with no counted article are absent, not zero. INVOKER: its only caller is service_role.';
+
+
+--
+-- Name: note_widget_holdings_head(uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.note_widget_holdings_head(p_grant_id uuid, p_ticker text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_ticker text := NULLIF(upper(btrim(p_ticker)), '');
+    v_n      integer;
+BEGIN
+    IF p_grant_id IS NULL THEN
+        RAISE EXCEPTION 'note_widget_holdings_head: p_grant_id is NULL' USING ERRCODE = '22004';
+    END IF;
+    IF v_ticker IS NOT NULL AND length(v_ticker) > 32 THEN
+        RAISE EXCEPTION 'note_widget_holdings_head: ticker longer than 32' USING ERRCODE = '22023';
+    END IF;
+
+    UPDATE public.widget_holdings_grants g
+       SET last_head_ticker = v_ticker
+     WHERE g.grant_id = p_grant_id
+       AND g.revoked_at IS NULL
+       AND g.last_head_ticker IS DISTINCT FROM v_ticker;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+
+    RETURN jsonb_build_object('status', CASE WHEN v_n > 0 THEN 'noted' ELSE 'unchanged' END);
+END;
+$$;
 
 
 --
@@ -4227,6 +4869,41 @@ COMMENT ON FUNCTION public.revoke_tier_credits(p_user_id uuid) IS 'Apple REFUND/
 
 
 --
+-- Name: revoke_widget_holdings_grant(uuid, uuid, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.revoke_widget_holdings_grant(p_grant_id uuid, p_user_id uuid, p_reason text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+DECLARE
+    v_n integer;
+BEGIN
+    IF p_grant_id IS NULL OR p_user_id IS NULL OR p_reason IS NULL THEN
+        RAISE EXCEPTION 'revoke_widget_holdings_grant: a required argument is NULL'
+            USING ERRCODE = '22004';
+    END IF;
+    IF p_reason NOT IN ('app_revoked', 'widget_removed') THEN
+        RAISE EXCEPTION 'revoke_widget_holdings_grant: unknown reason %', p_reason
+            USING ERRCODE = '22023';
+    END IF;
+
+    UPDATE public.widget_holdings_grants g
+       SET revoked_at = now(), revoke_reason = p_reason,
+           push_token = NULL, push_environment = NULL, last_head_ticker = NULL
+     WHERE g.grant_id = p_grant_id
+       AND g.user_id = p_user_id
+       AND g.revoked_at IS NULL;
+    GET DIAGNOSTICS v_n = ROW_COUNT;
+
+    RETURN jsonb_build_object(
+        'status', CASE WHEN v_n > 0 THEN 'revoked' ELSE 'already_revoked_or_unknown' END
+    );
+END;
+$$;
+
+
+--
 -- Name: rotate_refresh_token(uuid, uuid, bigint, bigint, boolean, uuid, uuid, timestamp with time zone, integer, integer); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -4792,6 +5469,349 @@ BEGIN
     END IF;
     RETURN NULL;
 END;
+$$;
+
+
+--
+-- Name: widget_holdings_grants; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.widget_holdings_grants (
+    grant_id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    key_hash text NOT NULL,
+    sid uuid NOT NULL,
+    minted_iat bigint NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    expires_at timestamp with time zone NOT NULL,
+    last_used_at timestamp with time zone,
+    revoked_at timestamp with time zone,
+    revoke_reason text,
+    superseded_by uuid,
+    last_head_ticker text,
+    push_token text,
+    push_environment text,
+    push_token_updated_at timestamp with time zone,
+    push_last_sent_at timestamp with time zone,
+    push_sent_day date,
+    push_sent_count integer DEFAULT 0 NOT NULL,
+    push_bad_since timestamp with time zone,
+    push_last_error text,
+    CONSTRAINT widget_holdings_grants_head_ticker_check CHECK (((last_head_ticker IS NULL) OR ((length(last_head_ticker) >= 1) AND (length(last_head_ticker) <= 32)))),
+    CONSTRAINT widget_holdings_grants_key_hash_check CHECK ((key_hash ~ '^[0-9a-f]{64}$'::text)),
+    CONSTRAINT widget_holdings_grants_life_check CHECK (((expires_at > created_at) AND (expires_at <= (created_at + '31 days'::interval)))),
+    CONSTRAINT widget_holdings_grants_minted_iat_check CHECK ((minted_iat > 0)),
+    CONSTRAINT widget_holdings_grants_push_count_check CHECK ((push_sent_count >= 0)),
+    CONSTRAINT widget_holdings_grants_push_environment_check CHECK (((push_environment IS NULL) OR (push_environment = ANY (ARRAY['sandbox'::text, 'production'::text])))),
+    CONSTRAINT widget_holdings_grants_push_error_check CHECK (((push_last_error IS NULL) OR (length(push_last_error) <= 200))),
+    CONSTRAINT widget_holdings_grants_push_pair_check CHECK (((push_token IS NULL) = (push_environment IS NULL))),
+    CONSTRAINT widget_holdings_grants_push_token_check CHECK (((push_token IS NULL) OR ((push_token ~ '^[0-9a-f]+$'::text) AND ((length(push_token) >= 32) AND (length(push_token) <= 400)) AND ((length(push_token) % 2) = 0)))),
+    CONSTRAINT widget_holdings_grants_revoke_reason_check CHECK (((revoke_reason IS NULL) OR (revoke_reason = ANY (ARRAY['logout'::text, 'reuse'::text, 'signout_all'::text, 'session_ended'::text, 'renewed'::text, 'cap'::text, 'app_revoked'::text, 'widget_removed'::text])))),
+    CONSTRAINT widget_holdings_grants_revoked_pair_check CHECK (((revoked_at IS NULL) = (revoke_reason IS NULL)))
+);
+
+
+--
+-- Name: TABLE widget_holdings_grants; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON TABLE public.widget_holdings_grants IS 'Per-device Home Screen widget Holdings credential (owner 2026-11-27, "Own key, 30-day life"): the SHA-256 of an opaque cwh1_ key, minted only inside a POST /auth/refresh rotation, sent by the widget extension to GET /widget/holdings-mover. Revoked by the auth_refresh_families trigger (logout, reuse, sign-out-all), evicted by the users stamps (one predicate, widget_holdings_grant_is_live), superseded on renewal, cascades with the account. Also holds the device''s WidgetKit push token and head ticker. Service-role only. Migration 216.';
+
+
+--
+-- Name: COLUMN widget_holdings_grants.key_hash; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.widget_holdings_grants.key_hash IS 'Lower-case hex SHA-256 of the full cwh1_ key. The key itself is never stored or logged.';
+
+
+--
+-- Name: COLUMN widget_holdings_grants.sid; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.widget_holdings_grants.sid IS 'The 214 session (auth_refresh_families.family_id) this grant was minted under. No FK: families are pruned and a grant outlives an idle session (30 days, owner decision).';
+
+
+--
+-- Name: COLUMN widget_holdings_grants.minted_iat; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.widget_holdings_grants.minted_iat IS 'iat of the access token minted in the same refresh. Eviction compares this against the later of users.password_changed_at / sessions_revoked_at, whole seconds — never created_at.';
+
+
+--
+-- Name: COLUMN widget_holdings_grants.superseded_by; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.widget_holdings_grants.superseded_by IS 'The successor minted under the same sid. A superseded grant keeps working for at most 24 h (expires_at clamped) and is revoked ''renewed'' on the successor''s first check.';
+
+
+--
+-- Name: COLUMN widget_holdings_grants.last_head_ticker; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.widget_holdings_grants.last_head_ticker IS 'The ticker the device''s Holdings tile last led with (push targeting). Nulled on revocation.';
+
+
+--
+-- Name: COLUMN widget_holdings_grants.push_token; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.widget_holdings_grants.push_token IS 'WidgetKit push token of the device holding this grant (iOS 26+). Uploaded by the APP via PUT /widget/push-token. Content-free wakes only; useless without our APNs .p8; never logged in full. Nulled on every revocation.';
+
+
+--
+-- Name: COLUMN widget_holdings_grants.push_token_updated_at; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.widget_holdings_grants.push_token_updated_at IS 'Set on every registration; compared with APNs'' 410 timestamp before a token is cleared.';
+
+
+--
+-- Name: COLUMN widget_holdings_grants.push_sent_day; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.widget_holdings_grants.push_sent_day IS 'ET calendar day push_sent_count counts (the daily cap survives a restart).';
+
+
+--
+-- Name: widget_holdings_grant_is_live(public.widget_holdings_grants); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.widget_holdings_grant_is_live(g public.widget_holdings_grants) RETURNS boolean
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT g.revoked_at IS NULL
+       AND g.expires_at > now()
+       AND EXISTS (
+           SELECT 1
+             FROM public.users u
+            WHERE u.id = g.user_id
+              AND (
+                  -- GREATEST ignores NULLs; whole seconds, as 214 (iat has no fraction).
+                  GREATEST(u.password_changed_at, u.sessions_revoked_at) IS NULL
+                  OR to_timestamp(g.minted_iat)
+                     >= date_trunc('second', GREATEST(u.password_changed_at, u.sessions_revoked_at))
+              )
+       );
+$$;
+
+
+--
+-- Name: widget_push_register(uuid, uuid, text, text); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.widget_push_register(p_user_id uuid, p_grant_id uuid, p_token text, p_environment text) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+DECLARE
+    v public.widget_holdings_grants%ROWTYPE;
+BEGIN
+    IF p_user_id IS NULL OR p_grant_id IS NULL THEN
+        RAISE EXCEPTION 'widget_push_register: a required argument is NULL' USING ERRCODE = '22004';
+    END IF;
+    IF p_token IS NOT NULL THEN
+        -- Postgres caps a regex repetition count at 255, hence `+` and an explicit length.
+        IF p_token !~ '^[0-9a-f]+$' OR length(p_token) NOT BETWEEN 32 AND 400
+           OR length(p_token) % 2 <> 0 THEN
+            RAISE EXCEPTION 'widget_push_register: malformed token' USING ERRCODE = '22023';
+        END IF;
+        IF p_environment IS NULL OR p_environment NOT IN ('sandbox', 'production') THEN
+            RAISE EXCEPTION 'widget_push_register: unknown environment' USING ERRCODE = '22023';
+        END IF;
+    END IF;
+
+    -- Ownership FIRST, under a row lock, before any other row is touched.
+    SELECT * INTO v
+      FROM public.widget_holdings_grants g
+     WHERE g.grant_id = p_grant_id AND g.user_id = p_user_id
+       FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('stored', false, 'grant_usable', false);
+    END IF;
+    -- Unknown, foreign, dead and superseded are one indistinguishable answer.
+    IF v.superseded_by IS NOT NULL OR NOT public.widget_holdings_grant_is_live(v) THEN
+        RETURN jsonb_build_object('stored', false, 'grant_usable', false);
+    END IF;
+
+    IF p_token IS NULL THEN
+        UPDATE public.widget_holdings_grants g
+           SET push_token = NULL, push_environment = NULL, push_token_updated_at = now(),
+               push_bad_since = NULL, push_last_error = NULL
+         WHERE g.grant_id = p_grant_id;
+        RETURN jsonb_build_object('stored', true, 'grant_usable', true);
+    END IF;
+
+    -- One row per device token: detach it from any other row, then set it here.
+    UPDATE public.widget_holdings_grants g
+       SET push_token = NULL, push_environment = NULL, push_token_updated_at = now(),
+           push_bad_since = NULL, push_last_error = 'moved to another grant'
+     WHERE g.push_token = p_token
+       AND g.grant_id <> p_grant_id;
+
+    UPDATE public.widget_holdings_grants g
+       SET push_token = p_token, push_environment = p_environment,
+           push_token_updated_at = now(), push_bad_since = NULL, push_last_error = NULL
+     WHERE g.grant_id = p_grant_id;
+
+    RETURN jsonb_build_object('stored', true, 'grant_usable', true);
+END;
+$_$;
+
+
+--
+-- Name: widget_push_settle(jsonb); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.widget_push_settle(p_outcomes jsonb) RETURNS jsonb
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $_$
+DECLARE
+    e           jsonb;
+    v_gid       uuid;
+    v_tok       text;
+    v_out       text;
+    v_ts        timestamptz;
+    v_err       text;
+    v_count     boolean;
+    v_n         integer;
+    v_today     date := (now() AT TIME ZONE 'America/New_York')::date;
+    n_accepted  integer := 0;
+    n_gone      integer := 0;
+    n_bad       integer := 0;
+    n_cleared   integer := 0;
+    n_retry     integer := 0;
+    n_not_sent  integer := 0;
+    n_unmatched integer := 0;
+    n_skipped   integer := 0;
+BEGIN
+    IF p_outcomes IS NULL OR jsonb_typeof(p_outcomes) <> 'array' THEN
+        RAISE EXCEPTION 'widget_push_settle: p_outcomes must be a JSON array' USING ERRCODE = '22023';
+    END IF;
+    IF jsonb_array_length(p_outcomes) > 100 THEN
+        RAISE EXCEPTION 'widget_push_settle: at most 100 outcomes per call' USING ERRCODE = '22023';
+    END IF;
+
+    FOR e IN SELECT value FROM jsonb_array_elements(p_outcomes) LOOP
+        -- Shape checks by pattern, never by a failing cast (no subtransaction per element).
+        IF jsonb_typeof(e) <> 'object'
+           OR jsonb_typeof(e->'grant_id') IS DISTINCT FROM 'string'
+           OR (e->>'grant_id') !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+           OR jsonb_typeof(e->'token') IS DISTINCT FROM 'string'
+           OR (e->>'token') !~ '^[0-9a-f]+$'
+           OR length(e->>'token') NOT BETWEEN 32 AND 400
+           OR jsonb_typeof(e->'outcome') IS DISTINCT FROM 'string' THEN
+            n_skipped := n_skipped + 1;
+            CONTINUE;
+        END IF;
+        v_gid := (e->>'grant_id')::uuid;
+        v_tok := e->>'token';
+        v_out := e->>'outcome';
+        v_err := left(NULLIF(e->>'error', ''), 200);
+
+        IF v_out = 'accepted' THEN
+            -- CASE, not OR: SQL guarantees no evaluation order, and a cast of a non-boolean
+            -- string would raise.
+            v_count := CASE WHEN jsonb_typeof(e->'count') = 'boolean'
+                            THEN (e->>'count') = 'true' ELSE true END;
+            UPDATE public.widget_holdings_grants g
+               SET push_last_sent_at = now(),
+                   push_sent_count = CASE
+                       WHEN NOT v_count THEN g.push_sent_count
+                       WHEN g.push_sent_day = v_today THEN g.push_sent_count + 1
+                       ELSE 1 END,
+                   push_sent_day = CASE WHEN v_count THEN v_today ELSE g.push_sent_day END,
+                   push_bad_since = NULL, push_last_error = NULL
+             WHERE g.grant_id = v_gid AND g.push_token = v_tok;
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            IF v_n > 0 THEN n_accepted := n_accepted + 1; ELSE n_unmatched := n_unmatched + 1; END IF;
+
+        ELSIF v_out = 'gone' THEN
+            -- APNs' 410 `timestamp`: milliseconds since the epoch. Absent or out of range →
+            -- now(). Nested IFs: a cast must never run on a value the type check refused.
+            v_ts := now();
+            IF jsonb_typeof(e->'apns_ts') = 'number' THEN
+                IF (e->>'apns_ts')::numeric BETWEEN 0 AND 100000000000000 THEN
+                    v_ts := to_timestamp((e->>'apns_ts')::double precision / 1000.0);
+                END IF;
+            END IF;
+            UPDATE public.widget_holdings_grants g
+               SET push_token = NULL, push_environment = NULL, push_bad_since = NULL,
+                   push_last_error = left(COALESCE(v_err, '410 Unregistered'), 200)
+             WHERE g.grant_id = v_gid AND g.push_token = v_tok
+               AND (g.push_token_updated_at IS NULL OR g.push_token_updated_at <= v_ts);
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            IF v_n > 0 THEN n_gone := n_gone + 1; ELSE n_unmatched := n_unmatched + 1; END IF;
+
+        ELSIF v_out = 'bad' THEN
+            UPDATE public.widget_holdings_grants g
+               SET push_last_sent_at = now(),
+                   push_sent_count = CASE WHEN g.push_sent_day = v_today
+                                          THEN g.push_sent_count + 1 ELSE 1 END,
+                   push_sent_day = v_today,
+                   push_bad_since = COALESCE(g.push_bad_since, now()),
+                   push_last_error = COALESCE(v_err, 'bad device token')
+             WHERE g.grant_id = v_gid AND g.push_token = v_tok;
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            IF v_n > 0 THEN n_bad := n_bad + 1; ELSE n_unmatched := n_unmatched + 1; END IF;
+            UPDATE public.widget_holdings_grants g
+               SET push_token = NULL, push_environment = NULL, push_bad_since = NULL,
+                   push_last_error = 'cleared: refused by APNs for over 24 h'
+             WHERE g.grant_id = v_gid AND g.push_token = v_tok
+               AND g.push_bad_since < now() - interval '24 hours';
+            GET DIAGNOSTICS v_n = ROW_COUNT;
+            n_cleared := n_cleared + v_n;
+
+        ELSIF v_out = 'retry' THEN
+            UPDATE public.widget_holdings_grants g
+               SET push_last_error = COALESCE(v_err, 'retry')
+             WHERE g.grant_id = v_gid AND g.push_token = v_tok;
+            n_retry := n_retry + 1;
+
+        ELSIF v_out = 'not_sent' THEN
+            n_not_sent := n_not_sent + 1;
+
+        ELSE
+            n_skipped := n_skipped + 1;
+        END IF;
+    END LOOP;
+
+    RETURN jsonb_build_object(
+        'status', 'settled',
+        'accepted', n_accepted, 'gone', n_gone, 'bad', n_bad, 'cleared_bad', n_cleared,
+        'retry', n_retry, 'not_sent', n_not_sent, 'unmatched', n_unmatched, 'skipped', n_skipped
+    );
+END;
+$_$;
+
+
+--
+-- Name: widget_push_targets(text[], boolean, uuid[], uuid, integer); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.widget_push_targets(p_scopes text[], p_all boolean, p_grant_ids uuid[], p_after uuid, p_limit integer) RETURNS TABLE(grant_id uuid, user_id uuid, push_token text, push_environment text, last_head_ticker text, push_last_sent_at timestamp with time zone, push_sent_day date, push_sent_count integer)
+    LANGUAGE sql STABLE SECURITY DEFINER
+    SET search_path TO 'public', 'pg_temp'
+    AS $$
+    SELECT g.grant_id, g.user_id, g.push_token, g.push_environment, g.last_head_ticker,
+           g.push_last_sent_at, g.push_sent_day, g.push_sent_count
+      FROM public.widget_holdings_grants g
+     WHERE g.push_token IS NOT NULL
+       AND g.superseded_by IS NULL
+       AND public.widget_holdings_grant_is_live(g)
+       AND (p_after IS NULL OR g.grant_id > p_after)
+       AND (
+           COALESCE(p_all, false)
+           OR g.grant_id = ANY(COALESCE(p_grant_ids, '{}'::uuid[]))
+           OR g.last_head_ticker = ANY(
+               ARRAY(SELECT upper(btrim(s)) FROM unnest(COALESCE(p_scopes, '{}'::text[])) AS s)
+           )
+       )
+     ORDER BY g.grant_id
+     LIMIT LEAST(GREATEST(COALESCE(p_limit, 1000), 1), 1000);
 $$;
 
 
@@ -10809,8 +11829,12 @@ CREATE TABLE public.marketing_runs (
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     lane text DEFAULT 'main'::text NOT NULL,
+    replacement smallint DEFAULT 0 NOT NULL,
+    replaces_run_id uuid,
     CONSTRAINT marketing_runs_content_class_check CHECK ((content_class = ANY (ARRAY['A'::text, 'C'::text, 'F'::text]))),
     CONSTRAINT marketing_runs_lane_valid CHECK ((lane = ANY (ARRAY['main'::text, 'spotlight'::text]))),
+    CONSTRAINT marketing_runs_replacement_valid CHECK (((replacement >= 0) AND (replacement <= 2))),
+    CONSTRAINT marketing_runs_replaces_run_id_valid CHECK (((replacement = 0) = (replaces_run_id IS NULL))),
     CONSTRAINT marketing_runs_stage_check CHECK ((stage = ANY (ARRAY['planned'::text, 'selected'::text, 'scripted'::text, 'voiced'::text, 'rendered'::text, 'assets_ready'::text]))),
     CONSTRAINT marketing_runs_status_check CHECK ((status = ANY (ARRAY['planned'::text, 'in_progress'::text, 'media_ready'::text, 'published'::text, 'failed'::text, 'skipped'::text])))
 );
@@ -10820,7 +11844,7 @@ CREATE TABLE public.marketing_runs (
 -- Name: TABLE marketing_runs; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public.marketing_runs IS 'One row per (ET calendar day, lane) of the zero-touch marketing engine (SYSTEM_DESIGN_GUIDELINES §12). The media worker CLAIMS a day''s run by inserting this row (UNIQUE (run_date, lane), migration 210: the main lane every day, the spotlight lane on its own weekdays) and checkpoints its last completed stage here so a killed or skipped Railway cron slot resumes on the next hourly tick instead of starting over or double-producing. Written through the token-gated internal API (app/api/v1/endpoints/marketing_internal.py); the worker holds no Supabase key.';
+COMMENT ON TABLE public.marketing_runs IS 'One row per (ET calendar day, lane, replacement) of the zero-touch marketing engine (SYSTEM_DESIGN_GUIDELINES §12). The media worker CLAIMS a day''s run by inserting this row (UNIQUE (run_date, lane, replacement), migration 215: the main lane every day, the spotlight lane on its own weekdays, and up to two owner-requested replacements a day) and checkpoints its last completed stage here so a killed or skipped Railway cron slot resumes on the next hourly tick instead of starting over or double-producing. Written through the token-gated internal API (app/api/v1/endpoints/marketing_internal.py), marketing_request_replacement and marketing_restore_replaced; the worker holds no Supabase key.';
 
 
 --
@@ -10835,6 +11859,20 @@ COMMENT ON COLUMN public.marketing_runs.content_class IS 'Informational mirror o
 --
 
 COMMENT ON COLUMN public.marketing_runs.lane IS 'Which daily run this row is (migration 210): main (the afternoon run every day has had since migration 170; the claiming INSERT never sends the column, so it defaults here) or spotlight (the second, morning run on MARKETING_SPOTLIGHT_WEEKDAYS, claimed through its own route). Written once by the claim and never updated.';
+
+
+--
+-- Name: COLUMN marketing_runs.replacement; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_runs.replacement IS '0 for a day''s own run of its lane; 1 or 2 for a replacement the owner asked for from the review bot ("🔄 Next company", Money Map only, at most 2 a day over both lanes), written once by marketing_request_replacement. The claim key is UNIQUE (run_date, lane, replacement) (migration 215).';
+
+
+--
+-- Name: COLUMN marketing_runs.replaces_run_id; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_runs.replaces_run_id IS 'The run this replacement replaces (its pending posts were rejected in the same transaction); NULL exactly when replacement = 0.';
 
 
 --
@@ -10864,11 +11902,13 @@ CREATE TABLE public.marketing_scripts (
     reject_reason text,
     claude_usage jsonb,
     lane text DEFAULT 'main'::text NOT NULL,
+    replacement smallint DEFAULT 0 NOT NULL,
     CONSTRAINT marketing_scripts_claude_usage_object CHECK (((claude_usage IS NULL) OR (jsonb_typeof(claude_usage) = 'object'::text))),
     CONSTRAINT marketing_scripts_content_rejections_nonneg CHECK ((content_rejections >= 0)),
     CONSTRAINT marketing_scripts_generations_check CHECK ((generations >= 0)),
     CONSTRAINT marketing_scripts_lane_valid CHECK ((lane = ANY (ARRAY['main'::text, 'spotlight'::text]))),
     CONSTRAINT marketing_scripts_reject_reason_valid CHECK (((reject_reason IS NULL) OR (reject_reason = ANY (ARRAY['content'::text, 'writer_unavailable'::text, 'empty_pool'::text, 'source_ineligible'::text, 'nothing_qualified'::text])))),
+    CONSTRAINT marketing_scripts_replacement_valid CHECK (((replacement >= 0) AND (replacement <= 2))),
     CONSTRAINT marketing_scripts_status_check CHECK ((status = ANY (ARRAY['rest_day'::text, 'selected'::text, 'generating'::text, 'accepted'::text, 'rejected'::text])))
 );
 
@@ -10941,6 +11981,13 @@ COMMENT ON COLUMN public.marketing_scripts.claude_usage IS 'The Claude tokens in
 --
 
 COMMENT ON COLUMN public.marketing_scripts.lane IS 'The lane of the run this script belongs to (migration 210), copied from marketing_runs.lane by the selecting INSERT (run_service.insert_script, the only writer). Lets the readers that take one script per day tell the main and spotlight scripts of one day apart.';
+
+
+--
+-- Name: COLUMN marketing_scripts.replacement; Type: COMMENT; Schema: public; Owner: -
+--
+
+COMMENT ON COLUMN public.marketing_scripts.replacement IS 'The replacement number of the script''s run, copied by run_service.insert_script (the one writer).';
 
 
 --
@@ -14751,11 +15798,11 @@ ALTER TABLE ONLY public.marketing_runs
 
 
 --
--- Name: marketing_runs marketing_runs_run_date_lane_key; Type: CONSTRAINT; Schema: public; Owner: -
+-- Name: marketing_runs marketing_runs_run_date_lane_replacement_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.marketing_runs
-    ADD CONSTRAINT marketing_runs_run_date_lane_key UNIQUE (run_date, lane);
+    ADD CONSTRAINT marketing_runs_run_date_lane_replacement_key UNIQUE (run_date, lane, replacement);
 
 
 --
@@ -15500,6 +16547,22 @@ ALTER TABLE ONLY public.whale_trades
 
 ALTER TABLE ONLY public.whales
     ADD CONSTRAINT whales_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: widget_holdings_grants widget_holdings_grants_key_hash_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.widget_holdings_grants
+    ADD CONSTRAINT widget_holdings_grants_key_hash_key UNIQUE (key_hash);
+
+
+--
+-- Name: widget_holdings_grants widget_holdings_grants_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.widget_holdings_grants
+    ADD CONSTRAINT widget_holdings_grants_pkey PRIMARY KEY (grant_id);
 
 
 --
@@ -17458,6 +18521,48 @@ CREATE INDEX idx_whales_name ON public.whales USING btree (name);
 
 
 --
+-- Name: idx_widget_holdings_grants_dead_since; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_widget_holdings_grants_dead_since ON public.widget_holdings_grants USING btree (COALESCE(revoked_at, expires_at));
+
+
+--
+-- Name: idx_widget_holdings_grants_push_head; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_widget_holdings_grants_push_head ON public.widget_holdings_grants USING btree (last_head_ticker) WHERE ((push_token IS NOT NULL) AND (revoked_at IS NULL));
+
+
+--
+-- Name: idx_widget_holdings_grants_sid_live; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_widget_holdings_grants_sid_live ON public.widget_holdings_grants USING btree (sid) WHERE (revoked_at IS NULL);
+
+
+--
+-- Name: idx_widget_holdings_grants_superseded_live; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_widget_holdings_grants_superseded_live ON public.widget_holdings_grants USING btree (superseded_by) WHERE ((superseded_by IS NOT NULL) AND (revoked_at IS NULL));
+
+
+--
+-- Name: idx_widget_holdings_grants_user; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_widget_holdings_grants_user ON public.widget_holdings_grants USING btree (user_id);
+
+
+--
+-- Name: idx_widget_holdings_grants_user_live; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_widget_holdings_grants_user_live ON public.widget_holdings_grants USING btree (user_id, created_at DESC) WHERE (revoked_at IS NULL);
+
+
+--
 -- Name: subscriptions_original_transaction_id_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -17511,6 +18616,13 @@ COMMENT ON INDEX public.uq_whale_trades_group_ticker_action_date IS 'Natural ide
 --
 
 CREATE UNIQUE INDEX uq_whales_cik ON public.whales USING btree (cik) WHERE (cik IS NOT NULL);
+
+
+--
+-- Name: uq_widget_holdings_grants_push_token; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX uq_widget_holdings_grants_push_token ON public.widget_holdings_grants USING btree (push_token) WHERE (push_token IS NOT NULL);
 
 
 --
@@ -17679,6 +18791,13 @@ CREATE TRIGGER subscriptions_max_period_end BEFORE INSERT OR UPDATE ON public.su
 --
 
 CREATE TRIGGER trg_agent_personas_updated_at BEFORE UPDATE ON public.agent_personas FOR EACH ROW EXECUTE FUNCTION public.update_updated_at_column();
+
+
+--
+-- Name: auth_refresh_families trg_auth_refresh_families_revoke_widget_grants; Type: TRIGGER; Schema: public; Owner: -
+--
+
+CREATE TRIGGER trg_auth_refresh_families_revoke_widget_grants AFTER UPDATE OF revoked_at ON public.auth_refresh_families FOR EACH ROW WHEN (((old.revoked_at IS NULL) AND (new.revoked_at IS NOT NULL))) EXECUTE FUNCTION public._revoke_widget_grants_for_session();
 
 
 --
@@ -18117,6 +19236,14 @@ ALTER TABLE ONLY public.marketing_posts
 
 
 --
+-- Name: marketing_runs marketing_runs_replaces_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.marketing_runs
+    ADD CONSTRAINT marketing_runs_replaces_run_id_fkey FOREIGN KEY (replaces_run_id) REFERENCES public.marketing_runs(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: marketing_scripts marketing_scripts_run_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -18338,6 +19465,14 @@ ALTER TABLE ONLY public.whale_trades
 
 ALTER TABLE ONLY public.whale_trades
     ADD CONSTRAINT whale_trades_whale_id_fkey FOREIGN KEY (whale_id) REFERENCES public.whales(id) ON DELETE CASCADE;
+
+
+--
+-- Name: widget_holdings_grants widget_holdings_grants_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.widget_holdings_grants
+    ADD CONSTRAINT widget_holdings_grants_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 --
@@ -20094,6 +21229,19 @@ CREATE POLICY whales_service_all ON public.whales USING ((auth.role() = 'service
 
 
 --
+-- Name: widget_holdings_grants; Type: ROW SECURITY; Schema: public; Owner: -
+--
+
+ALTER TABLE public.widget_holdings_grants ENABLE ROW LEVEL SECURITY;
+
+--
+-- Name: widget_holdings_grants widget_holdings_grants_service_all; Type: POLICY; Schema: public; Owner: -
+--
+
+CREATE POLICY widget_holdings_grants_service_all ON public.widget_holdings_grants TO service_role USING (true) WITH CHECK (true);
+
+
+--
 -- Name: messages; Type: ROW SECURITY; Schema: realtime; Owner: -
 --
 
@@ -20878,6 +22026,13 @@ GRANT ALL ON FUNCTION public._prune_refresh_sessions(p_user_id uuid) TO service_
 
 
 --
+-- Name: FUNCTION _revoke_widget_grants_for_session(); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public._revoke_widget_grants_for_session() FROM PUBLIC;
+
+
+--
 -- Name: FUNCTION account_auth_methods(p_user_id uuid); Type: ACL; Schema: public; Owner: -
 --
 
@@ -20923,6 +22078,14 @@ GRANT ALL ON FUNCTION public.canonical_account_email(p_email text) TO service_ro
 
 REVOKE ALL ON FUNCTION public.charge_user_credits(p_user_id uuid, p_amount integer) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.charge_user_credits(p_user_id uuid, p_amount integer) TO service_role;
+
+
+--
+-- Name: FUNCTION check_widget_holdings_grant(p_key_hash text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.check_widget_holdings_grant(p_key_hash text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.check_widget_holdings_grant(p_key_hash text) TO service_role;
 
 
 --
@@ -21185,11 +22348,43 @@ GRANT ALL ON FUNCTION public.increment_updates_insight_success(p_scope text) TO 
 
 
 --
+-- Name: FUNCTION marketing_request_replacement(p_run_id uuid, p_by text, p_not_after timestamp with time zone); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.marketing_request_replacement(p_run_id uuid, p_by text, p_not_after timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.marketing_request_replacement(p_run_id uuid, p_by text, p_not_after timestamp with time zone) TO service_role;
+
+
+--
+-- Name: FUNCTION marketing_restore_replaced(p_run_id uuid, p_by text, p_now timestamp with time zone); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.marketing_restore_replaced(p_run_id uuid, p_by text, p_now timestamp with time zone) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.marketing_restore_replaced(p_run_id uuid, p_by text, p_now timestamp with time zone) TO service_role;
+
+
+--
+-- Name: FUNCTION mint_widget_holdings_grant(p_user_id uuid, p_sid uuid, p_minted_iat bigint, p_key_hash text, p_ttl_days integer, p_max_live integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.mint_widget_holdings_grant(p_user_id uuid, p_sid uuid, p_minted_iat bigint, p_key_hash text, p_ttl_days integer, p_max_live integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.mint_widget_holdings_grant(p_user_id uuid, p_sid uuid, p_minted_iat bigint, p_key_hash text, p_ttl_days integer, p_max_live integer) TO service_role;
+
+
+--
 -- Name: FUNCTION news_sentiment_daily(p_scope text, p_since date); Type: ACL; Schema: public; Owner: -
 --
 
 REVOKE ALL ON FUNCTION public.news_sentiment_daily(p_scope text, p_since date) FROM PUBLIC;
 GRANT ALL ON FUNCTION public.news_sentiment_daily(p_scope text, p_since date) TO service_role;
+
+
+--
+-- Name: FUNCTION note_widget_holdings_head(p_grant_id uuid, p_ticker text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.note_widget_holdings_head(p_grant_id uuid, p_ticker text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.note_widget_holdings_head(p_grant_id uuid, p_ticker text) TO service_role;
 
 
 --
@@ -21312,6 +22507,14 @@ GRANT ALL ON FUNCTION public.revoke_tier_credits(p_user_id uuid) TO service_role
 
 
 --
+-- Name: FUNCTION revoke_widget_holdings_grant(p_grant_id uuid, p_user_id uuid, p_reason text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.revoke_widget_holdings_grant(p_grant_id uuid, p_user_id uuid, p_reason text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.revoke_widget_holdings_grant(p_grant_id uuid, p_user_id uuid, p_reason text) TO service_role;
+
+
+--
 -- Name: FUNCTION rotate_refresh_token(p_user_id uuid, p_jti uuid, p_token_iat bigint, p_token_exp bigint, p_legacy boolean, p_new_jti uuid, p_new_family_id uuid, p_new_expires_at timestamp with time zone, p_grace_seconds integer, p_max_children integer); Type: ACL; Schema: public; Owner: -
 --
 
@@ -21408,6 +22611,45 @@ REVOKE ALL ON FUNCTION public.update_updated_at_column() FROM PUBLIC;
 --
 
 REVOKE ALL ON FUNCTION public.update_whale_followers_count() FROM PUBLIC;
+
+
+--
+-- Name: TABLE widget_holdings_grants; Type: ACL; Schema: public; Owner: -
+--
+
+GRANT ALL ON TABLE public.widget_holdings_grants TO service_role;
+
+
+--
+-- Name: FUNCTION widget_holdings_grant_is_live(g public.widget_holdings_grants); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.widget_holdings_grant_is_live(g public.widget_holdings_grants) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.widget_holdings_grant_is_live(g public.widget_holdings_grants) TO service_role;
+
+
+--
+-- Name: FUNCTION widget_push_register(p_user_id uuid, p_grant_id uuid, p_token text, p_environment text); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.widget_push_register(p_user_id uuid, p_grant_id uuid, p_token text, p_environment text) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.widget_push_register(p_user_id uuid, p_grant_id uuid, p_token text, p_environment text) TO service_role;
+
+
+--
+-- Name: FUNCTION widget_push_settle(p_outcomes jsonb); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.widget_push_settle(p_outcomes jsonb) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.widget_push_settle(p_outcomes jsonb) TO service_role;
+
+
+--
+-- Name: FUNCTION widget_push_targets(p_scopes text[], p_all boolean, p_grant_ids uuid[], p_after uuid, p_limit integer); Type: ACL; Schema: public; Owner: -
+--
+
+REVOKE ALL ON FUNCTION public.widget_push_targets(p_scopes text[], p_all boolean, p_grant_ids uuid[], p_after uuid, p_limit integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.widget_push_targets(p_scopes text[], p_all boolean, p_grant_ids uuid[], p_after uuid, p_limit integer) TO service_role;
 
 
 --
@@ -23255,5 +24497,5 @@ CREATE EVENT TRIGGER pgrst_drop_watch ON sql_drop
 -- PostgreSQL database dump complete
 --
 
-\unrestrict hqSS8sqVY2710UyJI1d2Khf3rUhc7GZLCIPVNUv0ygzuoMNq8awQU6a9fwSrgxf
+\unrestrict qCAjKn1CFz4sOoznq9AvB4lF6Fufm8L4gaaavdXYLYplvcDP9YeM0X89Ii9i4lV
 

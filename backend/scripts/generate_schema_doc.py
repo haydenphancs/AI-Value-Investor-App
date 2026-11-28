@@ -194,12 +194,26 @@ EXPECTED: dict[str, int] = {
     #                          revoke_all_refresh_sessions, account_has_identity (214)
     #   211's and 212's triggers sit on auth.users; 214's users.sessions_revoked_at is a column:
     #   no counted delta.
-    "tables": 161,
-    "public": 120,
-    "fk": 40,
-    "policies": 127,
-    "rls": 120,
-    "functions": 71,
+    # Refreshed 2026-11-27 (later) after the owner applied 215 and 216 and the snapshot was
+    # re-dumped. Every delta is accounted for:
+    #   +1 table / +1 public / +1 rls / +1 policy -> widget_holdings_grants (216), one
+    #                          service_role policy
+    #   +2 fk                  -> widget_holdings_grants.user_id → users (216);
+    #                          marketing_runs.replaces_run_id → marketing_runs (215)
+    #   +11 functions          -> widget_holdings_grant_is_live, mint_widget_holdings_grant,
+    #                          check_widget_holdings_grant, revoke_widget_holdings_grant,
+    #                          note_widget_holdings_head, widget_push_register,
+    #                          widget_push_targets, widget_push_settle,
+    #                          _revoke_widget_grants_for_session (216);
+    #                          marketing_request_replacement, marketing_restore_replaced (215)
+    #   216's trigger sits on auth_refresh_families, and 215's marketing_runs changes are
+    #   columns plus a UNIQUE key: no counted delta.
+    "tables": 162,
+    "public": 121,
+    "fk": 42,
+    "policies": 128,
+    "rls": 121,
+    "functions": 82,
     "enums": 14,
     "views": 1,
 }

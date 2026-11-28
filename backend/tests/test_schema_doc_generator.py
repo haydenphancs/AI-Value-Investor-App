@@ -673,11 +673,10 @@ def test_every_public_table_is_curated():
 # 2026-11-13: 209's live earnings filing cache (earnings_filing_cache) was applied and re-dumped,
 # so it left the list. Each entry below leaves once the owner has applied its migration and
 # dump_schema.sh has run — the test below fails until then.
-_PENDING_MIGRATION_TABLES: set[str] = {
-    # 216: the Home Screen widget's Holdings grants (owner 2026-11-27). Leaves this list once the
-    # owner has applied 216 and dump_schema.sh has re-run (the test below fails until then).
-    "public.widget_holdings_grants",
-}
+_PENDING_MIGRATION_TABLES: set[str] = set()
+# 2026-11-27 (later): 216's widget_holdings_grants (the Home Screen widget's Holdings grants)
+# was applied and re-dumped, so it left the list. 215 (marketing replacement runs) added
+# columns and functions but no table.
 # 2026-11-27: 211's deleted_account_fingerprints, 213's apple_sign_in_grants and 214's
 # auth_refresh_families / auth_refresh_tokens were applied (with 212) and re-dumped, so they
 # left the list; `sessions_revoked_at` (214) joined public.users' key in schema_curation.py.

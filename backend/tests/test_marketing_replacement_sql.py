@@ -872,12 +872,14 @@ def test_once_215_is_in_the_snapshot_its_columns_key_and_functions_hold_there_to
 
 
 def test_the_snapshot_guard_s_post_215_branch_is_not_vacuous():
-    """The re-dump has not happened yet, so the branch above that judges a 215 snapshot runs here against the real
-    snapshot rewritten as pg_dump would print it after 215: clean, and each way the apply could have gone wrong is
-    named (the old key kept, a function left granted, a column missing)."""
+    """Both branches of the guard bite. The post-215 branch is run on a 215 snapshot: the real one since the re-dump of
+    2026-11-27 (it already holds 215), or the real one rewritten as pg_dump would print it after 215 while it did not.
+    It must come out clean, and each way the apply could have gone wrong must be named (the old key kept, a function
+    left granted, the FK missing). The pre-215 branch is run on a synthetic pre-215 table, which must name a missing
+    210 key."""
     real = _SNAPSHOT.read_text(encoding="utf-8")
-    applied = _as_if_215_applied(real)
-    assert applied != real and "replacement smallint" in applied
+    applied = real if re.search(r"^\s+replacement smallint", real, re.M) else _as_if_215_applied(real)
+    assert "replacement smallint" in applied
     assert _snapshot_215_problems(applied) == []
     kept_old = applied + ("\nALTER TABLE ONLY public.marketing_runs\n    ADD CONSTRAINT marketing_runs_run_date_lane_key "
                           "UNIQUE (run_date, lane);\n")
@@ -887,8 +889,14 @@ def test_the_snapshot_guard_s_post_215_branch_is_not_vacuous():
     assert f"{RESTORE} is granted to anon" in _snapshot_215_problems(granted)
     no_fk = applied.replace("ON DELETE RESTRICT;\n", ";\n")
     assert "no replaces_run_id FK ON DELETE RESTRICT" in _snapshot_215_problems(no_fk)
+    # The pre-215 branch, on a pre-215 table (no `replacement` column): the 210 key must be found, and its absence named.
+    pre_215 = "CREATE TABLE public.marketing_runs (\n    id uuid NOT NULL,\n    lane text DEFAULT 'main'::text NOT NULL\n);\n"
+    old_key = ("ALTER TABLE ONLY public.marketing_runs\n    ADD CONSTRAINT marketing_runs_run_date_lane_key "
+               "UNIQUE (run_date, lane);\n")
+    assert _snapshot_215_problems(pre_215 + old_key) == []
     assert "pre-215: the UNIQUE (run_date, lane) key 215's DO block matches is missing" in _snapshot_215_problems(
-        _OLD_KEY_RE.sub("", real))
+        pre_215)
+    assert "pre-215: a 215 function without its column" in _snapshot_215_problems(pre_215 + old_key + REQUEST)
 
 
 # ══ the constants and the switch ═════════════════════════════════════════════════════════════════════════════════

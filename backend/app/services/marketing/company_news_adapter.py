@@ -4615,7 +4615,7 @@ async def _money_map_record(ctx: _Ctx, sym: str, bd: Any, fy: str) -> Any:
                     "none" if operating is None else f"{operating:.0f}")
         return "money_map_loss_above_revenue"
     try:
-        return R.MoneyMap(
+        record = R.MoneyMap(
             series="money_map", company=company, fiscal_year=fy, period_end=period_end,
             segments=tuple(named), other_usd=other, eliminations_usd=None,
             revenue_usd=reported, gross_profit_usd=gross, operating_profit_usd=operating,
@@ -4624,6 +4624,18 @@ async def _money_map_record(ctx: _Ctx, sym: str, bd: Any, fy: str) -> Any:
     except ValueError as e:
         logger.info("company news money_map: %s FY%s refused (%s)", sym, fy, _describe(e))
         return "record_invalid"
+    # Owner decision 2026-11-27 ("i don't think we need to post for these companies. so, post the other one"): a loss
+    # year whose costs bar would be ONE undivided piece holding interest, tax and other items that were a cost — or that
+    # no operating line can tell apart — is refused HERE, exactly as the template refuses the record
+    # (`news_templates._money_map_parts`: ``costs_undivided``; one predicate for both). A content refusal: remembered
+    # for the fiscal year (B3PD-1), so the walk moves to the next company instead of spending a candidate on it
+    if R.money_map_costs_undivided(record):
+        logger.info("company news money_map: %s FY%s is a loss year whose costs bar cannot be split (gross %s, "
+                    "operating %s, net %.0f) — refused (money_map_costs_undivided): the next company posts instead",
+                    sym, fy, "none" if gross is None else f"{gross:.0f}",
+                    "none" if operating is None else f"{operating:.0f}", net_bd)
+        return "money_map_costs_undivided"
+    return record
 
 
 async def _collect_money_map(ctx: _Ctx) -> Candidates:

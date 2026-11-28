@@ -3605,3 +3605,1599 @@ async def test_art_the_sweeps_two_decisions_carry_the_art_line_create_posts_stam
         lines = decision["text"].split("\n")
         assert lines.count(line) == 1 and lines.index(line) == 1, lines
         assert "parse_mode" not in decision
+
+
+# ══ Replacement runs (migration 215): "🔄 Next company" on a Money Map run's review bundles ═══════════════════════════
+# Owner decision 2026-11-27: "Full replacement: the next company's post (video + picture) comes to Telegram for review
+# about 20-75 min after the tap. Max 2 replacements a day. Money Map posts only." The ledger is the run-service fake,
+# whose `rpc` runs tests/_replacement_rpc_fake.py (migration 215's two functions, statement by statement) over the very
+# rows the review bot reads. What must never regress:
+#   * every offer gate (DESIGN §1.1 + amendments A2 / A4) — any one false leaves both decision messages exactly as they
+#     are with the switch off (text and keyboard);
+#   * T1 is the LAST row of BOTH decision messages, T2 sits right after the Series / Replaces lines (amendment A9);
+#   * the confirm flow is edit-only (amendment A11): no fallback message ever carries the buttons;
+#   * a confirmed tap answers T5, closes the tapped message with T6 and removes every OTHER decision's keyboard (T7,
+#     paced; flood control and a 429 stop the rest and never escape the webhook — amendment A7);
+#   * refusals: their exact toasts; R8 / R11 / R12 keep the keyboard, every other one removes only the nx rows;
+#   * a lost response and a double tap are answered from the ledger (amendment A5), never written twice;
+#   * one notice per ending (N1-N5), sent once, stamped AFTER the send, carrying "↩ Post {SYM} after all" while it
+#     can still work; the restore puts the original's posts back for a fresh bundle without the 🔄 button.
+
+from datetime import datetime, timedelta  # noqa: E402
+
+import _replacement_rpc_fake as _rpcfake  # noqa: E402
+from app.services.marketing import telegram_pacing as _tp  # noqa: E402
+from app.utils.market_hours import ET as _ET  # noqa: E402
+
+_NX_DAY = "2026-09-17"                                  # a Thursday: a default spotlight day ("tue,thu,sat")
+_NX_NOW = datetime(2026, 9, 17, 18, 0, tzinfo=_ET)      # before the main lane's 22:10 ET tap cutoff
+_NX_REF = "news:money_map:COST:2025"
+_NX_SERIES = "ceo_buys,insider_buys,thirteen_f,money_map,insider_spotlight"
+RUN_SPOT = "66666666-6666-4666-8666-666666666666"
+RUN_R1 = "77777777-7777-4777-8777-777777777777"
+_OWNER_BY = f"telegram:{OWNER}"
+_T1 = [{"text": "🔄 Next company", "callback_data": f"nx:a:{RUN_A}"}]
+_T2 = ("🔄 Next company = reject this Money Map post (video and picture) and get the next company's instead, here in "
+       "about 20-75 min. At most 2 a day; last tap 22:10 ET. If no other company qualifies, you can post this one "
+       "after all.")
+_T6 = ("🔄 Replaced 18:00 ET (1 of 2 today): every post of this run still waiting was rejected. The next Money Map "
+       "company's video and picture come here in about 20-75 min (the worker's next start is 18:15 ET). If no other "
+       "company qualifies, one message will say so, and you can still post this one.")
+
+
+def _nx_clock(svc, monkeypatch, when: datetime) -> None:
+    """The bot's clock and the request function's clock, together (both read NOW)."""
+    monkeypatch.setattr(rs, "_now", lambda: when)
+    svc.fake.rpc_clock = when
+
+
+@pytest.fixture
+def nx(bundles, monkeypatch):
+    for name, value in (("MARKETING_REPLACE_ENABLED", True), ("MARKETING_CONTENT_CLASSES", "A,C,F"),
+                        ("MARKETING_NEWS_SERIES", _NX_SERIES), ("MARKETING_RUN_HOUR_ET", 16),
+                        ("MARKETING_MAX_RUN_ATTEMPTS", 6), ("MARKETING_RUN_STALE_SECONDS", 3600),
+                        ("MARKETING_SPOTLIGHT_ENABLED", True), ("MARKETING_SPOTLIGHT_WEEKDAYS", "tue,thu,sat"),
+                        ("MARKETING_SPOTLIGHT_HOUR_ET", 10)):
+        monkeypatch.setattr(settings, name, value)
+    monkeypatch.setattr(_tp, "_STATE", None)
+    _nx_clock(bundles, monkeypatch, _NX_NOW)
+    return bundles
+
+
+def _nx_run(svc, *, run_id: str = RUN_A, lane: str = "main", template: str = "money_map", ref: str = _NX_REF,
+            status: str = "media_ready", replacement: int = 0, replaces: Optional[str] = None,
+            meta: Optional[Dict[str, Any]] = None, video: Optional[str] = VIDEO, script: bool = True,
+            attempts: int = 1, stage: str = "assets_ready") -> Dict[str, Any]:
+    """A run as the ledger holds it once the worker closed it (the selection mirror written: template_id, source_ref)."""
+    row: Dict[str, Any] = {"id": run_id, "run_date": _NX_DAY, "status": status, "stage": stage, "attempts": attempts,
+                           "dry_run": False, "template_id": template, "source_ref": ref, "content_class": "F",
+                           "metadata": {**({"video_asset_id": video} if video else {}), **(meta or {})},
+                           "created_at": "2026-09-17T14:00:00+00:00", "updated_at": "2026-09-17T20:00:00+00:00"}
+    if lane != "main":
+        row["lane"] = lane
+    if replacement:
+        row["replacement"], row["replaces_run_id"] = replacement, replaces
+    _rows(svc, mrs.RUNS).append(row)
+    if video:
+        _rows(svc, mrs.ASSETS).append({"id": video, "run_id": run_id, "kind": "video", "status": "ready",
+                                       "storage_path": f"{_NX_DAY}/{run_id}/video-{'a' * 16}.mp4",
+                                       "content_type": "video/mp4", "bytes": 5_000_000, "metadata": {}})
+    if script:
+        _rows(svc, mrs.SCRIPTS).append({"run_id": run_id, "status": "accepted", "template_id": template,
+                                        "source_ref": ref, "run_date": _NX_DAY, "lane": lane,
+                                        "replacement": replacement})
+    return row
+
+
+def _nx_posts(svc, run_id: str = RUN_A, video: str = VIDEO) -> Dict[str, str]:
+    """Two video posts (the VIDEO bundle) and two text posts (the POSTS bundle)."""
+    ids = {p: _seed_post(svc, run_id, p, "video", caption=f"{p} caption", asset_ids=[video])
+           for p in ("tiktok", "youtube")}
+    ids.update({p: _seed_post(svc, run_id, p, "text", caption=SHORT, title=None) for p in ("x", "bluesky")})
+    return ids
+
+
+def _run(svc, run_id: str) -> Dict[str, Any]:
+    return next(r for r in _rows(svc, mrs.RUNS) if r["id"] == run_id)
+
+
+def _norm(decision: Dict[str, Any]) -> tuple:
+    """A decision message as sent, its bundle id masked (a new uuid per offer)."""
+    bid = _bundle_id(decision)
+    return decision["text"], json.loads(json.dumps(decision["reply_markup"]).replace(bid, "<bundle>"))
+
+
+def _unoffer(svc) -> None:
+    """Every post back to never-offered (the review stamps removed), so the next sweep offers it again."""
+    for row in _rows(svc, mrs.POSTS):
+        row["metadata"] = {k: v for k, v in row["metadata"].items()
+                           if k not in ("review_bundle", "review_notified_at", "review_message_id",
+                                        "review_message_ids")}
+
+
+def _nx_rows(keyboard: Dict[str, Any]) -> List[list]:
+    return [row for row in keyboard["inline_keyboard"] if any(b["callback_data"].startswith("nx:") for b in row)]
+
+
+def _without_t1(decision: Dict[str, Any]) -> List[list]:
+    """The decision's keyboard without its nx rows (every other row as sent)."""
+    return [row for row in decision["reply_markup"]["inline_keyboard"]
+            if not any(b["callback_data"].startswith("nx:") for b in row)]
+
+
+def _nx_tap(decision: Dict[str, Any], letter: str, run_id: str = RUN_A, *,
+            keyboard: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return _update(run_id, f"nx:{letter}", message={"message_id": decision["message_id"], "text": decision["text"],
+                                                    "reply_markup": keyboard or decision["reply_markup"]})
+
+
+def _confirm_keyboard(decision: Dict[str, Any], run_id: str = RUN_A) -> Dict[str, Any]:
+    return {"inline_keyboard": _without_t1(decision) + rs.next_confirm_rows(run_id)}
+
+
+async def _nx_offered(svc, tg) -> Dict[str, Dict[str, Any]]:
+    """Gen 0 media_ready with its posts → the sweep → both decision messages, by kind."""
+    await rs.review_cycle()
+    return {d["text"].split(" · ")[1].lower(): d for d in _decision_messages(tg)}
+
+
+# ── the offer ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_nx_both_decisions_carry_t1_last_and_t2_right_after_the_series_line(nx, tg):
+    """All gates true: BOTH decision messages end their keyboard with the ONE T1 row and carry T2 right after the
+    Series line (amendment A9: never the last line); everything else is the text and keyboard of the switch-off day."""
+    _nx_run(nx, meta={"series": "money_map"})
+    _nx_posts(nx)
+    on = await _nx_offered(nx, tg)
+    assert set(on) == {"video", "posts"}
+    _unoffer(nx)
+    tg.calls.clear(), tg.ids.clear()
+    settings.MARKETING_REPLACE_ENABLED = False
+    off = await _nx_offered(nx, tg)
+    for kind in ("video", "posts"):
+        text_on, kb_on = _norm(on[kind])
+        text_off, kb_off = _norm(off[kind])
+        assert kb_on["inline_keyboard"][-1] == _T1 and kb_on["inline_keyboard"][:-1] == kb_off["inline_keyboard"]
+        lines = text_on.split("\n")
+        assert lines[1] == "Series: Money Map" and lines[2] == _T2 and lines[-1] != _T2
+        assert lines[:2] + lines[3:] == text_off.split("\n")
+        assert "nx:" not in json.dumps(kb_off) and "🔄" not in text_off
+
+
+def _gate_switch_off(svc, mp):
+    mp.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+
+
+def _gate_switch_truthy(svc, mp):
+    mp.setattr(settings, "MARKETING_REPLACE_ENABLED", "true")      # exactly True only (selection.replacement_on)
+
+
+def _gate_not_money_map(svc, mp):
+    _run(svc, RUN_A)["template_id"] = "theme_explainer"
+
+
+def _gate_checkpoint_only(svc, mp):
+    _run(svc, RUN_A)["status"] = "failed"                      # offered through the assets_ready checkpoint only
+
+
+def _gate_replacement_cap(svc, mp):
+    _run(svc, RUN_A).update(replacement=2, replaces_run_id=RUN_SPOT)
+
+
+def _gate_junk_replacement(svc, mp):
+    _run(svc, RUN_A)["replacement"] = "1"
+
+
+def _gate_already_replaced(svc, mp):
+    _run(svc, RUN_A)["metadata"]["replaced_by"] = {"run_id": RUN_R1}
+
+
+def _gate_at_cutoff(svc, mp):
+    _nx_clock(svc, mp, datetime(2026, 9, 17, 22, 10, tzinfo=_ET))
+
+
+def _gate_next_day(svc, mp):
+    _nx_clock(svc, mp, datetime(2026, 9, 18, 9, 0, tzinfo=_ET))
+
+
+def _gate_money_map_series_off(svc, mp):
+    mp.setattr(settings, "MARKETING_NEWS_SERIES", "ceo_buys,insider_buys,thirteen_f")
+
+
+def _gate_class_f_off(svc, mp):
+    mp.setattr(settings, "MARKETING_CONTENT_CLASSES", "A,C")
+
+
+def _gate_a_post_approved(svc, mp):
+    next(p for p in _rows(svc, mrs.POSTS) if p["platform"] == "bluesky")["status"] = "approved"
+
+
+def _gate_a_post_failed(svc, mp):
+    next(p for p in _rows(svc, mrs.POSTS) if p["platform"] == "tiktok")["status"] = "failed"
+
+
+def _gate_day_cap_spent(svc, mp):
+    for n, run_id in ((1, "88888888-8888-4888-8888-888888888881"), (2, "88888888-8888-4888-8888-888888888882")):
+        _rows(svc, mrs.RUNS).append({"id": run_id, "run_date": _NX_DAY, "lane": "spotlight", "replacement": n,
+                                     "status": "skipped", "metadata": {}})
+
+
+_OFFER_GATES = [_gate_switch_off, _gate_switch_truthy, _gate_not_money_map, _gate_checkpoint_only,
+                _gate_replacement_cap, _gate_junk_replacement, _gate_already_replaced, _gate_at_cutoff, _gate_next_day,
+                _gate_money_map_series_off, _gate_class_f_off, _gate_a_post_approved, _gate_a_post_failed,
+                _gate_day_cap_spent]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate", _OFFER_GATES, ids=lambda g: g.__name__[len("_gate_"):])
+async def test_nx_each_offer_gate_alone_leaves_both_decisions_as_they_are_with_the_switch_off(nx, tg, monkeypatch,
+                                                                                            gate):
+    _nx_run(nx)
+    _nx_posts(nx)
+    gate(nx, monkeypatch)
+    gated = await _nx_offered(nx, tg)
+    assert gated, "the bundles still go out"
+    _unoffer(nx)
+    tg.calls.clear(), tg.ids.clear()
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+    plain = await _nx_offered(nx, tg)
+    assert set(gated) == set(plain)
+    for kind in gated:
+        assert _norm(gated[kind]) == _norm(plain[kind])
+        assert "nx:" not in json.dumps(gated[kind]["reply_markup"]) and "🔄 Next company =" not in gated[kind]["text"]
+
+
+@pytest.mark.asyncio
+async def test_nx_a_closed_spotlight_lane_offers_nothing_and_an_open_one_offers_its_own_cutoff(nx, tg, monkeypatch):
+    """Gate 6: a spotlight run is offered only while its lane is open for its date; its T2 names the spotlight cutoff
+    ((run hour − 1):10 ET = 15:10 with the default 16)."""
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 12, 0, tzinfo=_ET))
+    _nx_run(nx, run_id=RUN_SPOT, lane="spotlight")
+    _nx_posts(nx, RUN_SPOT)
+    offered = await _nx_offered(nx, tg)
+    post = offered["posts"]
+    assert post["reply_markup"]["inline_keyboard"][-1] == [{"text": "🔄 Next company",
+                                                            "callback_data": f"nx:a:{RUN_SPOT}"}]
+    assert "last tap 15:10 ET." in post["text"] and post["text"].split("\n")[0].endswith("· spotlight")
+    _unoffer(nx)
+    tg.calls.clear(), tg.ids.clear()
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_WEEKDAYS", "tue,sat")        # Thursday no longer a lane day
+    closed = await _nx_offered(nx, tg)
+    assert all("nx:" not in json.dumps(d["reply_markup"]) for d in closed.values())
+
+
+@pytest.mark.asyncio
+async def test_nx_a_count_that_cannot_be_read_shows_the_button_and_the_tap_decides(nx, tg, monkeypatch, caplog):
+    _nx_run(nx)
+    _nx_posts(nx)
+
+    async def broken(_run_date):
+        raise mrs.MarketingRunError("count failed: 520")
+
+    monkeypatch.setattr(nx, "count_replacements", broken)
+    caplog.set_level(logging.WARNING)
+    offered = await _nx_offered(nx, tg)
+    assert all(d["reply_markup"]["inline_keyboard"][-1] == _T1 for d in offered.values())
+    assert any("replacement count could not be read" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_nx_a_bug_in_the_offer_costs_only_the_button(nx, tg, monkeypatch, caplog):
+    _nx_run(nx)
+    _nx_posts(nx)
+
+    def boom(*_a, **_k):
+        raise KeyError("probe")
+
+    monkeypatch.setattr(rs, "_replacement_offer_gates", boom)
+    caplog.set_level(logging.WARNING)
+    offered = await _nx_offered(nx, tg)
+    assert set(offered) == {"video", "posts"}
+    assert all("nx:" not in json.dumps(d["reply_markup"]) for d in offered.values())
+    assert any("no 🔄 Next company on its decisions" in r.getMessage() for r in caplog.records)
+
+
+def test_nx_t2_stays_whole_under_the_4096_cap_while_the_end_is_cut(configured):
+    """Amendment A9: the cap trims from the END — T2, placed after the Series line, survives a message cut short."""
+    members = [_row("x", "text"), _row("bluesky", "text")]
+    warnings = ["⚠️ " + "w" * 300] * 20
+    text = rs.compose_bundle_decision_text("post", members, [], "2026-09-17", False, warnings,
+                                           series_note="Money Map", next_line=_T2,
+                                           replaces_line="Replaces: COST (replaced 18:00 ET).")
+    assert rs.utf16_len(text) <= 4096
+    lines = text.split("\n")
+    assert lines[1:4] == ["Series: Money Map", "Replaces: COST (replaced 18:00 ET).", _T2]
+    assert rs.compose_bundle_decision_text("post", members, [], "2026-09-17", False, []) == (
+        rs.compose_bundle_decision_text("post", members, [], "2026-09-17", False, [], next_line="",
+                                        replaces_line=""))
+
+
+def test_nx_the_keyboard_appends_t1_last_only_when_asked():
+    a = {"id": str(uuid.uuid4()), "platform": "x"}
+    b = {"id": str(uuid.uuid4()), "platform": "bluesky"}
+    plain = rs.bundle_keyboard(_PID, [a, b])
+    offered = rs.bundle_keyboard(_PID, [a, b], next_run_id=RUN_A)
+    assert offered["inline_keyboard"] == plain["inline_keyboard"] + [_T1]
+    assert rs.bundle_keyboard(_PID, [a], next_run_id=None) == rs.bundle_keyboard(_PID, [a])
+    with pytest.raises(ValueError):
+        rs.bundle_keyboard(_PID, [a], next_run_id="not-a-uuid")
+
+
+# ── the replacement run's own bundle (B1) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_nx_a_replacement_bundle_names_its_run_and_what_it_replaces_and_offers_t1_again(nx, tg):
+    _nx_run(nx, run_id=RUN_R1, replacement=1, replaces=RUN_A, video="99999999-9999-4999-8999-999999999999",
+            ref="news:money_map:MSFT:2025", meta={"series": "money_map", "replacement_request": {
+                "at": "2026-09-17T21:40:00+00:00", "from_run_id": RUN_A, "from_source_ref": _NX_REF}})
+    _nx_posts(nx, RUN_R1, video="99999999-9999-4999-8999-999999999999")
+    offered = await _nx_offered(nx, tg)
+    for decision in offered.values():
+        lines = decision["text"].split("\n")
+        assert lines[0].endswith("· run 2026-09-17 · replacement 1")
+        assert lines[1:4] == ["Series: Money Map", "Replaces: COST (replaced 17:40 ET).", _T2]
+        assert decision["reply_markup"]["inline_keyboard"][-1] == [{"text": "🔄 Next company",
+                                                                    "callback_data": f"nx:a:{RUN_R1}"}]
+
+
+@pytest.mark.parametrize("request_meta, line", [
+    ({"at": "2026-09-17T21:40:00+00:00", "from_source_ref": "news:money_map:BRK.B:2024"},
+     "Replaces: BRK.B (replaced 17:40 ET)."),
+    ({"at": "2026-09-17T21:40:00+00:00", "from_source_ref": "news:money_map:cost:2025"},
+     "Replaces: the earlier Money Map of this run (replaced 17:40 ET)."),
+    ({"at": "2026-09-17T21:40:00+00:00", "from_source_ref": "news:money_map:COST:2025\nhello"},
+     "Replaces: the earlier Money Map of this run (replaced 17:40 ET)."),
+    ({"at": "yesterday", "from_source_ref": _NX_REF}, "Replaces: COST."),
+    ({"at": 5, "from_source_ref": 7}, "Replaces: the earlier Money Map of this run."),
+    ("junk", "Replaces: the earlier Money Map of this run."),
+])
+def test_nx_the_replaces_line_never_shows_a_stored_string(request_meta, line):
+    run = {"replacement": 1, "metadata": {"replacement_request": request_meta}}
+    assert rs._replaces_line(run) == line
+
+
+@pytest.mark.parametrize("run", [{}, {"replacement": 0}, {"replacement": "1"}, {"replacement": True}, None, "x"])
+def test_nx_a_days_own_run_or_an_unreadable_number_has_no_replaces_line(run):
+    assert rs._replaces_line(run) == ""
+
+
+# ── the taps: ask / keep / yes ───────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_nx_ask_swaps_t1_for_the_two_confirm_rows_edit_only_and_writes_nothing(nx, tg, wakes):
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    before = copy.deepcopy(nx.fake.tables)
+    tg.calls.clear()
+    out = await rs.handle_update(_nx_tap(posts, "a"))
+    assert out == {"ok": True, "next": "ask", "outcome": "confirm_asked", "run_id": RUN_A}
+    (edit,) = tg.of("editMessageReplyMarkup")
+    assert edit["message_id"] == posts["message_id"]
+    assert edit["reply_markup"] == _confirm_keyboard(posts)
+    assert _nx_rows(edit["reply_markup"]) == [
+        [{"text": "✅ Yes, get the next company", "callback_data": f"nx:y:{RUN_A}"}],
+        [{"text": "↩ No, keep this one", "callback_data": f"nx:k:{RUN_A}"}]]
+    assert _answers(tg) == ["Replace this company? Tap Yes to confirm."]
+    assert tg.of("sendMessage") == [] and nx.fake.replacement_rpc.calls == [] and wakes == []
+    assert {t: v.rows for t, v in nx.fake.tables.items()} == {t: v.rows for t, v in before.items()}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [(400, {"ok": False, "description": "Bad Request: message to edit not found"}),
+                                    (403, {"ok": False, "description": "Forbidden"})])
+async def test_nx_ask_whose_edit_fails_answers_a_toast_and_never_sends_a_copy_of_the_buttons(nx, tg, answer):
+    """Amendment A11: no fallback message — a second live copy of the decision could never be closed."""
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    tg.calls.clear()
+    tg.script["editMessageReplyMarkup"] = [answer]
+    assert (await rs.handle_update(_nx_tap(posts, "a")))["outcome"] == "confirm_not_shown"
+    assert _answers(tg) == ["Could not show the confirm buttons — tap again"]
+    assert tg.of("sendMessage") == []
+
+
+@pytest.mark.asyncio
+async def test_nx_ask_on_a_message_that_already_shows_the_confirm_rows_is_not_modified_and_answers_t3(nx, tg):
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    tg.calls.clear()
+    tg.script["editMessageReplyMarkup"] = [(400, {"ok": False, "description":
+                                                  "Bad Request: message is not modified: specified new message "
+                                                  "content and reply markup are exactly the same"})]
+    assert (await rs.handle_update(_nx_tap(posts, "a")))["outcome"] == "confirm_asked"
+    assert _answers(tg) == ["Replace this company? Tap Yes to confirm."]
+
+
+@pytest.mark.asyncio
+async def test_nx_keep_puts_t1_back_and_writes_nothing(nx, tg, monkeypatch):
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    tg.calls.clear()
+    rows_before = copy.deepcopy((_rows(nx, mrs.RUNS), _rows(nx, mrs.POSTS)))
+    out = await rs.handle_update(_nx_tap(posts, "k", keyboard=_confirm_keyboard(posts)))
+    assert out["outcome"] == "kept"
+    (edit,) = tg.of("editMessageReplyMarkup")
+    assert edit["reply_markup"] == posts["reply_markup"]
+    assert _answers(tg) == ["Kept — nothing changed"]
+    assert (_rows(nx, mrs.RUNS), _rows(nx, mrs.POSTS)) == rows_before and nx.fake.replacement_rpc.calls == []
+
+
+@pytest.mark.asyncio
+async def test_nx_keep_after_a_yes_that_landed_says_already_replaced_never_nothing_changed(nx, tg):
+    """Review 2026-11-27: ✅ Yes commits and loses its response (R11 keeps the confirm rows); the owner then taps ↩ No.
+    His posts ARE rejected and the next company IS planned: the answer says so (by the replacement's state) and only
+    the nx rows go — never "Kept — nothing changed", never the 🔄 row back."""
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    nx.fake.replacement_rpc.lose_response = {_rpcfake.REQUEST}
+    assert (await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))))["outcome"] == "error"
+    nx.fake.replacement_rpc.lose_response = set()
+    tg.calls.clear()
+    out = await rs.handle_update(_nx_tap(posts, "k", keyboard=_confirm_keyboard(posts)))
+    assert out["outcome"] == "already_replaced"
+    assert _answers(tg) == ["Already replaced — the next company is on its way"]
+    (edit,) = tg.of("editMessageReplyMarkup")
+    assert edit["reply_markup"] == {"inline_keyboard": _without_t1(posts)}
+    # once that run ended, the same tap says how
+    gen1 = next(r for r in _rows(nx, mrs.RUNS) if r.get("replacement") == 1)
+    gen1.update(status="skipped", attempts=1, metadata={**gen1["metadata"], **_QUIET})
+    tg.calls.clear()
+    assert (await rs.handle_update(_nx_tap(posts, "k", keyboard=_confirm_keyboard(posts))))["outcome"] == \
+        "already_replaced"
+    assert _answers(tg) == ["Already replaced — that run ended: no other company qualified"]
+
+
+@pytest.mark.asyncio
+async def test_nx_keep_with_a_ledger_error_keeps_the_keyboard_and_asks_for_another_tap(nx, tg, monkeypatch, caplog):
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    tg.calls.clear()
+
+    async def broken(*_a, **_k):
+        raise mrs.MarketingRunError("get_run: connection reset")
+
+    monkeypatch.setattr(nx, "get_run", broken)
+    with caplog.at_level(logging.ERROR):
+        out = await rs.handle_update(_nx_tap(posts, "k", keyboard=_confirm_keyboard(posts)))
+    assert out["outcome"] == "error" and _answers(tg) == ["Could not record that — tap again"]
+    assert tg.of("editMessageReplyMarkup") == []
+    assert any("keep could not read" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_nx_yes_records_answers_t5_closes_the_tapped_message_with_t6_and_the_sibling_with_t7(nx, tg, wakes):
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+    offered = await _nx_offered(nx, tg)
+    posts, video = offered["posts"], offered["video"]
+    tg.calls.clear()
+    out = await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts)))
+    assert out["outcome"] == "requested"
+    assert _answers(tg) == ["Next company requested 🔄"]
+    (closed,) = tg.of("editMessageText")
+    assert closed["message_id"] == posts["message_id"] and closed["reply_markup"] == {"inline_keyboard": []}
+    assert closed["text"] == f"{posts['text']}\n\n{_T6}"
+    (sibling,) = tg.of("editMessageReplyMarkup")                     # T7: the VIDEO decision, never the tapped one
+    assert sibling["message_id"] == video["message_id"] and sibling["reply_markup"] == {"inline_keyboard": []}
+    # the ledger: every pending post rejected by the request, one planned replacement row, nothing for the publisher
+    new = [r for r in _rows(nx, mrs.RUNS) if r.get("replacement") == 1]
+    assert len(new) == 1 and new[0]["status"] == "planned" and new[0]["replaces_run_id"] == RUN_A
+    for pid in ids.values():
+        row = _post(nx, pid)
+        assert row["status"] == "rejected" and row["metadata"]["review"]["replaced_by_run_id"] == new[0]["id"]
+    assert wakes == [] and tg.of("sendMessage") == []
+
+
+@pytest.mark.asyncio
+async def test_nx_a_double_tap_and_a_lost_response_are_answered_from_the_ledger_never_written_twice(nx, tg):
+    """Amendment A5: the first call COMMITS and loses its response (R11, keyboard kept); the retry is answered
+    `requested` from the ledger (replayed) and finishes the UI exactly like the first answer would have; a third tap
+    on the same snapshot changes nothing either."""
+    _nx_run(nx)
+    _nx_posts(nx)
+    offered = await _nx_offered(nx, tg)
+    posts, video = offered["posts"], offered["video"]
+    tap = _nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))
+    tg.calls.clear()
+    nx.fake.replacement_rpc.lose_response = {_rpcfake.REQUEST}
+    assert (await rs.handle_update(tap))["outcome"] == "error"
+    assert _answers(tg) == ["Could not record that — tap again"]
+    assert tg.of("editMessageReplyMarkup") == [] and tg.of("editMessageText") == []     # the keyboard is kept
+    assert len([r for r in _rows(nx, mrs.RUNS) if r.get("replacement") == 1]) == 1      # it DID commit
+    nx.fake.replacement_rpc.lose_response = set()
+    rows_before = copy.deepcopy(_rows(nx, mrs.RUNS))
+    for _ in range(2):
+        tg.calls.clear()
+        assert (await rs.handle_update(tap))["outcome"] == "replayed"
+        assert _answers(tg) == ["Next company requested 🔄"]
+        (closed,) = tg.of("editMessageText")
+        assert closed["text"] == f"{posts['text']}\n\n{_T6}"                 # the recorded time, not the tap's
+        assert [e["message_id"] for e in tg.of("editMessageReplyMarkup")] == [video["message_id"]]
+    assert _rows(nx, mrs.RUNS) == rows_before
+
+
+@pytest.mark.asyncio
+async def test_nx_a_replayed_tap_states_the_time_the_request_was_recorded(nx, tg, monkeypatch):
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    tap = _nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))
+    await rs.handle_update(tap)
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 19, 5, tzinfo=_ET))
+    tg.calls.clear()
+    assert (await rs.handle_update(tap))["outcome"] == "replayed"
+    (closed,) = tg.of("editMessageText")
+    assert "🔄 Replaced 18:00 ET (1 of 2 today)" in closed["text"] and "next start is 19:15 ET" in closed["text"]
+
+
+async def _lost_yes(nx, tg, monkeypatch, at: datetime) -> Dict[str, Dict[str, Any]]:
+    """Gen 0 offered; ✅ Yes at `at` COMMITS and loses its response (R11, the confirm rows kept)."""
+    _nx_run(nx)
+    _nx_posts(nx)
+    offered = await _nx_offered(nx, tg)
+    _nx_clock(nx, monkeypatch, at)
+    nx.fake.replacement_rpc.lose_response = {_rpcfake.REQUEST}
+    tap = _nx_tap(offered["posts"], "y", keyboard=_confirm_keyboard(offered["posts"]))
+    assert (await rs.handle_update(tap))["outcome"] == "error"
+    nx.fake.replacement_rpc.lose_response = set()
+    assert len([r for r in _rows(nx, mrs.RUNS) if r.get("replacement") == 1]) == 1          # it DID commit
+    return offered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_at, why", [
+    (datetime(2026, 9, 17, 22, 10, 3, tzinfo=_ET), "past the cutoff"),
+    (datetime(2026, 9, 17, 23, 30, tzinfo=_ET), "an hour later"),
+    (datetime(2026, 9, 17, 22, 9, 59, tzinfo=_ET), "switched off meanwhile"),
+])
+async def test_nx_a_yes_that_landed_is_finished_on_the_retry_whatever_the_clock_or_switch(nx, tg, monkeypatch,
+                                                                                          retry_at, why):
+    """Review 2026-11-27: ✅ Yes at 22:09:58 commits but its answer is lost; the retry comes past the 22:10 cutoff (or
+    after the switch went off). It is answered from the ledger — T5, T6 (the recorded time), T7 — never "Too late" or
+    "switched off" for a request that rejected his posts and planned the 22:15 run."""
+    offered = await _lost_yes(nx, tg, monkeypatch, datetime(2026, 9, 17, 22, 9, 58, tzinfo=_ET))
+    posts, video = offered["posts"], offered["video"]
+    if why == "switched off meanwhile":
+        monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+    _nx_clock(nx, monkeypatch, retry_at)
+    rows_before = copy.deepcopy(_rows(nx, mrs.RUNS))
+    tg.calls.clear()
+    assert (await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))))["outcome"] == "replayed"
+    assert _answers(tg) == ["Next company requested 🔄"]
+    (closed,) = tg.of("editMessageText")
+    assert closed["text"].startswith(f"{posts['text']}\n\n🔄 Replaced 22:09 ET (1 of 2 today)")
+    assert closed["reply_markup"] == {"inline_keyboard": []}
+    assert [e["message_id"] for e in tg.of("editMessageReplyMarkup")] == [video["message_id"]]       # T7
+    assert _rows(nx, mrs.RUNS) == rows_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, meta, toast, line_end", [
+    ("skipped", {"skip_reason": "nothing_qualified", "series": "skip",
+                 "series_trail": [{"series": "money_map", "outcome": "no_candidates"}]},
+     "Already replaced — that run ended: no other company qualified",
+     "The next-company run has ended (no other company qualified); its own message says what you can do."),
+    ("media_ready", {}, "Already replaced — see the next company's message",
+     "The next Money Map company's video and picture were already sent here for review."),
+])
+async def test_nx_a_replayed_yes_after_the_replacement_moved_on_is_never_told_it_is_coming(nx, tg, monkeypatch, status,
+                                                                                          meta, toast, line_end):
+    """Review 2026-11-27: the replay carries the replacement's status NOW. A stale ✅ Yes on the kept confirm rows after
+    that run ended (or made its posts) gets the state's words, never "comes here in about 20-75 min"."""
+    offered = await _lost_yes(nx, tg, monkeypatch, _NX_NOW)
+    gen1 = next(r for r in _rows(nx, mrs.RUNS) if r.get("replacement") == 1)
+    gen1.update(status=status, attempts=1, metadata={**gen1["metadata"], **meta})
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 19, 0, tzinfo=_ET))
+    tg.calls.clear()
+    posts = offered["posts"]
+    assert (await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))))["outcome"] == "replayed"
+    assert _answers(tg) == [toast]
+    (closed,) = tg.of("editMessageText")
+    line = closed["text"].split("\n\n")[-1]
+    assert line == ("🔄 Replaced 18:00 ET (1 of 2 today): every post of this run still waiting was rejected. "
+                    + line_end)
+    assert "20-75 min" not in line
+
+
+@pytest.mark.asyncio
+async def test_nx_a_late_tap_s_original_can_still_be_posted_after_the_cutoff(nx, tg, wakes, monkeypatch):
+    """Review 2026-11-27: a tap at 21:30 is told (T6) that the next start is 22:15 and "If no other company qualifies,
+    one message will say so, and you can still post this one". The 22:15 run finds nothing at 22:20 — past the 22:10 TAP cutoff. The notice
+    still carries "↩ Post COST after all" and the restore works: it closes at the end of the run's ET day."""
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 21, 30, tzinfo=_ET))
+    tg.calls.clear()
+    assert (await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))))["outcome"] == "requested"
+    (closed,) = tg.of("editMessageText")
+    assert "the worker's next start is 22:15 ET" in closed["text"]
+    assert closed["text"].endswith("If no other company qualifies, one message will say so, and you can still post "
+                                   "this one.")
+    gen1 = next(r for r in _rows(nx, mrs.RUNS) if r.get("replacement") == 1)
+    gen1.update(status="skipped", stage="planned", attempts=1, metadata={**gen1["metadata"], **_QUIET})
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 22, 25, tzinfo=_ET))
+    tg.calls.clear(), tg.ids.clear()
+    await rs.review_cycle()
+    (notice,) = _notices(tg)
+    assert notice["reply_markup"] == _RESTORE_KB
+    notice["message_id"] = tg.ids[tg.calls.index(("sendMessage", notice))]
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 23, 50, tzinfo=_ET))
+    tg.calls.clear()
+    assert (await rs.handle_update(_restore_tap(notice)))["outcome"] == "restored"
+    assert {p["status"] for p in _rows(nx, mrs.POSTS) if p["run_id"] == RUN_A} == {"pending_review"}
+
+
+# ── refusals ─────────────────────────────────────────────────────────────────
+
+
+async def _refused(nx, tg, monkeypatch, setup, letter="y"):
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    keyboard = _confirm_keyboard(posts) if letter == "y" else posts["reply_markup"]
+    setup(nx, monkeypatch)
+    tg.calls.clear()
+    out = await rs.handle_update(_nx_tap(posts, letter, keyboard=keyboard))
+    return out, posts, keyboard
+
+
+def _cap_spent(svc, mp):
+    _gate_day_cap_spent(svc, mp)
+
+
+_REFUSALS = [
+    # (setup, outcome, toast, keyboard kept?)
+    (_gate_switch_off, "switched_off", "Replacing is switched off (MARKETING_REPLACE_ENABLED).", False),
+    (_gate_money_map_series_off, "money_map_off",
+     "Can't replace: Money Map is switched off (MARKETING_NEWS_SERIES / MARKETING_CONTENT_CLASSES).", True),
+    (_gate_class_f_off, "money_map_off",
+     "Can't replace: Money Map is switched off (MARKETING_NEWS_SERIES / MARKETING_CONTENT_CLASSES).", True),
+    (_gate_at_cutoff, "too_late", "Too late: replacements for run 2026-09-17 closed at 22:10 ET.", False),
+    (_gate_next_day, "too_late", "Too late: replacements for run 2026-09-17 closed at 22:10 ET.", False),
+    (_cap_spent, "cap_reached", "No more today: 2 replacements were already made today.", False),
+    (_gate_a_post_approved, "member_decided",
+     "Can't replace: part of this run is already approved or sent, so it posts as decided today.", False),
+    (lambda svc, mp: [p.update(status="rejected") for p in _rows(svc, mrs.POSTS)], "nothing_pending",
+     "Nothing left to replace: every post of this run is already decided.", False),
+    (lambda svc, mp: _rows(svc, mrs.SCRIPTS)[0].update(template_id="theme_explainer"), "not_money_map",
+     "Only a Money Map post can be replaced.", False),
+    (lambda svc, mp: _run(svc, RUN_A).update(status="failed"), "not_ready",
+     "This run is still being finished — try again in a few minutes.", True),
+    (lambda svc, mp: svc.fake.replacement_rpc.fail.add("*"), "error", "Could not record that — tap again", True),
+    (lambda svc, mp: setattr(svc.fake.replacement_rpc, "missing", True), "error",
+     "Could not record that — tap again", True),
+    (lambda svc, mp: setattr(svc.fake.replacement_rpc, "legacy_unique", True), "error",
+     "Could not record that — tap again", True),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setup, outcome, toast, kept", _REFUSALS,
+                         ids=[f"{r[1]}-{i}" for i, r in enumerate(_REFUSALS)])
+async def test_nx_every_refusal_answers_its_toast_and_removes_only_the_nx_rows_or_keeps_the_keyboard(
+        nx, tg, monkeypatch, setup, outcome, toast, kept):
+    out, posts, keyboard = await _refused(nx, tg, monkeypatch, setup)
+    assert out["outcome"] == outcome and _answers(tg) == [toast]
+    assert tg.of("editMessageText") == [] and tg.of("sendMessage") == []
+    edits = tg.of("editMessageReplyMarkup")
+    if kept:
+        assert edits == []
+    else:
+        (edit,) = edits
+        assert edit["message_id"] == posts["message_id"]
+        assert edit["reply_markup"] == {"inline_keyboard": _without_t1(posts)}      # every other row, as shown
+    assert all(p["status"] != "rejected" or outcome == "nothing_pending" for p in _rows(nx, mrs.POSTS))
+
+
+@pytest.mark.asyncio
+async def test_nx_an_unknown_run_is_run_not_found_and_reads_nothing_more(nx, tg, monkeypatch):
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    tg.calls.clear()
+    ghost = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    for letter in ("a", "y"):
+        out = await rs.handle_update(_nx_tap(posts, letter, ghost,
+                                             keyboard={"inline_keyboard": [[{"text": "🔄 Next company",
+                                                                             "callback_data": f"nx:a:{ghost}"}]]}))
+        assert out["outcome"] == "not_found"
+    assert _answers(tg) == ["Run not found.", "Run not found."]
+    assert [e["reply_markup"] for e in tg.of("editMessageReplyMarkup")] == [{"inline_keyboard": []}] * 2
+
+
+@pytest.mark.asyncio
+async def test_nx_a_spotlight_run_whose_lane_closed_answers_r6(nx, tg, monkeypatch):
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 12, 0, tzinfo=_ET))
+    _nx_run(nx, run_id=RUN_SPOT, lane="spotlight")
+    _nx_posts(nx, RUN_SPOT)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    monkeypatch.setattr(settings, "MARKETING_SPOTLIGHT_ENABLED", False)
+    for letter, keyboard in (("a", posts["reply_markup"]), ("y", _confirm_keyboard(posts, RUN_SPOT))):
+        tg.calls.clear()
+        out = await rs.handle_update(_nx_tap(posts, letter, RUN_SPOT, keyboard=keyboard))
+        assert out["outcome"] == "lane_closed"
+        assert _answers(tg) == ["Can't replace: no worker run is left today for this lane (the spotlight lane is off "
+                                "for 2026-09-17 now)."]
+    assert nx.fake.replacement_rpc.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setup, outcome, toast", [
+    (_gate_switch_off, "switched_off", "Replacing is switched off (MARKETING_REPLACE_ENABLED)."),
+    (_gate_money_map_series_off, "money_map_off",
+     "Can't replace: Money Map is switched off (MARKETING_NEWS_SERIES / MARKETING_CONTENT_CLASSES)."),
+    (_gate_at_cutoff, "too_late", "Too late: replacements for run 2026-09-17 closed at 22:10 ET."),
+])
+async def test_nx_ask_runs_the_cheap_gates_before_showing_the_confirm_rows(nx, tg, monkeypatch, setup, outcome,
+                                                                         toast):
+    out, _posts, _kb = await _refused(nx, tg, monkeypatch, setup, letter="a")
+    assert out["outcome"] == outcome and _answers(tg) == [toast]
+    edits = tg.of("editMessageReplyMarkup")
+    assert len(edits) == (0 if outcome == "money_map_off" else 1)               # R12 keeps the keyboard
+    assert all(not _nx_rows(e["reply_markup"]) for e in edits)
+
+
+@pytest.mark.asyncio
+async def test_nx_ask_with_a_ledger_error_keeps_the_keyboard(nx, tg, monkeypatch):
+    async def broken(_run_id):
+        raise mrs.MarketingRunError("read failed: 520")
+
+    out, _p, _k = await _refused(nx, tg, monkeypatch, lambda svc, mp: mp.setattr(svc, "get_run", broken), letter="a")
+    assert out["outcome"] == "error" and _answers(tg) == ["Could not record that — tap again"]
+    assert tg.of("editMessageReplyMarkup") == []
+
+
+@pytest.mark.asyncio
+async def test_nx_an_outcome_this_bot_does_not_know_keeps_the_keyboard_and_logs_error(nx, tg, monkeypatch, caplog):
+    async def weird(*_a, **_k):
+        return mrs.ReplacementResult("weird")
+
+    caplog.set_level(logging.ERROR)
+    out, _p, _k = await _refused(nx, tg, monkeypatch, lambda svc, mp: mp.setattr(svc, "request_replacement", weird))
+    assert out["outcome"] == "error" and _answers(tg) == ["Could not record that — tap again"]
+    assert tg.of("editMessageReplyMarkup") == []
+    assert any("does not know" in r.getMessage() for r in caplog.records)
+
+
+_NEWEST = "abababab-abab-4bab-8bab-abababababab"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("newest, toast", [
+    ({"status": "planned", "attempts": 0}, "Already replaced — the next company is on its way"),
+    ({"status": "in_progress", "attempts": 1}, "Already replaced — the next company is on its way"),
+    ({"status": "failed", "attempts": 1}, "Already replaced — the next company is on its way"),   # a retry is left
+    ({"status": "media_ready", "attempts": 1}, "Already replaced — see the next company's message"),
+    ({"status": "published", "attempts": 1}, "Already replaced — see the next company's message"),
+    ({"status": "failed", "attempts": 2}, "Already replaced — that run ended: it failed"),
+    ({"status": "skipped", "attempts": 1, "metadata": {"skip_reason": "nothing_qualified"}},
+     "Already replaced — that run ended: no other company qualified"),
+    ({"status": "skipped", "attempts": 0, "metadata": {"skip_reason": "replacement_expired"}},
+     "Already replaced — that run ended: it was not run"),
+    ({"status": "skipped", "attempts": 1, "metadata": {"skip_reason": "template_refused"}},
+     "Already replaced — that run ended: its post was refused"),
+    ({"status": "skipped", "attempts": 1, "metadata": {"skip_reason": "<script>"}},
+     "Already replaced — that run ended: it was skipped"),
+    (None, "Already replaced — the next company comes in its own message."),                   # unreadable newest
+])
+async def test_nx_already_replaced_is_worded_by_the_newest_runs_state(nx, tg, monkeypatch, newest, toast):
+    """Amendment A5: a stale message's ✅ Yes (someone else's / an older request) reads the newest run and words the
+    toast by its state; only the nx rows go."""
+    async def answer(*_a, **_k):
+        # the function's own status is the fallback when the newest row cannot be read back
+        return mrs.ReplacementResult("already_replaced", run_id=_NEWEST, replacement=2,
+                                     status=None if newest is None else "planned")
+
+    def setup(svc, mp):
+        mp.setattr(svc, "request_replacement", answer)
+        if newest is not None:
+            _rows(svc, mrs.RUNS).append({"id": _NEWEST, "run_date": _NX_DAY, "replacement": 2,
+                                         "replaces_run_id": RUN_R1, "metadata": {}, **newest})
+
+    out, posts, _kb = await _refused(nx, tg, monkeypatch, setup)
+    assert out["outcome"] == "already_replaced" and _answers(tg) == [toast]
+    (edit,) = tg.of("editMessageReplyMarkup")
+    assert edit["reply_markup"] == {"inline_keyboard": _without_t1(posts)}
+
+
+@pytest.mark.asyncio
+async def test_nx_already_replaced_through_the_real_function_after_a_second_replacement(nx, tg, monkeypatch):
+    """Gen 0 → gen 1 → gen 2: a tap on gen 0's stale message is `already_replaced` (its newest no longer replaces it),
+    worded by gen 2's state — and the request function wrote nothing."""
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts0 = (await _nx_offered(nx, tg))["posts"]
+    assert (await rs.handle_update(_nx_tap(posts0, "y", keyboard=_confirm_keyboard(posts0))))["outcome"] == "requested"
+    gen1 = next(r for r in _rows(nx, mrs.RUNS) if r.get("replacement") == 1)
+    gen1.update(status="media_ready", stage="assets_ready", template_id="money_map", source_ref="news:money_map:MSFT:2025")
+    _rows(nx, mrs.SCRIPTS).append({"run_id": gen1["id"], "status": "accepted", "template_id": "money_map",
+                                   "source_ref": "news:money_map:MSFT:2025"})
+    _seed_post(nx, gen1["id"], "x", "text", caption=SHORT, title=None)
+    res = await nx.request_replacement(gen1["id"], by=_OWNER_BY, now=_NX_NOW)
+    assert res.outcome == "requested" and res.replacement == 2
+    runs_before = copy.deepcopy(_rows(nx, mrs.RUNS))
+    tg.calls.clear()
+    assert (await rs.handle_update(_nx_tap(posts0, "y", keyboard=_confirm_keyboard(posts0))))["outcome"] == (
+        "already_replaced")
+    assert _answers(tg) == ["Already replaced — the next company is on its way"]
+    assert _rows(nx, mrs.RUNS) == runs_before
+
+
+# ── T7 / sibling edits under flood control (amendment A7) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_nx_flood_control_in_force_skips_the_sibling_and_the_decision_stands(nx, tg, monkeypatch):
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    tg.calls.clear()
+    _tp.note_rate_limit(120)
+    out = await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts)))
+    assert out["outcome"] == "requested"
+    assert tg.of("editMessageReplyMarkup") == []                    # the sibling waits; nothing raised
+    assert {_post(nx, p)["status"] for p in ids.values()} == {"rejected"}
+
+
+async def _two_siblings(nx, tg) -> Dict[str, Any]:
+    """Gen 0 offered, then one VIDEO member re-stamped under a second (older) decision message: the request names TWO
+    other decision messages, so a test can tell "stop the rest" from "skip one"."""
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    _post(nx, ids["youtube"])["metadata"]["review_message_id"] = 9_999_999
+    tg.calls.clear()
+    return posts
+
+
+@pytest.mark.asyncio
+async def test_nx_flood_control_starting_while_the_sibling_waits_stops_the_rest_and_never_escapes(nx, tg, monkeypatch):
+    posts = await _two_siblings(nx, tg)
+    waits: List[int] = []
+
+    async def closed_while_waiting():
+        waits.append(1)
+        raise telegram.TelegramFloodControlActive("closed", method="paced_send", retry_after=30)
+
+    monkeypatch.setattr(_tp, "wait_turn", closed_while_waiting)     # SharedPacer.wait → wait_turn (slots)
+    out = await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts)))
+    assert out == {"ok": True, "next": "yes", "outcome": "requested", "run_id": RUN_A}
+    assert tg.of("editMessageReplyMarkup") == [] and waits == [1]           # the second sibling is never tried
+
+
+@pytest.mark.asyncio
+async def test_nx_a_429_on_the_sibling_edit_is_recorded_for_every_sender_and_stops_the_rest(nx, tg, monkeypatch):
+    posts = await _two_siblings(nx, tg)
+    tg.script["editMessageReplyMarkup"] = [(429, {"ok": False, "description": "Too Many Requests",
+                                                  "parameters": {"retry_after": 45}})]
+    out = await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts)))
+    assert out["outcome"] == "requested"
+    assert len(tg.of("editMessageReplyMarkup")) == 1                        # the 429'd one; the second never tried
+    assert _tp.is_rate_limited() and _tp.seconds_left() > 40
+
+
+@pytest.mark.asyncio
+async def test_nx_a_sibling_that_cannot_be_edited_costs_only_itself(nx, tg):
+    posts = await _two_siblings(nx, tg)
+    tg.script["editMessageReplyMarkup"] = [(400, {"ok": False, "description": "Bad Request: message to edit not found"})]
+    assert (await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))))["outcome"] == "requested"
+    assert len(tg.of("editMessageReplyMarkup")) == 2
+
+
+@pytest.mark.asyncio
+async def test_nx_t7_never_edits_the_tapped_message_nor_a_preview_nor_a_non_number(nx, tg, monkeypatch):
+    """Amendment A6: only NUMERIC decision ids of non-preview posts, the tapped one dropped."""
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+    offered = await _nx_offered(nx, tg)
+    posts, video = offered["posts"], offered["video"]
+    _post(nx, ids["youtube"])["metadata"]["review_message_id"] = str(video["message_id"])       # text: dropped
+    preview = _seed_post(nx, RUN_A, "threads", "text", caption=SHORT, title=None)
+    _post(nx, preview)["metadata"].update(review_preview_at="2026-09-17T20:00:00+00:00", review_message_id=4242)
+    tg.calls.clear()
+    assert (await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))))["outcome"] == "requested"
+    assert [e["message_id"] for e in tg.of("editMessageReplyMarkup")] == [video["message_id"]]
+
+
+# ── A4(b): an approval removes the OTHER decision's 🔄 row ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_nx_approve_all_removes_the_other_decisions_t1_and_keeps_its_buttons(nx, tg, wakes):
+    _nx_run(nx)
+    _nx_posts(nx)
+    offered = await _nx_offered(nx, tg)
+    video, posts = offered["video"], offered["posts"]
+    tg.calls.clear()
+    assert (await rs.handle_update(_tap_on(video, "g")))["outcome"] == "decided"
+    (edit,) = tg.of("editMessageReplyMarkup")
+    assert edit["message_id"] == posts["message_id"]
+    assert edit["reply_markup"] == {"inline_keyboard": _without_t1(posts)}
+    # …and a 🔄 tap on it now is R3, worded as amended (A4c)
+    tg.calls.clear()
+    assert (await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))))["outcome"] == (
+        "member_decided")
+
+
+@pytest.mark.asyncio
+async def test_nx_approve_all_with_the_feature_off_makes_exactly_the_calls_of_before(nx, tg, wakes, monkeypatch):
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+    _nx_run(nx)
+    _nx_posts(nx)
+    video = (await _nx_offered(nx, tg))["video"]
+    reads: List[str] = []
+    real = rs._run_posts
+
+    async def spy(svc, run_id):
+        reads.append(run_id)
+        return await real(svc, run_id)
+
+    monkeypatch.setattr(rs, "_run_posts", spy)
+    tg.calls.clear()
+    await rs.handle_update(_tap_on(video, "g"))
+    assert [m for m, _p in tg.calls] == ["answerCallbackQuery", "editMessageText"] and reads == []
+
+
+@pytest.mark.asyncio
+async def test_nx_a_reject_all_leaves_the_other_decisions_t1(nx, tg, wakes):
+    _nx_run(nx)
+    _nx_posts(nx)
+    video = (await _nx_offered(nx, tg))["video"]
+    tg.calls.clear()
+    await rs.handle_update(_tap_on(video, "j"))
+    assert all(e["message_id"] == video["message_id"] for e in tg.of("editMessageText"))
+    assert tg.of("editMessageReplyMarkup") == []
+
+
+# ── ✂ drop keeps the 🔄 row ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirming", [False, True])
+async def test_nx_a_drop_rebuilds_the_keyboard_with_the_one_t1_row(nx, tg, confirming):
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    keyboard = _confirm_keyboard(posts) if confirming else posts["reply_markup"]
+    tg.calls.clear()
+    tap = _update(ids["x"], "s", message={"message_id": posts["message_id"], "text": posts["text"],
+                                          "reply_markup": keyboard})
+    await rs.handle_update(tap)
+    (edit,) = tg.of("editMessageText")
+    rows = edit["reply_markup"]["inline_keyboard"]
+    # one member left: Approve all (1) / Reject all / T1 — the one T1 row, never the confirm rows
+    assert [r[0]["text"] for r in rows] == ["✅ Approve all (1)", "❌ Reject all", "🔄 Next company"]
+    assert rows[-1] == _T1 and _nx_rows(edit["reply_markup"]) == [_T1]
+
+
+@pytest.mark.asyncio
+async def test_nx_a_drop_whose_edit_fails_sends_the_rest_without_the_t1_row(nx, tg):
+    """Amendment A11: the drop's fallback message carries the bundle's buttons but never 🔄 — a confirmed tap could
+    never close a copy it does not know."""
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+    third = _seed_post(nx, RUN_A, "threads", "text", caption=SHORT, title=None)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    assert third
+    tg.calls.clear()
+    tg.script["editMessageText"] = [(400, {"ok": False, "description": "Bad Request: message to edit not found"})]
+    await rs.handle_update(_tap_on(posts, "s", ids["x"]))
+    fallback = [p for p in tg.of("sendMessage") if p.get("reply_markup", {}).get("inline_keyboard", [[{}]])[0][0]
+                .get("callback_data", "").startswith("g:")]
+    assert len(fallback) == 1 and not _nx_rows(fallback[0]["reply_markup"])
+
+
+# ── decided-post wording ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_nx_stale_buttons_on_replaced_posts_say_replaced_and_never_ask_why(nx, tg, wakes):
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+    offered = await _nx_offered(nx, tg)
+    video, posts = offered["video"], offered["posts"]
+    await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts)))
+    # ❌ Reject all on the VIDEO decision's stale keyboard: no reason keyboard, the replaced lines
+    tg.calls.clear()
+    await rs.handle_update(_tap_on(video, "j"))
+    (edit,) = tg.of("editMessageText")
+    assert edit["reply_markup"] == {"inline_keyboard": []}
+    assert "• TIKTOK (video): replaced by the next company — see the newer message" in edit["text"]
+    assert "Nothing left to decide:" in edit["text"]
+    # ✂ drop on a replaced post: "Replaced by the next company (… ET)", and no reason message
+    tg.calls.clear()
+    await rs.handle_update(_tap_on(posts, "s", ids["x"]))
+    (toast,) = _answers(tg)
+    assert re.fullmatch(r"X: Replaced by the next company \(\d\d:\d\d ET\)|Replaced by the next company \(\d\d:\d\d ET\)",
+                        toast), toast
+    assert not any("Why was" in p.get("text", "") for p in tg.of("sendMessage"))
+
+
+def test_nx_result_lines_name_a_replaced_member(configured):
+    replaced = {"id": str(uuid.uuid4()), "platform": "x", "format": "text", "status": "rejected",
+                "metadata": {"review": {"decision": "rejected", "replaced_by_run_id": RUN_R1}}}
+    plain = {**replaced, "metadata": {"review": {"decision": "rejected"}}}
+    junk = {**replaced, "metadata": {"review": {"replaced_by_run_id": "not-a-uuid"}}}
+    lines, _ = rs.bundle_result_lines([{"outcome": "already_rejected", "row": r} for r in (replaced, plain, junk)])
+    assert lines == ["• X (text): replaced by the next company — see the newer message",
+                     "• X (text): already rejected", "• X (text): already rejected"]
+
+
+# ── A8: a decision sent while the tap landed is closed at stamp time ─────────
+
+
+@pytest.mark.asyncio
+async def test_nx_a8_a_decision_sent_after_the_tap_is_closed_when_its_members_are_stamped(nx, tg):
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+    done: List[Any] = []
+
+    def tap_lands_while_posts_decision_is_sent(_request, payload):
+        if not done and str(payload.get("text", "")).startswith("DECISION · POSTS"):
+            done.append(nx.fake.replacement_rpc.marketing_request_replacement(
+                RUN_A, _OWNER_BY, datetime(2026, 9, 17, 22, 10, tzinfo=_ET).isoformat()))
+        return None
+
+    tg.script["sendMessage"] = [tap_lands_while_posts_decision_is_sent] * 40
+    await rs.review_cycle()
+    assert done and done[0]["outcome"] == "requested"
+    posts = next(d for d in _decision_messages(tg) if d["text"].startswith("DECISION · POSTS"))
+    (closed,) = [e for e in tg.of("editMessageText") if e["message_id"] == posts["message_id"]]
+    assert closed["text"] == f"{posts['text']}\n\n🔄 Replaced by the next company — nothing to decide here"
+    assert closed["reply_markup"] == {"inline_keyboard": []}
+    assert "review_notified_at" not in _meta(nx, ids["x"])
+    assert [e["message_id"] for e in tg.of("editMessageText")] == [posts["message_id"]]     # VIDEO: stamped earlier
+
+
+@pytest.mark.asyncio
+async def test_nx_a8_a_member_decided_otherwise_never_closes_the_decision(nx, tg):
+    _nx_run(nx)
+    ids = _nx_posts(nx)
+
+    def a_reject_lands(_request, payload):
+        if str(payload.get("text", "")).startswith("DECISION · POSTS"):
+            _post(nx, ids["x"]).update(status="rejected")
+        return None
+
+    tg.script["sendMessage"] = [a_reject_lands] * 40
+    await rs.review_cycle()
+    assert tg.of("editMessageText") == []
+
+
+# ── the notices (N1-N5) ──────────────────────────────────────────────────────
+
+_GEN0_REQUEST = {"at": "2026-09-17T21:40:00+00:00", "from_run_id": RUN_A, "from_source_ref": _NX_REF}
+
+
+def _ended(svc, *, status: str, meta: Optional[Dict[str, Any]] = None, lane: str = "main", attempts: int = 1,
+           stage: str = "rendered", last_error: Optional[str] = None, ref_meta=_GEN0_REQUEST,
+           run_id: str = RUN_R1) -> Dict[str, Any]:
+    """Gen 0 (media_ready, its posts rejected by the request) and its replacement, ended as given."""
+    if not any(r["id"] == RUN_A for r in _rows(svc, mrs.RUNS)):
+        _nx_run(svc, lane=lane, meta={"replaced_by": {"run_id": run_id, "replacement": 1,
+                                                      "not_after": "2026-09-18T02:10:00+00:00"}})
+    row = {"id": run_id, "run_date": _NX_DAY, "replacement": 1, "replaces_run_id": RUN_A, "status": status,
+           "stage": stage, "attempts": attempts, "last_error": last_error,
+           "metadata": {"replacement_request": ref_meta, **(meta or {})},
+           "created_at": "2026-09-17T21:40:00+00:00", "updated_at": "2026-09-17T22:00:00+00:00"}
+    if lane != "main":
+        row["lane"] = lane
+    _rows(svc, mrs.RUNS).append(row)
+    return row
+
+
+_RESTORE_KB = {"inline_keyboard": [[{"text": "↩ Post COST after all", "callback_data": f"nx:r:{RUN_A}"}]]}
+_QUIET = {"skip_reason": "nothing_qualified", "series": "skip",
+          "series_trail": [{"series": "money_map", "outcome": "no_candidates"}]}
+
+
+def _notices(tg) -> List[Dict[str, Any]]:
+    return [p for p in tg.of("sendMessage") if not str(p.get("text", "")).startswith(("DECISION", "CAPTION"))]
+
+
+#: The wording review of 2026-11-27: a notice that carries "↩ Post {SYM} after all" never says the lane "posts nothing
+#: more today" without the way out — N1-N3 gain the restore clause before it, N4/N5 one closing sentence.
+_RESTORE_CLAUSE = "tap ↩ below to post it after all, or "
+
+
+def _with_restore(text):
+    if "this lane posts nothing more today" in text:
+        return text.replace("this lane posts nothing more today", _RESTORE_CLAUSE + "this lane posts nothing more today")
+    return text + " Tap ↩ below to post it after all."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw, code, text", [
+    (dict(status="skipped", meta=_QUIET), "N1",
+     "🔄 No other Money Map company qualified for run 2026-09-17 · replacement 1 — nothing replaces COST, so this "
+     "lane posts nothing more today."),
+    (dict(status="skipped", meta={"skip_reason": "nothing_qualified", "series": "skip",
+                                  "series_trail": [{"series": "money_map", "outcome": "unavailable"}]}), "N2",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 found no company: nothing posted (fell back from Money Map: "
+     "its data source was unavailable). Nothing replaces COST; this lane posts nothing more today. Check the web log "
+     "for this run."),
+    (dict(status="skipped", meta={"skip_reason": "nothing_qualified", "series": "skip",
+                                  "series_trail": [{"series": "money_map", "outcome": "switched_off"}]}), "N2",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 found no company: nothing posted (fell back from Money Map: "
+     "switched off in MARKETING_NEWS_SERIES or MARKETING_CONTENT_CLASSES). Nothing replaces COST; this lane posts "
+     "nothing more today. Check the web log for this run."),
+    (dict(status="skipped", meta={"skip_reason": "nothing_qualified"}), "N2",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 found no company: no readable selection trail. Nothing "
+     "replaces COST; this lane posts nothing more today. Check the web log for this run."),
+    (dict(status="skipped", attempts=0, stage="planned",
+          meta={"skip_reason": "replacement_expired", "replacement_expired": {"why": "switched_off"}}), "N3",
+     "🔄 The next company for run 2026-09-17 · replacement 1 was not made: replacing was switched off "
+     "(MARKETING_REPLACE_ENABLED) before the worker started it. Nothing replaces COST; this lane posts nothing more "
+     "today."),
+    (dict(status="skipped", attempts=1, stage="voiced",
+          meta={"skip_reason": "replacement_expired", "replacement_expired": {"why": "day_over", "was": "failed"}}),
+     "N4",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 was SKIPPED (replacement_expired): its day ended before the "
+     "worker finished it. Nothing replaces COST. Check the marketing-worker logs."),
+    (dict(status="skipped", attempts=1, meta={"skip_reason": "template_refused"}), "N4",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 was SKIPPED (template_refused): the next company's post "
+     "failed the template re-check, or MARKETING_REPLACE_ENABLED is off, or MARKETING_CONTENT_CLASSES / "
+     "MARKETING_NEWS_SERIES no longer lists Money Map — read the web log 'create_posts TEMPLATE REFUSED' for this "
+     "run. Nothing replaces COST. Check the marketing-worker logs."),
+    (dict(status="skipped", attempts=1, meta={"skip_reason": "empty_narration"}), "N4",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 was SKIPPED (empty_narration): the video stage had nothing "
+     "to narrate — check the voice stage in the worker logs. Nothing replaces COST. Check the marketing-worker logs."),
+    (dict(status="skipped", attempts=1, meta={"skip_reason": "a<b>c"}), "N4",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 was SKIPPED (unrecognised): a reason this version does not "
+     "recognise (see the logs). Nothing replaces COST. Check the marketing-worker logs."),
+    (dict(status="failed", attempts=2, stage="voiced", last_error="ffmpeg exited 1.\nsecond line"), "N4",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 FAILED after stage voiced (all 2 attempts used): ffmpeg "
+     "exited 1. second line. Nothing replaces COST. Check the marketing-worker logs."),
+    (dict(status="failed", attempts=2, stage="<b>", last_error=None), "N4",
+     "⚠️ The next-company run 2026-09-17 · replacement 1 FAILED after stage ? (all 2 attempts used): no error was "
+     "recorded. Nothing replaces COST. Check the marketing-worker logs."),
+])
+async def test_nx_each_ending_sends_its_one_notice_loud_with_the_restore_button_then_stamps(nx, tg, kw, code, text):
+    _ended(nx, **kw)
+    counters = await rs.review_cycle()
+    (notice,) = _notices(tg)
+    assert notice["text"] == _with_restore(text)
+    assert notice["reply_markup"] == _RESTORE_KB and notice.get("disable_notification") is not True
+    stamp = _run(nx, RUN_R1)["metadata"]["replacement_reported"]
+    assert stamp["notice"] == code and stamp["message_id"] == tg.ids[tg.calls.index(("sendMessage", notice))]
+    assert counters["replacement_notices"] == 1
+    tg.calls.clear()
+    assert "replacement_notices" not in await rs.review_cycle() and _notices(tg) == []     # once
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("why, lane, words", [
+    ("start_window_closed", "main", "the worker did not start it before this lane's last start (23:15 ET)"),
+    ("start_window_closed", "spotlight", "the worker did not start it before this lane's last start (15:15 ET)"),
+    ("day_over", "main", "its day ended before the worker finished it"),
+    ("lane_closed", "spotlight", "the spotlight lane was closed for 2026-09-17 before the worker started it"),
+    (None, "main", "the worker never claimed it"),
+    ("<b>", "main", "the worker never claimed it"),
+])
+async def test_nx_n3_names_why_the_replacement_was_not_made(nx, tg, monkeypatch, why, lane, words):
+    if lane == "spotlight":
+        _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 12, 0, tzinfo=_ET))
+    _ended(nx, status="skipped", attempts=0, stage="planned", lane=lane,
+           meta={"skip_reason": "replacement_expired", "replacement_expired": {"why": why}})
+    await rs.review_cycle()
+    (notice,) = _notices(tg)
+    label = "2026-09-17 · spotlight · replacement 1" if lane == "spotlight" else "2026-09-17 · replacement 1"
+    assert notice["text"] == _with_restore(f"🔄 The next company for run {label} was not made: {words}. Nothing "
+                                           f"replaces COST; this lane posts nothing more today.")
+
+
+@pytest.mark.asyncio
+async def test_nx_n5_a_media_ready_replacement_with_no_post_says_so_and_offers_the_restore(nx, tg):
+    _ended(nx, status="media_ready", stage="assets_ready")
+    await rs.review_cycle()
+    (notice,) = _notices(tg)
+    assert notice["text"] == _with_restore("⚠️ The next-company run 2026-09-17 · replacement 1 finished but made no "
+                                           "post to review. Nothing replaces COST.")
+    assert notice["reply_markup"] == _RESTORE_KB
+    assert _run(nx, RUN_R1)["metadata"]["replacement_reported"]["notice"] == "N5"
+
+
+@pytest.mark.asyncio
+async def test_nx_n5_with_only_preview_posts_offers_no_restore_a_restore_would_refuse_it(nx, tg, monkeypatch):
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: ["x"])
+    _ended(nx, status="media_ready", stage="assets_ready")
+    _seed_post(nx, RUN_R1, "bluesky", "text", caption=SHORT, title=None)
+    await rs.review_cycle()
+    (notice,) = [n for n in _notices(tg) if n["text"].startswith("⚠️ The next-company")]
+    assert "finished but made no post to review" in notice["text"] and notice.get("reply_markup") is None
+
+
+@pytest.mark.asyncio
+async def test_nx_a_replacement_with_reviewable_posts_is_left_to_its_bundles_and_stamped(nx, tg):
+    _ended(nx, status="media_ready", stage="assets_ready")
+    _seed_post(nx, RUN_R1, "x", "text", caption=SHORT, title=None)
+    await rs.review_cycle()
+    assert _notices(tg) == []
+    assert _run(nx, RUN_R1)["metadata"]["replacement_reported"]["notice"] == "bundles"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw", [
+    dict(status="failed", attempts=1, stage="voiced"),                       # a retry is left
+    dict(status="failed", attempts=1, stage="assets_ready"),                 # its posts exist: the resume completes it
+    dict(status="planned", attempts=0, stage="planned"),
+    dict(status="in_progress", attempts=1, stage="voiced"),
+    dict(status="published", attempts=1, stage="assets_ready"),
+    dict(status="skipped", meta={**_QUIET, "replacement_reported": {"at": "x", "notice": "N1"}}),
+])
+async def test_nx_nothing_is_due_for_a_run_still_running_or_already_reported(nx, tg, kw):
+    _ended(nx, **kw)
+    counters = await rs.review_cycle()
+    assert _notices(tg) == [] and "replacement_notices" not in counters
+
+
+@pytest.mark.asyncio
+async def test_nx_a_notice_after_the_tap_cutoff_still_carries_the_restore_its_day_is_not_over(nx, tg, monkeypatch):
+    """Review 2026-11-27: the restore closes at the END of the run's ET day, never at the 22:10 tap cutoff — a 21:30
+    tap's replacement ends after 22:15, and an unstarted one is closed at 23:35."""
+    _ended(nx, status="skipped", meta=_QUIET)
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 23, 59, tzinfo=_ET))
+    await rs.review_cycle()
+    (notice,) = _notices(tg)
+    assert notice["reply_markup"] == _RESTORE_KB
+    assert notice["text"].endswith("so tap ↩ below to post it after all, or this lane posts nothing more today.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kw, text", [
+    (dict(status="skipped", meta=_QUIET),
+     "🔄 No other Money Map company qualified for run 2026-09-17 · replacement 1 — nothing replaces COST, so this "
+     "lane posted nothing more on 2026-09-17."),
+    (dict(status="skipped", attempts=0, stage="planned",
+          meta={"skip_reason": "replacement_expired", "replacement_expired": {"why": "day_over"}}),
+     "🔄 The next company for run 2026-09-17 · replacement 1 was not made: its day ended before the worker finished "
+     "it. Nothing replaces COST; this lane posted nothing more on 2026-09-17."),
+    (dict(status="skipped", meta={"skip_reason": "nothing_qualified"}),
+     "⚠️ The next-company run 2026-09-17 · replacement 1 found no company: no readable selection trail. Nothing "
+     "replaces COST; this lane posted nothing more on 2026-09-17. Check the web log for this run."),
+])
+async def test_nx_a_notice_sent_on_a_later_day_is_dated_and_carries_no_dead_restore_button(nx, tg, monkeypatch, kw,
+                                                                                           text):
+    """Review 2026-11-27: N1-N3 reaching the owner after midnight (the web's expiry closed it `day_over`, the final word
+    carried it) never say "this lane posts nothing more TODAY" — today's own run of that lane still posts."""
+    _ended(nx, **kw)
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 18, 0, 30, tzinfo=_ET))
+    await rs.review_cycle()
+    (notice,) = [n for n in _notices(tg) if "2026-09-17 · replacement 1" in n["text"]]
+    assert notice["text"] == text and notice.get("reply_markup") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setting, attempts, button", [
+    (1, 1, False),     # at the claim's cap (MARKETING_MAX_RUN_ATTEMPTS 1) but "still running" for the restore (2)
+    (1, 2, True),
+    (6, 2, True),
+])
+async def test_nx_a_failed_replacement_offers_the_restore_only_at_the_restore_s_own_cap(nx, tg, monkeypatch, setting,
+                                                                                       attempts, button):
+    """Review 2026-11-27: the claim stops a replacement at min(2, MARKETING_MAX_RUN_ATTEMPTS) while the restore counts a
+    failed one as over only at REPLACEMENT_MAX_ATTEMPTS (2). With the setting at 1 a run failed at 1 gets its N4, but
+    no "↩ Post … after all" that could only ever answer "still running"."""
+    monkeypatch.setattr(settings, "MARKETING_MAX_RUN_ATTEMPTS", setting)
+    _ended(nx, status="failed", attempts=attempts, stage="voiced", last_error="ffmpeg exited 1")
+    await rs.review_cycle()
+    (notice,) = _notices(tg)
+    assert notice["text"].startswith("⚠️ The next-company run 2026-09-17 · replacement 1 FAILED after stage voiced "
+                                     f"(all {min(setting, 2)} attempts used)")
+    assert (notice.get("reply_markup") == _RESTORE_KB) is button
+    if button:
+        notice["message_id"] = tg.ids[tg.calls.index(("sendMessage", notice))]
+        tg.calls.clear()
+        assert (await rs.handle_update(_restore_tap(notice)))["outcome"] == "restored"
+
+
+@pytest.mark.asyncio
+async def test_nx_an_unreadable_symbol_and_replaced_run_degrade_the_notice_never_echo_it(nx, tg):
+    _ended(nx, status="skipped", meta=_QUIET, ref_meta={"from_source_ref": "news:money_map:<b>:2025"})
+    _run(nx, RUN_R1)["replaces_run_id"] = "not-a-uuid"
+    await rs.review_cycle()
+    (notice,) = _notices(tg)
+    assert "nothing replaces the earlier company" in notice["text"] and "<b>" not in notice["text"]
+    assert notice.get("reply_markup") is None
+
+
+@pytest.mark.asyncio
+async def test_nx_the_restore_button_without_a_symbol_names_the_original(nx, tg):
+    _ended(nx, status="skipped", meta=_QUIET, ref_meta={})
+    await rs.review_cycle()
+    (notice,) = _notices(tg)
+    assert notice["reply_markup"] == {"inline_keyboard": [[{"text": "↩ Post the original after all",
+                                                            "callback_data": f"nx:r:{RUN_A}"}]]}
+
+
+@pytest.mark.asyncio
+async def test_nx_a_lost_stamp_sends_the_notice_again_next_cycle(nx, tg, monkeypatch, caplog):
+    _ended(nx, status="skipped", meta=_QUIET)
+    real = nx.update_run
+    misses = [1]
+
+    async def flaky(run_id, **kw):
+        if misses:
+            misses.pop()
+            return None                                     # the fenced write missed
+        return await real(run_id, **kw)
+
+    monkeypatch.setattr(nx, "update_run", flaky)
+    caplog.set_level(logging.WARNING)
+    await rs.review_cycle()
+    await rs.review_cycle()
+    assert len(_notices(tg)) == 2 and _run(nx, RUN_R1)["metadata"]["replacement_reported"]["notice"] == "N1"
+    assert any("sent again next cycle" in r.getMessage() for r in caplog.records)
+    tg.calls.clear()
+    await rs.review_cycle()
+    assert _notices(tg) == []
+
+
+@pytest.mark.asyncio
+async def test_nx_a_failed_send_stamps_nothing_and_the_next_cycle_sends_it(nx, tg):
+    _ended(nx, status="skipped", meta=_QUIET)
+    tg.script["sendMessage"] = [(400, {"ok": False, "description": "Bad Request: chat not found"})]
+    await rs.review_cycle()
+    assert "replacement_reported" not in _run(nx, RUN_R1)["metadata"]
+    await rs.review_cycle()
+    assert len(_notices(tg)) == 2 and _run(nx, RUN_R1)["metadata"]["replacement_reported"]["notice"] == "N1"
+
+
+@pytest.mark.asyncio
+async def test_nx_a_429_on_a_notice_stops_the_cycle_like_the_sweep_and_stamps_nothing(nx, tg):
+    _ended(nx, status="skipped", meta=_QUIET)
+    tg.script["sendMessage"] = [(429, {"ok": False, "parameters": {"retry_after": 30}})]
+    counters = await rs.review_cycle()
+    assert counters["rate_limited"] == 1 and "replacement_reported" not in _run(nx, RUN_R1)["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_nx_the_web_clock_expires_an_unstarted_replacement_and_says_so_in_the_same_cycle(nx, tg, monkeypatch):
+    """Amendment A10: switched off before the worker started it → closed `skipped/replacement_expired` by the review
+    cycle itself (no claim needed) → N3 at once."""
+    _nx_run(nx, meta={"replaced_by": {"run_id": RUN_R1}})
+    _rows(nx, mrs.RUNS).append({"id": RUN_R1, "run_date": _NX_DAY, "replacement": 1, "replaces_run_id": RUN_A,
+                                "status": "planned", "stage": "planned", "attempts": 0,
+                                "metadata": {"replacement_request": _GEN0_REQUEST},
+                                "updated_at": "2026-09-17T21:40:00+00:00"})
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+    counters = await rs.review_cycle()
+    assert counters["replacements_expired"] == 1 and counters["replacement_notices"] == 1
+    (notice,) = _notices(tg)
+    assert "was not made: replacing was switched off (MARKETING_REPLACE_ENABLED)" in notice["text"]
+    assert notice["reply_markup"] == _RESTORE_KB          # the restore reads no switch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bundles_on", [True, False])
+async def test_nx_notices_go_out_whatever_the_bundles_and_replace_switches_say(nx, tg, monkeypatch, bundles_on):
+    monkeypatch.setattr(settings, "MARKETING_REVIEW_BUNDLES", bundles_on)
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+    _ended(nx, status="skipped", meta=_QUIET)
+    await rs.review_cycle()
+    assert len(_notices(tg)) == 1
+
+
+@pytest.mark.asyncio
+async def test_nx_a_notice_read_failure_is_a_warning_counted_and_never_raised(nx, tg, monkeypatch, caplog):
+    async def broken(*_a, **_k):
+        raise mrs.MarketingRunError("read failed: 520")
+
+    monkeypatch.setattr(nx, "replacement_runs_between", broken)
+    caplog.set_level(logging.WARNING)
+    counters = await rs.review_cycle()
+    assert counters["failed"] == 2               # the expiry step reads through it too
+    assert any("could not be read" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_nx_one_broken_row_costs_only_itself(nx, tg, caplog):
+    _ended(nx, status="skipped", meta=_QUIET)
+    _rows(nx, mrs.RUNS).append({"id": "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd", "run_date": _NX_DAY,
+                                "lane": "nowhere", "replacement": 2, "replaces_run_id": RUN_A, "status": "skipped",
+                                "metadata": {"skip_reason": "nothing_qualified"}})
+    caplog.set_level(logging.ERROR)
+    counters = await rs.review_cycle()
+    assert len(_notices(tg)) == 1 and counters["failed"] >= 1
+    assert any("could not be noticed" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_nx_a_pending_read_failure_never_holds_a_notice(nx, tg, monkeypatch):
+    async def broken(*_a, **_k):
+        raise mrs.MarketingRunError("list failed: 520")
+
+    monkeypatch.setattr(rs, "_pending_unnotified", broken)
+    _ended(nx, status="skipped", meta=_QUIET)
+    counters = await rs.review_cycle()
+    assert counters["failed"] == 1 and len(_notices(tg)) == 1
+
+
+@pytest.mark.parametrize("run, posts", [({"replacement": 1, "status": "media_ready"}, None)])
+def test_nx_the_builder_refuses_to_guess_without_the_posts(run, posts):
+    with pytest.raises(ValueError):
+        rs.replacement_notice({"id": RUN_R1, "run_date": _NX_DAY, "metadata": {}, **run}, now=_NX_NOW, posts=posts)
+
+
+def test_nx_the_builder_says_nothing_for_a_days_own_run():
+    assert rs.replacement_notice({"id": RUN_A, "run_date": _NX_DAY, "status": "skipped",
+                                  "metadata": {"skip_reason": "nothing_qualified"}}, now=_NX_NOW) is None
+
+
+# ── the restore (amendment A1) ───────────────────────────────────────────────
+
+
+async def _restore_ready(nx, tg) -> Dict[str, Any]:
+    """Gen 0 offered → ✅ Yes → its replacement skipped nothing_qualified (the worker's skip) → N1 with the button."""
+    _nx_run(nx)
+    _nx_posts(nx)
+    posts = (await _nx_offered(nx, tg))["posts"]
+    assert (await rs.handle_update(_nx_tap(posts, "y", keyboard=_confirm_keyboard(posts))))["outcome"] == "requested"
+    gen1 = next(r for r in _rows(nx, mrs.RUNS) if r.get("replacement") == 1)
+    gen1.update(status="skipped", stage="planned", attempts=1, metadata={**gen1["metadata"], **_QUIET})
+    tg.calls.clear(), tg.ids.clear()
+    await rs.review_cycle()
+    (notice,) = _notices(tg)
+    notice["message_id"] = tg.ids[tg.calls.index(("sendMessage", notice))]
+    return notice
+
+
+def _restore_tap(notice: Dict[str, Any], run_id: str = RUN_A) -> Dict[str, Any]:
+    return _update(run_id, "nx:r", message={"message_id": notice["message_id"], "text": notice["text"],
+                                            "reply_markup": notice["reply_markup"]})
+
+
+@pytest.mark.asyncio
+async def test_nx_restore_puts_the_posts_back_for_a_fresh_bundle_without_the_next_button(nx, tg, wakes):
+    notice = await _restore_ready(nx, tg)
+    assert notice["reply_markup"] == _RESTORE_KB
+    tg.calls.clear(), tg.ids.clear()
+    out = await rs.handle_update(_restore_tap(notice))
+    assert out["outcome"] == "restored" and wakes == [1]
+    assert _answers(tg) == ["Restored ✅ — COST's posts come back for review in a few minutes"]
+    (edit,) = tg.of("editMessageText")
+    assert edit["text"] == (f"{notice['text']}\n\n↩ Restored 18:00 ET — COST's posts come back for review in a few "
+                            f"minutes.") and edit["reply_markup"] == {"inline_keyboard": []}
+    assert {p["status"] for p in _rows(nx, mrs.POSTS)} == {"pending_review"}
+    tg.calls.clear(), tg.ids.clear()
+    again = await _nx_offered(nx, tg)
+    assert set(again) == {"video", "posts"}
+    assert all("nx:" not in json.dumps(d["reply_markup"]) and "🔄" not in d["text"] for d in again.values())
+    # a replayed tap (a lost response, a second phone): read back, never a second write
+    tg.calls.clear()
+    assert (await rs.handle_update(_restore_tap(notice)))["outcome"] == "already_restored"
+    assert _answers(tg) == ["Already restored"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("setup, outcome, toast, kept", [
+    (lambda svc, mp: _seed_post(svc, next(r for r in _rows(svc, mrs.RUNS) if r.get("replacement") == 1)["id"], "x",
+                                "text", caption=SHORT, title=None),
+     "replacement_has_posts", "Can't restore: the next company already made posts", False),
+    (lambda svc, mp: _nx_clock(svc, mp, datetime(2026, 9, 18, 0, 30, tzinfo=_ET)),
+     "too_late", "Can't restore: too late — run 2026-09-17 closed at midnight ET", False),
+    (lambda svc, mp: next(r for r in _rows(svc, mrs.RUNS) if r.get("replacement") == 1).update(status="failed",
+                                                                                               attempts=1),
+     "replacement_running", "Can't restore: the next-company run is still running", True),
+    (lambda svc, mp: _run(svc, RUN_A).update(status="skipped"),
+     "not_restorable", "Can't restore: this run can no longer be restored", False),
+    (lambda svc, mp: svc.fake.replacement_rpc.fail.add("*"), "error", "Could not record that — tap again", True),
+])
+async def test_nx_every_restore_refusal_answers_its_toast(nx, tg, wakes, monkeypatch, setup, outcome, toast, kept):
+    notice = await _restore_ready(nx, tg)
+    setup(nx, monkeypatch)
+    tg.calls.clear()
+    assert (await rs.handle_update(_restore_tap(notice)))["outcome"] == outcome
+    assert _answers(tg) == [toast] and wakes == []
+    edits = tg.of("editMessageReplyMarkup")
+    assert edits == [] if kept else [e["reply_markup"] for e in edits] == [{"inline_keyboard": []}]
+    assert {p["status"] for p in _rows(nx, mrs.POSTS) if p["run_id"] == RUN_A} == {"rejected"}   # nothing restored
+
+
+@pytest.mark.asyncio
+async def test_nx_a_restore_that_landed_before_midnight_is_answered_on_a_retry_after_it(nx, tg, wakes, monkeypatch):
+    """Review 2026-11-27: ↩ at 23:59:58 restores and loses its answer (R11, the button kept); the retry at 00:00:03 is
+    answered "Already restored" from the ledger — never "too late" for posts already back in review."""
+    notice = await _restore_ready(nx, tg)
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 17, 23, 59, 58, tzinfo=_ET))
+    nx.fake.replacement_rpc.lose_response = {_rpcfake.RESTORE}
+    tg.calls.clear()
+    assert (await rs.handle_update(_restore_tap(notice)))["outcome"] == "error"
+    assert _answers(tg) == ["Could not record that — tap again"] and tg.of("editMessageReplyMarkup") == []
+    nx.fake.replacement_rpc.lose_response = set()
+    assert {p["status"] for p in _rows(nx, mrs.POSTS) if p["run_id"] == RUN_A} == {"pending_review"}   # it DID land
+    _nx_clock(nx, monkeypatch, datetime(2026, 9, 18, 0, 0, 3, tzinfo=_ET))
+    tg.calls.clear()
+    assert (await rs.handle_update(_restore_tap(notice)))["outcome"] == "already_restored"
+    assert _answers(tg) == ["Already restored"]
+
+
+@pytest.mark.asyncio
+async def test_nx_restore_of_an_unknown_run_is_run_not_found(nx, tg, wakes):
+    notice = await _restore_ready(nx, tg)
+    ghost = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    tg.calls.clear()
+    assert (await rs.handle_update(_restore_tap(notice, ghost)))["outcome"] == "not_found"
+    assert _answers(tg) == ["Run not found."]
+
+
+@pytest.mark.asyncio
+async def test_nx_restore_reads_no_switch(nx, tg, wakes, monkeypatch):
+    notice = await _restore_ready(nx, tg)
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+    monkeypatch.setattr(settings, "MARKETING_CONTENT_CLASSES", "A")
+    assert (await rs.handle_update(_restore_tap(notice)))["outcome"] == "restored"
+
+
+# ── end to end: the spotlight Money Map twin (DESIGN §6) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_e2e_nx_spotlight_replacement_posts_under_its_own_r1_key(nx, tg, wakes, monkeypatch):
+    """The spotlight run's 🔄 → the request → the worker's next tick claims replacement 1 through the EXISTING claim →
+    its accepted Money Map → create_posts writes `D:spotlight:r1:…` keys → the sweep offers its bundle as
+    "run D · spotlight · replacement 1" with its "Replaces:" line → Approve all → the Upload-Post request id is
+    `D:spotlight:r1:facebook:text:a1`."""
+    from datetime import date
+
+    day = date(2026, 9, 17)
+    noon = datetime(2026, 9, 17, 12, 0, tzinfo=_ET)
+    _nx_clock(nx, monkeypatch, noon)
+    monkeypatch.setattr(mrs, "spotlight_start_closed", lambda run_date, now: False)
+    for name, value in (("MARKETING_AUTO_PUBLISH", False),
+                        ("MARKETING_UPLOAD_POST_API_KEY", "UPkeyE2E0123456789abcdefghijKLMNOPqrs"),
+                        ("MARKETING_UPLOAD_POST_USER", "caydex"),
+                        ("MARKETING_UPLOAD_POST_FACEBOOK_PAGE_ID", "104857600123456")):
+        monkeypatch.setattr(settings, name, value)
+    monkeypatch.setattr(mrs.news_templates, "revalidate", lambda *_a, **_k: [])
+    platforms = ("x", "bluesky", "facebook")
+
+    async def money_map_day(ref: str, at: datetime):
+        run, why = await nx.claim_run(day, worker_version="t", dry_run=False, now=at, claim_nonce=fake_db._n(),
+                                      lane="spotlight")
+        assert run is not None, why
+        posts = {p: {"platform": p, "title": None, "caption": f"{ref} copy for {p}"} for p in platforms}
+        await nx.insert_script({"run_id": run["id"], "status": "accepted", "template_id": "money_map",
+                                "source_ref": ref, "fact_sheet": {},
+                                "output": {"posts": posts, "content_class": "F", "authorship": "template",
+                                           "series": "money_map"}})
+        created = await nx.create_posts(run["id"], [{"platform": p, "format": "text"} for p in platforms],
+                                        claim=fake_db._holder(nx, run["id"]))
+        await nx.update_run(run["id"], status="media_ready", stage="assets_ready", template_id="money_map",
+                            source_ref=ref)
+        return run, created
+
+    gen0, created0 = await money_map_day(_NX_REF, noon - timedelta(minutes=45))
+    assert [p["idempotency_key"] for p in created0] == [f"2026-09-17:spotlight:{p}:text" for p in platforms]
+    await rs.review_cycle()
+    (posts,) = _decision_messages(tg)
+    assert posts["reply_markup"]["inline_keyboard"][-1] == [{"text": "🔄 Next company",
+                                                             "callback_data": f"nx:a:{gen0['id']}"}]
+    assert (await rs.handle_update(_nx_tap(posts, "y", gen0["id"],
+                                           keyboard=_confirm_keyboard(posts, gen0["id"]))))["outcome"] == "requested"
+    gen1, created1 = await money_map_day("news:money_map:MSFT:2025", noon + timedelta(minutes=15))
+    assert gen1["replacement"] == 1 and gen1["replaces_run_id"] == gen0["id"]
+    assert [p["idempotency_key"] for p in created1] == [f"2026-09-17:spotlight:r1:{p}:text" for p in platforms]
+    tg.calls.clear(), tg.ids.clear()
+    await rs.review_cycle()
+    (decision,) = _decision_messages(tg)
+    lines = decision["text"].split("\n")
+    assert lines[0] == "DECISION · POSTS · run 2026-09-17 · spotlight · replacement 1"
+    assert lines[1] == "Replaces: COST (replaced 12:00 ET)."
+    assert (await rs.handle_update(_tap_on(decision, "g")))["outcome"] == "decided"
+    fb = next(r for r in _rows(nx, mrs.POSTS) if r["run_id"] == gen1["id"] and r["platform"] == "facebook")
+    assert fb["status"] == "approved"
+    prepared = outlet_upload_post.UploadPostAdapter("facebook").prepare(fb)
+    assert prepared.payload["request_id"] == "2026-09-17:spotlight:r1:facebook:text:a1"
+    assert {p["status"] for p in _rows(nx, mrs.POSTS) if p["run_id"] == gen0["id"]} == {"rejected"}

@@ -39,6 +39,19 @@ Usage (from backend/):
     ./venv/bin/python scripts/marketing_news_preview.py --candidates --lane spotlight --date 2026-11-19
     ./venv/bin/python scripts/marketing_news_preview.py --candidates --lane spotlight --series insider_spotlight \\
         --logos --art --render                                                  # SPENDS MONEY: per-post art
+    ./venv/bin/python scripts/marketing_news_preview.py --candidates --date 2026-12-03 \\
+        --exclude-ref news:money_map:COST:2025                                  # what would replace Costco that day
+
+--exclude-ref news:money_map:<SYM>:<FY> (migration 215, owner decision 2026-11-27 "🔄 Next company"; repeatable, at
+most two — replacement 2 keeps out both earlier records) previews what a REPLACEMENT run would post: Money Map only, on
+either lane — a replacement never reads the day's calendar, and C0 does not drop Money Map from a spotlight replacement
+(`selection.replacement_chain`) — with each named record kept out the way the build keeps out the run(s) it replaces:
+the key joins the adapter's exclude set (it refuses the record `already_posted`), and a record whose LEAD company a key
+names, a share-class twin included (`script_service.replaced_lead_keys`: GOOGL and GOOG are one company), is EXCLUDED
+(`replaced_company`, EXCLUDED.txt, never a post). The cross-lane exclusion (--ledger, or the live ledger on the
+spotlight lane) still applies, as it does to a real replacement. A key that is not a Money Map ledger key, more than two
+keys, or a --series other than money_map is refused (exit 2) before anything runs. Without the flag every mode is the
+preview of before, byte for byte.
 
 --art (workstream C, 2026-11-16) SPENDS MONEY — about $0.15 to $0.45 per record (one or two drawings at the image
 model's price, $0.134 each at 2K, plus the brief and the picture check on this environment's Claude key) — and does so
@@ -145,6 +158,7 @@ from app.schemas.marketing import (  # noqa: E402
     RUN_LANE_MAIN,
     RUN_LANE_SPOTLIGHT,
     RUN_LANES,
+    RUN_REPLACEMENT_MAX,
     RUN_WORKER_CAPABILITIES_KEY,
     VIDEO_FEATURES_KEY,
     VIDEO_POSTS_KEY,
@@ -161,9 +175,11 @@ from app.services.marketing.script_service import (  # noqa: E402
     lead_company,
     lead_keys,
     narrow_other_lane_lead,
+    replaced_lead_keys,
     template_picture_outlets,
     worker_script,
 )
+from app.services.marketing.review_service import money_map_symbol  # noqa: E402
 from app.services.trillion_club.rules import is_federal_business_day  # noqa: E402
 from app.utils.market_hours import ET  # noqa: E402
 
@@ -854,6 +870,39 @@ def cross_lane(rows: Sequence[Any], run_date: date, lane: str, source: str) -> C
     return CrossLane(refs, taken, leads, source)
 
 
+# ── --exclude-ref: a replacement's build (migration 215, "🔄 Next company") ─────────
+
+class Replaced(NamedTuple):
+    """What a REPLACEMENT build keeps away from (`script_service._build_template_day` for replacement ≥ 1): the
+    ledger keys of the run(s) it replaces (`refs`, unioned into the adapter's exclude set) and their lead keys
+    (`leads`, `script_service.replaced_lead_keys` — the company and its share-class twins, `replaced_company`)."""
+    refs: FrozenSet[str]
+    leads: FrozenSet[str]
+
+
+NO_REPLACED = Replaced(frozenset(), frozenset())
+
+
+def replaced_from(refs: Optional[Sequence[str]]) -> Replaced:
+    """The --exclude-ref values as a replacement build reads them; NO_REPLACED without any. ValueError for a value that
+    is not a Money Map ledger key `news:money_map:<SYM>:<FY>` (parsed by the review bot's own strict parser,
+    `review_service.money_map_symbol`) or for more distinct keys than a replacement can replace (RUN_REPLACEMENT_MAX:
+    replacement 2 keeps out the day's run and replacement 1)."""
+    if not refs:
+        return NO_REPLACED
+    bad = [r for r in refs if money_map_symbol(r) is None]
+    if bad:
+        raise ValueError("not a Money Map ledger key (news:money_map:<SYM>:<FY>): "
+                         + ", ".join(repr(str(b)[:60]) for b in bad))
+    unique = sorted(set(refs))
+    if len(unique) > RUN_REPLACEMENT_MAX:
+        raise ValueError(f"a replacement replaces at most {RUN_REPLACEMENT_MAX} records (replacement "
+                         f"{RUN_REPLACEMENT_MAX} keeps out every earlier one), got {len(unique)}")
+    leads = replaced_lead_keys([{"run_id": PREVIEW_RUN_ID, "replacement": i, "source_ref": r, "output": None}
+                                for i, r in enumerate(unique)])
+    return Replaced(frozenset(unique), leads)
+
+
 # ── --art: the per-post art, made locally (SPENDS MONEY — only with the flag) ──────────
 
 def art_clients() -> Tuple[Any, Any]:
@@ -1060,10 +1109,12 @@ def _excluded(folder: Path, ref: str, why: str) -> bool:
 
 def write_one(rec: Any, run_date: date, folder: Path, *, logos_in: Optional[Path], sample: bool,
               do_render: bool, lane: str = RUN_LANE_MAIN, cross: CrossLane = NO_CROSS_LANE,
-              do_art: bool = False) -> bool:
+              do_art: bool = False, replaced: Replaced = NO_REPLACED) -> bool:
     """One record into `folder`: composed as stored (or REFUSED / EXCLUDED), its script and stored output, post.md,
     and — `do_art` (--art, SPENDS MONEY) — its per-post art (`make_art`: art.jpg + art.json, the record stored in the
-    output as the build stores it), then — `do_render` — the worker's preview, with the checked art as --art-file."""
+    output as the build stores it), then — `do_render` — the worker's preview, with the checked art as --art-file.
+    `replaced` (--exclude-ref): a replacement build's exclusions — the replaced record itself, and a record whose lead
+    company it drew (checked before the cross-lane lead rule, as the build checks it)."""
     folder.mkdir(parents=True, exist_ok=True)
     try:
         # review 2026-11-20: the record as the build narrows it (`narrowed_record`) — its ledger key, art and post.md
@@ -1075,6 +1126,9 @@ def write_one(rec: Any, run_date: date, folder: Path, *, logos_in: Optional[Path
         print(f"- {ref}: REFUSED — {e}")
         return False
     ref = R.ledger_key(rec)
+    if ref in replaced.refs:
+        # a replacement build: the run it replaces drew this record (its key is in the exclude set → already_posted)
+        return _excluded(folder, ref, "the run it replaces drew this record (--exclude-ref)")
     if ref in cross.same_day_refs:
         # rule (a): the other lane posted this very record today (the build adds it to its exclude set)
         return _excluded(folder, ref, f"the other lane posted this record that day ({cross.source})")
@@ -1096,6 +1150,12 @@ def write_one(rec: Any, run_date: date, folder: Path, *, logos_in: Optional[Path
         (folder / "REFUSED.txt").write_text(f"{ref}\n{e}\n", encoding="utf-8")
         print(f"- {ref}: REFUSED — {e}")
         return False
+    replaced_hit = lead_keys(stored) & replaced.leads
+    if replaced_hit:
+        # a replacement build's REPLACED_COMPANY: the run it replaces drew this record's LEAD company — a share-class
+        # twin included (`replaced_lead_keys`: by issuer root) — checked before the cross-lane rule (b), as the build does
+        return _excluded(folder, ref, f"the run it replaces drew its lead company {lead_company(stored)} "
+                                      f"({', '.join(sorted(replaced_hit))}) — replaced_company (--exclude-ref)")
     hit = lead_keys(stored) & cross.avoid_leads
     if hit:
         # rule (b): a lane drew this record's LEAD company within CROSS_LANE_COMPANY_DAYS ET days — by its issuer root
@@ -1262,6 +1322,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="SPENDS MONEY (about $%.2f-$%.2f a record): make each single-company record's per-post art "
                          "(brief, drawing, picture check) into <series>-<n>/art.jpg + art.json"
                          % ART_COST_PER_RECORD_USD)
+    ap.add_argument("--exclude-ref", action="append", metavar="news:money_map:<SYM>:<FY>",
+                    help="preview a REPLACEMENT ('🔄 Next company'): Money Map only, keeping out this record and its "
+                         f"lead company (repeatable, at most {RUN_REPLACEMENT_MAX})")
     args = ap.parse_args(argv)
 
     # The guard goes on BEFORE anything else runs — the adapter, its lazy import, a logo fetch — and
@@ -1324,6 +1387,22 @@ def _run(args: argparse.Namespace) -> int:
     dates: Dict[str, date] = {}
     #: the cross-lane exclusion each run date is judged with (NO_CROSS_LANE: nothing simulated)
     crosses: Dict[date, CrossLane] = {}
+    #: --exclude-ref: a replacement's build (NO_REPLACED: the day's own run, the preview of before)
+    try:
+        replaced = replaced_from(args.exclude_ref)
+    except ValueError as e:
+        print(f"refused: --exclude-ref: {e}", file=sys.stderr)
+        return 2
+    if replaced.refs:
+        other = [s for s in (args.series or []) if s != "money_map"]
+        if other:
+            print(f"refused: --exclude-ref previews a replacement, which posts Money Map only — not "
+                  f"{', '.join(other)}", file=sys.stderr)
+            return 2
+        args.series = ["money_map"]
+        print(f"Replacement preview ({lane} lane): Money Map only — the day's calendar is not read, and C0 does not "
+              f"apply — keeping out {', '.join(sorted(replaced.refs))} and its lead compan"
+              f"{'y' if len(replaced.refs) == 1 else 'ies'} ({', '.join(sorted(replaced.leads))})\n")
     refused = _lane_series_refused(args, today)
     if refused:
         print(f"refused: {refused}", file=sys.stderr)
@@ -1348,7 +1427,7 @@ def _run(args: argparse.Namespace) -> int:
         run_date = found_day
         plan = plan_of(run_date, lane)
         series_list = args.series or [s for s in plan.chain if s in SHIPPED_SERIES]
-        if lane == RUN_LANE_SPOTLIGHT:
+        if lane == RUN_LANE_SPOTLIGHT and not replaced.refs:
             for s in [s for s in series_list if main_lane_holds(s, run_date)]:
                 print(f"## {s}: left out — the main lane's chain holds it that day (C0: never the spotlight's)")
                 series_list = [x for x in series_list if x != s]
@@ -1378,7 +1457,7 @@ def _run(args: argparse.Namespace) -> int:
         # during that drain escapes it with the thread alive: the guard then stays installed until the
         # process exits (`supabase_read_only_guard`), so that write is refused all the same.
         found = asyncio.run(live_candidates([s for s in series_list if s not in taken], run_date,
-                                            logos_dir=logos_in, exclude=cross.same_day_refs))
+                                            logos_dir=logos_in, exclude=cross.same_day_refs | replaced.refs))
         by_series = {s: v["records"] for s, v in found.items()}
         for s, v in found.items():
             print(f"## {s}: {len(v['records'])} record(s) · skip={v['skip_reason']} · error={v['error']}\n"
@@ -1412,7 +1491,7 @@ def _run(args: argparse.Namespace) -> int:
                 print(f"- {s}: sample day {dates[s]:%a %Y-%m-%d}" + (" (spotlight lane)"
                                                                      if lane == RUN_LANE_SPOTLIGHT else ""))
             run_date = args.date or next_lane_day(today, lane) or today
-        if lane == RUN_LANE_SPOTLIGHT:
+        if lane == RUN_LANE_SPOTLIGHT and not replaced.refs:
             for s in [s for s in by_series if main_lane_holds(s, dates.get(s, run_date))]:
                 print(f"## {s}: left out — the main lane's chain holds it on "
                       f"{dates.get(s, run_date):%a %Y-%m-%d} (C0: never the spotlight's)")
@@ -1432,7 +1511,7 @@ def _run(args: argparse.Namespace) -> int:
         for i, rec in enumerate(recs, 1):
             ok &= write_one(rec, day, out_root / f"{s}-{i}", logos_in=logos_in, sample=sample,
                             do_render=args.render, lane=lane, cross=crosses.get(day, NO_CROSS_LANE),
-                            do_art=args.art)
+                            do_art=args.art, replaced=replaced)
     return 0 if ok else 1
 
 

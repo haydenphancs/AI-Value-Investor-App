@@ -1807,3 +1807,137 @@ def test_the_preview_freezes_the_picture_platforms_as_the_build_reads_them(monke
     stored, _ = NP.compose_stored(NTT.f13s_list8(), NTT.SPOT_SAT, logos_in=None, logos_out=tmp_path)
     assert stored["picture_outlets"] == ["bluesky", "facebook", "linkedin", "threads"]
     assert stored["post_formats"]["x"] == "text" and "x" not in stored["text_outlets"]
+
+
+# ── Replacement runs (migration 215, owner decision 2026-11-27: "🔄 Next company"): --exclude-ref ──────────────────────
+# What a REPLACEMENT would post, read before the switch goes on (DESIGN §3.13): Money Map only, on either lane, never
+# the day's calendar and never C0's drop; the named record kept out exactly as the build keeps out the run it replaces —
+# its key in the adapter's exclude set, and a record whose LEAD company it names (a share-class twin included) EXCLUDED
+# `replaced_company`. Without the flag every mode is the preview of before (every test above is that pin).
+
+_CONTOSO_REF = "news:money_map:ZQCT:2025"          # the built-in Money Map sample's key on a 2026 run date
+
+
+def _two_money_maps(tmp_path, day=THU):
+    """A --record dump of two Money Map records: the built-in Contoso sample, then the same figures for Fabrikam."""
+    import dataclasses
+
+    contoso = NP.sample_records("money_map", day)[0]
+    assert R.ledger_key(contoso) == _CONTOSO_REF
+    path = tmp_path / "day.json"
+    NP.save_records(path, day, {"money_map": [contoso, dataclasses.replace(contoso, company=NP._co("fabrikam"))]})
+    return path
+
+
+def test_replacement_the_replaced_record_is_excluded_and_the_next_company_is_composed(tmp_path, capsys):
+    out_root = tmp_path / "out"
+    assert NP.main(["--fixture", str(_two_money_maps(tmp_path)), "--exclude-ref", _CONTOSO_REF,
+                    "--out", str(out_root)]) == 0
+    first, second = out_root / "money_map-1", out_root / "money_map-2"
+    assert (first / "EXCLUDED.txt").read_text(encoding="utf-8") == (
+        f"{_CONTOSO_REF}\nthe run it replaces drew this record (--exclude-ref)\n")
+    assert sorted(p.name for p in first.iterdir()) == ["EXCLUDED.txt"]
+    stored = json.loads((second / "stored_output.json").read_text(encoding="utf-8"))
+    assert stored["series"] == "money_map" and (second / "post.md").exists()
+    assert stored["source_ref"] == "news:money_map:ZQFB:2025"
+    out = capsys.readouterr().out
+    assert ("Replacement preview (main lane): Money Map only — the day's calendar is not read, and C0 does not apply "
+            f"— keeping out {_CONTOSO_REF} and its lead company (root:ZQCT)\n") in out
+    assert f"- {_CONTOSO_REF}: EXCLUDED — the run it replaces drew this record (--exclude-ref)" in out
+
+
+def test_replacement_a_share_class_twin_of_the_replaced_company_is_excluded_replaced_company(tmp_path, capsys):
+    """The build keeps out the replaced company's LEAD by its issuer root, so another listing of it (ZQCTA folds to
+    ZQCT) is excluded too — after it was composed (its lead is the stored output's), before the cross-lane rule."""
+    out_root = tmp_path / "out"
+    assert NP.main(["--fixture", str(_two_money_maps(tmp_path)), "--exclude-ref", "news:money_map:ZQCTA:2025",
+                    "--out", str(out_root)]) == 0
+    excluded = (out_root / "money_map-1" / "EXCLUDED.txt").read_text(encoding="utf-8")
+    assert excluded == (f"{_CONTOSO_REF}\nthe run it replaces drew its lead company ZQCT (root:ZQCT) — "
+                        "replaced_company (--exclude-ref)\n")
+    assert not (out_root / "money_map-1" / "post.md").exists()
+    assert (out_root / "money_map-2" / "post.md").exists()
+
+
+def test_replacement_two_refs_keep_out_both_earlier_records(tmp_path):
+    out_root = tmp_path / "out"
+    assert NP.main(["--fixture", str(_two_money_maps(tmp_path)), "--exclude-ref", _CONTOSO_REF,
+                    "--exclude-ref", "news:money_map:ZQFB:2025", "--out", str(out_root)]) == 0
+    assert all((out_root / f"money_map-{i}" / "EXCLUDED.txt").exists() for i in (1, 2))
+    assert not list(out_root.glob("*/post.md"))
+    # the same key twice is one record
+    assert NP.replaced_from([_CONTOSO_REF, _CONTOSO_REF]) == NP.Replaced(frozenset({_CONTOSO_REF}),
+                                                                       frozenset({"root:ZQCT"}))
+
+
+@pytest.mark.parametrize("args, why", [
+    (["--exclude-ref", "news:money_map:ZQCT"], "not a Money Map ledger key"),
+    (["--exclude-ref", "news:money_map:zqct:2025"], "not a Money Map ledger key"),
+    (["--exclude-ref", "news:money_map:ZQCT:25"], "not a Money Map ledger key"),
+    (["--exclude-ref", "news:earnings:ZQCT:2026-11-19"], "not a Money Map ledger key"),
+    (["--exclude-ref", " news:money_map:ZQCT:2025"], "not a Money Map ledger key"),
+    (["--exclude-ref", ""], "not a Money Map ledger key"),
+    (["--exclude-ref", "news:money_map:ZQCT:2025", "--exclude-ref", "news:money_map:ZQFB:2025",
+      "--exclude-ref", "news:money_map:ZQNW:2025"], "at most 2 records"),
+    (["--exclude-ref", "news:money_map:ZQCT:2025", "--series", "ceo_buys"], "posts Money Map only — not ceo_buys"),
+    (["--exclude-ref", "news:money_map:ZQCT:2025", "--series", "money_map", "--series", "earnings"],
+     "not earnings"),
+])
+def test_replacement_a_bad_exclude_ref_is_refused_before_anything_runs(tmp_path, capsys, args, why):
+    out_root = tmp_path / "out"
+    assert NP.main(["--fixture", "--date", THU.isoformat(), *args, "--out", str(out_root)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("refused: --exclude-ref") and why in err
+    assert not out_root.exists()
+
+
+def test_replacement_c0_never_drops_money_map_from_a_spotlight_replacement(tmp_path, capsys):
+    """On a Thursday the main lane's chain holds Money Map, so the spotlight's own run never posts it (C0) — but a
+    spotlight REPLACEMENT replaces a spotlight Money Map, and its chain is `selection.replacement_chain`: composed."""
+    without = tmp_path / "without"
+    assert NP.main(["--fixture", "--lane", "spotlight", "--series", "money_map", "--date", THU.isoformat(),
+                    "--out", str(without)]) == 0
+    assert "## money_map: left out — the main lane's chain holds it" in capsys.readouterr().out
+    assert not (without / "money_map-1").exists()
+    replacing = tmp_path / "replacing"
+    assert NP.main(["--fixture", "--lane", "spotlight", "--date", THU.isoformat(), "--exclude-ref",
+                    "news:money_map:ZQFB:2025", "--out", str(replacing)]) == 0
+    out = capsys.readouterr().out
+    assert "left out" not in out and "Replacement preview (spotlight lane)" in out
+    assert (replacing / "money_map-1" / "post.md").exists()
+
+
+def test_replacement_live_candidates_ask_money_map_alone_with_the_replaced_key_excluded(monkeypatch, tmp_path, capsys):
+    """--candidates on a Monday, whose calendar LEADS with the CEO roundup: a replacement asks the adapter for Money Map
+    ONLY, the replaced key in its exclude set beside the other lane's same-day refs (the live ledger on the spotlight
+    lane) — what the build passes (`exclude | replaced_refs`)."""
+    from app.services.marketing import company_news_adapter as adapter
+
+    asked = []
+
+    async def fake_candidates(series, *, run_date, exclude, limit, deadline, deps):
+        asked.append((series, run_date, exclude))
+        return SimpleNamespace(records=(), skip_reason="money_map_all_posted", rejections={"already_posted": 1})
+
+    monkeypatch.setattr(adapter, "candidates", fake_candidates)
+    assert NP.plan_of(MON).chain[0] == "ceo_buys"
+    assert NP.main(["--candidates", "--date", MON.isoformat(), "--exclude-ref", _CONTOSO_REF,
+                    "--out", str(tmp_path / "main")]) == 0
+    assert asked == [("money_map", MON, frozenset({_CONTOSO_REF}))]
+    assert "## money_map: 0 record(s) · skip=money_map_all_posted" in capsys.readouterr().out
+    # the spotlight lane: the other lane's same-day refs join the replaced key
+    asked.clear()
+    monkeypatch.setattr(NP, "load_live_ledger",
+                        lambda d, lane="spotlight": [_ledger_row(d, "main", ref="news:earnings:ZQFB:2026-11-19",
+                                                                 lead="ZQFB")])
+    assert NP.main(["--candidates", "--lane", "spotlight", "--date", THU.isoformat(), "--exclude-ref", _CONTOSO_REF,
+                    "--out", str(tmp_path / "spot")]) == 0
+    assert asked == [("money_map", THU, frozenset({_CONTOSO_REF, "news:earnings:ZQFB:2026-11-19"}))]
+
+
+def test_replacement_without_the_flag_write_one_keeps_out_nothing_new(tmp_path):
+    """`write_one`'s default is NO_REPLACED: the day's own run composes the record the replacement would exclude."""
+    rec = NP.sample_records("money_map", THU)[0]
+    assert NP.replaced_from(None) is NP.NO_REPLACED and NP.replaced_from([]) is NP.NO_REPLACED
+    assert NP.write_one(rec, THU, tmp_path / "x", logos_in=None, sample=True, do_render=False) is True
+    assert (tmp_path / "x" / "post.md").exists() and not (tmp_path / "x" / "EXCLUDED.txt").exists()

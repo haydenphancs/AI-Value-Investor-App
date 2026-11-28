@@ -2688,6 +2688,20 @@ async def test_batch3_an_extra_video_arrives_as_its_own_facebook_video_message_w
     ({}, "2026-11-17:spotlight:nope:text", "2026-11-17"),     # a key that does not read back: its date alone
     (None, "garbage", "?"),
     (None, None, "?"),
+    # migration 215 (amendment A12): a replacement run's post is never named like the run it replaced — the run row's
+    # number when it has one, else the key's `r<n>` segment (`post_run_label`); a segment that does not read back (r0,
+    # r3, R1, r01) is not a replacement key at all: the date alone, as for any key that does not read back
+    ({"run_date": "2026-11-17", "replacement": 1}, "2026-11-17:x:text", "2026-11-17 · replacement 1"),
+    ({"run_date": "2026-11-17", "lane": "spotlight", "replacement": 2}, "garbage",
+     "2026-11-17 · spotlight · replacement 2"),
+    ({"run_date": "2026-11-17", "replacement": "1"}, "2026-11-17:r1:x:text", "2026-11-17 · replacement ?"),
+    (None, "2026-11-17:r1:x:text", "2026-11-17 · replacement 1"),
+    ({}, "2026-11-17:spotlight:r2:facebook:video", "2026-11-17 · spotlight · replacement 2"),
+    (None, "2026-11-17:r0:x:text", "2026-11-17"),
+    (None, "2026-11-17:r3:x:text", "2026-11-17"),
+    (None, "2026-11-17:R1:x:text", "2026-11-17"),
+    (None, "2026-11-17:r01:x:text", "2026-11-17"),
+    (None, "2026-11-17:r1:spotlight:x:text", "2026-11-17"),
 ])
 def test_spotlight_the_review_run_label_names_the_spotlight_lane(run, key, label):
     """Every review message names its run "… · run <label>": a main run's label is its date, as always; a spotlight
@@ -2716,3 +2730,212 @@ def test_the_bundle_fake_reads_a_missing_lane_as_main_like_the_ledger(bundle_led
     assert _nested_col({"run_date": "2026-09-28"}, "lane") == "main"
     assert _nested_col({"lane": "spotlight"}, "lane") == "spotlight"
     assert _nested_col({"metadata": {"review_bundle": {"id": "b"}}}, "metadata->review_bundle->>id") == "b"
+
+
+# ── Replacement runs (migration 215): the `nx:` grammar and its dispatch ─────────────────────────────────────────────
+# "🔄 Next company" (owner decision 2026-11-27) rides this bot with its OWN two-letter grammar — no single letter is
+# left after `z` (rules/marketing.md §2): `nx:<a|y|k|r>:<run uuid>`. The full flows are in
+# tests/test_marketing_review_bundles.py ("Replacement runs"); here: the grammar, its isolation from every other family,
+# the allow-list in front of it, the per-post flow's wording of a replaced post, and the edit-only rule (A11).
+
+import ast  # noqa: E402
+import inspect  # noqa: E402
+import io  # noqa: E402
+import tokenize  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+
+_NX_VERBS = [("a", "ask"), ("y", "yes"), ("k", "keep"), ("r", "restore")]
+#: The marketing verb table as it was before migration 215 — the `nx:` family must not touch it.
+_VERBS_BEFORE_215 = {
+    "a": "approve", "r": "reject", "d": "retract", "k": "confirm_retract", "c": "cancel_retract", "l": "live",
+    "n": "not_posted", "t": "reason_tone", "f": "reason_accuracy", "p": "reason_compliance", "w": "reason_weak",
+    "o": "reason_other", "g": "bundle_approve", "j": "bundle_reject", "s": "bundle_drop", "h": "bundle_reason_tone",
+    "i": "bundle_reason_accuracy", "m": "bundle_reason_compliance", "u": "bundle_reason_weak",
+    "v": "bundle_reason_other",
+}
+
+
+@pytest.mark.parametrize("letter, verb", _NX_VERBS)
+def test_nx_every_verb_round_trips_within_64_bytes(letter, verb):
+    data = rs.next_callback_data(verb, _PID)
+    assert data == f"nx:{letter}:{_PID}" and len(data.encode("utf-8")) == 41
+    assert rs.parse_next_callback(data) == (verb, _PID)
+    assert rs.parse_callback_data(data) is None                       # never a marketing verb
+    with pytest.raises(ValueError):
+        rs.next_callback_data(verb, _PID.upper())                     # only a canonical uuid makes a button
+    with pytest.raises(KeyError):
+        rs.next_callback_data("approve", _PID)
+
+
+def test_nx_the_family_is_free_of_every_marketing_verb_and_of_the_learn_and_stake_families():
+    assert rs._VERBS == _VERBS_BEFORE_215                              # the single-letter table is untouched
+    assert "x" not in rs._VERBS                                        # so no `<letter>:` string starts with "nx:"
+    for decision in rs._VERBS.values():
+        assert not rs.callback_data(decision, _PID).startswith(rs.NEXT_CALLBACK_PREFIX)
+    for letter, verb in _NX_VERBS:
+        data = rs.next_callback_data(verb, _PID)
+        assert not data.startswith((rs.LEARN_CALLBACK_PREFIX, rs.STAKES_CALLBACK_PREFIX))
+        assert rs.parse_callback_data(data) is None
+    for prefix in (rs.LEARN_CALLBACK_PREFIX, rs.STAKES_CALLBACK_PREFIX):
+        assert not prefix.startswith(rs.NEXT_CALLBACK_PREFIX) and not rs.NEXT_CALLBACK_PREFIX.startswith(prefix)
+    assert rs.NEXT_CALLBACK_PREFIX == "nx:" and set(rs._NEXT_VERBS) == {"a", "y", "k", "r"}
+
+
+@pytest.mark.parametrize("data", [
+    f"nx:q:{_PID}", f"nx:A:{_PID}", f"nx:a:{_PID.upper()}", f"nx:a:{_PID}\n", f"nx:a:{_PID} ", f"nx:a:{_PID[:-1]}",
+    f"nx:ay:{_PID}", f"nx:a:a:{_PID}", f"nx::{_PID}", "nx:a:", "nx:", "nx", f"nx:a:{_PID}" + "0" * 30, None, 41,
+    f"nxa:{_PID}", f"n:x:{_PID}",
+])
+def test_nx_the_parser_is_strict(data):
+    assert rs.parse_next_callback(data) is None
+
+
+@pytest.mark.parametrize("data", [f"nx:q:{_PID}", f"nx:a:{_PID.upper()}", f"nx:a:{_PID}\n", "nx:", f"nx:r:{_PID}x"])
+def test_nx_malformed_data_through_the_webhook_is_unknown_action_and_decides_nothing(client, ledger, tg, data):
+    r = _post_hook(client, _tap(_PID, data=data))
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert tg.of("answerCallbackQuery") == [{"callback_query_id": "cbq-1", "text": "Unknown action"}]
+    assert ledger.fake.replacement_rpc.calls == []
+
+
+@pytest.mark.parametrize("kw", [{"from_id": OWNER + 1}, {"chat_id": OWNER + 1}, {"from_id": str(OWNER)},
+                                {"drop": ("from",)}, {"drop": ("message",)}])
+@pytest.mark.parametrize("letter", ["a", "y", "k", "r"])
+def test_nx_a_strangers_tap_is_refused_before_the_family_runs(client, configured, tg, monkeypatch, kw, letter):
+    seen: List[str] = []
+
+    async def spy(*_a, **_k):
+        seen.append("dispatched")
+        return {"ok": True}
+
+    monkeypatch.setattr(rs, "_dispatch_next", spy)
+    r = _post_hook(client, _tap(_PID, data=f"nx:{letter}:{_PID}", **kw))
+    assert r.status_code == 200 and seen == []
+    assert tg.of("answerCallbackQuery") == [{"callback_query_id": "cbq-1", "text": "Not allowed"}]
+
+
+def test_nx_an_owners_tap_reaches_only_the_next_company_family(client, ledger, tg, monkeypatch):
+    seen: List[tuple] = []
+
+    async def spy(cq_id, chat_id, from_id, message, data):
+        seen.append((cq_id, chat_id, from_id, message["message_id"], data))
+        return {"ok": True}
+
+    monkeypatch.setattr(rs, "_dispatch_next", spy)
+    pid = _seed_post(ledger)
+    r = _post_hook(client, _tap(pid, data=f"nx:a:{RUN_A}"))
+    assert r.status_code == 200 and seen == [("cbq-1", OWNER, OWNER, 555, f"nx:a:{RUN_A}")]
+    assert _post(ledger, pid)["status"] == "pending_review" and tg.calls == []
+
+
+def test_nx_a_bug_in_a_flow_is_answered_and_the_webhook_still_answers_200(client, configured, ledger, tg, monkeypatch,
+                                                                         caplog):
+    async def boom(*_a, **_k):
+        raise KeyError("probe")
+
+    monkeypatch.setattr(rs, "_next_ask", boom)
+    caplog.set_level(logging.ERROR)
+    r = _post_hook(client, _tap(_PID, data=f"nx:a:{RUN_A}"))
+    assert r.status_code == 200 and r.json() == {"ok": True}
+    assert tg.of("answerCallbackQuery") == [{"callback_query_id": "cbq-1", "text": "Could not record that — tap again"}]
+    assert any("next company ask FAILED" in rec.getMessage() for rec in caplog.records)
+
+
+def test_nx_every_toast_fits_telegrams_200_characters():
+    """answerCallbackQuery caps a toast at 200 characters: every fixed text, and the longest formatted ones."""
+    fixed = [v for k, v in vars(rs).items() if k.startswith(("NEXT_", "RESTORE_")) and k.endswith("_TOAST")]
+    assert len(fixed) >= 20
+    longest = [rs._too_late_toast({"run_date": "2026-09-17", "lane": "spotlight", "replacement": 2},
+                                  datetime(2026, 9, 17, 19, 10, tzinfo=timezone.utc)),
+               rs._lane_closed_toast({"run_date": "2026-09-17"}),
+               rs.NEXT_REPLACED_ENDED_TOAST.format(reason="no other company qualified"),
+               rs.RESTORE_DONE_TOAST.format(who="BRK.B-ABCDE")]
+    assert all(len(t) <= 200 for t in fixed + longest), max(fixed + longest, key=len)
+
+
+# ── the per-post flow: a replaced post's stale buttons say so and never ask "why" ────────────────────────────────
+
+
+def _seed_replaced(svc) -> str:
+    pid = _seed_post(svc, platform="x", fmt="text", title=None)
+    row = _post(svc, pid)
+    row["status"] = "rejected"
+    row["metadata"] = {**row["metadata"], "review": {"decision": "rejected", "by": f"telegram:{OWNER}",
+                                                     "at": "2026-09-28T22:05:00+00:00",
+                                                     "replaced_by_run_id": RUN_B, "replacement": 1}}
+    return pid
+
+
+@pytest.mark.parametrize("verb", ["r", "a"])
+def test_nx_a_per_post_tap_on_a_replaced_post_says_replaced_and_offers_no_reasons(client, ledger, tg, verb):
+    pid = _seed_replaced(ledger)
+    _post_hook(client, _tap(pid, verb))
+    assert tg.of("answerCallbackQuery")[0]["text"] == "Replaced by the next company (18:05 ET)"
+    (edit,) = tg.of("editMessageText")
+    assert edit["text"].endswith("\n\nReplaced by the next company (18:05 ET)")
+    assert edit["reply_markup"] == {"inline_keyboard": []}                   # no reason keyboard
+    assert tg.of("sendMessage") == []
+
+
+def test_nx_a_replaced_marker_that_does_not_read_back_is_an_ordinary_rejection(client, ledger, tg):
+    pid = _seed_replaced(ledger)
+    _post(ledger, pid)["metadata"]["review"]["replaced_by_run_id"] = "not-a-uuid"
+    _post_hook(client, _tap(pid, "r"))
+    assert tg.of("answerCallbackQuery")[0]["text"].startswith("Already rejected")
+    (edit,) = tg.of("editMessageText")
+    assert [b["callback_data"][0] for row in edit["reply_markup"]["inline_keyboard"] for b in row] == list("tfpwo")
+
+
+# ── amendment A11: no `nx:` flow ever sends a fallback message carrying buttons ──────────────────────────────────
+
+#: The `nx:` flows (their bodies must never reach `_set_keyboard`, whose fallback SENDS a copy of the keyboard).
+_NX_FLOWS = ("_dispatch_next", "_next_ask", "_next_keep", "_next_yes", "_next_restore", "_next_refuse",
+             "_edit_keyboard_only", "_paced_markup_edits", "_close_sibling_next_rows")
+
+
+def _code_without_comments(source: str) -> str:
+    """The source with every comment and docstring/string token dropped, so prose naming a helper never counts."""
+    out = []
+    for tok in tokenize.generate_tokens(io.StringIO(source).readline):
+        if tok.type in (tokenize.COMMENT, tokenize.STRING):
+            continue
+        out.append(tok.string)
+    return " ".join(out)
+
+
+def _function_sources(path: str, names: tuple) -> Dict[str, str]:
+    """Each named module-level (async) function's own source, bounded by its AST node."""
+    source = open(path, encoding="utf-8").read()
+    tree = ast.parse(source)
+    lines = source.splitlines(keepends=True)
+    found = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
+            found[node.name] = "".join(lines[node.lineno - 1: node.end_lineno])
+    return found
+
+
+def test_nx_no_flow_reaches_set_keyboard_or_sends_a_message_with_buttons():
+    path = inspect.getsourcefile(rs)
+    flows = _function_sources(path, _NX_FLOWS)
+    assert set(flows) == set(_NX_FLOWS), sorted(set(_NX_FLOWS) - set(flows))
+    for name, body in flows.items():
+        code = _code_without_comments(body)
+        assert "_set_keyboard" not in code, name
+        assert "send_message" not in code, name             # a toast and edits only (T6 goes through _edit_or_reply)
+
+
+@pytest.mark.asyncio
+async def test_nx_the_switch_on_without_bundles_warns_once_per_process(ledger, tg, monkeypatch, caplog):
+    """DESIGN §1.1 gate 1: the button rides a bundle's decision message only — with MARKETING_REPLACE_ENABLED on and
+    MARKETING_REVIEW_BUNDLES off, ONE WARNING per process, never one per cycle; off, nothing."""
+    monkeypatch.setattr(rs, "_bundles_off_warned", False)
+    monkeypatch.setattr(settings, "MARKETING_REVIEW_BUNDLES", False)
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+    caplog.set_level(logging.WARNING)
+    await rs.review_cycle()
+    assert not any("needs MARKETING_REVIEW_BUNDLES" in r.getMessage() for r in caplog.records)
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", True)
+    await rs.review_cycle()
+    await rs.review_cycle()
+    assert sum("needs MARKETING_REVIEW_BUNDLES" in r.getMessage() for r in caplog.records) == 1

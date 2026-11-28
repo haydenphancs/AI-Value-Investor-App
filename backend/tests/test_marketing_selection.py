@@ -1965,3 +1965,76 @@ def test_week_cap_the_lead_is_exactly_the_main_chain_that_opens_on_the_theme(mon
     # the ET week's edges: a Sunday closes the week its Monday opened; the next Monday opens a new one
     sun, mon = date(2026, 11, 22), date(2026, 11, 23)
     assert sel.theme_week(sun) == (date(2026, 11, 16), sun) and sel.theme_week(mon) == (mon, date(2026, 11, 29))
+
+
+# ── Replacement runs (migration 215, owner decision 2026-11-27: "🔄 Next company") ────────────────────────────────────
+
+
+@pytest.mark.parametrize("value, on", [(True, True), (False, False), ("true", False), (1, False), (None, False)])
+def test_replacement_on_is_true_only_for_an_exact_true(monkeypatch, value, on):
+    from app.config import Settings
+
+    assert Settings.model_fields["MARKETING_REPLACE_ENABLED"].default is False          # off until switched on
+    monkeypatch.setattr(sel.settings, "MARKETING_REPLACE_ENABLED", value)
+    assert sel.replacement_on() is on
+
+
+def test_a_replacement_chain_is_money_map_then_skip_never_the_lesson():
+    from app.schemas import marketing as schemas
+
+    assert schemas.REPLACEABLE_SERIES == ("money_map",) and set(schemas.REPLACEABLE_SERIES) <= sel.SHIPPED_SERIES
+    on = frozenset({"money_map", "ceo_buys"})
+    assert sel.replacement_chain(frozenset({"A", "C", "F"}), on) == ("money_map", sel.SKIP)
+    assert sel.replacement_chain(frozenset({"F"}), frozenset({"money_map"})) == ("money_map", sel.SKIP)
+    for classes, series in ((frozenset({"A", "C"}), on), (frozenset({"A"}), on),
+                            (frozenset({"A", "C", "F"}), frozenset({"ceo_buys"})), (frozenset(), frozenset())):
+        assert sel.replacement_chain(classes, series) == (sel.SKIP,), (classes, series)
+    assert sel.LESSON not in sel.replacement_chain(frozenset({"A", "C", "F"}), on)
+
+
+@pytest.mark.parametrize("classes, series, expected", [
+    ("A,C,F", "ceo_buys,money_map", ("money_map", "skip")),
+    ("A,C,F", "ceo_buys,insider_buys", ("skip",)),
+    ("A,C", "money_map", ("skip",)),
+    ("A", "money_map", ("skip",)),                       # the lesson alone: MARKETING_NEWS_SERIES is not even read
+    ("A,C,F", "", ("skip",)),
+])
+def test_the_replacement_chain_now_reads_the_two_switches(monkeypatch, classes, series, expected):
+    monkeypatch.setattr(sel.settings, "MARKETING_CONTENT_CLASSES", classes)
+    monkeypatch.setattr(sel.settings, "MARKETING_NEWS_SERIES", series)
+    assert sel.replacement_chain_now() == expected
+
+
+# ── Replacement runs (migration 215), slice B3: the build's plan — Money Map or the skip, never the calendar ──────────
+
+
+def test_the_replacement_plan_reason_is_its_own_and_never_a_calendar_plan():
+    """`script_service._select_replacement` records plan `replacement`: no day's calendar ever produces it, on either
+    lane, so a replacement's trail can never be read as a day's own selection (and the other way round)."""
+    assert sel.REPLACEMENT_PLAN_REASON == "replacement"
+    start = date(2026, 1, 1)
+    reasons = set()
+    for i in range(366 * 2):
+        d = start + timedelta(days=i)
+        reasons.add(sel.plan_for(d, weekdays=range(7)).reason)
+        reasons.add(sel.spotlight_plan_for(d, weekdays=range(7)).reason)
+    assert sel.REPLACEMENT_PLAN_REASON not in reasons and len(reasons) > 5
+
+
+def test_a_replacement_chain_never_holds_a_calendar_series_whatever_the_switches_list():
+    """Every shipped series listed, every class on: the replacement chain is still exactly (money_map, SKIP) — the
+    day's calendar (the CEO roundup a Monday leads with, the 13F spotlight a Saturday's spotlight leads with, the
+    weekly theme, earnings) never reaches it, and neither does the lesson. Each replaceable series is a known, shipped
+    class-F series (the replacement posts a company FACT, never a filing about a person)."""
+    from app.schemas import marketing as schemas
+
+    every = frozenset(sel.SHIPPED_SERIES)
+    assert sel.replacement_chain(frozenset({"A", "C", "F"}), every) == ("money_map", sel.SKIP)
+    assert sel.replacement_chain(frozenset({"A", "B", "C", "F", "Z"}), every | {"bogus"}) == ("money_map", sel.SKIP)
+    for sid in schemas.REPLACEABLE_SERIES:
+        assert sid in sel.SERIES_BY_ID and sid in sel.SHIPPED_SERIES and sel.content_class_of(sid) == "F"
+    for d in (date(2026, 11, 16), date(2026, 11, 21), date(2026, 11, 18), date(2026, 11, 19)):
+        calendar = {s for s in sel.plan_for(d, weekdays=range(7)).chain} | {
+            s for s in sel.spotlight_plan_for(d, weekdays=range(7)).chain}
+        assert set(sel.replacement_chain(frozenset({"A", "C", "F"}), every)) & (calendar - {"money_map", sel.SKIP}) \
+            == set(), d

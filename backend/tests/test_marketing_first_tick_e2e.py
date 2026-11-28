@@ -54,6 +54,14 @@ on the spotlight's `feature` picture band AND its video cover, on a main-lane Mo
 the REAL server accepts exactly that, refuses a forged declaration 422, and create_posts notes it (the review line
 reads the note). With the switch off the day is the day of before, byte for byte — also when it goes off between the
 build and the read-back the render keeps (a real kill switch).
+
+The replacement days (migration 215, owner decision 2026-11-27 "🔄 Next company", the very last tests) wire the REAL
+review bot to the world's ledger (Telegram a MockTransport): a Money Map day reaches media_ready on the worker's real
+tick plan, the sweep offers its bundles with the button, the owner's taps go through the real webhook handler (the
+request is migration 215's function, modelled by tests/_replacement_rpc_fake.py over the world's own rows), and the
+NEXT tick of the UNCHANGED worker claims the replacement through the existing claim and builds a Money Map of another
+company under `<date>[/spotlight]/r1/` and `<date>[:spotlight]:r1:…`; with no other company it skips, the notice step
+sends ONE notice with the restore button, and the restore puts the original's posts back for review.
 """
 
 from __future__ import annotations
@@ -64,7 +72,7 @@ import importlib.util
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
@@ -2669,3 +2677,341 @@ def test_post_art_with_the_switch_off_the_day_is_the_day_of_before_byte_for_byte
     for p in killed.world.posts():
         assert p["metadata"]["art"]["drawn"] == {"picture": False, "cover": False}
         assert p["metadata"]["made_with_ai"] is (p["format"] == "video")
+
+
+# ══ Replacement runs (migration 215, owner decision 2026-11-27: "🔄 Next company") — the REAL worker, UNCHANGED ════════
+#
+# A Money Map day reaches media_ready on the worker's real tick plan (`_tick`); the review sweep (the REAL
+# review_service over the world's ledger, Telegram a MockTransport) offers its bundles with "🔄 Next company"; the
+# owner's two taps go through the REAL webhook handler, whose request runs migration 215's function (the
+# statement-by-statement model, tests/_replacement_rpc_fake.py, over the world's own rows). The NEXT tick of the
+# unchanged worker claims the planned replacement through the EXISTING claim (its INSERT meets 23505 on (day, lane, 0),
+# the newest run is read, the re-claim CAS takes it), and the REAL build makes ONLY a Money Map, of ANOTHER company: the
+# source models the adapter's ledger rule (the replaced record's key is in the build's exclude set → `already_posted`).
+# Its objects land under `<date>[/spotlight]/r1/`, its posts are keyed `<date>[:spotlight]:r1:<platform>:<format>`, the
+# run closes media_ready and the next sweep offers it as "… · replacement 1" with its "Replaces:" line. With no other
+# company the replacement skips (`nothing_qualified`), the notice step sends ONE N1 with "↩ Post COST after all", and
+# that tap puts the original's posts back to pending_review.
+#
+# Clocks: `_tick` freezes the worker's; the review bot's (`review_service._now`) and the function's (`rpc_clock`) are
+# set to the tap time. The server's own clock stays the wall clock, as in every `_tick` test — so the day's run gets its
+# `created_at` (the fake INSERT's stamp) put back to its tick's time: in production one clock stamps both rows, and
+# `get_run_by_date` reads a (day, lane)'s NEWEST run by created_at (review L7a).
+
+#: lane → (the day, the lane's tick hour): Thursday 2026-12-03 is an off-season main day whose chain reaches Money Map
+#: (as `_ArtDay`'s); Saturday 2026-11-21 is a spotlight day whose Money Map is the spotlight's (the main Saturday is the
+#: lesson alone, C0).
+_REPLACEMENT_DAYS = {"main": (date(2026, 12, 3), 16), "spotlight": (date(2026, 11, 21), 10)}
+_COST_REF = "news:money_map:COST:2025"
+
+
+class _MoneyMapPool:
+    """The adapter's public surface with a Money Map pool that models its LEDGER rule — a record whose ledger key is in
+    the build's `exclude` set is refused `already_posted` before it is offered (the real `_collect_money_map` refuses
+    an excluded `news:money_map:<SYM>:<FY>` before any read) — and every other series empty. `calls`: each (series,
+    the Money Map keys of its exclude set)."""
+
+    MarketingNewsUnavailable = _StubNews.MarketingNewsUnavailable
+
+    def __init__(self, *records: Any) -> None:
+        self.records = records
+        self.calls: List[tuple] = []
+        self.logo_calls: List[str] = []
+
+    async def candidates(self, series, *, run_date, exclude, limit, deadline, **_kw):
+        from types import SimpleNamespace
+
+        from app.services.marketing import company_news_rules as R
+
+        self.calls.append((series, sorted(r for r in exclude if str(r).startswith("news:money_map:"))))
+        if series != "money_map":
+            return SimpleNamespace(series=series, records=(), skip_reason=f"{series}_none_qualified", rejections={})
+        kept = tuple(r for r in self.records if R.ledger_key(r) not in exclude)
+        posted = len(self.records) - len(kept)
+        return SimpleNamespace(series=series, records=kept, skip_reason=None if kept else "money_map_all_posted",
+                               rejections={"already_posted": posted} if posted else {})
+
+    async def fetch_logo(self, symbol, *, max_bytes, timeout):
+        self.logo_calls.append(symbol)
+        return _logo_png(symbol), "image/png"
+
+    def money_map_excludes(self) -> List[List[str]]:
+        """The Money Map keys each Money Map ask excluded, in order."""
+        return [excluded for series, excluded in self.calls if series == "money_map"]
+
+
+def _decision_messages(tg) -> List[Dict[str, Any]]:
+    """Every bundle DECISION message sent (`test_marketing_review_bundles._decision_messages`: those carrying a `g:`
+    button), each with the message id Telegram answered."""
+    from test_marketing_review_bundles import _decision_messages as decisions
+
+    return decisions(tg)
+
+
+def _walmart_money_map():
+    """A second Money Map record the template accepts: Costco's figures under another company."""
+    import dataclasses
+
+    from app.services.marketing import company_news_rules as R
+
+    return dataclasses.replace(_costco_money_map(), company=R.CompanyRef(symbol="WMT", name="Walmart"))
+
+
+class _ReplacementDay:
+    """One lane's Money Map day in a template world whose review bot is wired (see the section note):
+    MARKETING_REPLACE_ENABLED and MARKETING_REVIEW_BUNDLES on, art off, the spotlight lane on only for its own day."""
+
+    def __init__(self, monkeypatch, lane: str, *records: Any) -> None:
+        import test_marketing_run_service as fake_db
+        from app.integrations import telegram
+        from app.schemas.marketing import POST_PLATFORMS
+        from app.services.marketing import review_service as rs
+        from app.services.marketing import telegram_pacing as tp
+        from test_marketing_review_bot import OWNER, SECRET, TOKEN
+        from test_marketing_review_bundles import IdTelegram, _col_nested
+
+        self.mp, self.rs, self.lane = monkeypatch, rs, lane
+        self.day, self.hour = _REPLACEMENT_DAYS[lane]
+        self.d = self.day.isoformat()
+        #: the lane's storage folder and post-key prefix of the day (the replacement's add `r1`)
+        self.folder = f"{self.d}/spotlight/" if lane == "spotlight" else f"{self.d}/"
+        self.key = f"{self.d}:spotlight:" if lane == "spotlight" else f"{self.d}:"
+        self.news = _MoneyMapPool(*records)
+        self.world = TemplateWorld(monkeypatch, news=self.news, run_date=self.day)
+        for name, value in (("MARKETING_REPLACE_ENABLED", True), ("MARKETING_REVIEW_BUNDLES", True),
+                            ("MARKETING_ART_ENABLED", False), ("MARKETING_SPOTLIGHT_ENABLED", lane == "spotlight"),
+                            ("MARKETING_TELEGRAM_BOT_TOKEN", TOKEN), ("MARKETING_TELEGRAM_REVIEW_CHAT_ID", OWNER),
+                            ("MARKETING_TELEGRAM_WEBHOOK_SECRET", SECRET), ("MARKETING_ENABLED", True),
+                            ("MARKETING_DRY_RUN", False)):
+            monkeypatch.setattr(settings, name, value)
+        # the worker on its real tick plan (`_tick`), never a forced run of one date
+        monkeypatch.delenv("MARKETING_FORCE")
+        monkeypatch.delenv("MARKETING_RUN_DATE")
+        self.tg = IdTelegram()
+        monkeypatch.setattr(telegram, "_client", httpx.AsyncClient(transport=httpx.MockTransport(self.tg.handler)))
+        monkeypatch.setattr(fake_db, "_col", _col_nested)        # the bundle fence filters a nested JSON path
+        monkeypatch.setattr(rs, "get_marketing_run_service", lambda: self.world.ledger)
+        monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: list(POST_PLATFORMS))
+        monkeypatch.setattr(rs, "SEND_SPACING_SECONDS", 0.0)
+        monkeypatch.setattr(rs, "_rate_limited_until", 0.0)
+        monkeypatch.setattr(tp, "_STATE", None)
+        self.wakes: List[int] = []
+        monkeypatch.setattr(rs.publisher_wake, "wake", lambda: self.wakes.append(1))
+
+    # ── the clock, the worker, the bot ──
+    def clock(self, hour: int, minute: int) -> datetime:
+        """The review bot's clock and the request function's, together (both read NOW), at hour:minute ET."""
+        when = datetime(self.day.year, self.day.month, self.day.day, hour, minute, tzinfo=_ET)
+        self.mp.setattr(self.rs, "_now", lambda: when)
+        self.world.fake.rpc_clock = when
+        return when
+
+    def tick(self, hour: int):
+        return _tick(self.world, self.mp, self.day, hour)
+
+    def sweep(self) -> Dict[str, int]:
+        import asyncio
+
+        self.tg.calls.clear()
+        self.tg.ids.clear()
+        return asyncio.run(self.rs.review_cycle())
+
+    def tap(self, run_id: str, letter: str, message: Dict[str, Any]) -> Dict[str, Any]:
+        """An owner's `nx:<letter>:<run_id>` tap on `message` as Telegram returns it, through the real handler."""
+        import asyncio
+
+        from test_marketing_review_bundles import _update
+
+        shown = {"message_id": message["message_id"], "text": message["text"],
+                 "reply_markup": message.get("reply_markup") or {"inline_keyboard": []}}
+        return asyncio.run(self.rs.handle_update(_update(run_id, f"nx:{letter}", message=shown)))
+
+    def message_id(self, payload: Dict[str, Any]) -> int:
+        return self.tg.ids[self.tg.calls.index(("sendMessage", payload))]
+
+    # ── the ledger ──
+    def run(self, n: int) -> Dict[str, Any]:
+        (row,) = [r for r in self.world.fake.tables[mrs.RUNS].rows if mrs.run_replacement(r) == n]
+        return row
+
+    def script(self, run_id: str) -> Dict[str, Any]:
+        (row,) = [s for s in self.world.fake.tables[mrs.SCRIPTS].rows if s["run_id"] == run_id]
+        return row
+
+    def posts(self, run_id: str) -> List[Dict[str, Any]]:
+        return [p for p in self.world.posts() if p["run_id"] == run_id]
+
+    def objects(self, run_id: str) -> Dict[str, Any]:
+        """{storage path: the bytes stored there} of every asset of `run_id`."""
+        return {a["storage_path"]: self.world.stored.get(a["storage_path"])
+                for a in self.world.assets() if a["run_id"] == run_id}
+
+    # ── the steps ──
+    def day_run(self) -> Dict[str, Any]:
+        """The lane's tick: the day's own run (replacement 0) to media_ready, Costco's Money Map — its created_at put
+        back to that tick's time (the section note)."""
+        code, claims, _bodies = self.tick(self.hour)
+        assert code == 0, claims
+        gen0 = self.run(0)
+        assert (mrs.run_lane(gen0), gen0["status"], gen0["template_id"]) == (self.lane, "media_ready", "money_map")
+        assert self.script(gen0["id"])["source_ref"] == _COST_REF
+        gen0["created_at"] = datetime(self.day.year, self.day.month, self.day.day, self.hour, 15,
+                                      tzinfo=_ET).astimezone(timezone.utc).isoformat()
+        return gen0
+
+    def next_company(self, gen0: Dict[str, Any]) -> Dict[str, Any]:
+        """At the next hour:00 ET the sweep offers the day's two decisions, each ending with the ONE 🔄 row; the owner
+        taps 🔄 on the POSTS decision, then ✅ Yes on the confirm rows it showed. Returns the planned replacement."""
+        self.clock(self.hour + 1, 0)
+        self.sweep()
+        decisions = _decision_messages(self.tg)
+        assert len(decisions) == 2, [m["text"].split("\n")[0] for m in decisions]
+        t1 = [{"text": "🔄 Next company", "callback_data": f"nx:a:{gen0['id']}"}]
+        assert all(m["reply_markup"]["inline_keyboard"][-1] == t1 for m in decisions)
+        posts = next(m for m in decisions if m["text"].startswith("DECISION · POSTS"))
+        assert self.tap(gen0["id"], "a", posts)["outcome"] == "confirm_asked"
+        (asked,) = self.tg.of("editMessageReplyMarkup")
+        assert asked["message_id"] == posts["message_id"]
+        assert self.tap(gen0["id"], "y", {**posts, "reply_markup": asked["reply_markup"]})["outcome"] == "requested"
+        assert "Next company requested 🔄" in [a.get("text") for a in self.tg.of("answerCallbackQuery")]
+        gen1 = self.run(1)
+        assert (gen1["status"], gen1["attempts"], gen1["replaces_run_id"], mrs.run_lane(gen1)) == (
+            "planned", 0, gen0["id"], self.lane)
+        rejected = self.posts(gen0["id"])
+        assert rejected and {p["status"] for p in rejected} == {"rejected"}
+        assert {p["metadata"]["review"]["replaced_by_run_id"] for p in rejected} == {gen1["id"]}
+        return gen1
+
+
+@pytest.mark.parametrize("lane", ["main", "spotlight"])
+def test_replacement_the_next_tick_claims_it_and_posts_the_next_company_under_r1(monkeypatch, lane):
+    """Owner decision 2026-11-27: the tap rejects the day's Money Map; the worker's NEXT tick — no worker change, no new
+    claim field — claims replacement 1, whose build asks ONLY Money Map with Costco's record kept out, so Walmart posts:
+    its objects under `<date>[/spotlight]/r1/` (the manifest the worker always sends, byte for byte, in the server's new
+    folder), its posts keyed `<date>[:spotlight]:r1:…`, held for review; the replaced run's objects untouched; the next
+    sweep offers it as "… · replacement 1" with "Replaces: COST (replaced HH:00 ET).", 🔄 again (1 of 2 used)."""
+    pytest.importorskip("PIL")
+    day = _ReplacementDay(monkeypatch, lane, _costco_money_map(), _walmart_money_map())
+    w, h = day.world, day.hour
+    gen0 = day.day_run()
+    assert day.news.money_map_excludes() == [[]]
+    before = day.objects(gen0["id"])
+    assert before and all(p.startswith(day.folder) and "/r1/" not in p for p in before)
+    posts0 = day.posts(gen0["id"])
+    assert posts0 and all(p["idempotency_key"] == f"{day.key}{p['platform']}:{p['format']}" for p in posts0)
+
+    gen1 = day.next_company(gen0)
+    asked = len(day.news.calls)
+
+    # ── the NEXT tick: the unchanged worker claims the replacement through the existing claim — no new row ──
+    code, claims, bodies = day.tick(h + 1)
+    assert code == 0
+    if lane == "main":
+        assert claims == ["runs/claim"] and [b["resume_only"] for b in bodies] == [False]
+    else:     # the main lane's hour has not come: yesterday's resume first (none), then the spotlight claim
+        assert claims == ["runs/claim", "lanes/spotlight/claim"] and [b["resume_only"] for b in bodies] == [True, False]
+    assert len(w.fake.tables[mrs.RUNS].rows) == 2
+    gen1 = day.run(1)
+    assert (gen1["status"], gen1["stage"], gen1["attempts"], gen1["template_id"]) == (
+        "media_ready", "assets_ready", 1, "money_map")
+    assert gen1["metadata"]["replacement_request"]["from_source_ref"] == _COST_REF
+    assert day.run(0)["status"] == "media_ready"          # the replaced run is left as it was (closed two days later)
+    # the build: ONLY Money Map, with Costco's record kept out → Walmart
+    assert [s for s, _x in day.news.calls[asked:]] == ["money_map"]
+    assert day.news.money_map_excludes()[-1] == [_COST_REF]
+    script1 = day.script(gen1["id"])
+    assert (script1["status"], script1["template_id"], script1["source_ref"], script1["replacement"]) == (
+        "accepted", "money_map", "news:money_map:WMT:2025", 1)
+    assert script1["output"]["series"] == "money_map"
+    # its objects: under the lane's `r1/` folder; the manifest is the one the worker always sends, byte for byte
+    after = day.objects(gen1["id"])
+    kinds = {a["kind"] for a in w.assets() if a["run_id"] == gen1["id"]}
+    assert kinds >= {"manifest", "audio", "video", "card"}
+    assert all(p.startswith(f"{day.folder}r1/") for p in after), sorted(after)
+    (m0,) = [p for p in before if "/manifest-" in p]
+    (m1,) = [p for p in after if "/manifest-" in p]
+    assert m1 == m0.replace(day.folder, f"{day.folder}r1/", 1) and after[m1] == before[m0]
+    assert not set(before) & set(after)
+    # its posts: `<date>[:spotlight]:r1:<platform>:<format>`, the same outlets, every one held for review
+    posts1 = day.posts(gen1["id"])
+    assert posts1 and all(p["idempotency_key"] == f"{day.key}r1:{p['platform']}:{p['format']}"
+                          and p["status"] == "pending_review" and p["metadata"]["series"] == "money_map"
+                          for p in posts1)
+    assert {(p["platform"], p["format"]) for p in posts1} == {(p["platform"], p["format"]) for p in posts0}
+    # the replaced run's objects, bytes and posts are untouched (its posts stay rejected by the request)
+    assert day.objects(gen0["id"]) == before
+    assert {p["status"] for p in day.posts(gen0["id"])} == {"rejected"}
+
+    # ── the next sweep offers the replacement as its own run ──
+    day.sweep()
+    decisions = _decision_messages(day.tg)
+    # (" · DRY RUN": the worker's posts are rehearsal rows — its MARKETING_DRY_RUN default — as the day's own were)
+    label = f"run {day.d}{' · spotlight' if lane == 'spotlight' else ''} · replacement 1 · DRY RUN"
+    assert sorted(m["text"].split("\n")[0] for m in decisions) == [f"DECISION · POSTS · {label}",
+                                                                   f"DECISION · VIDEO · {label}"]
+    for m in decisions:
+        assert f"Replaces: COST (replaced {h + 1}:00 ET)." in m["text"].split("\n")
+        assert m["reply_markup"]["inline_keyboard"][-1] == [{"text": "🔄 Next company",
+                                                             "callback_data": f"nx:a:{gen1['id']}"}]
+
+
+def test_replacement_with_no_other_company_skips_sends_one_notice_and_restores_the_original(monkeypatch):
+    """The pool holds only the replaced company: replacement 1 (claimed by the next tick) asks Money Map alone, the
+    source refuses Costco `already_posted`, and the build skips — never the lesson — so the unchanged worker closes the
+    run `skipped` / `nothing_qualified` with no post. The review sweep's notice step sends ONE N1 that rings and
+    carries "↩ Post COST after all"; it is stamped and never sent twice; the tap restores exactly the posts the request
+    rejected (back to pending_review, their review record gone, an audit record on each), wakes the publisher, and the
+    next sweep offers them again as fresh bundles — without 🔄 (the day was replaced once)."""
+    pytest.importorskip("PIL")
+    day = _ReplacementDay(monkeypatch, "main", _costco_money_map())
+    w = day.world
+    gen0 = day.day_run()
+    gen1 = day.next_company(gen0)
+
+    code, claims, _bodies = day.tick(day.hour + 1)
+    assert code == 0 and claims == ["runs/claim"]
+    gen1 = day.run(1)
+    assert (gen1["status"], gen1["attempts"], gen1["metadata"]["skip_reason"]) == ("skipped", 1, "nothing_qualified")
+    assert day.news.money_map_excludes()[-1] == [_COST_REF]
+    script1 = day.script(gen1["id"])
+    assert (script1["status"], script1["reject_reason"], script1["last_error"], script1["replacement"]) == (
+        "rejected", "nothing_qualified", "replacement 1: no other company qualified", 1)
+    assert script1["fact_sheet"]["selection"]["trail"][0] == {"series": "money_map", "outcome": "all_recent",
+                                                             "reason": "money_map_all_posted"}
+    assert day.posts(gen1["id"]) == []
+    assert all(p.startswith(f"{day.d}/r1/") for p in day.objects(gen1["id"]))
+
+    # ── the notice step, half an hour later: ONE N1, ringing, with the restore button ──
+    day.clock(day.hour + 1, 30)
+    counters = day.sweep()
+    (notice,) = day.tg.of("sendMessage")
+    assert notice["text"] == (f"🔄 No other Money Map company qualified for run {day.d} · replacement 1 — nothing "
+                              f"replaces COST, so tap ↩ below to post it after all, or this lane posts nothing more "
+                              f"today.")
+    assert notice["reply_markup"] == {"inline_keyboard": [[{"text": "↩ Post COST after all",
+                                                            "callback_data": f"nx:r:{gen0['id']}"}]]}
+    assert not notice.get("disable_notification")
+    assert counters.get("replacement_notices") == 1 and _decision_messages(day.tg) == []
+    reported = day.run(1)["metadata"]["replacement_reported"]
+    notice_id = day.message_id(notice)
+    assert (reported["notice"], reported["message_id"]) == ("N1", notice_id)
+    day.sweep()
+    assert day.tg.of("sendMessage") == []                       # stamped: never sent twice
+
+    # ── ↩ Post COST after all ──
+    out = day.tap(gen0["id"], "r", {**notice, "message_id": notice_id})
+    assert out["outcome"] == "restored" and day.wakes == [1]
+    assert [a.get("text") for a in day.tg.of("answerCallbackQuery")] == [
+        "Restored ✅ — COST's posts come back for review in a few minutes"]
+    restored = day.posts(gen0["id"])
+    assert restored and {p["status"] for p in restored} == {"pending_review"}
+    for p in restored:
+        assert "review" not in p["metadata"] and p["metadata"]["restored"]["by_run_id"] == gen1["id"]
+    assert day.run(0)["metadata"]["restored_from"]["run_id"] == gen1["id"]
+    assert day.posts(gen1["id"]) == [] and len(w.fake.tables[mrs.RUNS].rows) == 2
+    # the next sweep offers them again as fresh bundles, without 🔄
+    day.sweep()
+    again = _decision_messages(day.tg)
+    assert sorted(m["text"].split("\n")[0] for m in again) == [f"DECISION · POSTS · run {day.d} · DRY RUN",
+                                                               f"DECISION · VIDEO · run {day.d} · DRY RUN"]
+    assert all("nx:" not in json.dumps(m["reply_markup"]) and "🔄" not in m["text"] for m in again)

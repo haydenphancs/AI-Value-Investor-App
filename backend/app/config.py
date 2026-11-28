@@ -1689,6 +1689,14 @@ class Settings(BaseSettings):
     # answers `not_scheduled` before any read or write, and no other code path changes (the main lane is byte
     # for byte today's). Read at CALL time (selection.spotlight_on / spotlight_lane_open).
     MARKETING_SPOTLIGHT_ENABLED: bool = False
+    # Owner decision 2026-11-27 ("Full replacement … Money Map posts only … off until you switch it on"): the review bot's
+    # "🔄 Next company" button on a Money Map run's review bundles (needs MARKETING_REVIEW_BUNDLES), its tap, the claim of a
+    # replacement that has not started, and create_posts of a replacement run all read this NOW. Off: no button, every tap
+    # refused, a replacement not yet started is closed unrun (the owner is told once), one already rendering cannot post.
+    # Needs migration 215 (a replacement is its own run: UNIQUE (run_date, lane, replacement)). Web only: the worker
+    # never reads it. "↩ Post {SYM} after all" (restoring the original) does NOT read it, so the owner can still post
+    # the original after switching replacements off.
+    MARKETING_REPLACE_ENABLED: bool = False
     # The spotlight lane's run hour, MIRRORED here like MARKETING_RUN_HOUR_ET: the ET hour (0-23) from which the
     # worker's hourly tick may claim a spotlight run. It MUST equal the worker service's own
     # MARKETING_SPOTLIGHT_HOUR_ET (marketing/main.py; the defaults are pinned equal) — change both together.

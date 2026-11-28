@@ -68,8 +68,9 @@ def _meta(post: Dict[str, Any]) -> Dict[str, Any]:
 
 def _run_date(post: Dict[str, Any]) -> str:
     """The post's run as every feed line names it ("… · run <this>"): its key's run date — "?" for a key too short to
-    hold one — plus " · spotlight" for a SPOTLIGHT post (migration 210: `run_service.post_run_label`). A main post's
-    label is byte for byte the date it always was."""
+    hold one — plus " · spotlight" for a SPOTLIGHT post (migration 210: `run_service.post_run_label`) and
+    " · replacement <n>" for a post of one of the owner's replacement runs (migration 215, "🔄 Next company"). A main
+    day run's post's label is byte for byte the date it always was."""
     key = str(post.get("idempotency_key") or "")
     return post_run_label(post) if len(key) >= 10 else "?"
 

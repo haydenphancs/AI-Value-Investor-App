@@ -3397,8 +3397,10 @@ async def test_a_capped_measure_read_is_named_in_the_jobs_note(env, monkeypatch)
 
 
 def test_the_paged_reads_hold_every_post_the_schema_allows():
-    """MD-7 — the record of why the paged reads cannot drop the NEWEST posts. One run per (day, lane)
-    (`marketing_runs` UNIQUE (run_date, lane) since migration 210 — the main lane and the spotlight lane: RUN_LANES)
+    """MD-7 — the record of why the paged reads cannot drop the NEWEST posts. At most one PUBLISHING run per (day, lane)
+    (migration 210 — the main lane and the spotlight lane: RUN_LANES; since migration 215 a (day, lane) may hold the
+    owner's replacement runs too, but only one of them can publish — amendment A13, pinned by
+    `test_replacement_a13_one_publishing_run_per_day_and_lane_keeps_the_published_post_ceilings`)
     records at most one post per (platform, format) (`marketing_posts` UNIQUE (run_id, platform, format) over
     POST_FORMATS_BY_PLATFORM plus, since Batch 3, the extra videos of EXTRA_POST_FORMATS_BY_PLATFORM: 13 + 3 = 16
     pairs); a post goes out on its run day or the next (a week of slack covers a late reconcile). So a window of D
@@ -8718,17 +8720,24 @@ def test_the_template_refusal_hint_names_every_switch_create_posts_refuses_on():
     assert {"MARKETING_CONTENT_CLASSES", "MARKETING_NEWS_SERIES", "MARKETING_SPOTLIGHT_ENABLED"} <= set(switches), \
         switches
     lane_only = {s for s in switches if "SPOTLIGHT" in s}
+    # Migration 215 (owner decision 2026-11-27): create_posts also refuses a REPLACEMENT run on MARKETING_REPLACE_ENABLED.
+    # Like the spotlight's switch it gates only that kind of run, so a day's own run's text never names it (byte for
+    # byte); the replacement's own notice (the review bot's N4) is where it is named.
+    replacement_only = {s for s in switches if s == "MARKETING_REPLACE_ENABLED"}
+    assert replacement_only == {"MARKETING_REPLACE_ENABLED"}, switches
     msg = _health(_run("skipped", stage="assets_ready", metadata={"skip_reason": "template_refused"}))
     assert msg is not None
-    missing = [s for s in switches if s not in msg and s not in lane_only]
+    missing = [s for s in switches if s not in msg and s not in lane_only | replacement_only]
     assert not missing, (missing, msg)
-    assert not [s for s in lane_only if s in msg], msg                  # the main lane's text never names them
+    assert not [s for s in lane_only | replacement_only if s in msg], msg     # the main lane's text never names them
     assert ds._SKIP_HINTS["template_refused"] == _MAIN_TEMPLATE_REFUSED_HINT
     assert msg == f"⚠️ Marketing run Sat 2026-10-03 was SKIPPED (template_refused): {_MAIN_TEMPLATE_REFUSED_HINT}."
     spot = _spot_health(_spot("skipped", run_date="2026-11-17", stage="assets_ready",
                               metadata={"skip_reason": "template_refused"}))
     assert spot.startswith("⚠️ Marketing run Tue 2026-11-17 · spotlight was SKIPPED (template_refused): "), spot
-    assert not [s for s in switches if s not in spot], spot
+    # the spotlight's own run's text names every switch but the replacement's (byte for byte as before 215)
+    assert not [s for s in switches if s not in spot and s not in replacement_only], spot
+    assert not [s for s in replacement_only if s in spot], spot
     # a lane's own wording only ever re-words a hint `_SKIP_HINTS` has (`_skip_text` checks that set)
     assert set(ds._LANE_SKIP_HINTS) <= set(RUN_LANES)
     for words in ds._LANE_SKIP_HINTS.values():
@@ -10237,3 +10246,848 @@ async def test_art_gather_without_art_is_the_worked_example_and_a_failed_art_rea
         "worker ≈ $0.050 · Upload-Post $3.680 (plan fee · 3 uploads)",
         _usage_art("≥ $0.235 (art unreadable)", "≥ $0.186 (art unreadable)")]
     assert any("art_usage_between 503" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+
+
+# ══ Replacement runs (migration 215): run health, the final word and the weekly digest ═══════════════════════════
+# Owner decision 2026-11-27: "Full replacement: the next company's post (video + picture) comes to Telegram for review
+# about 20-75 min after the tap. Max 2 replacements a day. Money Map posts only." The nightly check and the final word
+# judge the NEWEST run of each (day, lane) — possibly one of those replacement runs. What must never regress:
+#   * a day's own run (replacement 0) is judged byte for byte as before, with or without the `replacement` key, and its
+#     judgement reads nothing new (no switch, no posts, no notice);
+#   * a replacement's ending reaches the owner as ONE message (DESIGN D10, amendment A10): no alert once its notice went
+#     out, while it still runs on its own day, or when its bundles speak — never "recovered at"; where its ending was
+#     told to nobody, THE SAME text the review bot's notice step builds (`review_service.replacement_notice`), stamped
+#     `replacement_reported` after the send, so the notice step never sends a second one;
+#   * H1 (no worker started it 75 min after the request) names the real cause — never "check the cron" for a closed
+#     lane or a switch that is off;
+#   * the weekly digest lists each replacement after its lane's day run, names its posts' runs, counts the posts the
+#     owner's tap rejected in their own bucket (never "no reason"), and a week without one is the digest of before.
+
+_R_DAY = "2026-10-03"                                      # SAT, a posting day
+_R_GEN0 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+_R_R1 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+_R_R2 = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+_R_REF = "news:money_map:COST:2025"
+_R_ASKED = _et(2026, 10, 3, 19, 0)                         # the owner's confirmed tap (and the row's created_at)
+_R_FINAL = _et(2026, 10, 4, 16, 0)                         # Sun: Saturday's final word
+_R_LABEL = "2026-10-03 · replacement 1"
+_R_H1 = (f"⚠️ Marketing run {_R_LABEL} was asked for at 19:00 ET and the worker has not started it — check the "
+         f"marketing-worker cron. Nothing replaces COST until it runs.")
+#: with the restore button the notice names the way out first (the wording review of 2026-11-27)
+_R_N1 = (f"🔄 No other Money Map company qualified for run {_R_LABEL} — nothing replaces COST, so tap ↩ below to post "
+         f"it after all, or this lane posts nothing more today.")
+_R_QUIET_TRAIL = {"skip_reason": "nothing_qualified", "series": "skip",
+                  "series_trail": [{"series": "money_map", "outcome": "replaced"},
+                                   {"series": "skip", "outcome": "no_candidates"}]}
+_R_RESTORE = {"inline_keyboard": [[{"text": "↩ Post COST after all", "callback_data": f"nx:r:{_R_GEN0}"}]]}
+
+
+def _rep(status: str, *, n: int = 1, asked: Optional[datetime] = _R_ASKED, ref: Optional[str] = _R_REF,
+         meta: Optional[Dict[str, Any]] = None, **kw: Any) -> Dict[str, Any]:
+    """One of the owner's replacement runs as the request function inserts it (then as the worker left it): its number,
+    the run it replaces and `metadata.replacement_request` {at, from_run_id, from_source_ref}. `asked=None` leaves the
+    request time out (and `created_at` with it); `ref=None` leaves the replaced key out."""
+    request: Dict[str, Any] = {"from_run_id": _R_GEN0}
+    if asked is not None:
+        request["at"] = asked.isoformat()
+        kw.setdefault("created_at", asked.isoformat())
+    if ref is not None:
+        request["from_source_ref"] = ref
+    kw.setdefault("id", _R_R1)
+    kw.setdefault("updated_at", (asked or _R_ASKED).isoformat())
+    return _run(status, run_date=kw.pop("run_date", _R_DAY), replacement=n, replaces_run_id=_R_GEN0,
+                metadata={"replacement_request": request, **(meta or {})}, **kw)
+
+
+def _unstarted(**kw: Any) -> Dict[str, Any]:
+    """A replacement no worker claimed yet: `planned`, attempts 0, stage `planned` — what the request function inserts."""
+    return _rep("planned", stage="planned", attempts=0, **kw)
+
+
+def _gen0(**kw: Any) -> Dict[str, Any]:
+    """The day run the owner replaced: media_ready Money Map, stamped `replaced_by` by the request function."""
+    kw.setdefault("id", _R_GEN0)
+    kw.setdefault("created_at", _et(2026, 10, 3, 16, 20).isoformat())
+    kw.setdefault("updated_at", _et(2026, 10, 3, 16, 40).isoformat())
+    meta = {"series": "money_map", "replaced_by": {"run_id": _R_R1, "replacement": 1, "at": _R_ASKED.isoformat()},
+            **kw.pop("metadata", {})}
+    return _run(kw.pop("status", "media_ready"), run_date=kw.pop("run_date", _R_DAY), template_id="money_map",
+                source_ref=_R_REF, metadata=meta, **kw)
+
+
+def _rv(run: Any, **kw: Any) -> "ds.HealthVerdict":
+    base: Dict[str, Any] = dict(run_date=SAT, posting_day=True, now=SAT_22, max_attempts=HEALTH_MAX_ATTEMPTS,
+                                stale_seconds=HEALTH_STALE_SECONDS)
+    base.update(kw)
+    return ds.health_verdict(run, **base)
+
+
+def _rf(run: Any, **kw: Any) -> "ds.HealthVerdict":
+    base: Dict[str, Any] = dict(run_date=SAT, posting_day=True, now=_R_FINAL, max_attempts=HEALTH_MAX_ATTEMPTS,
+                                stale_seconds=HEALTH_STALE_SECONDS, checked_at=SAT_22)
+    base.update(kw)
+    return ds.final_verdict(run, **base)
+
+
+def _reported(code: str = "N1") -> Dict[str, Any]:
+    return {"replacement_reported": {"at": _et(2026, 10, 3, 20, 30).isoformat(), "notice": code}}
+
+
+# ── the day run: byte for byte ────────────────────────────────────────────────
+
+
+_R_DAY_RUNS = [
+    _run("failed", stage="voiced", attempts=2, last_error="writer 429", updated_at=_iso_of(_et(2026, 10, 3, 21, 40))),
+    _run("failed", stage="voiced", attempts=6, last_error="boom"),
+    _run("skipped", stage="selected", metadata={"skip_reason": "writer_unavailable"}),
+    _run("in_progress", stage="voiced", attempts=3, updated_at=_iso_of(_et(2026, 10, 3, 20, 0))),
+    _run("planned", stage="planned", attempts=0),
+    _run("media_ready", timings={"rendered_cgroup_peak_mb": 3900.0}),
+    _run("bogus"),
+]
+
+
+@pytest.mark.parametrize("run", _R_DAY_RUNS, ids=lambda r: r["status"])
+def test_replacement_a_day_run_is_judged_byte_for_byte_with_or_without_the_key(run):
+    """Migration 215's column default is 0: a row read before it (no key) and after it (`replacement: 0`) are the same
+    day run — the same texts, no notice to stamp — and a notice or a switch handed to a day run changes nothing."""
+    stray = rs.ReplacementNotice("N1", "🔄 a stray notice", _R_RESTORE)
+    keyed = {**run, "replacement": 0}
+    night = _health(run)
+    assert _rv(keyed) == (night, None) and _rv(keyed, notice=stray, replace_on=False) == (night, None)
+    final = _final_word(run)
+    assert _rf(keyed) == (final, None) and _rf(keyed, notice=stray, replace_on=False) == (final, None)
+    for kw in ({}, {"posting_day": False}):
+        assert ds.evaluate_run_health(keyed, run_date=SAT, now=SAT_22, max_attempts=6, stale_seconds=2700,
+                                      **{"posting_day": True, **kw}) == _health(run, **kw)
+
+
+def test_replacement_the_lane_closed_text_is_byte_for_byte_after_its_split():
+    """`_LANE_CLOSED` is now built from `_LANE_CLOSED_WHY` (H1 reuses the why): its bytes are the ones of before."""
+    assert ds._LANE_CLOSED == (
+        "the spotlight lane is closed for that day now (MARKETING_SPOTLIGHT_ENABLED, MARKETING_SPOTLIGHT_WEEKDAYS, the "
+        "hour rule MARKETING_SPOTLIGHT_HOUR_ET + MARKETING_MAX_RUN_ATTEMPTS ≤ MARKETING_RUN_HOUR_ET, "
+        "MARKETING_CONTENT_CLASSES or MARKETING_NEWS_SERIES), so the worker cannot claim it again")
+
+
+# ── a replacement's own rules (pure) ──────────────────────────────────────────
+
+
+def test_replacement_a_reported_one_is_quiet_but_for_its_memory_line():
+    """Its notice went out (`replacement_reported`): nothing more about its ending, whatever its status — only a stage
+    memory peak, named by the replacement's label; the final word repeats no peak the nightly check carried."""
+    for status in ("skipped", "failed", "media_ready", "published"):
+        assert _rv(_rep(status, attempts=2, meta=_reported())) == (None, None)
+        assert _rf(_rep(status, attempts=2, meta=_reported())) == (None, None)
+    peaked = _rep("skipped", meta=_reported(), timings={"rendered_cgroup_peak_mb": 3900.0},
+                  updated_at=_iso_of(_et(2026, 10, 3, 21, 0)))
+    text = _rv(peaked).text
+    assert text.startswith("⚠️ Marketing worker memory: stage rendered peaked at 3,900 MB on Sat 2026-10-03 · "
+                           "replacement 1 (alert above 3,200 MB;"), text
+    assert _rf(peaked).text is None                                     # unchanged since the 22:00 check
+    assert _rf(peaked, checked_at=None).text == text                    # no check went out: the word carries it
+    after = {**peaked, "updated_at": _iso_of(_et(2026, 10, 3, 23, 0))}
+    assert _rf(after).text == text                                      # changed after the check
+    # the message that carried the notice carried the peak too (the run-health job's stamp says so): never again —
+    # that stamp's own write lands AFTER the check, so "changed after it" alone would repeat it (review 2026-11-27)
+    carried = {**after, "metadata": {**after["metadata"], "replacement_reported": {
+        **after["metadata"]["replacement_reported"], "memory": True}}}
+    assert _rf(carried) == (None, None) and _rv(carried) == (None, None)
+    for junk in ("true", 1, None, False):                               # only an exact True says it was carried
+        odd = {**after, "metadata": {**after["metadata"], "replacement_reported": {
+            **after["metadata"]["replacement_reported"], "memory": junk}}}
+        assert _rf(odd).text == text, junk
+
+
+def test_replacement_an_unstarted_one_is_quiet_for_75_minutes_then_h1():
+    run = _unstarted()
+    assert ds.REPLACEMENT_UNSTARTED_ALERT_SECONDS == 75 * 60
+    for seconds in (0, 60, 4_499):
+        assert _rv(run, now=_R_ASKED + timedelta(seconds=seconds)) == (None, None), seconds
+    for seconds in (4_500, 4_501, 3 * 3600):
+        assert _rv(run, now=_R_ASKED + timedelta(seconds=seconds)) == (_R_H1, None), seconds
+    # judged FIRST, whatever today's calendar says: the row itself proves the day posted (a weekday dropped since)
+    assert _rv(run, posting_day=False) == (_R_H1, None)
+    assert _rf(run, posting_day=False).text.endswith("before its day ended, so nothing replaced COST. Check the "
+                                                     "marketing-worker cron and its last logs.")
+    # within the clock skew a request "in the future" is still inside its grace; far beyond it, it is unreadable
+    assert _rv(_unstarted(asked=SAT_22 + timedelta(minutes=30))) == (None, None)
+    far = _rv(_unstarted(asked=SAT_22 + timedelta(hours=2))).text
+    assert far.startswith(f"⚠️ Marketing run {_R_LABEL} was asked for at ? ET and the worker has not started it"), far
+
+
+def test_replacement_h1_reads_the_request_time_then_created_at_and_alerts_on_neither():
+    no_request_time = _unstarted(asked=None, created_at=_R_ASKED.isoformat())
+    assert _rv(no_request_time) == (_R_H1, None)
+    nothing = _unstarted(asked=None)
+    assert "created_at" not in nothing
+    # no time at all: never quiet on a guess — even one minute after a tap that may not have happened that early
+    assert _rv(nothing, now=_et(2026, 10, 3, 19, 1)).text == _R_H1.replace("at 19:00 ET", "at ? ET")
+    assert _rv(_unstarted(asked=None, created_at="junk")).text == _R_H1.replace("at 19:00 ET", "at ? ET")
+
+
+@pytest.mark.parametrize("ref, who", [(_R_REF, "COST"), (None, "the earlier company"),
+                                      ("news:ceo_buys:COST:2026-10-01", "the earlier company"),
+                                      ("news:money_map:cost:2025", "the earlier company")])
+def test_replacement_h1_names_the_replaced_company_only_from_a_money_map_key(ref, who):
+    assert _rv(_unstarted(ref=ref)).text == _R_H1.replace("COST", who)
+
+
+def test_replacement_h1_names_the_real_cause_never_the_cron_for_a_switch_or_a_closed_lane():
+    run = _unstarted()
+    off = _rv(run, replace_on=False).text
+    assert off == (f"⚠️ Marketing run {_R_LABEL} was asked for at 19:00 ET and will not be started: replacing was "
+                   f"switched off (MARKETING_REPLACE_ENABLED). Nothing replaces COST.")
+    spot = _unstarted(lane="spotlight", asked=_et(2026, 10, 3, 14, 50))
+    closed = _rv(spot, lane="spotlight", lane_open=False).text
+    assert closed == (f"⚠️ Marketing run 2026-10-03 · spotlight · replacement 1 was asked for at 14:50 ET and will not "
+                      f"be started: {ds._LANE_CLOSED_WHY}. Nothing replaces COST.")
+    assert "cron" not in off and "cron" not in closed
+    # the spotlight lane open, its last start tick (15:15 with run hour 16) and the grace long gone
+    late = _rv(spot, lane="spotlight", replace_on=True).text
+    assert late == ("⚠️ Marketing run 2026-10-03 · spotlight · replacement 1 was asked for at 14:50 ET and the worker did "
+                    "not start it before this lane's last start (15:15 ET) — check the marketing-worker cron. Nothing "
+                    "replaces COST.")
+    # the main lane's last start is the day's last tick (23:15) + the 20-minute grace
+    assert _rv(run, now=_et(2026, 10, 3, 23, 34)) == (_R_H1, None)
+    assert _rv(run, now=_et(2026, 10, 3, 23, 35)).text == (
+        f"⚠️ Marketing run {_R_LABEL} was asked for at 19:00 ET and the worker did not start it before this lane's last "
+        f"start (23:15 ET) — check the marketing-worker cron. Nothing replaces COST.")
+    # the order: a closed lane before the switch, the switch before the start window
+    assert _rv(spot, lane="spotlight", lane_open=False, replace_on=False).text == closed
+    assert "switched off" in _rv(spot, lane="spotlight", replace_on=False).text
+
+
+def test_replacement_h1_with_an_unreadable_run_hour_names_no_tick(monkeypatch, caplog):
+    monkeypatch.setattr(settings, "MARKETING_RUN_HOUR_ET", "junk")
+    spot = _unstarted(lane="spotlight", asked=_et(2026, 10, 3, 9, 0))
+    text = _rv(spot, lane="spotlight", now=_et(2026, 10, 3, 11, 0)).text
+    assert text == ("⚠️ Marketing run 2026-10-03 · spotlight · replacement 1 was asked for at 09:00 ET and the worker "
+                    "did not start it before this lane's last start — check the marketing-worker cron. Nothing replaces "
+                    "COST.")
+
+
+def test_replacement_h1_on_the_next_day_says_its_day_ended_whatever_the_switches_say_now():
+    day_over = (f"⚠️ Marketing run {_R_LABEL} was asked for at 19:00 ET and no worker started it before its day ended, "
+                f"so nothing replaced COST. Check the marketing-worker cron and its last logs.")
+    for kw in ({}, {"replace_on": False}, {"lane_open": False}, {"checked_at": None}):
+        assert _rf(_unstarted(), **kw) == (day_over, None), kw
+    assert _rf(_unstarted(lane="spotlight"), lane="spotlight", lane_open=False).text == day_over.replace(
+        _R_LABEL, "2026-10-03 · spotlight · replacement 1")
+
+
+def test_replacement_media_ready_or_published_is_never_recovered_and_says_only_its_peak():
+    """Its bundles told him (B1): never "recovered at" — the final word after a check that saw it running included."""
+    for status in ("media_ready", "published"):
+        assert _rv(_rep(status)) == (None, None)
+        done = _rep(status, finished_at=_iso_of(_et(2026, 10, 3, 23, 5)), updated_at=_iso_of(_et(2026, 10, 3, 23, 5)))
+        assert _rf(done) == (None, None) and _rf(done, checked_at=None) == (None, None)
+        peaked = {**done, "timings": {"voiced_cgroup_peak_mb": 3500.0}}
+        assert "recovered" not in (_rf(peaked).text or "") and "· replacement 1" in _rf(peaked).text
+    # its bundles speak (the builder said so for a run that ended at the assets_ready checkpoint)
+    bundles = rs.ReplacementNotice(rs.NOTICE_BUNDLES)
+    ended = _rep("skipped", meta={"skip_reason": "template_refused"})
+    assert _rv(ended, notice=bundles) == (None, None) and _rf(ended, notice=bundles) == (None, None)
+
+
+@pytest.mark.parametrize("run", [
+    _rep("in_progress", stage="voiced", updated_at=_iso_of(_et(2026, 10, 3, 21, 50))),    # fresh
+    _rep("in_progress", stage="voiced", updated_at=_iso_of(_et(2026, 10, 3, 20, 0))),     # stale: the next tick retries
+    _rep("planned", stage="planned", attempts=1),
+    _rep("failed", stage="voiced", attempts=1, last_error="ffmpeg 137"),                  # below its own cap of 2
+], ids=["fresh", "stale", "planned_claimed", "failed_below_cap"])
+def test_replacement_still_running_on_its_own_day_is_quiet(run):
+    """The next tick may still finish it, and the notice step speaks when it ends — the nightly check says nothing
+    (never "the worker retries hourly … resumes it on tomorrow's early ticks": a replacement never runs on a later
+    day)."""
+    assert _rv(run) == (None, None)
+
+
+def test_replacement_failed_at_its_own_cap_with_no_notice_falls_back_loud_with_its_label_and_cap():
+    """Its own cap is REPLACEMENT_MAX_ATTEMPTS (2), not MARKETING_MAX_RUN_ATTEMPTS (6): failed at 2 is an ending. With
+    no notice (the builder could not be asked) it is today's alert under the replacement's label — never silence."""
+    run = _rep("failed", stage="voiced", attempts=2, last_error="ffmpeg exited 137")
+    assert _rv(run) == ("⚠️ Marketing run Sat 2026-10-03 · replacement 1 FAILED after stage voiced (the last completed "
+                        "stage): all 2 attempts used; this day's posts will not go out. Last error: ffmpeg exited 137. "
+                        "Check the marketing-worker logs.", None)
+    unreadable = _rep("failed", stage="voiced", attempts="x")
+    assert "attempt ? of 2" in _rv(unreadable).text
+    # a notice of the wrong type is no notice
+    assert _rv(run, notice={"code": "N4", "text": "forged"}) == _rv(run)
+
+
+def test_replacement_a_skip_with_no_notice_falls_back_to_the_skip_hint_under_its_label():
+    refused = _rep("skipped", stage="selected", meta={"skip_reason": "template_refused"})
+    assert _rv(refused).text == (f"⚠️ Marketing run Sat 2026-10-03 · replacement 1 was SKIPPED (template_refused): "
+                                 f"{_MAIN_TEMPLATE_REFUSED_HINT}.")
+    expired = _rep("skipped", stage="planned", attempts=0, meta={"skip_reason": "replacement_expired"})
+    assert _rv(expired).text == (f"⚠️ Marketing run Sat 2026-10-03 · replacement 1 was SKIPPED (replacement_expired): "
+                                 f"{ds._SKIP_HINTS['replacement_expired']}.")
+    assert "MARKETING_REPLACE_ENABLED" in ds._SKIP_HINTS["replacement_expired"]
+
+
+def test_replacement_an_unreadable_number_is_judged_by_the_day_rules_under_a_question_mark():
+    for bad in ("1", True, 3, -1, 1.0):
+        run = _rep("failed", stage="voiced", attempts=2, last_error="boom")
+        run["replacement"] = bad
+        text = _rv(run).text
+        # today's cap (6) — its own cap cannot be told without its number — and never quiet
+        assert text.startswith("⚠️ Marketing run Sat 2026-10-03 · replacement ? FAILED after stage voiced (the last "
+                               "completed stage): attempt 2 of 6; the worker retries hourly"), (bad, text)
+        assert _rf(run).text.startswith("⚠️ Marketing run Sat 2026-10-03 · replacement ? is still FAILED"), bad
+
+
+def test_replacement_an_ending_told_to_nobody_is_the_review_bots_own_notice_text(monkeypatch):
+    """Amendment A10: ONE builder. The verdict carries the notice (the caller stamps it after the send) and its text is
+    byte for byte the review bot's — N1, N2, N4 here, N3 and N5 below; its memory line rides along."""
+    quiet = _rep("skipped", stage="selected", meta=_R_QUIET_TRAIL)
+    n1 = rs.replacement_notice(quiet, now=SAT_22)
+    assert n1.code == "N1" and n1.text == _R_N1 and n1.keyboard == _R_RESTORE      # 22:00: before the 22:10 cutoff
+    assert _rv(quiet, notice=n1) == (_R_N1, n1)
+    peaked = {**quiet, "timings": {"rendered_cgroup_peak_mb": 3900.0}}
+    text = _rv(peaked, notice=n1).text
+    assert text.startswith(_R_N1 + "\n⚠️ Marketing worker memory: stage rendered peaked at 3,900 MB on Sat 2026-10-03 "
+                                   "· replacement 1")
+    outage = _rep("skipped", stage="selected", meta={
+        "skip_reason": "nothing_qualified", "series": "skip",
+        "series_trail": [{"series": "money_map", "outcome": "timeout"}, {"series": "skip", "outcome": "no_candidates"}]})
+    n2 = rs.replacement_notice(outage, now=SAT_22)
+    assert n2.code == "N2" and _rv(outage, notice=n2) == (n2.text, n2)
+    assert "its data source timed out" in n2.text
+    failed = _rep("failed", stage="voiced", attempts=2, last_error="ffmpeg exited 137")
+    n4 = rs.replacement_notice(failed, now=SAT_22)
+    assert n4.code == "N4" and _rv(failed, notice=n4) == (n4.text, n4)
+    # the final word sends it too while it is unreported (the nightly check never went out, or it ended after it)
+    assert _rf(quiet, notice=n1) == (n1.text, n1)
+    expired = _rep("skipped", stage="planned", attempts=0,
+                   meta={"skip_reason": "replacement_expired", "replacement_expired": {"why": "switched_off"}})
+    n3 = rs.replacement_notice(expired, now=SAT_22)
+    assert n3.code == "N3" and _rv(expired, notice=n3) == (n3.text, n3)
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: ["x"])
+    made = _rep("media_ready")
+    n5 = rs.replacement_notice(made, now=SAT_22, posts=[_post("tiktok", "pending_review", run_id=_R_R1)])
+    assert n5.code == "N5" and _rv(made, notice=n5) == (n5.text, n5)
+
+
+def test_replacement_the_final_word_on_a_replacement_left_unfinished_is_labelled_with_its_own_cap():
+    stale = _rep("in_progress", stage="voiced", updated_at=_iso_of(_et(2026, 10, 3, 21, 0)))
+    text = _rf(stale).text
+    assert text.startswith("⚠️ Marketing run Sat 2026-10-03 · replacement 1 never finished — the day is lost: "
+                           "in_progress after stage voiced (the last completed stage), attempt 1 of 2, untouched since "
+                           "10-03 21:00 ET."), text
+    failed = _rep("failed", stage="voiced", attempts=1, updated_at=_iso_of(_et(2026, 10, 3, 21, 0)))
+    assert _rf(failed).text.startswith("⚠️ Marketing run Sat 2026-10-03 · replacement 1 is still FAILED after stage "
+                                       "voiced (the last completed stage), attempt 1 of 2: no retry happened")
+
+
+def test_replacement_a_replacement_row_is_its_own_posting_day_evidence():
+    """Review L7(d): the final word reads the NEWEST row, which may be a replacement still `planned` with nothing
+    selected — it proves the day posted (its replaced run was media_ready). An unreadable number proves nothing."""
+    planned = _unstarted()
+    assert ds.ran_as_posting_day(planned) is True
+    assert ds.ran_as_posting_day({**planned, "replacement": 0}) is False         # a day run that never got going
+    assert ds.ran_as_posting_day({**planned, "replacement": "1"}) is False        # unreadable: its own work decides
+    assert ds.ran_as_posting_day({**planned, "replacement": 2}) is True
+    assert ds.judged_posting_day(FRI, nightly=ds.NIGHTLY_NEVER, run=planned) is True
+
+
+def test_replacement_every_server_written_skip_reason_has_a_hint_and_a_row_word():
+    assert "replacement_expired" in ds._SKIP_HINTS
+    assert ds._SKIP_ROW_WORDS["replacement_expired"] == "not run" and ds._SKIP_ROW_WORDS["replaced"] == "replaced"
+    assert ds._SKIP_HINTS["replacement_expired"].endswith("— nothing replaced the rejected post")
+
+
+def test_replacement_a13_one_publishing_run_per_day_and_lane_keeps_the_published_post_ceilings():
+    """Amendment A13: the paged published-post reads (MEASURE_SCAN_PAGES, MEASURED_POST_PAGES) are sized for at most ONE
+    PUBLISHING run per (day, lane). A replacement keeps that: the request refuses a run with a post in any status that
+    can reach a platform and rejects every pending one; the restore refuses a replacement that made any post."""
+    from app.schemas.marketing import POST_STATUSES, REPLACEMENT_BLOCKING_POST_STATUSES, RESTORE_OUTCOMES
+
+    assert set(REPLACEMENT_BLOCKING_POST_STATUSES) == set(POST_STATUSES) - {"pending_review", "rejected", "skipped"}
+    assert "replacement_has_posts" in RESTORE_OUTCOMES
+    import inspect
+    for module, name in ((ms, "MEASURE_SCAN_PAGES"), (ds, "MEASURED_POST_PAGES")):
+        lines = inspect.getsource(module).splitlines()
+        i = next(k for k, line in enumerate(lines) if line.startswith(f"{name} = "))
+        comment = " ".join(line.lstrip("#: ") for line in lines[max(0, i - 14):i] if line.startswith("#"))
+        assert "at most one PUBLISHING run per (day, lane)" in comment, (name, comment)
+
+
+# ── the nightly check and the final word (I/O): one text, one stamp ───────────
+
+
+def _r_seed(svc, *runs: Dict[str, Any]) -> None:
+    svc.fake.tables[mrs.RUNS].rows.extend(runs)
+
+
+def _r_row(svc, run_id: str) -> Dict[str, Any]:
+    return next(r for r in svc.fake.tables[mrs.RUNS].rows if r["id"] == run_id)
+
+
+def _r_rerun(digest_jobs: DigestJobs) -> None:
+    """Judge today again (as a new process would): the nightly check's day record and this process's memo cleared."""
+    digest_jobs.rows.pop(ds.JOB_HEALTH, None)
+    ms._DAY_JOBS.clear()
+
+
+async def _r_notice_step(svc, at: datetime, monkeypatch) -> Dict[str, int]:
+    """The review bot's notice step, at `at` (the sweep's own clock)."""
+    monkeypatch.setattr(rs, "_now", lambda: at)
+    counters: Dict[str, int] = {"failed": 0}
+    await rs._replacement_notices(svc, OWNER, rs._Pacer(), counters)
+    return counters
+
+
+@pytest.mark.asyncio
+async def test_replacement_the_nightly_check_sends_the_notice_once_and_the_notice_step_never_repeats_it(
+        bot, digest_jobs, digest_ledger, monkeypatch, platforms_forbidden):
+    _r_seed(digest_ledger, _gen0(), _rep("skipped", stage="selected", meta=_R_QUIET_TRAIL))
+    assert await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)) == {"checked": 1, "sent": 1, "failed": 0,
+                                                                     "rate_limited": 0}
+    (msg,) = _sends(bot)
+    assert msg["text"] == _R_N1 and msg["reply_markup"] == _R_RESTORE and "parse_mode" not in msg
+    stamp = _r_row(digest_ledger, _R_R1)["metadata"]["replacement_reported"]
+    assert stamp["notice"] == "N1" and "at" in stamp
+    assert _r_row(digest_ledger, _R_GEN0)["metadata"].get("replacement_reported") is None   # only the replacement
+    counters = await _r_notice_step(digest_ledger, _et(2026, 10, 3, 22, 5), monkeypatch)
+    assert counters == {"failed": 0} and len(_sends(bot)) == 1                              # never a second message
+    assert await _health_at(digest_jobs, _et(2026, 10, 4, 16, 0)) == {"checked": 1, "sent": 0, "failed": 0,
+                                                                     "rate_limited": 0}  # nor in the final word
+    assert len(_sends(bot)) == 1 and platforms_forbidden == []
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_memory_peak_the_nightly_notice_carried_is_never_repeated_by_the_final_word(
+        bot, digest_jobs, digest_ledger, monkeypatch):
+    """Review 2026-11-27: the 22:00 check sends N1 WITH the memory line and stamps `replacement_reported` — a write that
+    moves `updated_at` past the check's claim. The final word must not read that as a change and send the same peak
+    again: the stamp records `memory: true`, and the next day says nothing."""
+    _r_seed(digest_ledger, _gen0(), _rep("skipped", stage="selected", meta=_R_QUIET_TRAIL,
+                                         timings={"rendered_cgroup_peak_mb": 3900.0}))
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)))["sent"] == 1
+    (msg,) = _sends(bot)
+    assert msg["text"].startswith(_R_N1 + "\n⚠️ Marketing worker memory: stage rendered peaked at 3,900 MB")
+    row = _r_row(digest_ledger, _R_R1)
+    assert row["metadata"]["replacement_reported"]["memory"] is True
+    assert mrs._parse_ts(row["updated_at"]) >= _et(2026, 10, 3, 22, 0)          # the stamp moved updated_at
+    assert (await _health_at(digest_jobs, _R_FINAL))["sent"] == 0 and len(_sends(bot)) == 1
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_notice_sent_without_a_peak_records_no_memory(bot, digest_jobs, digest_ledger,
+                                                                          monkeypatch):
+    _r_seed(digest_ledger, _gen0(), _rep("skipped", stage="selected", meta=_R_QUIET_TRAIL))
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)))["sent"] == 1
+    assert "memory" not in _r_row(digest_ledger, _R_R1)["metadata"]["replacement_reported"]
+    # the review bot's own notice never carries a peak, so it never records one either
+    _r_seed(digest_ledger, _rep("skipped", id=_R_R2, stage="selected", meta=_R_QUIET_TRAIL,
+                                timings={"rendered_cgroup_peak_mb": 3900.0}))
+    await _r_notice_step(digest_ledger, _et(2026, 10, 3, 22, 5), monkeypatch)
+    assert "memory" not in _r_row(digest_ledger, _R_R2)["metadata"]["replacement_reported"]
+
+
+def test_replacement_carried_memory_is_exactly_a_text_longer_than_its_notice():
+    n1 = rs.ReplacementNotice("N1", _R_N1, _R_RESTORE)
+    assert ds._carried_memory(ds.HealthVerdict(_R_N1 + "\n⚠️ Marketing worker memory: …", n1)) is True
+    assert ds._carried_memory(ds.HealthVerdict(_R_N1, n1)) is False
+    assert ds._carried_memory(ds.HealthVerdict(None, n1)) is False
+    assert ds._carried_memory(ds.HealthVerdict("x", None)) is False
+    assert ds._carried_memory(ds.HealthVerdict("x", rs.ReplacementNotice("N1", None))) is False
+
+
+@pytest.mark.asyncio
+async def test_replacement_once_the_notice_step_told_him_the_nightly_check_stays_quiet(bot, digest_jobs, digest_ledger,
+                                                                                      monkeypatch):
+    _r_seed(digest_ledger, _gen0(), _rep("skipped", stage="selected", meta=_R_QUIET_TRAIL))
+    counters = await _r_notice_step(digest_ledger, _et(2026, 10, 3, 21, 0), monkeypatch)
+    assert counters["replacement_notices"] == 1 and [m["text"] for m in _sends(bot)] == [_R_N1]
+    assert await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)) == {"checked": 1, "sent": 0, "failed": 0,
+                                                                     "rate_limited": 0}
+    assert digest_jobs.finishes[-1] == (ds.JOB_HEALTH, True, 0, None) and len(_sends(bot)) == 1
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_failed_send_stamps_nothing_and_the_retry_sends_and_stamps(bot, digest_jobs, digest_ledger):
+    _r_seed(digest_ledger, _gen0(), _rep("skipped", stage="selected", meta=_R_QUIET_TRAIL))
+    bot.script["sendMessage"] = [_TG_500]
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)))["sent"] == 0
+    assert "replacement_reported" not in _r_row(digest_ledger, _R_R1)["metadata"]
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 1)))["sent"] == 1
+    assert _r_row(digest_ledger, _R_R1)["metadata"]["replacement_reported"]["notice"] == "N1"
+    bot.script["sendMessage"] = [_TG_429]
+    _r_row(digest_ledger, _R_R1)["metadata"].pop("replacement_reported")
+    _r_rerun(digest_jobs)
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 30)))["rate_limited"] == 1
+    assert "replacement_reported" not in _r_row(digest_ledger, _R_R1)["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_lost_stamp_is_a_warning_and_the_notice_step_sends_it_again(bot, digest_jobs, digest_ledger,
+                                                                                       monkeypatch, caplog):
+    """At least once (the bundles' own rule): the message went out, the stamp's CAS missed — the job is done (one
+    message), and the notice step, finding the ending still unreported, sends its notice next cycle."""
+    caplog.set_level(logging.WARNING)
+    _r_seed(digest_ledger, _gen0(), _rep("skipped", stage="selected", meta=_R_QUIET_TRAIL))
+    real = digest_ledger.update_run
+
+    async def lost(run_id, **kw):
+        if "replacement_reported" in (kw.get("metadata") or {}):
+            return None
+        return await real(run_id, **kw)
+
+    monkeypatch.setattr(digest_ledger, "update_run", lost)
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)))["sent"] == 1
+    assert any("reported stamp" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+    monkeypatch.setattr(digest_ledger, "update_run", real)
+    counters = await _r_notice_step(digest_ledger, _et(2026, 10, 3, 22, 5), monkeypatch)
+    assert counters["replacement_notices"] == 1 and [m["text"] for m in _sends(bot)] == [_R_N1, _R_N1]
+
+
+@pytest.mark.asyncio
+async def test_replacement_h1_through_the_nightly_check_names_the_switch_and_stamps_nothing(bot, digest_jobs,
+                                                                                          digest_ledger, monkeypatch):
+    _r_seed(digest_ledger, _gen0(), _unstarted())
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", True)
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)))["sent"] == 1
+    (msg,) = _sends(bot)
+    assert msg["text"] == _R_H1 and "reply_markup" not in msg          # no restore while it may still run
+    assert "replacement_reported" not in _r_row(digest_ledger, _R_R1)["metadata"]   # H1 is not its ending
+    monkeypatch.setattr(settings, "MARKETING_REPLACE_ENABLED", False)
+    _r_rerun(digest_jobs)
+    await _health_at(digest_jobs, _et(2026, 10, 3, 22, 30))
+    assert _sends(bot)[1]["text"] == (f"⚠️ Marketing run {_R_LABEL} was asked for at 19:00 ET and will not be started: "
+                                      f"replacing was switched off (MARKETING_REPLACE_ENABLED). Nothing replaces COST.")
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_day_runs_health_reads_nothing_new(bot, digest_jobs, digest_ledger, monkeypatch):
+    """Gen 0 byte for byte, and no new read: the switch, the posts and the notice builder are never asked."""
+    def boom(*_a, **_k):
+        raise AssertionError("a day run's health read a replacement input")
+
+    async def aboom(*_a, **_k):
+        raise AssertionError("a day run's health read the run's posts")
+
+    monkeypatch.setattr(selection, "replacement_on", boom)
+    monkeypatch.setattr(rs, "replacement_notice", boom)
+    monkeypatch.setattr(rs, "_run_posts", aboom)
+    _seed_health_run(digest_ledger, _run("failed", run_date=_R_DAY, stage="voiced", attempts=6, last_error="boom",
+                                         replacement=0))
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)))["sent"] == 1
+    (msg,) = _sends(bot)
+    assert msg["text"] == ("⚠️ Marketing run Sat 2026-10-03 FAILED after stage voiced (the last completed stage): all 6 "
+                           "attempts used; this day's posts will not go out. Last error: boom. Check the "
+                           "marketing-worker logs.")
+    assert "reply_markup" not in msg
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_media_ready_one_with_no_reviewable_post_gets_n5_and_its_bundles_quiet(
+        bot, digest_jobs, digest_ledger, monkeypatch):
+    monkeypatch.setattr(rs.outlets, "enabled_platforms", lambda: ["x"])
+    _r_seed(digest_ledger, _gen0(), _rep("media_ready"))
+    digest_ledger.fake.tables[mrs.POSTS].rows.append(_post("tiktok", "pending_review", run_id=_R_R1,
+                                                           idempotency_key=f"{_R_DAY}:r1:tiktok:video"))
+    await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0))
+    (msg,) = _sends(bot)
+    assert msg["text"] == (f"⚠️ The next-company run {_R_LABEL} finished but made no post to review. Nothing replaces "
+                           f"COST.")
+    assert "reply_markup" not in msg                                     # it recorded a post: no restore
+    assert _r_row(digest_ledger, _R_R1)["metadata"]["replacement_reported"]["notice"] == "N5"
+    # the same run with a post its bundles carry: quiet, and the stamp is the review bot's to write
+    digest_ledger.fake.tables[mrs.POSTS].rows.append(_post("x", "pending_review", run_id=_R_R1,
+                                                           idempotency_key=f"{_R_DAY}:r1:x:text"))
+    _r_row(digest_ledger, _R_R1)["metadata"].pop("replacement_reported")
+    _r_rerun(digest_jobs)
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 30)))["sent"] == 0
+    assert "replacement_reported" not in _r_row(digest_ledger, _R_R1)["metadata"]
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_failed_posts_read_never_raises_a_false_alarm_nor_silences_an_ending(
+        bot, digest_jobs, digest_ledger, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+
+    async def down(*_a, **_k):
+        raise mrs.MarketingRunError("posts 503")
+
+    monkeypatch.setattr(rs, "_run_posts", down)
+    _r_seed(digest_ledger, _gen0(), _rep("media_ready"))
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)))["sent"] == 0   # media_ready: no false alarm
+    assert any("could not be built" in r.getMessage() and "posts 503" in r.getMessage() for r in caplog.records)
+    _r_row(digest_ledger, _R_R1).update(status="skipped", metadata={
+        **_r_row(digest_ledger, _R_R1)["metadata"], "skip_reason": "template_refused"})   # ended at assets_ready
+    _r_rerun(digest_jobs)
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 30)))["sent"] == 1
+    (msg,) = _sends(bot)
+    assert msg["text"].startswith("⚠️ Marketing run Sat 2026-10-03 · replacement 1 was SKIPPED (template_refused): ")
+    assert "replacement_reported" not in _r_row(digest_ledger, _R_R1)["metadata"]   # the notice step still owes it
+
+
+@pytest.mark.asyncio
+async def test_replacement_both_lanes_one_message_both_stamps_one_restore_row(bot, digest_jobs, digest_ledger,
+                                                                             monkeypatch):
+    """Main first, then the spotlight lane, in ONE message; each lane's notice stamped; the keyboard holds BOTH
+    restores, each naming its own replaced run — the restore stays open to the end of the run's ET day, never only to
+    the lane's tap cutoff (15:10 for the spotlight, long gone at 22:00; review 2026-11-27)."""
+    _spot_lane(monkeypatch)
+    spot_gen0 = _gen0(id=_R_R2, lane="spotlight", created_at=_et(2026, 10, 3, 10, 20).isoformat())
+    spot_r1 = _rep("skipped", id="dddddddd-dddd-4ddd-8ddd-dddddddddddd", lane="spotlight", stage="selected",
+                   asked=_et(2026, 10, 3, 14, 0), meta=_R_QUIET_TRAIL)
+    spot_r1["replaces_run_id"] = _R_R2
+    _r_seed(digest_ledger, _gen0(), _rep("skipped", stage="selected", meta=_R_QUIET_TRAIL), spot_gen0, spot_r1)
+    await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0))
+    (msg,) = _sends(bot)
+    spot_n1 = _R_N1.replace(_R_LABEL, "2026-10-03 · spotlight · replacement 1")
+    assert msg["text"] == f"{_R_N1}\n\n{spot_n1}"
+    assert msg["reply_markup"] == {"inline_keyboard": _R_RESTORE["inline_keyboard"] + [
+        [{"text": "↩ Post COST after all", "callback_data": f"nx:r:{_R_R2}"}]]}
+    for run_id in (_R_R1, spot_r1["id"]):
+        assert _r_row(digest_ledger, run_id)["metadata"]["replacement_reported"]["notice"] == "N1"
+
+
+@pytest.mark.asyncio
+async def test_replacement_the_final_word_tells_an_ending_nobody_told_and_never_twice(bot, digest_jobs, digest_ledger):
+    _r_seed(digest_ledger, _gen0(), _rep("failed", stage="voiced", attempts=2, last_error="ffmpeg exited 137",
+                                         updated_at=_iso_of(_et(2026, 10, 3, 23, 30))))
+    assert (await _health_at(digest_jobs, _R_FINAL))["sent"] == 1          # no nightly check went out that day
+    (msg,) = _sends(bot)
+    assert msg["text"] == (f"⚠️ The next-company run {_R_LABEL} FAILED after stage voiced (all 2 attempts used): ffmpeg "
+                           f"exited 137. Nothing replaces COST. Check the marketing-worker logs.")
+    assert "reply_markup" not in msg                                        # Sunday: the restore closed with its day
+    assert _r_row(digest_ledger, _R_R1)["metadata"]["replacement_reported"]["notice"] == "N4"
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_final_word_that_did_not_go_out_stamps_nothing(bot, digest_jobs, digest_ledger,
+                                                                          monkeypatch):
+    _r_seed(digest_ledger, _gen0(), _rep("failed", stage="voiced", attempts=2, last_error="ffmpeg exited 137",
+                                         updated_at=_iso_of(_et(2026, 10, 3, 23, 30))))
+    for failure in (_TG_500, _TG_429):
+        bot.script["sendMessage"] = [failure]
+        assert (await _health_at(digest_jobs, _R_FINAL))["sent"] == 0
+        assert "replacement_reported" not in _r_row(digest_ledger, _R_R1)["metadata"]
+        digest_jobs.rows.pop(ds.JOB_HEALTH_FINAL, None)
+        ms._DAY_JOBS.clear()
+        monkeypatch.setattr(rs, "_rate_limited_until", 0.0)       # the 429's shared back-off, lifted
+
+
+@pytest.mark.asyncio
+async def test_replacement_media_ready_after_the_check_gets_no_recovered_word(bot, digest_jobs, digest_ledger):
+    _r_seed(digest_ledger, _gen0(), _rep("in_progress", stage="voiced", updated_at=_iso_of(_et(2026, 10, 3, 21, 55))))
+    assert (await _health_at(digest_jobs, _et(2026, 10, 3, 22, 0)))["sent"] == 0     # still running on its day
+    _r_row(digest_ledger, _R_R1).update(status="media_ready", stage="assets_ready",
+                                        finished_at=_iso_of(_et(2026, 10, 3, 22, 40)),
+                                        updated_at=_iso_of(_et(2026, 10, 3, 22, 40)))
+    _r_row(digest_ledger, _R_R1)["metadata"].update(_reported(rs.NOTICE_BUNDLES))
+    assert (await _health_at(digest_jobs, _R_FINAL))["sent"] == 0 and _sends(bot) == []
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_planned_replacement_owes_the_final_word_after_the_weekday_was_dropped(
+        bot, digest_jobs, digest_ledger, monkeypatch):
+    """Review L7(d) end to end: Saturday dropped from MARKETING_POST_WEEKDAYS overnight; Saturday's newest main row is a
+    replacement still planned (nothing selected) — its own row owes the final word (before the fix: no word)."""
+    _r_seed(digest_ledger, _gen0(), _unstarted())
+    _cadence(monkeypatch, "mon,tue,thu")
+    assert await ds._final_owed(_R_FINAL) is True
+    await _health_at(digest_jobs, _R_FINAL)
+    assert [m["text"] for m in _sends(bot)] == [
+        f"⚠️ Marketing run {_R_LABEL} was asked for at 19:00 ET and no worker started it before its day ended, so "
+        f"nothing replaced COST. Check the marketing-worker cron and its last logs."]
+
+
+# ── the weekly digest ─────────────────────────────────────────────────────────
+
+
+def test_replacement_the_runs_section_lists_each_replacement_after_its_lanes_day_run():
+    sat = date(2026, 10, 3)
+    closed = {"series": "money_map", "closed": {"reason": "replaced"}}
+    runs = [
+        _rep("media_ready", meta={"series": "money_map"}),                          # inserted before its day run
+        _run("skipped", run_date=_R_DAY, metadata=closed, replacement=0),
+        _spot("skipped", run_date=_R_DAY, metadata={**closed}),
+        _rep("skipped", id=_R_R2, n=2, lane="spotlight", stage="planned", attempts=0,
+             meta={"skip_reason": "replacement_expired"}),
+        _rep("skipped", lane="spotlight", stage="selected", meta=_R_QUIET_TRAIL),
+        _rep("skipped", id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", n=2, stage="voiced", attempts=1,
+             meta={"skip_reason": "replacement_expired", "series": "money_map"}),
+    ]
+    junk = _rep("failed", id="ffffffff-ffff-4fff-8fff-ffffffffffff", stage="voiced")
+    junk["replacement"] = "9"
+    rows, _peak = ds._run_rows(runs + [junk], sat, sat)
+    assert [text for _d, text in rows] == [
+        "skipped — replaced · Money Map",
+        "replacement 1: media_ready · Money Map",
+        "replacement 2: skipped — not finished · Money Map",
+        "replacement ?: failed after voiced",
+        "spotlight: skipped — replaced · Money Map",
+        "spotlight: replacement 1: skipped — nothing qualified · nothing posted (fell back from Money Map: only the "
+        "company being replaced was left)",
+        "spotlight: replacement 2: skipped — not run",
+    ]
+    # a week with only day runs lists exactly what it did
+    plain, _ = ds._run_rows([_run("published", run_date=_R_DAY)], sat, sat)
+    assert plain == [(sat, "published")]
+
+
+def test_replacement_the_memory_peak_names_a_replacement_run():
+    runs = [_run("published", run_date="2026-09-29", timings={"voice_cgroup_peak_mb": 2_000}),
+            _rep("media_ready", run_date="2026-09-29", timings={"voice_cgroup_peak_mb": 5_000})]
+    s = _summary([], runs=runs)
+    assert s["memory_peak"][4:] == ("main", 1)
+    assert "Worker memory peak: 5,000 MB (voice, Tue 09-29 · replacement 1) ⚠️ above 3,200 MB" in \
+        ds.compose_digest(s).splitlines()
+    day_only = _summary([], runs=runs[:1])
+    assert day_only["memory_peak"][4:] == ("main", 0)
+    assert "Worker memory peak: 2,000 MB (voice, Tue 09-29)" in ds.compose_digest(day_only).splitlines()
+
+
+def test_replacement_the_posts_the_tap_rejected_have_their_own_bucket_never_no_reason():
+    replaced = {"review": {"decision": "rejected", "by": "telegram:424242", "at": "2026-10-01T22:00:00+00:00",
+                           "replaced_by_run_id": _R_R1, "replacement": 1}}
+    forged = {"review": {"decision": "rejected", "replaced_by_run_id": _R_R1.upper()}}   # not canonical: not ours
+    posts = [
+        _post("x", "rejected", run_date="2026-10-01", meta={"review": {"decision": "rejected", "reason": "tone"}}),
+        _post("bluesky", "rejected", run_date="2026-10-01", meta=replaced),
+        _post("threads", "rejected", run_date="2026-10-01", meta=replaced),
+        _post("x", "rejected", run_date="2026-10-01", meta=forged, idempotency_key="2026-10-01:spotlight:x:text"),
+        _post("x", "rejected", run_date="2026-10-01", meta={"review": {"decision": "rejected", "reason": "tone"}},
+              idempotency_key="2026-10-01:r1:x:text"),
+    ]
+    s = _summary(posts)
+    assert s["rejections"]["by_reason"] == {"tone": 2, "replaced": 2, "none": 1}
+    lines = ds.compose_digest(s).splitlines()
+    assert "Rejected 5: Tone 2 · replaced by the next company 2 · no reason 1" in lines
+    assert "  ❌ BLUESKY · run 10-01 · replaced by the next company · text" in lines
+    assert "  ❌ X · run 10-01 · spotlight · no reason · text" in lines
+    assert "  ❌ X · run 10-01 · replacement 1 · Tone · text" in lines
+    # a week with no replaced post renders its line exactly as before
+    plain = _summary(posts[:1])
+    assert "Rejected 1: Tone 1" in ds.compose_digest(plain).splitlines()
+
+
+def test_replacement_every_post_row_names_a_replacement_posts_run():
+    failed = _post("bluesky", "failed", run_date="2026-10-01", idempotency_key="2026-10-01:spotlight:r2:bluesky:text",
+                   last_error="boom")
+    escalated = _post("x", "queued", run_date="2026-10-01", idempotency_key="2026-10-01:r1:x:text",
+                      meta={"escalated_at": "2026-10-01T20:40:00+00:00"})
+    s = _summary([failed], escalated=[escalated])
+    lines = ds.compose_digest(s).splitlines()
+    assert "  ✖ BLUESKY · run 10-01 · spotlight · replacement 2 · boom · text" in lines
+    assert "  X · run 10-01 · replacement 1 · since 10-01 16:40 ET" in lines
+    # an r0 / r3 / R1 segment does not read back: the post is named by its date alone (never a guessed run)
+    for key in ("2026-10-01:r0:x:text", "2026-10-01:r3:x:text", "2026-10-01:R1:x:text"):
+        assert ds._run_text(date(2026, 10, 1), {"idempotency_key": key}) == "10-01", key
+
+
+def test_replacement_picture_fallbacks_get_a_line_per_replacement_run():
+    meta = {"image_fallback": "image_dropped"}
+    posts = [_post("facebook", "published", run_date="2026-10-01", meta=meta),
+             _post("facebook", "rejected", run_date="2026-10-01", meta=meta,
+                   idempotency_key="2026-10-01:r1:facebook:text"),
+             _post("x", "published", run_date="2026-10-01", meta=meta,
+                   idempotency_key="2026-10-01:spotlight:r1:x:text")]
+    s = _summary(posts)
+    words = IMAGE_FALLBACK_REASONS["image_dropped"]
+    assert s["image_fallback"] == [(date(2026, 10, 1), "main", [(words, 1)]),
+                                   (date(2026, 10, 1), "main", [(words, 1)], 1),
+                                   (date(2026, 10, 1), "spotlight", [(words, 1)], 1)]
+    lines = ds.compose_digest(s).splitlines()
+    i = lines.index("🖼 Picture not used on 1 day (text posts instead):")
+    assert lines[i + 1:i + 4] == [f"  Thu 10-01: {words} (1 post)", f"  Thu 10-01 · replacement 1: {words} (1 post)",
+                                  f"  Thu 10-01 · spotlight · replacement 1: {words} (1 post)"]
+
+
+@pytest.mark.asyncio
+async def test_replacement_the_cost_line_counts_replacement_runs_and_reads(digest_ledger, monkeypatch):
+    """Two replacements in the window (one per lane on Tue 09-29): their tokens and worker time are counted — never
+    "unreadable" from a bound sized for one run per (day, lane)."""
+    monkeypatch.setattr(settings, "MARKETING_UPLOAD_POST_MONTHLY_USD", 16.0)
+    _seed_costs(digest_ledger)
+    before = await ds.gather_digest(digest_ledger, NOW)
+    scripts, runs = digest_ledger.fake.tables[mrs.SCRIPTS].rows, digest_ledger.fake.tables[mrs.RUNS].rows
+    for lane, run_id in (("main", _R_R1), ("spotlight", _R_R2)):
+        scripts.append({"run_id": run_id, "run_date": "2026-09-29", "lane": lane, "replacement": 1,
+                        "source_ref": "news:money_map:ACME:2025", "tokens_used": 20_000})
+        runs.append(_rep("media_ready", id=run_id, run_date="2026-09-29", lane=lane, timings={"rendered_s": 10.0}))
+    after = await ds.gather_digest(digest_ledger, NOW)
+    assert after["cost"]["last"]["gemini"] == before["cost"]["last"]["gemini"] + 60_000      # 40,000 tokens at $1.50/1M
+    assert after["cost"]["last"]["worker"] > before["cost"]["last"]["worker"]
+    assert after["cost"]["last"]["unreadable"] == [] and "unreadable" not in ds.compose_digest(after).splitlines()[2]
+
+
+# ── the runway: today's rows with replacements (review L7(b)) ─────────────────
+
+
+@pytest.mark.parametrize("with_today, before_today, limit, replacements, k", [
+    (["r2", "r1", "t1", "t2", "a"], ["a"], 240, 2, 4),
+    (["r1", "t1", "t2", "a"], ["a"], 240, 1, 3),
+    (["r1", "t1", "t2", "a"], ["a"], 240, 2, 3),          # a replacement row not (yet) holding a script
+    # a cut read, matched by content: the last (bound − 1) positions left out
+    (["r1", "t1", "t2", "a", "b", "c", "d"], ["a", "b", "c", "d", "e", "f", "g"], 7, 1, 3),
+    (["r2", "r1", "t1", "t2", "a", "b", "c", "d", "e"], list("abcdefghi"), 9, 2, 4),
+])
+def test_replacement_the_runway_counts_every_row_of_a_day_with_replacements(with_today, before_today, limit,
+                                                                             replacements, k):
+    assert ds._rows_of_today(with_today, before_today, limit=limit, replacements_today=replacements) == k
+
+
+@pytest.mark.parametrize("replacements", [0, None, "2", True, -1, 2.0])
+def test_replacement_with_no_readable_replacement_today_the_runway_bound_is_the_one_of_before(caplog, replacements):
+    """L7(b): with none today (or a value that is not a count) the bound is len(RUN_LANES), so every answer — the cut
+    reads' shift scan and the uncut tolerance — is the one of before."""
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    assert ds._rows_of_today(["t1", "t2", "t3"], [], limit=240, replacements_today=replacements) == 2
+    assert any("runway" in r.getMessage() for r in caplog.records)
+    assert ds._rows_of_today(["t", "a", "b", "x"], ["a", "b", "y", "z"], limit=4, replacements_today=replacements) == 1
+
+
+def test_replacement_the_runway_bound_is_clamped_to_the_most_a_day_can_hold(caplog):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    rows = ["r", "r", "t", "t", "x", "a"]
+    assert ds._rows_of_today(rows, ["a"], limit=240, replacements_today=99) == 4           # RUNS_PER_DAY_MAX
+    assert any("runway" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_replacement_the_runway_reads_todays_replacement_count_once(digest_ledger, monkeypatch):
+    """End to end: a day holding four scripts (two of them the owner's replacements) — today's lesson, the OLDEST of
+    them, still reads as picked: the count widens the bound to four (with the old bound of two it read "not picked")."""
+    now = _et(2026, 10, 5, 23, 0)
+    today = now.astimezone(ET).date()
+    scripts = digest_ledger.fake.tables[mrs.SCRIPTS].rows
+    scripts += [
+        {"run_id": str(uuid.uuid4()), "run_date": "2026-10-03", "source_ref": "journey:1",
+         "created_at": "2026-10-03T20:20:00+00:00", "tokens_used": 0},
+        {"run_id": str(uuid.uuid4()), "run_date": today.isoformat(), "source_ref": "journey:3",
+         "created_at": "2026-10-05T14:00:00+00:00", "tokens_used": 0},
+    ] + [{"run_id": str(uuid.uuid4()), "run_date": today.isoformat(), "lane": "spotlight", "replacement": n,
+          "source_ref": f"news:money_map:T{n}:2025", "created_at": f"2026-10-05T1{5 + n}:00:00+00:00", "tokens_used": 0}
+         for n in (0, 1, 2)]
+    digest_ledger.fake.tables[mrs.RUNS].rows += [
+        _rep("media_ready", id=str(uuid.uuid4()), n=n, run_date=today.isoformat(), lane="spotlight") for n in (1, 2)]
+    counts: List[date] = []
+    real = digest_ledger.count_replacements
+
+    async def spy(day):
+        counts.append(day)
+        return await real(day)
+
+    monkeypatch.setattr(digest_ledger, "count_replacements", spy)
+    report = await ds.gather_digest(digest_ledger, now)
+    pool, used = [f"journey:{i}" for i in range(10)], ["journey:3", "journey:1"]
+    assert counts == [today]
+    picked = ds.pool_runway(pool, used, today=today, today_picked=True)
+    assert picked != ds.pool_runway(pool, used, today=today, today_picked=False)     # the case matters
+    assert report["runway"] == picked
+
+
+@pytest.mark.asyncio
+async def test_replacement_a_failed_count_bounds_today_by_the_most_a_day_holds(digest_ledger, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger=ds.__name__)
+    monkeypatch.setattr(digest_ledger, "count_replacements", _Exploding(mrs.MarketingRunError("count 503")))
+    assert await ds._replacements_today(digest_ledger, date(2026, 10, 5)) == 2
+    assert any("count 503" in r.getMessage() and r.levelno == logging.WARNING for r in caplog.records)
+    report = await ds.gather_digest(digest_ledger, NOW)
+    assert report["runway"] is not None                                    # the runway itself still reads

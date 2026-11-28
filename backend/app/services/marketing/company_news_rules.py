@@ -813,6 +813,12 @@ REJECTION_REASONS: FrozenSet[str] = frozenset({
     # `stake_listing_unverified` — its profile is missing or refused (`company_from_profile`, purpose "common"), names
     # another company, or is the investor itself: the symbol cannot be trusted to be this investee
     "stake_not_public", "stake_not_trading", "stake_listing_unverified",
+    # Money Map (owner decision 2026-11-27, "i don't think we need to post for these companies. so, post the other
+    # one"; append-only): `money_map_costs_undivided` — a LOSS year whose costs bar would be one undivided piece
+    # holding interest, tax and other items that were a cost, or that no operating line can tell apart
+    # (`money_map_costs_undivided`): refused at the read exactly as the template refuses it, and REMEMBERED for the
+    # symbol's fiscal year like `money_map_loss_above_revenue`, so the walk moves to the next company
+    "money_map_costs_undivided",
 })
 _REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
@@ -895,6 +901,43 @@ def merge_money_map_pool(*sources: Iterable[Any]) -> Tuple[str, ...]:
             seen.add(sym)
             out.append(sym)
     return tuple(out)
+
+
+def money_map_costs_undivided(rec: Any) -> bool:
+    """True for a Money Map LOSS year that would draw ONE undivided costs bar holding interest, tax and other items
+    it cannot name — never posted (owner decision 2026-11-27, on the open call "a loss year whose other items were a
+    COST with no gross line": "i don't think we need to post for these companies. so, post the other one").
+
+    The loss year's costs card (`news_templates._money_map_costs`, news-v24) splits its red bar into cost of sales and
+    operating expenses only when the record holds BOTH the gross and the operating line and each part is positive
+    (revenue − gross profit > 0, gross profit − operating income > 0). Without that split the bar is one piece worth
+    revenue − net income, and only the sign of interest, tax and other items (net income − operating income) says
+    what it is:
+
+    * INCOME (> 0): the bar is labelled "Costs, after other items" — true as drawn (the owner's news-v24 label): kept;
+    * exactly ZERO: the bar IS the statement's own costs and expenses: kept;
+    * a COST (< 0), or no operating line to tell: the bar labelled "Costs and expenses" would also hold interest and
+      tax the 10-K does not count there — refused (``money_map_costs_undivided``), so the walk moves to the next
+      company. A missing operating line is refused fail-closed: nothing says the other items were not a cost.
+
+    A profit year never draws a costs card: always False. Computed on the Decimal of each figure's shortest repr —
+    exactly the template's own arithmetic (`news_templates._dec`) — so the adapter's read
+    (`company_news_adapter._money_map_record`) and the template (`news_templates._money_map_parts`) can never disagree
+    on a record. Pure; a record missing a figure's attribute reads as that line absent."""
+    def dec(v: Any) -> Optional[Decimal]:
+        if v is None or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            return None
+        return Decimal(repr(float(v)))
+
+    rev = dec(getattr(rec, "revenue_usd", None))
+    ni = dec(getattr(rec, "net_income_usd", None))
+    if rev is None or ni is None or ni >= 0:
+        return False
+    gp = dec(getattr(rec, "gross_profit_usd", None))
+    op = dec(getattr(rec, "operating_profit_usd", None))
+    if gp is not None and op is not None and rev - gp > 0 and gp - op > 0:
+        return False                         # the bar is split: cost of sales, operating expenses (and a cost part)
+    return op is None or ni - op < 0
 
 
 # ── symbols ───────────────────────────────────────────────────────────────────
@@ -4577,7 +4620,7 @@ __all__ = [
     "free_text_ok", "theme_title_problem",
     "COMPANY_WEEKLY_LAUNCH", "STAKE_KINDS", "VALUE_BASES", "ROSTER_MIN_MEMBERS", "UNAVAILABLE_REASONS", "SKIP_REASONS", "REJECTION_REASONS",
     "SOURCE_LABELS", "THIRTEEN_F_AMENDED_LABEL", "THEME_ANGLE_SOURCE_LABELS", "MONEY_MAP_SEED", "MONEY_MAP_EXCLUDED_SYMBOLS",
-    "merge_money_map_pool", "symbol_problem", "canonical_symbol", "cik10", "period_label",
+    "merge_money_map_pool", "money_map_costs_undivided", "symbol_problem", "canonical_symbol", "cik10", "period_label",
     "period_end_of", "previous_period_end_of", "month_end_of", "insider_window", "DISPLAY_OVERRIDES",
     "SEGMENT_DISPLAY_OVERRIDES", "segment_display_name",
     "company_name_problem", "display_company_name", "company_from_profile", "filer_name_problem",

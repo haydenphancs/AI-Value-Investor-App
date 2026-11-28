@@ -102,7 +102,7 @@ admin recomputes, and marketing script generation (Marketing v2 also ships per-p
 ### 1E. This Mac (Claude Code hooks, `.claude/hooks/`)
 
 - **Session start** — prints context. It does not start the watchdog.
-- **Build guard** — blocks an iOS build without `-jobs 2`, a second concurrent build, and any build when swap is nearly full.
+- **Build guard** — blocks an iOS build without `-jobs 2`, a third concurrent build (two allowed since 2026-11-26 on the 48 GB Mac, each on its own simulator: "Caydex A" iPhone 17 Pro iOS 27.2, "Caydex B" iPhone 17e iOS 26.5), a second build sharing the first one's simulator or DerivedData, and any build when swap is nearly full.
 - **Swift memory watchdog** — runs only while a Swift build is running (yours or Claude's, ⌘B included), and stops about 30 s after it. A macOS LaunchAgent checks for builds every 5 s; check or remove it with `bash .claude/hooks/install-swift-build-watchdog-agent.sh status` (or `uninstall`). The watchdog kills a compiler at 10 GB, or at 7 GB when RAM is under pressure (a normal Archive build peaks at about 5.3 GB). It logs to `~/Library/Logs/caydex-swift-watchdog.log`.
 - **After each edit** — Python syntax check; SQL migration lint; iOS theme parity tests; design-doc parity test.
 - **FMP URL guard** — blocks a `/api/v3` URL.
@@ -1137,7 +1137,7 @@ admin recomputes, and marketing script generation (Marketing v2 also ships per-p
 1. [ ] Bump `CURRENT_PROJECT_VERSION` and `MARKETING_VERSION` in **all 4** configs (app + widget × Debug/Release), and `_VERSION` in `scripts/asc_review_resubmit.py`. 1.03 is build **15** (1.02 = 13 is live; 14 was never uploaded); tests pin all four equal and the script to the shipped version.
 2. [ ] `./venv/bin/python scripts/fmp_entitlement_probe.py --gate`: must exit 0.
 3. [ ] `./venv/bin/python scripts/asc_audit.py`: read-only diff of App Store IAP config vs `Caydex.storekit`.
-4. [ ] Archive in Xcode (**you only**; Claude never archives). One build at a time on this Mac.
+4. [ ] Archive in Xcode (**you only**; Claude never archives). At most two builds at a time on this Mac; an Archive is heavy (~5.3 GB), so run it alone.
 5. [ ] `./frontend/ios/scripts/upload-dsyms.sh <path/to/that.xcarchive>`. Always pass the path; the default re-uploads the previous build.
 6. [ ] Deploy the backend on Railway, since some fixes are backend-only.
 7. [ ] After TestFlight feedback: `./venv/bin/python scripts/pull_testflight_feedback.py --since YYYY-MM-DD`.

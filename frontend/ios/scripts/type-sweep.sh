@@ -55,7 +55,7 @@
 set -uo pipefail
 
 BUNDLE_ID="com.phan.caydex"
-UDID="${CAYDEX_SIM_UDID:-57C9097B-08F1-4CB1-BF9A-035876F3604F}"
+UDID="${CAYDEX_SIM_UDID:-C400CC1B-DCE0-48CF-8A3C-4F6194E4DC3E}"
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
 # The twelve valid arguments to `simctl ui <udid> content_size`, smallest to largest.

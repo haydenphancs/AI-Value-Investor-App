@@ -316,9 +316,13 @@ def test_the_watchdog_exits_on_its_own_when_nothing_builds(tmp_path):
 
 # ── the real guard, end to end ────────────────────────────────────────────────────────────────
 
-def _shims(tmp_path: Path, xcodebuild_running: bool = False, ps_table: str = "") -> dict:
+def _shims(tmp_path: Path, xcodebuild_running: bool = False, ps_table: str = "",
+           xcodebuild_command: str = "") -> dict:
     """PATH shims so the guard's gates are DETERMINISTIC: healthy swap, and a process table we
-    choose — a real machine's swap level or another session's build must not decide a test."""
+    choose — a real machine's swap level or another session's build must not decide a test.
+    The fake running `xcodebuild` is pid 99999; its command line (what the slot-collision gate
+    reads with `ps -ww -o command= -p`) is `xcodebuild_command`, never whatever a live pid 99999
+    happens to be."""
     bin_dir = tmp_path / "shimbin"
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / "sysctl").write_text('#!/bin/bash\ncase "$*" in *vm.swapusage*) '
@@ -327,7 +331,10 @@ def _shims(tmp_path: Path, xcodebuild_running: bool = False, ps_table: str = "")
     (bin_dir / "pgrep").write_text('#!/bin/bash\n[ "$*" = "-x xcodebuild" ] && [ -n "$FAKE_XCODEBUILD" ] '
                                    '&& { echo 99999; exit 0; }\nexit 1\n')
     (tmp_path / "ps_table").write_text(ps_table)
+    (tmp_path / "xcodebuild_command").write_text(xcodebuild_command)
     (bin_dir / "ps").write_text(f'#!/bin/bash\nif [ "$*" = "-Ao pid=,ppid=,ucomm=" ]; then cat "{tmp_path / "ps_table"}"; '
+                                'exit 0; fi\n'
+                                f'if [ "$*" = "-ww -o command= -p 99999" ]; then cat "{tmp_path / "xcodebuild_command"}"; '
                                 'exit 0; fi\nexec /bin/ps "$@"\n')
     for f in bin_dir.iterdir():
         f.chmod(0o755)
@@ -367,21 +374,63 @@ def test_the_guard_admits_a_compliant_build(tmp_path):
     assert r.returncode == 0, r.stderr
 
 
-def test_the_one_build_gate_still_applies_to_real_builds(tmp_path):
-    r = _guard(f"{X} -jobs 2 -scheme ios build", tmp_path, xcodebuild_running=True)
-    assert r.returncode == 2 and "already" in r.stderr, r.stderr
+# The two build slots (CLAUDE.md "Machine safety" rule 2 + "Build / test / run", since 2026-11-26):
+# slot A = simulator "Caydex A" + the default DerivedData, slot B = "Caydex B" + its own DerivedData.
+_SIM_A = "C400CC1B-DCE0-48CF-8A3C-4F6194E4DC3E"
+_SIM_B = "E9D67F01-54E7-4985-BC1C-41775DF0143A"
+_SLOT_B_DD = "~/Library/Developer/Xcode/DerivedData/Caydex-slotB"
+_SLOT_A_BUILD = f"{X} -project frontend/ios/ios.xcodeproj -scheme ios -destination 'id={_SIM_A}' -jobs 2 build"
+_SLOT_B_BUILD = (f"{X} -project frontend/ios/ios.xcodeproj -scheme ios -destination 'id={_SIM_B}' "
+                 f"-derivedDataPath {_SLOT_B_DD} -jobs 2 build")
+# An Xcode ⌘B build: a compiler under the Xcode app (no CLI xcodebuild) — it uses slot A.
+_XCODE_BUILDING = "300 1 Xcode\n301 300 SWBBuildService\n302 301 swift-frontend\n"
+_COLLIDES = "would collide"
+
+
+def test_the_build_gate_allows_two_builds_in_their_own_slots(tmp_path):
+    """One CLI build running in slot A: a slot-B build may start, a second slot-A build may not."""
+    running = dict(xcodebuild_running=True, xcodebuild_command=_SLOT_A_BUILD)
+    second = _guard(_SLOT_B_BUILD, tmp_path, **running)
+    _no_shell_errors(second)
+    assert second.returncode == 0, second.stderr
+    # Same DerivedData (and same simulator) as the running build → refused, naming both clashes.
+    same = _guard(_SLOT_A_BUILD, tmp_path, **running)
+    _no_shell_errors(same)
+    assert same.returncode == 2 and _COLLIDES in same.stderr, same.stderr
+    assert "same DerivedData" in same.stderr and "same simulator" in same.stderr, same.stderr
+    # Its own DerivedData but slot A's simulator → still refused: the two would fight over one device.
+    shared_sim = _guard(f"{X} -scheme ios -destination 'id={_SIM_A}' -derivedDataPath {_SLOT_B_DD} -jobs 2 build",
+                        tmp_path, **running)
+    assert shared_sim.returncode == 2 and "same simulator" in shared_sim.stderr \
+        and "same DerivedData" not in shared_sim.stderr, shared_sim.stderr
+
+
+def test_the_build_gate_still_applies_to_real_builds(tmp_path):
+    """Two builds already running (a CLI build + Xcode's ⌘B) → a third is refused, whatever its slot."""
+    r = _guard(_SLOT_B_BUILD, tmp_path, xcodebuild_running=True, xcodebuild_command=_SLOT_A_BUILD,
+               ps_table=_XCODE_BUILDING)
+    _no_shell_errors(r)
+    assert r.returncode == 2 and "2 Swift build(s) already running" in r.stderr, r.stderr
     # …but a command that only MENTIONS xcodebuild is never refused because someone is building.
-    ok = _guard(f"grep -n {X} build.log", tmp_path, xcodebuild_running=True)
+    ok = _guard(f"grep -n {X} build.log", tmp_path, xcodebuild_running=True, xcodebuild_command=_SLOT_A_BUILD,
+                ps_table=_XCODE_BUILDING)
     assert ok.returncode == 0, ok.stderr
 
 
-def test_the_one_build_gate_ignores_the_editors_own_compiler(tmp_path):
-    """Xcode's editor agent runs swift-frontend to type-check the open file — that is not a build."""
-    table = "100 1 SKAgent\n101 100 swift-frontend\n"
-    r = _guard(f"{X} -jobs 2 -scheme ios build", tmp_path, ps_table=table)
+def test_the_build_gate_ignores_the_editors_own_compiler(tmp_path):
+    """Xcode's editor agent runs swift-frontend to type-check the open file — that is not a build,
+    so a slot-A build may start beside it. A compiler under Xcode's build service IS a build (⌘B,
+    slot A): only a slot-B build may start then."""
+    editor = "100 1 SKAgent\n101 100 swift-frontend\n"
+    r = _guard(_SLOT_A_BUILD, tmp_path, ps_table=editor)
+    _no_shell_errors(r)
     assert r.returncode == 0, r.stderr
-    building = _guard(f"{X} -jobs 2 -scheme ios build", tmp_path, ps_table="200 1 SWBBuildService\n201 200 swift-frontend\n")
-    assert building.returncode == 2 and "already" in building.stderr, building.stderr
+    building = "200 1 SWBBuildService\n201 200 swift-frontend\n"
+    clash = _guard(_SLOT_A_BUILD, tmp_path, ps_table=building)
+    _no_shell_errors(clash)
+    assert clash.returncode == 2 and "Xcode is building and uses the default DerivedData" in clash.stderr, clash.stderr
+    free = _guard(_SLOT_B_BUILD, tmp_path, ps_table=building)
+    assert free.returncode == 0, free.stderr
 
 
 def test_a_command_it_cannot_judge_takes_the_conservative_path(tmp_path):

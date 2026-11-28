@@ -2,7 +2,7 @@
 Phase 4 — the video half of the render (worker side: marketing/video.py, SYSTEM_DESIGN_GUIDELINES
 §12.8). Hermetic: the timeline, the argv and the ffprobe gate are pure; the runner is driven by a
 fake process on a fake clock; ONE real smoke render runs through the local ffmpeg (skipped when
-ffmpeg/ffprobe are missing) and proves the things only a real encode can: the disclaimer tail is
+ffmpeg/ffprobe are missing, or ffmpeg lacks libass's `ass` filter) and proves the things only a real encode can: the disclaimer tail is
 really in the file (never `-shortest`), the stream is CFR 30/1 with the B-frame/no-edit-list
 arrangement, moov comes first, and two renders are byte-identical.
 """
@@ -28,6 +28,30 @@ from marketing import video as vid
 
 _FONT = Path(__file__).resolve().parents[1] / "marketing" / "assets" / "fonts" / "Inter-Bold.ttf"
 HAVE_FFMPEG = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
+
+
+def _ffmpeg_has_filter(name: str) -> bool:
+    """True when the PATH ffmpeg lists `name` among its filters. The render burns its captions with
+    the `ass` filter, which exists only in an ffmpeg built with libass: production's (bookworm's
+    ffmpeg, marketing/Dockerfile) is; Homebrew's plain `ffmpeg` formula is not since its 2026-11
+    9.x build (macOS: `brew install ffmpeg-full`, keg-only, and put its bin first on PATH)."""
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        return False
+    try:
+        out = subprocess.run([exe, "-hide_banner", "-filters"], capture_output=True, text=True,
+                             timeout=30, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    # Rows look like " ..C ass               V->V       Render ASS subtitles …".
+    return any(len(f) > 1 and f[1] == name for f in (line.split() for line in out.splitlines()))
+
+
+HAVE_RENDER_FFMPEG = HAVE_FFMPEG and _ffmpeg_has_filter("ass")
+_needs_render_ffmpeg = pytest.mark.skipif(
+    not HAVE_RENDER_FFMPEG,
+    reason="needs ffmpeg + ffprobe, with ffmpeg built with libass (the `ass` caption filter); "
+           "macOS: brew install ffmpeg-full and put /opt/homebrew/opt/ffmpeg-full/bin first on PATH")
 S = vid.Segment
 
 
@@ -1069,7 +1093,7 @@ def _pixel(path: Path, at: float) -> bytes:
                           capture_output=True, check=True, timeout=30).stdout[:3]
 
 
-@pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg + ffprobe")
+@_needs_render_ffmpeg
 def test_a_real_render_keeps_the_disclaimer_tail_and_is_bit_exact(tmp_path):
     """The production opening (hook_card=False, drop 1): the FIRST CONTENT card is on screen from
     frame 0 through the hook — no brand card — then the second content card, then the disclaimer
@@ -1387,7 +1411,7 @@ def _gray_frames(path: Path, frames: List[int]) -> List[bytes]:
     return [raw[i * size:(i + 1) * size] for i in range(len(frames))]
 
 
-@pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg + ffprobe")
+@_needs_render_ffmpeg
 def test_a_real_push_in_zooms_card_0_only_stays_above_the_captions_and_is_bit_exact(tmp_path):
     """Through the local ffmpeg: card 0 grows from 1.00 to PUSH_IN_ZOOM over its first PUSH_IN_FRAMES
     frames about the text zone's middle and then holds; the text zone's bottom edge moves down but stays
@@ -1476,7 +1500,7 @@ def test_a_real_push_in_zooms_card_0_only_stays_above_the_captions_and_is_bit_ex
         assert all(abs(g - c) <= 6 for g, c in zip(got, colour)), (at, tuple(got), colour)
 
 
-@pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg + ffprobe")
+@_needs_render_ffmpeg
 def test_a_real_hook_card_video_shows_the_hook_once_then_captions_the_script(tmp_path):
     """The whole render path (real cards, captions and ffmpeg — render.produce_video): a lesson that opens
     on its HOOK card shows no burned caption under it (the card already says the hook) and captions the
@@ -1520,7 +1544,7 @@ def test_a_real_hook_card_video_shows_the_hook_once_then_captions_the_script(tmp
         assert ink(under_line1) > 150                                                  # line 1 is captioned
 
 
-@pytest.mark.skipif(not HAVE_FFMPEG, reason="needs ffmpeg + ffprobe")
+@_needs_render_ffmpeg
 def test_a_real_template_video_opens_on_its_art_cover(tmp_path):
     """Workstream C (2026-11-16, "Picture and video cover"): the whole render path (real cards, captions and ffmpeg —
     render.produce_video) of a template whose OPENING card draws the per-post art. Frame 0 — the platforms' cover —

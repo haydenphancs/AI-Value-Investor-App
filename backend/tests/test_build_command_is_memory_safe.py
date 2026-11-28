@@ -92,7 +92,10 @@ def test_every_build_command_in_the_rulebook_is_memory_bounded():
     assert problems == [], "\n".join(problems)
 
 
-_SAFETY_MUSTS = ("-jobs 2", "subagent", "One Swift compile on this Mac at a time",
+# The build-count rule: two slots since the 48 GB Mac (2026-11-26; "One Swift compile on this Mac
+# at a time" on the 16 GB Mac) — each slot with its own simulator and DerivedData.
+_SAFETY_MUSTS = ("-jobs 2", "subagent", "At most two Swift compiles on this Mac at a time",
+                 "each in its own slot",
                  "pgrep -fl swift-frontend", "run_in_background", "39.2 GB", "10240 MB", "7168 MB",
                  "Never weaken either one",
                  # The root cause (2026-09-25): giant generated Swift literals.
@@ -122,6 +125,8 @@ def test_the_safety_checks_fail_on_a_weakened_rulebook():
     assert machine_safety_problems(claude.replace("Machine safety — Swift builds", "Swift builds", 1))
     assert machine_safety_problems(claude.replace("**10240 MB**", "**16 GB**", 1))
     assert machine_safety_problems(claude.replace("test_ios_no_giant_literals.py", "a test", 1))
+    assert machine_safety_problems(claude.replace("At most two Swift compiles", "At most three Swift compiles", 1))
+    assert machine_safety_problems(claude.replace("each in its own slot", "sharing one slot", 1))
     skill = (REPO / ".claude/skills/add-fmp-endpoint/SKILL.md").read_text(encoding="utf-8")
     assert unsafe_commands(skill) == []
     assert unsafe_commands(skill.replace(" -jobs 2 build", " build", 1))

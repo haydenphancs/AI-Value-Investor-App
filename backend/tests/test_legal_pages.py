@@ -932,6 +932,20 @@ _SOURCE_LIST_SAVED = "is saved with the answer, so it appears again when you reo
 _SOURCE_LIST_DELETED = "it is deleted when you delete that conversation or your account"
 _SOURCE_LIST_NOT_KEPT = "is shown with the answer but is not kept"
 
+# Privacy §3's Updates jump-search trigger (2026-11-27, move cards). Each part is one path the
+# sweeper searches on: "unusual for that stock" = a σ / fixed-band jump (`JUMP_TIERS`' unusual
+# and extreme classes); "10% or more" = the ≥ `JUMP_FLOOR_SESSION_PCT` floor (`JUMP_FLOOR`);
+# "turns around after one" = a same-day move card's stock now moving materially the other way
+# (`InsightSweeper._plan_moves` → `plan.reversals`, searched by `_jump_candidates`), which can
+# be only Notable. `test_the_updates_search_trigger_matches_the_code` ties each part to the code.
+_UPDATES_SEARCH_TRIGGER = (
+    "web search for updates insights: when a stock on the updates tab makes a large price move "
+    "(unusual for that stock, or 10% or more), or turns around after one, caydex may search the "
+    "web for the reason"
+)
+# What the copy said before the move cards: true of the σ jump search alone.
+_STALE_UPDATES_TRIGGERS = ("an unusually large move", "an unusually large price move")
+
 _WEB_SEARCH_CLAUSES = {
     "privacy": (
         "PrivacyPolicyView.swift",
@@ -965,13 +979,24 @@ _WEB_SEARCH_CLAUSES = {
             # The Updates jump search (2026-10-28): what is sent (a company name and the move's
             # direction — `jump_web_search_service.build_query`), and that the shared card keeps
             # the pages' titles and links (`news_insight_service._web_first_sources`).
-            "web search for updates insights: when a stock on the updates tab makes an unusually "
-            "large move, caydex may search the web for the reason",
+            # 2026-11-27 (move cards): the trigger is what the sweeper searches — a σ/band jump
+            # ("unusual for that stock"), the ≥10% floor (`JUMP_FLOOR`), and a material move the
+            # other way after a same-day move card (`_plan_moves` → `plan.reversals`), so never
+            # "an unusually large move" alone (`test_the_updates_search_trigger_matches_the_code`).
+            _UPDATES_SEARCH_TRIGGER,
             "only the company\u2019s name and whether the stock is up or down are sent to our web "
             "search provider",
             "never anything about you",
             "is stored with the title and link of each web page it used, and every user who views "
             "that card sees them",
+            # The second provider (2026-11-27, owner: "use Claude API … as fallback"): asked only
+            # when the jump search cannot run (capped, paced, failed) or found no reason, and sent
+            # what `jump_claude_lookup_service.lookup` takes from the card — the name and the
+            # direction. Named as a provider, never as a model (the identity rule).
+            "when our web search cannot run or finds no reason, caydex may ask a second provider, "
+            "anthropic, to search the web, sending only the company’s name and whether the "
+            "stock is up or down — again, never anything about you",
+            "anthropic (web search for updates insights, as described above)",
         ],
     ),
     "terms": (
@@ -989,8 +1014,11 @@ _WEB_SEARCH_CLAUSES = {
             "you may not scrape, copy, store, cache, resell, or redistribute them",
             "build, train, or improve any artificial intelligence or machine learning model",
             # 2026-10-28: the flow-down covers the web pages an Updates Insights card lists too.
-            "an updates insights card that explains an unusually large price move may also draw "
-            "on, and list among its sources, web pages found by the same provider",
+            # 2026-11-27: "by our web search providers" — a card may list pages the second
+            # provider found, so "the same provider" would be false once its switch is on.
+            # "a large price move" (not "an unusually large" one): the same trigger as Privacy §3.
+            "an updates insights card that explains a large price move may also draw "
+            "on, and list among its sources, web pages found by our web search providers",
         ],
     ),
 }
@@ -1447,3 +1475,167 @@ def test_no_privacy_copy_still_says_reports_are_used_solely_to_fix_the_problem(p
     assert "emails you send to support are kept until you ask us to delete them" in raw, (
         f"{path.name}'s summary no longer says support emails outlive an in-app deletion"
     )
+
+
+# ── The Updates Insights second web-search provider (2026-11-27) ──────────────
+#
+# Owner (2026-11-27): "do Brave 80 a day, and use Claude API … as fallback". When the jump
+# search cannot run (its daily bucket is used up or paced, Brave failed) or found no reason,
+# `jump_claude_lookup_service` may ask Anthropic's web search, sending the company's name and
+# the move's direction. That is a NEW recipient, so it has to be in Privacy §3 (what is sent)
+# AND §4 (the provider list) of every copy, and Terms §7 can no longer say the card's pages were
+# "found by the same provider". The switch (`UPDATES_JUMP_CLAUDE_FALLBACK_ENABLED`) ships OFF;
+# the owner turns it on only once this copy is live (documents/OWNER_TASKS.md). The provider is
+# named, the model never is (CLAUDE.md invariant 7 — the Policy names Google, never Gemini).
+
+_SECOND_PROVIDER_SECTION3 = (
+    "when our web search cannot run or finds no reason, caydex may ask a second provider, "
+    "anthropic, to search the web"
+)
+_SECOND_PROVIDER_SENT = (
+    "sending only the company’s name and whether the stock is up or down"
+)
+_SECOND_PROVIDER_SECTION4 = "anthropic (web search for updates insights, as described above)"
+_STALE_SAME_PROVIDER = "web pages found by the same provider"
+
+_TERMS_COPIES = [
+    _SERVED / "terms.html",
+    _AUTHORED / "terms.html",
+    _IOS_SCREENS_DIR / "TermsOfUseView.swift",
+]
+
+
+def _privacy_providers_section(path: Path) -> str:
+    """§4 "Service Providers" of one privacy copy, comments removed and bound to the section
+    (the same shape as `_privacy_ai_section`), so the §3 sentence cannot satisfy a §4 check."""
+    text = _prose_only(path)  # lowercased
+    if path.suffix == ".swift":
+        start = text.index('heading: "service providers"')
+        end = text.index("legalsection(", start)
+        return _normalized_prose(_swift_literals_in(text[start:end]), strip_tags=False)
+    start = text.index("<h2>4. service providers</h2>")
+    end = text.index("<h2>", start + len("<h2>"))
+    return _normalized_prose(text[start:end], strip_tags=True)
+
+
+@pytest.mark.parametrize("path", _PRIVACY_COPIES, ids=lambda p: str(p.relative_to(_BACKEND.parent)))
+def test_every_privacy_copy_names_the_second_provider_in_sections_3_and_4(path):
+    if not path.is_file():
+        pytest.skip(f"{path} not present (expected outside the repo checkout)")
+    section3 = _privacy_ai_section(path)
+    assert _SECOND_PROVIDER_SECTION3 in section3, f"{path.name} §3 lost the second provider"
+    assert _SECOND_PROVIDER_SENT in section3, f"{path.name} §3 no longer says what is sent to it"
+    assert "never anything about you" in section3
+    providers = _privacy_providers_section(path)
+    assert _SECOND_PROVIDER_SECTION4 in providers, f"{path.name} §4 does not list Anthropic"
+    # The §4 scan is bound to §4: the §3 sentence is not in it, the next section is not either.
+    assert _SECOND_PROVIDER_SECTION3 not in providers
+    assert "brave software" in providers and "how we share information" not in providers
+
+
+@pytest.mark.parametrize("path", _TERMS_COPIES, ids=lambda p: str(p.relative_to(_BACKEND.parent)))
+def test_no_terms_copy_still_credits_one_provider_with_the_cards_pages(path):
+    """The other direction: "found by the same provider" beside a second provider is false the
+    day the switch goes on — and the in-app mirror pinned it too."""
+    if not path.is_file():
+        pytest.skip(f"{path} not present (expected outside the repo checkout)")
+    prose = _copy_prose(path)
+    assert "web pages found by our web search providers" in prose, f"{path.name} lost §7's clause"
+    assert _STALE_SAME_PROVIDER not in prose, f"{path.name} still says {_STALE_SAME_PROVIDER!r}"
+
+
+@pytest.mark.parametrize(
+    "path", [*_PRIVACY_COPIES, *_TERMS_COPIES], ids=lambda p: str(p.relative_to(_BACKEND.parent)),
+)
+def test_no_legal_copy_names_a_model(path):
+    """Anthropic and Google are named as providers; no model ever is (invariant 7)."""
+    if not path.is_file():
+        pytest.skip(f"{path} not present (expected outside the repo checkout)")
+    prose = _copy_prose(path)
+    assert len(prose) > 1500, f"{path.name} scan returned {len(prose)} chars"
+    for model in ("claude", "sonnet", "opus", "haiku", "gemini", "gpt"):
+        assert not re.search(rf"\b{model}\b", prose), f"{path.name} names the model {model!r}"
+
+
+def test_the_second_provider_ships_off_and_every_copy_already_discloses_it():
+    """The switch ships OFF (the owner turns it on after this copy is deployed), and the copy it
+    needs is already in every privacy copy — so turning it on never publishes a recipient the
+    Policy does not name. If the default ever flips to True, the copy must still be there."""
+    from app.config import Settings
+
+    default = Settings.model_fields["UPDATES_JUMP_CLAUDE_FALLBACK_ENABLED"].default
+    assert default is False, (
+        "UPDATES_JUMP_CLAUDE_FALLBACK_ENABLED must ship False: the owner turns it on in the "
+        "environment once Privacy §3/§4 and Terms §7 are live"
+    )
+    for path in _PRIVACY_COPIES:
+        if path.is_file():
+            assert _SECOND_PROVIDER_SECTION3 in _privacy_ai_section(path), path.name
+            assert _SECOND_PROVIDER_SECTION4 in _privacy_providers_section(path), path.name
+
+
+def test_the_providers_section_scan_is_not_vacuous(tmp_path):
+    """Guard against the guard: a planted §4 that only says it in a comment is unseen, and the
+    real words in the section are seen."""
+    html = ("<h2>4. Service Providers</h2>\n<!-- {s} -->\n<p>Brave Software.</p>{p}\n"
+            "<h2>5. How We Share Information</h2>\n<p>{s}</p>\n")
+    sentence = "Anthropic (web search for Updates Insights, as described above)"
+    planted = tmp_path / "p.html"
+    planted.write_text(html.format(s=sentence, p=""), encoding="utf-8")
+    assert _SECOND_PROVIDER_SECTION4 not in _privacy_providers_section(planted)
+    planted.write_text(html.format(s=sentence, p=f"\n<p>{sentence}</p>"), encoding="utf-8")
+    assert _SECOND_PROVIDER_SECTION4 in _privacy_providers_section(planted)
+
+
+# ── The Updates jump search's trigger, as the code runs it (2026-11-27, move cards) ──────
+#
+# Privacy §3 and Terms §7 used to say the search runs for "an unusually large move" — true of
+# the σ jump search alone. The move cards widened what the sweeper searches: the ≥10% floor
+# (`jump_band` → `JUMP_FLOOR`, a move that can be only Typical or Notable for a volatile stock)
+# and a same-day move card's stock turning the other way at a merely Notable move
+# (`_plan_moves` → `plan.reversals` → `_jump_candidates`), and the Anthropic fallback rides the
+# same triggers. Each part of `_UPDATES_SEARCH_TRIGGER` is tied to the code path it describes,
+# so narrowing the code or the copy alone fails here.
+
+
+def test_the_updates_search_trigger_matches_the_code():
+    from app.services.insight_move import BASIS_REVERSAL, MoveTag
+    from app.services.updates_insight_sweeper import InsightSweeper
+    from app.services.updates_materiality import (
+        JUMP_FLOOR, JUMP_FLOOR_SESSION_PCT, JUMP_TIERS, canonical_band, classify_move, jump_band,
+    )
+    from app.utils.market_hours import session_trading_date
+    from datetime import datetime, timedelta, timezone
+
+    # "10% or more": +12% on a stock whose σ makes it only Notable is still a jump (searched).
+    assert JUMP_FLOOR in JUMP_TIERS and JUMP_FLOOR_SESSION_PCT == 10.0
+    assert canonical_band(classify_move(12.0, 0.08)) == "notable"
+    assert jump_band(12.0, 0.08, is_market_scope=False) == JUMP_FLOOR
+    assert "(unusual for that stock, or 10% or more)" in _UPDATES_SEARCH_TRIGGER
+
+    # "turns around after one": a stock that got a down move card this morning and now trades
+    # +4% (Notable at σ 3%, not a jump) is planned as a reversal — the set the search reads.
+    now = datetime(2026, 11, 23, 15, 30, tzinfo=timezone.utc)  # Monday 10:30 ET
+    assert jump_band(4.0, 0.03, is_market_scope=False) is None
+    quote = {"symbol": "TURN", "price": 10.0, "changePercentage": 4.0, "marketCap": 2e9,
+             "changeSession": session_trading_date(now).isoformat()}
+    state = {"last_trigger_reason": "move:down:none + web (2)",
+             "last_generated_at": (now - timedelta(minutes=5)).isoformat()}
+    plan = InsightSweeper._plan_moves(
+        ["TURN"], {}, {"TURN": quote}, {"TURN": 0.03}, {"TURN": state},
+        {"TURN": (False, False, None)}, "regular", False, now,
+    )
+    assert plan.held == {"TURN": MoveTag(kind="none", direction="down")}
+    assert plan.basis == {"TURN": BASIS_REVERSAL} and "TURN" in plan.reversals
+    assert "or turns around after one" in _UPDATES_SEARCH_TRIGGER
+
+    # Every copy states the trigger; none keeps the narrower wording, which reads as "only".
+    for path in _PRIVACY_COPIES:
+        if path.is_file():
+            assert _UPDATES_SEARCH_TRIGGER in _copy_prose(path), f"{path.name} lost the trigger"
+    for path in [*_PRIVACY_COPIES, *_TERMS_COPIES]:
+        if path.is_file():
+            prose = _copy_prose(path)
+            assert len(prose) > 1500, f"{path.name} scan returned {len(prose)} chars"
+            for stale in _STALE_UPDATES_TRIGGERS:
+                assert stale not in prose, f"{path.name} still says {stale!r}"

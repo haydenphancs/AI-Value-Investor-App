@@ -295,6 +295,16 @@ _WEB_RESULT_MODULES = frozenset({
     "app.services.chat_web_search_service",
     "app.services.jump_web_search_service",
     "app.services.web_result_hygiene",
+    # The jump search's fallback lookup (2026-11-27): its frames hold the cited pages and rows.
+    "app.services.jump_claude_lookup_service",
+})
+# ...and, in modules whose OTHER frames keep their locals for triage, these functions only: the
+# fallback lookup's web-search call and its answer parsing hold the results and citations
+# (2026-11-27). Matched on (module, function), as sentry-sdk names a frame by its code name.
+_WEB_RESULT_FUNCTIONS = frozenset({
+    ("app.integrations.anthropic_client", "cited_web_search"),
+    ("app.integrations.anthropic_client", "_web_search_answer"),
+    ("app.services.llm_provider", "cited_web_search"),
 })
 # On the Insights path, only a frame that HOLDS the jump search's pages (one of these locals, not
 # empty) loses its locals; the card's other failures keep theirs for triage.
@@ -462,6 +472,9 @@ def _holds_web_value(node: Any, depth: int = 0) -> bool:
 def _holds_web_results(frame: dict) -> bool:
     module = _frame_module(frame)
     if module in _WEB_RESULT_MODULES:
+        return True
+    function = frame.get("function")
+    if isinstance(function, str) and (module, function) in _WEB_RESULT_FUNCTIONS:
         return True
     local_vars = frame.get("vars") or {}
     if module in _WEB_PAGE_MODULES and any(

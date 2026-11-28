@@ -17,9 +17,10 @@ from __future__ import annotations
 import html
 import ipaddress
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from app.services.chat_security import neutralize_fences
 
@@ -42,6 +43,10 @@ _DENIED_HOSTS = frozenset({
     "robinhood.com", "webull.com", "companiesmarketcap.com", "coinmarketcap.com",
     "coingecko.com", "markets.ft.com",
 })
+#: The denied hosts, public: the jump search's fallback provider passes them as its own
+#: blocked-domain list (2026-11-27), so its pages meet the SAME host policy before the digest
+#: re-checks every row. Hosts only — the quote PATHS below cannot be expressed as a domain.
+DENIED_HOSTS: frozenset = _DENIED_HOSTS
 # Quote / price pages on otherwise legitimate publishers — the code backstop for "never take a
 # price from the web" (host suffix, path prefix).
 _QUOTE_PATHS: Tuple[Tuple[str, str], ...] = (
@@ -257,3 +262,61 @@ def parse_relative_age(value: Any, now: datetime) -> Optional[datetime]:
     raw = m.group(1).lower()
     count = 1 if raw in ("a", "an", "one") else int(raw)
     return now - timedelta(seconds=count * _RELATIVE_UNIT_SECONDS[m.group(2).lower()])
+
+
+_ET = ZoneInfo("America/New_York")
+# How a page states only its DAY: an ISO date ("2026-11-27"), an ISO naive midnight, or the
+# written form a search provider prints ("November 27, 2026", "Nov 27, 2026"). Parsed with
+# `strptime` — no regex, so nothing here joins the linearity sweep.
+_DATE_ONLY_FORMATS = (
+    "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M",
+    "%B %d, %Y", "%b %d, %Y", "%B %d %Y", "%b %d %Y",
+)
+
+
+def _date_only(text: str) -> Optional[date]:
+    """The day a date-only page text names, else None. An ISO value WITH a time of day other
+    than midnight is not date-only (it is an instant `parse_page_age` reads)."""
+    for fmt in _DATE_ONLY_FORMATS:
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        if (parsed.hour, parsed.minute, parsed.second, parsed.microsecond) != (0, 0, 0, 0):
+            return None
+        if not 1990 <= parsed.year <= datetime.now(timezone.utc).year + 1:
+            return None
+        return parsed.date()
+    return None
+
+
+def parse_fallback_page_age(value: Any, now: datetime) -> Tuple[Optional[datetime], bool]:
+    """``(instant, precise)`` for a page date from the jump search's FALLBACK provider (2026-11-27).
+
+    * an ISO instant (`parse_page_age`) or a relative text (`parse_relative_age`): that instant,
+      precise;
+    * a date with no time that is TODAY's ET date: 00:00 ET of today, NOT precise — the page is
+      from today, but its time is unknown, so the card must never print one;
+    * anything else — another day, a day count, an unreadable or over-long value: ``(None,
+      False)``, never a guess.
+
+    ``now`` must be aware (a naive one is read as UTC). Pure; never raises.
+    """
+    if not isinstance(value, str) or not isinstance(now, datetime):
+        return None, False
+    text = value.strip()
+    if not text or len(text) > _PAGE_AGE_MAX_CHARS:
+        return None, False
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    exact = parse_page_age(text)
+    if exact is not None:
+        return exact, True
+    relative = parse_relative_age(text, now)
+    if relative is not None:
+        return relative, True
+    day = _date_only(text)
+    if day is None or day != now.astimezone(_ET).date():
+        return None, False
+    midnight = datetime(day.year, day.month, day.day, tzinfo=_ET)
+    return midnight.astimezone(timezone.utc), False

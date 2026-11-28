@@ -2028,3 +2028,145 @@ def test_every_row_is_linear_on_hostile_input(label):
             pass
         elapsed = time.perf_counter() - start
         assert elapsed < 0.5, f"{name} took {elapsed:.2f}s on {label!r}"
+
+
+# ── move cards only: `move_price_claims` (2026-11-27) ───────────────────────────────────────
+#
+# A MOVE card (news_insight_service, move mode) is checked with `move_price_claims` = every
+# `price_claims` row + three move-only rows. They live apart so `price_claims` — the widget's
+# lean gate, the stored card's read-time net and the web-page news test — stays byte-identical:
+# every move-only sample below is asserted NOT flagged by `price_claims`.
+#
+# EVERY STRING IN THIS SECTION IS HAND-WRITTEN (never a production card's or a web page's text).
+
+from app.services.insight_conclusion import (  # noqa: E402
+    MOVE_PRICE_CLAIM_PATTERNS,
+    move_price_claim_rows,
+    move_price_claims,
+)
+
+_MT_PLUG = ("PLUG", "plug power", "Plug Power")
+_MT_CRWV = ("CRWV", "coreweave", "CoreWeave")
+
+# One sample per move-only row that ONLY that row matches (among the move-only rows).
+MOVE_ROW_SAMPLES = {
+    "group_stocks_move_present": (_MT_CRWV, "Chip stocks jump on a supplier's leadership news."),
+    "rally_fades": (_MT_CRWV, "The tech rally fades into the afternoon."),
+    "subject_recovery": (_MT_PLUG, "The stock staged a sharp recovery."),
+    "term_recovery": (_MT_PLUG, "PLUG shows signs of a rebound."),
+    # integration review 2026-11-27: a group's move told as an experience
+    "group_stocks_light_move": (_MT_PLUG, "Hydrogen stocks experienced a notable decline."),
+}
+MOVE_FLAG = [
+    (_MT_PLUG, "Hydrogen shares retreat as the tech rally fades"),
+    (_MT_PLUG, "Fuel cell makers' stocks slide as tech rally cools"),
+    (_MT_CRWV, "AI stocks jump after a chip maker names its founder chief executive"),
+    (_MT_CRWV, "Tech sell-off deepens on rate fears"),
+    (_MT_CRWV, "AI rally loses steam"),
+    (_MT_CRWV, "The run-up ran out of steam by midday"),
+    (_MT_PLUG, "Plug Power stock shows signs of recovery"),
+    (_MT_PLUG, "Shares are showing hints of a turnaround"),
+    (_MT_PLUG, "PLUG stock mounts a comeback"),
+    (("ETHUSD", "ETH", "Ethereum"), "Ethereum shows signs of a rebound"),
+    # already price talk under `price_claims` — still caught
+    (_MT_CRWV, "CoreWeave rises with the market after the supplier news"),
+    (_MT_CRWV, "CoreWeave rallies with AI stocks after the supplier news"),
+    (_MT_CRWV, "CoreWeave outperforms the S&P 500 after the supplier news"),
+    (_MT_PLUG, "Fuel cell stocks, including a hydrogen maker, experienced a sharp decline today."),
+    (_MT_PLUG, "Bank stocks saw a sharp sell-off."),
+    (_MT_PLUG, "Hydrogen stocks staged a rebound."),
+    (_MT_PLUG, "Clean energy stocks have posted steep losses."),
+]
+MOVE_HONEST = [
+    (_MT_PLUG, "Crude stocks fall by 3 million barrels"),
+    (_MT_PLUG, "Housing stocks rise as builders report more orders"),
+    (_MT_PLUG, "Retail stocks decline in the third quarter at the warehouse chain"),
+    (_MT_CRWV, "Trump rally draws thousands"),
+    (_MT_CRWV, "Workers rally outside the plant"),
+    (_MT_CRWV, "Boeing shows signs of recovery in deliveries"),
+    (_MT_CRWV, "Shares of the recovery fund were distributed"),
+    (_MT_CRWV, "The broader stock market fell, but Oracle's backlog rose."),
+    (_MT_CRWV, "The AI rally has fueled data-center spending."),
+    (_MT_PLUG, "No news yet explains Plug Power's move"),
+    (_MT_PLUG, "Plug Power moves with the broader market; no company news explains it yet"),
+    (_MT_CRWV, "CoreWeave moves with the broader market after a chip maker named its founder chief"),
+    (_MT_PLUG, "Plug Power's hydrogen plant restart shows signs of progress"),
+    (_MT_PLUG, "The company staged a product launch in Texas"),
+    # twins of `group_stocks_light_move`: the business, an inventory, a metric
+    (_MT_PLUG, "Chip stocks posted strong revenue gains."),
+    (_MT_PLUG, "Crude stocks saw a drop of 3 million barrels."),
+    (_MT_PLUG, "Housing stocks saw gains in new orders."),
+    (_MT_PLUG, "Retail stocks recorded higher sales."),
+    (_MT_PLUG, "Utility stocks posted order growth."),
+]
+# Real price talk the move rows still leave to the prompt (a company NAME recovering is also the
+# business recovering).
+MOVE_PROMPT_ONLY = [
+    (_MT_PLUG, "Plug Power shows signs of recovery"),
+]
+
+
+def test_every_move_row_has_a_sample_and_every_sample_a_row():
+    names = [n for n, _ in MOVE_PRICE_CLAIM_PATTERNS] + ["term_recovery"]
+    assert len(names) == len(set(names)) and set(names) == set(MOVE_ROW_SAMPLES)
+    assert not set(names) & {n for n, _ in PRICE_CLAIM_PATTERNS}
+
+
+@pytest.mark.parametrize("name", sorted(MOVE_ROW_SAMPLES))
+def test_each_move_rows_sample_is_matched_by_that_row_alone(name):
+    terms, sample = MOVE_ROW_SAMPLES[name]
+    assert move_price_claim_rows(sample, terms) == [name]
+    # a NEW shape: `price_claims` (and so the lean gate and the read-time net) never sees it
+    assert price_claims(sample, terms) == []
+    assert move_price_claims(sample, terms)
+
+
+@pytest.mark.parametrize("terms,text", MOVE_FLAG)
+def test_move_flags(terms, text):
+    assert move_price_claims(text, terms), text
+
+
+@pytest.mark.parametrize("terms,text", MOVE_HONEST + [(t, s) for t, s in MOVE_PROMPT_ONLY])
+def test_move_honest_and_prompt_only_are_not_flagged(terms, text):
+    assert move_price_claims(text, terms) == [], text
+
+
+def test_price_claims_comes_first_and_unchanged():
+    terms, text = _MT_PLUG, "Shares of Plug Power fell 8% as the tech rally fades"
+    base = price_claims(text, terms)
+    assert base and move_price_claims(text, terms)[:len(base)] == base
+    assert move_price_claims(text, terms)[len(base):] == ["rally fades"]
+
+
+def test_the_move_rows_never_flag_the_honest_corpus():
+    hits = [(t, s) for t, s in MUST_PASS if move_price_claim_rows(s, t)]
+    assert hits == []
+
+
+@pytest.mark.parametrize("text", [None, "", 5, ["rally fades"]])
+def test_move_price_claims_never_raises(text):
+    assert move_price_claims(text, _MT_PLUG) == []
+    assert move_price_claim_rows(text, _MT_PLUG) == []
+
+
+_MOVE_HOSTILE = {
+    "stocks": "stocks " * _N,
+    "stocks_comma": "stocks, including " * (_N // 3),
+    "rally": "rally " * _N,
+    "sell_off": "sell-off " * _N,
+    "shares_aux": "shares is was " * (_N // 3),
+    "symbol": "PLUG " * _N,
+    "signs_of": "shows signs of " * (_N // 3),
+    "stock_spaces": "stock" + " " * _N + "x",
+    "stocks_saw": "stocks saw a " * (_N // 3),
+    "stocks_light_gap": "stocks experienced " + "very-sharp " * _N,
+}
+
+
+@pytest.mark.parametrize("label", sorted(_MOVE_HOSTILE))
+def test_every_move_row_is_linear_on_hostile_input(label):
+    text = _MOVE_HOSTILE[label]
+    start = time.perf_counter()
+    move_price_claim_rows(text, _MT_PLUG)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 1.5, f"{label} took {elapsed:.2f}s"

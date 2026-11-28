@@ -114,10 +114,12 @@ def test_the_jump_reserve_reaches_the_claim_exactly_as_the_gate_used_it(rpc, is_
     assert rpc.last_params["p_attempt_cap"] == attempt_cap_for(is_market, jumping=jumping)
 
 
-def test_a_jumping_ticker_claims_sixteen_and_twenty(rpc):
+def test_a_jumping_ticker_claims_twenty_and_twenty_four(rpc):
+    # `JUMP_RESERVE` 6 → 10 on 2026-11-27 (move cards): the RPC takes the integers, so
+    # the claim follows the gate with no migration.
     sweeper = _StubSweeper(rpc)
     assert sweeper._claim("ORCL", NOW, is_market_scope=False, jumping=True) is True
-    assert (rpc.last_params["p_daily_cap"], rpc.last_params["p_attempt_cap"]) == (16, 20)
+    assert (rpc.last_params["p_daily_cap"], rpc.last_params["p_attempt_cap"]) == (20, 24)
     # The market scope never gets the reserve.
     sweeper._claim(MARKET_SCOPE, NOW, is_market_scope=True, jumping=True)
     assert rpc.last_params["p_daily_cap"] == PER_SCOPE_DAILY_CAP_MARKET

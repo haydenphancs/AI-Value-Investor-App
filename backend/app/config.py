@@ -108,6 +108,10 @@ class Settings(BaseSettings):
     # model id is part of every card's fingerprint: changing it re-keys every scope
     # (one controlled regeneration wave, bounded by the per-cycle and daily caps).
     INSIGHT_AI_MODEL: Optional[str] = None
+    # The card writer for MOVE cards only (a big mover's card that explains the day's move,
+    # 2026-11-27, `news_insight_service`). None → INSIGHT_AI_MODEL, so unset changes nothing. Not in
+    # the fingerprint: a change applies from the next move card. Never a model switch by default.
+    INSIGHT_JUMP_AI_MODEL: Optional[str] = None
     # The grounding judge for WEB-ONLY Insights cards (news_insight_service, 2026-11-13, owner:
     # "Add a grounding judge"): one call per web-only card (two with a conclusion repair's re-judge)
     # checks every claim against the 1-3
@@ -1267,10 +1271,26 @@ class Settings(BaseSettings):
     # only stops writes keeps serving what was stored (the 2026-10-02 grounding lesson).
     UPDATES_JUMP_WEB_SEARCH_ENABLED: bool = True
     # Searches a day across all scopes, in its OWN fail-closed bucket in `chat_usage_budget` —
-    # outside chat's 180, which it must never eat. ~$5 per 1,000 requests: 40 bounds it at
-    # ~$0.20 a day (~$4-6 a month). Chat and this share ONE Brave key and dashboard spend limit:
-    # raise that limit by about this much before turning it on. `0` disables the search.
-    UPDATES_JUMP_WEB_SEARCH_DAILY_CAP: int = Field(40, ge=0, le=200)
+    # outside chat's 180, which it must never eat. ~$5 per 1,000 requests: 80 bounds it at
+    # ~$0.40 a day (~$9 a month over the trading days). Chat and this share ONE Brave key and
+    # dashboard spend limit: raise that limit by about this much first. `0` disables the search.
+    # Owner 2026-11-27: "do Brave 80 a day" (was 40, spent by 10:07 ET on 2026-11-23). The
+    # service paces it through the session, so the morning never spends the afternoon's share.
+    UPDATES_JUMP_WEB_SEARCH_DAILY_CAP: int = Field(80, ge=0, le=200)
+    # ── Claude web-search FALLBACK for the jump search (owner 2026-11-27: "use Claude API (200
+    # credits as fallback)", "Claude Sonnet 5.5", "40 a month") ──
+    # When Brave's day is used up, Brave fails or finds nothing, or Brave's pages explain nothing
+    # about an hour into the move, `jump_claude_lookup_service` asks Claude (server-side web search)
+    # for the pages. Ships OFF: the Privacy and Terms pages must name Anthropic as a second web
+    # search provider before this is turned on (documents/OWNER_TASKS.md). Read at call time.
+    UPDATES_JUMP_CLAUDE_FALLBACK_ENABLED: bool = False
+    UPDATES_JUMP_CLAUDE_MODEL: str = "claude-sonnet-5-5"
+    # Dollars a calendar month (ET) this fallback may spend from the shared $200 Claude credit
+    # (marketing + Learn used ~$1-5 a month in 2026-11). Each lookup is pre-charged at its worst
+    # case before the call. 0 = no lookups.
+    UPDATES_JUMP_CLAUDE_MONTHLY_BUDGET_USD: float = Field(40.0, ge=0, le=200, allow_inf_nan=False)
+    # Lookups a day (ET), so one broad-move day cannot spend the month. 0 = no lookups.
+    UPDATES_JUMP_CLAUDE_DAILY_LOOKUPS: int = Field(30, ge=0, le=60)
 
     @field_validator("CHAT_AUTO_WEB_SEARCH_MODE", mode="before")
     @classmethod

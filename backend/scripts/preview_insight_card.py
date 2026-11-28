@@ -32,6 +32,17 @@ calendar as it looked before FMP filled them in (status ``due_today``, not ``rep
 A web-only day (no FMP story in the window, 2026-11-12) replays with ``--jump --web-fixture``:
 the hand-written pages go through the same no-model-call gate as production
 (``_web_only_pages``) before ``_generate_card`` writes the card from them alone.
+
+A MOVE card (2026-11-27: a big mover's card states the cause, a market story the code
+confirmed, or honestly that no news explains the move yet) replays with ``--move up|down``:
+the corpus is the sweeper's move corpus (``select_move_corpus``: since the previous close, at
+least 24 h, price recaps set aside), and ``--market-fixture`` adds a confirmed market context
+(index basis) built from a JSON list of LICENSED FMP general-news rows through the production
+``select_market_items``. Web pages stay HAND-WRITTEN (``--web-fixture``), never saved search
+results, and neither search runs (both switches are forced off below):
+
+    ./venv/bin/python -m scripts.preview_insight_card --scope CRWV --name CoreWeave \\
+        --as-of 2026-11-23T15:33:00Z --move up --market-fixture /path/to/fmp_general.json
 """
 from __future__ import annotations
 
@@ -62,6 +73,14 @@ from app.config import settings  # noqa: E402
 # the jump prompt's MOVE rule from licensed FMP news; `--web-fixture` adds HAND-WRITTEN pages
 # (never saved search results) to test the web block against the card's price guard.
 settings.UPDATES_JUMP_WEB_SEARCH_ENABLED = False
+# The jump search's second provider (2026-11-27, Anthropic's web search) the same way: this
+# preview never pays for a lookup, and never evaluates a card on its pages.
+settings.UPDATES_JUMP_CLAUDE_FALLBACK_ENABLED = False
+
+from app.services.insight_move import MOVE_BASES, MOVE_DIRECTIONS  # noqa: E402  (stdlib only)
+
+MOVE_DIRECTION_CHOICES = MOVE_DIRECTIONS
+MOVE_BASIS_CHOICES = MOVE_BASES
 
 logger = logging.getLogger("preview_insight_card")
 
@@ -238,15 +257,32 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
 
     scope = args.scope.upper() if not args.scope.startswith("__") else args.scope
     as_of = parse_as_of(args.as_of)
+    move_problem = move_args_problem(args, scope)
+    if move_problem:
+        print(f"\n{move_problem}")
+        return 2
     rows = await _fetch_news(fmp, scope, as_of)
-    corpus, window = select_recent_corpus(
-        rows, as_of, scope=None if scope.startswith("__") else scope, company_name=args.name,
-    )
+    recaps: List[Dict[str, Any]] = []
+    direction = move_direction(args, scope)
+    if direction:
+        # The sweeper's ONE move corpus (gate, search candidates and the card all read it):
+        # since the previous regular close, at least 24 h; price recaps set aside (≤ 3 kept).
+        from app.services.news_insight_service import select_move_corpus
+
+        corpus, recaps = select_move_corpus(rows, as_of, scope, company_name=args.name)
+        window_label = "move"
+    else:
+        corpus, window = select_recent_corpus(
+            rows, as_of, scope=None if scope.startswith("__") else scope, company_name=args.name,
+        )
+        window_label = f"{window}h"
     corpus = corpus[:MAX_CORPUS_ARTICLES]
     status = await _earnings_status(fmp, scope, as_of, args.earnings_actuals)
 
     print(f"\n=== {scope} as of {as_of.isoformat()} — {len(rows)} fetched, "
-          f"{len(corpus)} in the {window}h corpus ===")
+          f"{len(corpus)} in the {window_label} corpus ===")
+    if direction:
+        print(f"price recaps set aside: {len(recaps)}")
     print(f"earnings status: {status.status + ' ' + status.date.isoformat() if status else 'none'}")
     if stored and stored.get("withheld"):
         print("\n--- stored now: written from web search results — not shown ---")
@@ -282,16 +318,54 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
     counting = _CountingGemini(gemini)
     svc.gemini = counting
 
+    move = None
+    if direction:
+        market = None
+        if args.market_fixture and web_only:
+            # Production never hands a web-only card a market context: its sources must stay
+            # all-web (`is_web_only_row`), and a cited market row would break that.
+            print("market fixture ignored: a web-only card never gets a market context")
+        elif args.market_fixture:
+            market = build_market_context(load_market_fixture(args.market_fixture), as_of)
+            print(f"market context: index basis, {len(market.items)} FMP general-news item(s)")
+        move = build_move_context(args, scope, direction, market=market, recaps=recaps)
+        if not all(callable(getattr(svc, name, None)) for name in _MOVE_WRITER_METHODS):
+            print("\nthis build's card writer has no move mode — nothing to replay")
+            return 2
+        print(f"move mode: {move.direction}, basis {move.basis}"
+              + (", coin" if move.is_crypto else "")
+              + ("" if args.move else " (from --jump and the sign of --quote-pct)")
+              + " — the downgrade guard (a better card stored today) is not replayed")
+
     # The sweeper hands the card the sweep's quote; replaying a big-move day needs it (the
     # MARKET prompt's "Price context" line, and the ticker guard's figure rules).
     quote = {"changePercentage": args.quote_pct} if args.quote_pct is not None else None
     for i in range(args.samples):
         before = len(counting.tags)
-        card, reason = await svc._generate_card(
-            scope, corpus, f"preview-{scope}-{as_of.isoformat()}-{i}", args.price_band, quote,
-            now=as_of, earnings=status, company_name=args.name, jumping=args.jump,
-            web_context=web or None,
-        )
+        inputset_id = f"preview-{scope}-{as_of.isoformat()}-{i}"
+        outcome = None
+        if move is not None:
+            # What `generate_and_store` runs in move mode (`_generate_and_store_move`), minus
+            # the stored-row read and the write.
+            if web_only:
+                result = await svc._web_only_move_result(
+                    scope, web, inputset_id, args.price_band, quote, move,
+                    now=as_of, earnings=status, company_name=args.name, jumping=True,
+                )
+            else:
+                result = await svc._generate_move_card(
+                    scope, corpus, web, move,
+                    inputset_id=inputset_id, now=as_of, earnings=status, company_name=args.name,
+                )
+            card = getattr(result, "card", None)
+            reason = getattr(result, "error", None) or getattr(result, "why", None)
+            outcome = move_outcome_line(move.direction, result)
+        else:
+            card, reason = await svc._generate_card(
+                scope, corpus, inputset_id, args.price_band, quote,
+                now=as_of, earnings=status, company_name=args.name, jumping=args.jump,
+                web_context=web or None,
+            )
         tags = counting.tags[before:]
         if i == 0 and args.show_prompt and counting.prompts:
             print("\n--- prompt (sample 1) ---\n" + safe(counting.prompts[before], secrets))
@@ -299,6 +373,8 @@ async def run_preview(args: argparse.Namespace, *, fmp: Any, gemini: Any,
         if card is None:
             print(f"  REJECTED — nothing would be written: {reason}")
             continue
+        if outcome:
+            print(f"  {outcome}")
         print(f"  {card['headline']}  [{card['sentiment']}]")
         for b in card["bullets"][:-1]:
             print(f"  • {b}")
@@ -320,7 +396,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=1)
     parser.add_argument("--show-prompt", action="store_true")
     parser.add_argument("--jump", action="store_true",
-                        help="replay a JUMPING ticker's prompt (the MOVE rule; never a web search)")
+                        help="replay a JUMPING ticker (never a web search): with a non-flat "
+                             "--quote-pct a move card in that direction, as the sweeper now "
+                             "writes; without one, the MOVE rule prompt")
+    parser.add_argument("--move", choices=MOVE_DIRECTION_CHOICES, default=None,
+                        help="replay a MOVE card in this direction (the sweeper's move corpus "
+                             "and move prompt; never a web search)")
+    parser.add_argument("--move-basis", choices=MOVE_BASIS_CHOICES, default="sigma",
+                        help="why the scope is in move mode (sigma, or floor for a ≥10%% "
+                             "session move the stock's own volatility calls ordinary)")
+    parser.add_argument("--market-fixture", default=None,
+                        help="with --move: JSON list of LICENSED FMP general-news rows (as FMP "
+                             "returns them, or as ticker_news_cache stores them) for a confirmed "
+                             "market context, index basis — equities only")
     parser.add_argument("--web-fixture", default=None,
                         help="JSON list of HAND-WRITTEN pages {title, snippet, url, publisher, "
                              "published_at} for the prompt's web block — never saved search "
@@ -349,6 +437,104 @@ def load_web_fixture(path: str) -> List[Dict[str, Any]]:
             page["published_at"] = parse_as_of(page["published_at"])
         pages.append(page)
     return pages
+
+
+# ── Move cards (2026-11-27) ────────────────────────────────────────────────────────
+
+
+def move_args_problem(args: argparse.Namespace, scope: str) -> Optional[str]:
+    """Why these move flags cannot replay anything production would do, or None."""
+    from app.services.news_cache_service import is_crypto_scope
+
+    if args.market_fixture and not move_direction(args, scope):
+        return ("--market-fixture needs move mode (--move, or --jump with a non-flat "
+                "--quote-pct): a market context exists only there")
+    if args.move and scope.startswith("__"):
+        return "--move: the market scope never writes a move card"
+    if args.market_fixture and is_crypto_scope(scope):
+        return "--market-fixture: coins get no market confirmation (equities only)"
+    return None
+
+
+def load_market_fixture(path: str) -> List[Dict[str, Any]]:
+    """The rows of a ``--market-fixture`` file in the ``ticker_news_cache`` shape: raw FMP
+    general-news rows (``title`` / ``publishedDate`` / ``url``) go through the production
+    mapping (`map_fmp_rows`, the market scope); rows already in the cache shape (``headline`` /
+    ``article_url``) are kept. Raises on anything else: this preview must read LICENSED FMP rows
+    only, never a hand-made or a web page posing as one."""
+    import json
+
+    from app.services.news_cache_service import MARKET_SCOPE
+
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("--market-fixture: expected a JSON list of FMP general-news rows")
+    fmp_rows: List[Dict[str, Any]] = []
+    cache_rows: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("--market-fixture: every row must be an object")
+        if str(item.get("headline") or "").strip():
+            if not str(item.get("article_url") or "").startswith("https://"):
+                raise ValueError("--market-fixture: a cache-shape row needs an https article_url")
+            cache_rows.append(dict(item))
+        elif str(item.get("title") or "").strip():
+            if not str(item.get("url") or "").startswith("https://"):
+                raise ValueError("--market-fixture: an FMP row needs an https url")
+            fmp_rows.append(item)
+        else:
+            raise ValueError("--market-fixture: every row needs a title (FMP) or headline (cache)")
+    return map_fmp_rows(fmp_rows, MARKET_SCOPE) + cache_rows
+
+
+def build_market_context(rows: Sequence[Dict[str, Any]], as_of: datetime) -> Any:
+    """An INDEX-basis market context from the fixture's rows as of ``as_of``: the production
+    selector (≤ 5 rows ≤ 24 h, filler and price-only dropped, newest first). The preview cannot
+    replay the S&P 500 check itself; passing the fixture IS the claim that it held."""
+    from app.services.insight_move import MARKET_BASIS_INDEX, MarketContext
+    from app.services.news_insight_service import select_market_items
+
+    items = select_market_items(rows_as_of(rows, as_of), as_of)
+    return MarketContext(basis=MARKET_BASIS_INDEX, items=tuple(items))
+
+
+# The writer's move-mode methods this replay calls, as `_generate_and_store_move` does.
+_MOVE_WRITER_METHODS = ("_generate_move_card", "_web_only_move_result")
+
+
+def move_direction(args: argparse.Namespace, scope: str) -> Optional[str]:
+    """The direction to replay a MOVE card in, or None for an ordinary replay: ``--move``, else
+    ``--jump`` with a non-flat ``--quote-pct`` on a ticker or coin — a live jumper, which the
+    sweeper now hands the writer in move mode. ``--jump`` without a quote stays today's jump
+    replay (the MOVE rule prompt)."""
+    from app.services.insight_move import direction_of
+
+    if args.move:
+        return args.move
+    if args.jump and args.quote_pct is not None and not scope.startswith("__"):
+        return direction_of(args.quote_pct)
+    return None
+
+
+def build_move_context(args: argparse.Namespace, scope: str, direction: str, *, market: Any,
+                       recaps: Sequence[Dict[str, Any]]) -> Any:
+    """The `MoveContext` the sweeper would hand the writer for this replay (nothing held)."""
+    from app.services.insight_move import MoveContext
+    from app.services.news_cache_service import is_crypto_scope
+
+    return MoveContext(
+        direction=direction, basis=args.move_basis, market=market,
+        recaps=tuple(recaps)[:3], held=None, is_crypto=is_crypto_scope(scope),
+    )
+
+
+def move_outcome_line(direction: str, result: Any) -> str:
+    """One line on what a move attempt would store: the tag, the verdict and why (codes only)."""
+    from app.services.insight_move import format_move_tag
+
+    tag = format_move_tag(direction, getattr(result, "kind", None))
+    return (f"move card: {tag or 'NO TAG (the sweeper would log this)'} — verdict "
+            f"{getattr(result, 'verdict', None)}, why {getattr(result, 'why', None)}")
 
 
 def _read_stored(scope: str) -> Optional[Dict[str, Any]]:

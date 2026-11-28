@@ -66,9 +66,13 @@ from app.services.news_cache_service import (
     get_news_cache_service,
     is_crypto_scope,
 )
+from app.services.insight_move import KIND_NONE, MOVE_DIRECTIONS, MOVE_KINDS, MoveTag
 from app.services.news_insight_service import (
+    PRIMARY_WINDOW_HOURS,
     WEB_ONLY_BADGE,
     cited_window_floor,
+    move_card_current,
+    move_card_today,
     select_recent_corpus,
     get_news_insight_service,
     web_only_card_visible,
@@ -83,13 +87,34 @@ from app.services.price_service import price_source
 logger = logging.getLogger(__name__)
 
 # Server-only markers `NewsInsightService._row_to_card` puts on a card: chat's audit skip
-# (`web_assisted`) and the same-day web-only rule (`web_only`). Stripped before the response
-# model, so neither ever reaches the wire.
-_SERVER_ONLY_CARD_KEYS = frozenset({"web_assisted", "web_only"})
+# (`web_assisted`), the same-day web-only rule (`web_only`) and the move card's kind and
+# direction (`move`, 2026-11-27). Stripped before the response model, so none ever reaches the
+# wire: old iOS builds decode the card unchanged (the tag still rides `trigger_reason`, which
+# they decode and never render).
+_SERVER_ONLY_CARD_KEYS = frozenset({"web_assisted", "web_only", "move"})
+
+# The narrowest badge a move card written today can carry. Its move corpus starts at the
+# previous regular close (at least 24 h back), so its own window is "24h" unless a story it
+# CITES is older (`cited_window_floor`) — never the subject window recomputed from the feed,
+# which reads "72h" on a Monday morning because a thin weekend widens it back to Friday.
+_MOVE_CARD_MIN_BADGE_HOURS = 24
+
+
+def _move_marker_kind(card: Dict[str, Any]) -> Optional[str]:
+    """The kind of a card's server-only ``move`` marker whatever day it was written, or None for
+    a general card or a marker outside the closed vocabularies (fail toward the ordinary card)."""
+    raw = card.get("move")
+    if not isinstance(raw, dict):
+        return None
+    kind, direction = raw.get("kind"), raw.get("direction")
+    if kind not in MOVE_KINDS or direction not in MOVE_DIRECTIONS:
+        return None
+    return kind
 
 
 def _card_age_hours(card: Dict[str, Any], now: datetime) -> Optional[float]:
-    """Hours since a card's ``generated_at``, for a log line only. None when unreadable."""
+    """Hours since a card's ``generated_at`` (negative when dated ahead of ``now``). None when
+    unreadable. Logged, and read by `_current_move_card` for a coin."""
     raw = card.get("generated_at")
     if isinstance(raw, datetime):
         dt = raw
@@ -105,22 +130,41 @@ def _card_age_hours(card: Dict[str, Any], now: datetime) -> Optional[float]:
     return (now - dt).total_seconds() / 3600.0
 
 
+def _current_move_card(card: Dict[str, Any], scope: str, now: datetime) -> Optional[MoveTag]:
+    """The move card a served card IS while its move is the current one, else None: the ONE
+    shared rule, `news_insight_service.move_card_current` (an equity's on its ET day, a coin's
+    for 24 h across ET midnight). Ask Cay AI reads the same function. Pure."""
+    return move_card_current(card, scope, now)
+
+
 # One WARNING per hidden web-only card, keyed (scope, generated_at): the card stays readable
 # until its hard expiry (~96 h) and every page-0 load (iOS re-polls included) would otherwise
 # re-log it. Bounded like `news_insight_service._price_net_logged`.
 _web_only_hide_logged: Set[Tuple[str, str]] = set()
 _WEB_ONLY_HIDE_LOG_CAP = 5000
+# The same, for a no-cause move card hidden on a later ET day (2026-11-27).
+_move_none_hide_logged: Set[Tuple[str, str]] = set()
+
+
+def _first_hide(logged: Set[Tuple[str, str]], scope: str, card: Dict[str, Any]) -> bool:
+    """True the first time this process hides this card (by scope + generated_at)."""
+    key = (scope, str(card.get("generated_at")))
+    if key in logged:
+        return False
+    if len(logged) >= _WEB_ONLY_HIDE_LOG_CAP:
+        logged.clear()
+    logged.add(key)
+    return True
 
 
 def _first_web_only_hide(scope: str, card: Dict[str, Any]) -> bool:
-    """True the first time this process hides this card (by scope + generated_at)."""
-    key = (scope, str(card.get("generated_at")))
-    if key in _web_only_hide_logged:
-        return False
-    if len(_web_only_hide_logged) >= _WEB_ONLY_HIDE_LOG_CAP:
-        _web_only_hide_logged.clear()
-    _web_only_hide_logged.add(key)
-    return True
+    """True the first time this process hides this web-only card (by scope + generated_at)."""
+    return _first_hide(_web_only_hide_logged, scope, card)
+
+
+def _first_move_none_hide(scope: str, card: Dict[str, Any]) -> bool:
+    """True the first time this process hides this no-cause move card."""
+    return _first_hide(_move_none_hide_logged, scope, card)
 
 
 def _insight_failure_detail(e: BaseException) -> str:
@@ -631,6 +675,29 @@ async def get_updates_feed(
                         )
                     card = None
                     web_only = False
+                if (card is not None and _move_marker_kind(card) == KIND_NONE
+                        and _current_move_card(card, scope, now) is None):
+                    # A no-cause move card ("no news explains the move yet", 2026-11-27) whose
+                    # move is no longer the current one — an equity's from an EARLIER ET day, a
+                    # coin's 24 h old (`_current_move_card`), or an unreadable / future time:
+                    # its "yet" and its move were that day's, so it gives way to the headline
+                    # list, as an aged web-only card does. Scope and age only — never the text.
+                    age_h = _card_age_hours(card, now)
+                    age_txt = f"{age_h:.1f}" if age_h is not None else "unknown"
+                    if _first_move_none_hide(scope, card):
+                        logger.warning(
+                            "Updates insight: hiding no-cause move card for scope=%s age_h=%s "
+                            "(%s)", scope, age_txt,
+                            f"not written in the last {PRIMARY_WINDOW_HOURS} h"
+                            if is_crypto_scope(scope) else "not written on today's ET date",
+                        )
+                    else:
+                        logger.debug(
+                            "Updates insight: still hiding no-cause move card for scope=%s "
+                            "age_h=%s", scope, age_txt,
+                        )
+                    card = None
+                    web_only = False
                 if not feed_recent and not web_only:
                     # An empty window shows no card (as before 2026-11-12) — a plain or
                     # MIXED card included, and no headline fallback (nothing to list).
@@ -671,6 +738,18 @@ async def get_updates_feed(
                         # its ET day only: never the recomputed corpus window (the FMP
                         # corpus is not what it summarised, and may be empty).
                         card = {**card, "badge": WEB_ONLY_BADGE}
+                    elif (card.get("ai_generated", True)
+                          and _current_move_card(card, scope, now) is not None):
+                        # A move card written TODAY (2026-11-27; a coin's, in the last 24 h —
+                        # `_current_move_card`) summarised the move corpus — since the previous
+                        # close, at least 24 h — so its own window is "24h", floored by any
+                        # older story it CITES; never the recomputed subject window (a Monday's
+                        # "72h" from Friday's stories it never cited), and stated over an empty
+                        # subject window too. Once its move is over it is an ordinary card with
+                        # the ordinary badge.
+                        cited = cited_window_floor(card.get("sources"), raw_articles, now)
+                        window_hours = max(_MOVE_CARD_MIN_BADGE_HOURS, cited or 0)
+                        card = {**card, "badge": f"{window_hours}h"}
                     elif card.get("ai_generated", True) and subject_recent:
                         # The recompute can under-claim once a thin day fills in:
                         # a brief written over 48h (yesterday's story cited) must
@@ -680,9 +759,10 @@ async def get_updates_feed(
                         cited = cited_window_floor(card.get("sources"), raw_articles, now)
                         window_hours = max(subject_window, cited or 0)
                         card = {**card, "badge": f"{window_hours}h"}
-                    # `web_assisted` (a card written with the jump search's web pages) and
-                    # `web_only` (written from those pages alone) are server-only markers
-                    # for chat and the widget: never on the wire. `is_stale` stays as read.
+                    # `web_assisted` (a card written with the jump search's web pages),
+                    # `web_only` (written from those pages alone) and `move` (a move card's
+                    # kind and direction) are server-only markers for chat and the widget:
+                    # never on the wire. `is_stale` stays as read.
                     card = {
                         k: v for k, v in card.items()
                         if k not in _SERVER_ONLY_CARD_KEYS

@@ -226,9 +226,11 @@ async def test_the_stub_corpus_reaches_the_real_gate_non_empty(monkeypatch):
 
 
 def test_the_verified_current_reason_set_is_pinned():
+    # `move_card_held` joined on 2026-11-27 (a held company / market move card, or a no-cause
+    # card whose search is over); `no_cause_waiting` is deliberately absent.
     assert _VERIFIED_CURRENT_REASONS == {
         "fingerprint_unchanged", "daily_cap", "attempt_cap", "premarket_reserved",
-        "earnings_reserved",
+        "earnings_reserved", "move_card_held",
     }
 
 

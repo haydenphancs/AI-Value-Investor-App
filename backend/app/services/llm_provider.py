@@ -34,6 +34,19 @@ drawn picture), `max_tokens` (Opus 5.5 always thinks, and its thinking counts ag
 `deadline_seconds` that fits the art step's budget, an explicit `effort`, and the opt-in breaker
 policy BREAKER_ACCOUNT. The art is NOT a role: ROLES, MARKETING_SETTINGS and
 `any_marketing_role_on_claude()` — and so the script lease — are untouched by it.
+
+`ClaudeOnly.cited_web_search` (2026-11-27) is the ONE app-feature use of Claude: the Updates
+Insights jump search's fallback lookup (`services/jump_claude_lookup_service.py`, owner: "use Claude
+API (200 credits as fallback)", "Claude Sonnet 5.5"; ships OFF). It finds news pages with the
+server-side web search tool; Claude's prose is discarded. One attempt, the BREAKER_ACCOUNT read (an
+open breaker = no call), and a NARROWER opening rule than the art's: only used-up credits or a 401
+(`search_opens_account_breaker`) — a 403/400 refusal of the web tool (web search not enabled for the
+organisation, a refused parameter) is that feature's problem and must not push the marketing roles
+to Gemini for an hour. It is not a role either: ROLES and the lease never see it.
+
+Claude's list prices (`CLAUDE_MICROS_PER_MILLION_TOKENS`, `claude_rates`) live here since
+2026-11-27, so an app feature's spend cap never imports a marketing module;
+`marketing/digest_service.py` re-exports both under their old names.
 """
 
 from __future__ import annotations
@@ -97,6 +110,43 @@ CLAUDE_USAGE_KEY = "claude_usage"
 #: wider `anthropic_client.BREAKER_EXCEPTIONS`.
 BREAKER_ACCOUNT = "account"
 BREAKER_POLICIES = (None, BREAKER_ACCOUNT)
+
+#: Anthropic's list prices per 1M tokens, in micro-dollars: (input, output, cache read, cache write) —
+#: as published 2026-10-06, checked 2026-10-31 (Sonnet 5.5 $2 / $10, Opus 5.5 $4 / $20, Fable 5.1 $10 / $50;
+#: cache reads $0.20 / $0.20 / $0.25). Cache writes at 1.25× input, the 5-minute TTL's rate (these callers
+#: send no cache_control, so both cache kinds stay 0 in practice). Haiku 5.5 at its rate for prompts up to
+#: 100K tokens (every prompt of these roles is far below; $0.50 / $2.50 above), with no published cache-read
+#: rate (None). A served model is matched by its id or its id plus a dated snapshot suffix (-YYYYMMDD). A
+#: model or token kind with no rate here makes the marketing cost line's Claude part "unreadable" and the
+#: jump lookup off (`jump_claude_lookup_service`) — add its row, never a guess. Revisit with any Anthropic
+#: price change. Moved here from `marketing/digest_service.py` (2026-11-27), which re-exports it.
+CLAUDE_MICROS_PER_MILLION_TOKENS: Dict[str, Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]] = {
+    "claude-sonnet-5-5": (2_000_000, 10_000_000, 200_000, 2_500_000),
+    "claude-opus-5-5": (4_000_000, 20_000_000, 200_000, 5_000_000),
+    "claude-fable-5-1": (10_000_000, 50_000_000, 250_000, 12_500_000),
+    "claude-haiku-5-5": (100_000, 500_000, None, 125_000),
+}
+
+
+def claude_rates(model: str) -> Optional[Tuple[Optional[int], ...]]:
+    """A served Claude model's price row: by its id, or by its id with a dated snapshot suffix
+    ("claude-sonnet-5-5-20261001"); None for a model without one."""
+    rates = CLAUDE_MICROS_PER_MILLION_TOKENS.get(model)
+    if rates is None:
+        base, _, suffix = model.rpartition("-")
+        if len(suffix) == 8 and suffix.isascii() and suffix.isdigit():
+            rates = CLAUDE_MICROS_PER_MILLION_TOKENS.get(base)
+    return rates
+
+
+def search_opens_account_breaker(e: BaseException) -> bool:
+    """Whether a failed `cited_web_search` opens the shared breaker under BREAKER_ACCOUNT: only an
+    ACCOUNT failure — used-up credits, or a 401 (a revoked or wrong key). A 403 is
+    ClaudeAuthException too, but on this path it is the web tool refused for the organisation, which
+    only the jump lookup should stop over (review 2026-11-27)."""
+    if isinstance(e, ac.ClaudeCreditsExhaustedException):
+        return True
+    return isinstance(e, ac.ClaudeAuthException) and getattr(e, "status_code", None) == 401
 
 _breaker_until: float = 0.0
 _breaker_reason: str = ""
@@ -319,14 +369,15 @@ _MEASURE_RETRYABLE = (ac.ClaudeRateLimitException, ac.ClaudeUnavailableException
 
 
 class ClaudeOnly:
-    """Claude with NO fallback. Raises ClaudeException. Two users:
+    """Claude with NO fallback. Raises ClaudeException. Three users:
 
       * measurement scripts (judge calibration, the writer preview): a fallback would mix Gemini
         answers into a Claude measurement;
       * the marketing per-post art brief and check (owner decision 2026-11-15, "Google draws, Claude
         checks": no Gemini fallback by decision — a Gemini check would be Google grading Google's own
         picture, and art is optional), with `breaker=BREAKER_ACCOUNT` and, per call, `images`,
-        `max_tokens`, `deadline_seconds` and `effort`.
+        `max_tokens`, `deadline_seconds` and `effort`;
+      * the Updates jump search's fallback lookup, through `cited_web_search` only (2026-11-27).
 
     `retries` (default 0) re-asks after a 429 / 5xx / overload / timeout with a 2-4-8 s back-off, so
     one transport blip among hundreds of calibration calls is not scored as an unusable answer. Every
@@ -418,6 +469,48 @@ class ClaudeOnly:
                     "tokens_used": int(result.get("tokens_used") or 0) + spent,
                     **({CLAUDE_USAGE_KEY: usage} if usage else {})}
         raise AssertionError("unreachable")  # pragma: no cover
+
+    async def cited_web_search(self, prompt: str, *, system_instruction: Optional[str], max_uses: int,
+                               max_tokens: int, deadline_seconds: Optional[float], effort: str = "low",
+                               blocked_domains: Sequence[str] = (),
+                               user_location: Optional[Dict[str, str]] = None,
+                               usage_tag: str) -> Dict[str, Any]:
+        """ONE `ClaudeClient.cited_web_search` call (the jump search's fallback lookup, 2026-11-27).
+
+        Under BREAKER_ACCOUNT an open shared breaker raises ClaudeBreakerOpenException with no call;
+        a failure opens it ONLY on `search_opens_account_breaker` (used-up credits, a 401) — never on
+        a 403/400 refusal of the web tool, a 429, an overload or a timeout. `effort` is normalised
+        like the art's (unknown → "low"); thinking is Sonnet 5.5's `between_tools` where the model
+        and effort take it (Opus 5.5 always thinks). Never retried: a ClaudeOnly built with retries
+        > 0 is refused before any I/O (a second attempt would spend past the caller's pre-charge).
+        A success carries CLAUDE_USAGE_KEY; a billed failure carries it as an attribute."""
+        tag = usage_tag
+        if self.retries:
+            raise ac.ClaudeRequestInvalidException(
+                f"cited_web_search makes ONE attempt — build ClaudeOnly with retries=0 (tag={tag})")
+        if self.breaker == BREAKER_ACCOUNT and breaker_open():
+            logger.warning("CLAUDE_SKIP tag=%s model=%s reason=breaker_open(%s) — no web search call",
+                           tag, self.model, _breaker_reason)
+            raise ac.ClaudeBreakerOpenException(
+                f"the shared Claude breaker is open ({_breaker_reason}) — not called "
+                f"(model={self.model}, tag={tag})")
+        claude = self._claude or ac.get_claude_client()
+        effort = _effort(effort)
+        try:
+            result = await claude.cited_web_search(
+                prompt, model_name=self.model, system_instruction=system_instruction, max_uses=max_uses,
+                max_tokens=max_tokens, effort=effort, thinking=_thinking(self.model, 0, effort),
+                blocked_domains=blocked_domains, user_location=user_location, usage_tag=tag,
+                deadline_seconds=deadline_seconds)
+        except ac.ClaudeException as e:
+            if self.breaker == BREAKER_ACCOUNT and search_opens_account_breaker(e):
+                _open_breaker(f"{type(e).__name__} (tag={tag})")
+            usage = _exception_usage(e)
+            if usage:
+                setattr(e, CLAUDE_USAGE_KEY, usage)
+            raise
+        usage = _usage_entry(result.get("model") or self.model, result.get("usage")).get(CLAUDE_USAGE_KEY)
+        return {**result, "provider": PROVIDER_CLAUDE, **({CLAUDE_USAGE_KEY: usage} if usage else {})}
 
 
 class ProviderRouter:

@@ -2779,10 +2779,14 @@ class NewsCacheService:
         # `ai_model` carries the Market rows' scope verdict (`market_news_relevance.
         # model_scope`); without it here the card corpus would ignore the model's read
         # that the feed (`select("*")`) applies.
+        # `cached_at` (2026-11-27, Insights move cards): when the row reached our cache. The
+        # sweeper's fresh-news hold breaker reads the LATER of it and `published_at`, so a story
+        # FMP delivered late (published before a held card, cached after it) still counts as
+        # new evidence (`updates_insight_sweeper._newest_arrival`).
         columns = (
             "id, ticker, external_id, headline, summary, sentiment, "
             "ai_processed, published_at, article_url, source_name, related_tickers, "
-            "ai_model"
+            "ai_model, cached_at"
         )
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         # MARKET rows pass through `market_news_relevance` exactly as the feed's do

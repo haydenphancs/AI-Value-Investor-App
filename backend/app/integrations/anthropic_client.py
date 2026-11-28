@@ -1,15 +1,21 @@
 """
 Anthropic Claude Messages API — a thin JSON-generation wrapper.
 
-Used ONLY through `app/services/llm_provider.py`, and only for marketing and Learn weekly work:
+Used ONLY through `app/services/llm_provider.py`, for marketing and Learn weekly work plus ONE
+app feature's web lookup:
   * its provider router, for four roles — the marketing writer and judge, the Learn weekly
     writer and judge. Gemini stays the default and the fallback for every one of them;
   * its no-fallback `ClaudeOnly` path: the measurement scripts (judge calibration, the writer
     preview) and — owner decision 2026-11-15, "Google draws, Claude checks" — the marketing
     per-post ART: Claude writes the picture's brief and then inspects the drawn picture (vision,
     `images=`). Gemini draws it (`integrations/gemini.py::generate_image`); there is no Gemini
-    fallback for the brief or the check, and art is optional (any failure = no art that day).
-Nothing else in the app calls Claude (owner: Claude is for marketing only, never app features).
+    fallback for the brief or the check, and art is optional (any failure = no art that day);
+  * `ClaudeOnly.cited_web_search` → `ClaudeClient.cited_web_search`, the server-side web search
+    tool, for the Updates Insights jump search's FALLBACK lookup only (owner 2026-11-27: "use
+    Claude API (200 credits as fallback)", `services/jump_claude_lookup_service.py`, which ships
+    OFF). It FINDS news pages; Claude's own prose is discarded and never reaches a card.
+Nothing else in the app calls Claude (owner: Claude is for marketing, never app features — the
+jump lookup above is the one, page-finding exception; `tests/test_claude_web_search_boundary.py`).
 
 Integration-layer rules (.claude/rules/integrations.md): HTTP in, dict out; typed exceptions; a
 lazy module-level client closed in the app lifespan; no caching, no business decisions. Returns
@@ -43,6 +49,8 @@ import json
 import logging
 import math
 import os
+import re
+from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import anthropic
@@ -84,6 +92,24 @@ MAX_IMAGE_BASE64_CHARS = 5 * 1024 * 1024
 #: Images in one call. The art check sends one; the cap only bounds a caller's mistake.
 MAX_IMAGES = 20
 
+#: The server-side web search tool `cited_web_search` sends (2026-11-27): the dynamic-filtering
+#: version, which Sonnet 5.5 and Opus 5.5 take. Its built-in code execution is free with it.
+WEB_SEARCH_TOOL_TYPE = "web_search_20260209"
+WEB_SEARCH_TOOL_NAME = "web_search"
+#: Searches one call may make (the API's `max_uses`). The caller's own cap is smaller; this only
+#: bounds a caller's mistake.
+MAX_WEB_SEARCH_USES = 10
+#: The API takes 1-64 plain hostnames per domain list; more is refused here, before any I/O.
+MAX_BLOCKED_DOMAINS = 64
+#: A plain lowercase hostname with at least one dot: no scheme, port, path, wildcard or IP-only form.
+_HOSTNAME_RE = re.compile(
+    r"(?=[a-z0-9.-]{4,253}\Z)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
+    r"\.[a-z][a-z0-9-]{0,61}[a-z0-9]")
+#: The keys an approximate user location may carry (the SDK's UserLocationParam).
+_USER_LOCATION_KEYS = frozenset({"type", "city", "country", "region", "timezone"})
+#: A web search tool error code as it may be counted: short, lowercase, underscored.
+_ERROR_CODE_RE = re.compile(r"[a-z_]{1,40}")
+
 
 class ClaudeException(Exception):
     """Any Claude failure. `tokens_used` is what the failed call billed (0 when unknown); `usage` is
@@ -96,6 +122,13 @@ class ClaudeException(Exception):
 
     #: Overridden per class (a timeout) or per instance (a connection failure, `_translate`).
     billing_unknown: bool = False
+    #: The HTTP status of an API error (`_translate`), None for anything else — a caller that must
+    #: tell a 401 (the key) from a 403 (a refused tool) reads it instead of parsing the message.
+    status_code: Optional[int] = None
+    #: Server-side web searches the call billed (`cited_web_search` sets it on the exceptions it
+    #: raises after an answer: $10 per 1,000 on top of the tokens); None when the answer's usage
+    #: could not be read. 0 for every other call.
+    web_searches: Optional[int] = 0
 
     def __init__(self, message: str, tokens_used: int = 0, *,
                  usage: Optional[Dict[str, int]] = None, model: Optional[str] = None):
@@ -290,6 +323,16 @@ def _usage_tokens(response: Any) -> Dict[str, int]:
     return out
 
 
+def _log_usage(usage_tag: Optional[str], served: Any, usage: Dict[str, int], stop: Any, suffix: str) -> None:
+    """The one CLAUDE_USAGE line per answered call. `suffix` rides at the END (" images=N" on a call
+    that sent images, " web_searches=N" on `cited_web_search`), so every other line is unchanged."""
+    logger.info(
+        "CLAUDE_USAGE tag=%s model=%s input=%d output=%d cache_read=%d cache_write=%d "
+        "total=%d stop=%s%s", usage_tag or "-", served, usage["input"], usage["output"],
+        usage["cache_read"], usage["cache_write"], usage["total"], stop, suffix,
+    )
+
+
 def _billed(usage: Dict[str, int], model: str) -> Dict[str, Any]:
     """The billing keywords of an exception raised AFTER Claude answered: its total, its tokens by
     kind and the model that billed them."""
@@ -308,6 +351,15 @@ def _api_message(e: Exception) -> str:
 
 
 def _translate(e: Exception) -> ClaudeException:
+    """An SDK error → our typed exception (`_translate_typed`), carrying the HTTP status of an API
+    error as `status_code` (None for a timeout or a connection failure)."""
+    out = _translate_typed(e)
+    status = getattr(e, "status_code", None)
+    out.status_code = status if isinstance(status, int) and not isinstance(status, bool) else None
+    return out
+
+
+def _translate_typed(e: Exception) -> ClaudeException:
     """An SDK error → our typed exception. Message: class, status, the API error type, request id
     and a capped message — or, for a connection failure, its ROOT cause (DNS, TLS, reset: the SDK
     says only "Connection error."). Never the key, the URL or the prompt (each part scrubbed)."""
@@ -420,9 +472,127 @@ def call_deadline(deadline_seconds: Optional[float], *, usage_tag: Optional[str]
     return min(float(deadline_seconds), configured)
 
 
+def _value_shown(value: Any) -> str:
+    """A refused argument as it may appear in a message: a number or a short printable string as
+    is, anything else by its type."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return repr(value)
+    if isinstance(value, str) and len(value) <= 64 and value.isprintable():
+        return repr(value)
+    return f"<{type(value).__name__}>"
+
+
+def web_search_tool(max_uses: Any, blocked_domains: Any = (), user_location: Any = None, *,
+                    usage_tag: Optional[str] = None) -> Dict[str, Any]:
+    """The `tools` entry of `cited_web_search`: the server-side web search tool. Pure: every check
+    runs before any I/O and raises ClaudeRequestInvalidException — `max_uses` not a whole number
+    from 1 to MAX_WEB_SEARCH_USES (a bool included); `blocked_domains` not a list or tuple (a bare
+    str, a set — no order — a generator), over MAX_BLOCKED_DOMAINS, a repeat, or an entry that is not
+    a plain lowercase hostname; a `user_location` that is not an approximate location of short
+    strings. An empty domain list sends no `blocked_domains` key."""
+    if isinstance(max_uses, bool) or not isinstance(max_uses, int) or not 1 <= max_uses <= MAX_WEB_SEARCH_USES:
+        raise ClaudeRequestInvalidException(
+            f"max_uses={_value_shown(max_uses)} is not a whole number from 1 to {MAX_WEB_SEARCH_USES} "
+            f"(tag={usage_tag})")
+    tool: Dict[str, Any] = {"type": WEB_SEARCH_TOOL_TYPE, "name": WEB_SEARCH_TOOL_NAME, "max_uses": max_uses}
+    if blocked_domains is None:
+        domains: List[str] = []
+    elif isinstance(blocked_domains, (list, tuple)):
+        domains = list(blocked_domains)
+    else:
+        raise ClaudeRequestInvalidException(
+            f"blocked_domains must be a list or tuple of hostnames, not {type(blocked_domains).__name__} "
+            f"(tag={usage_tag})")
+    if len(domains) > MAX_BLOCKED_DOMAINS:
+        raise ClaudeRequestInvalidException(
+            f"{len(domains)} blocked domains — the API takes at most {MAX_BLOCKED_DOMAINS} (tag={usage_tag})")
+    for i, domain in enumerate(domains):
+        if not isinstance(domain, str) or not _HOSTNAME_RE.fullmatch(domain):
+            raise ClaudeRequestInvalidException(
+                f"blocked domain {i} ({_value_shown(domain)}) is not a plain lowercase hostname (tag={usage_tag})")
+    if len(set(domains)) != len(domains):
+        raise ClaudeRequestInvalidException(f"blocked_domains repeats a hostname (tag={usage_tag})")
+    if domains:
+        tool["blocked_domains"] = domains
+    if user_location is not None:
+        if (not isinstance(user_location, dict) or user_location.get("type") != "approximate"
+                or set(user_location) - _USER_LOCATION_KEYS
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 64 for v in user_location.values())):
+            raise ClaudeRequestInvalidException(
+                f"user_location must be an approximate location of short strings ({sorted(_USER_LOCATION_KEYS)}) "
+                f"(tag={usage_tag})")
+        tool["user_location"] = dict(user_location)
+    return tool
+
+
+def _field(obj: Any, name: str) -> Any:
+    """`obj.name` for an SDK model, `obj[name]` for a dict (the SDK builds an unknown shape as one)."""
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _web_search_answer(response: Any) -> Dict[str, Any]:
+    """The parts of a web-search answer a caller may keep — Claude's text; each search RESULT as
+    {url, title, page_age} (never its `encrypted_content`); each web CITATION as {url, title,
+    cited_text} (never its `encrypted_index`); the search errors by code (an error object in place of
+    the result list is counted, never raised); and `web_search_requests`, the billed searches from
+    `usage.server_tool_use`, or None when that cannot be read on an answer that holds search results.
+    Anything of another shape is skipped. Pure; holds web results, so `log_redaction` drops this
+    frame's locals."""
+    texts: List[str] = []
+    results: List[Dict[str, Any]] = []
+    citations: List[Dict[str, Any]] = []
+    errors: Counter = Counter()
+    result_blocks = 0
+    for block in (getattr(response, "content", None) or []):
+        kind = _field(block, "type")
+        if kind == "text":
+            text = _field(block, "text")
+            if isinstance(text, str):
+                texts.append(text)
+            cited = _field(block, "citations")
+            for c in (cited if isinstance(cited, (list, tuple)) else ()):
+                if _field(c, "type") != "web_search_result_location":
+                    continue
+                url, cited_text, title = _field(c, "url"), _field(c, "cited_text"), _field(c, "title")
+                if isinstance(url, str) and isinstance(cited_text, str):
+                    citations.append({"url": url, "title": title if isinstance(title, str) else None,
+                                      "cited_text": cited_text})
+        elif kind == "web_search_tool_result":
+            result_blocks += 1
+            content = _field(block, "content")
+            if isinstance(content, (list, tuple)):
+                for item in content:
+                    if _field(item, "type") != "web_search_result":
+                        continue
+                    url, title, age = _field(item, "url"), _field(item, "title"), _field(item, "page_age")
+                    if isinstance(url, str) and isinstance(title, str):
+                        results.append({"url": url, "title": title,
+                                        "page_age": age if isinstance(age, str) else None})
+            else:
+                code = _field(content, "error_code")
+                errors[code if isinstance(code, str) and _ERROR_CODE_RE.fullmatch(code) else "unknown"] += 1
+    server = _field(getattr(response, "usage", None), "server_tool_use")
+    searches = _field(server, "web_search_requests")
+    if isinstance(searches, bool) or not isinstance(searches, int) or searches < 0:
+        searches = None if result_blocks else 0
+    return {"text": "".join(texts), "results": results, "citations": citations,
+            "search_errors": dict(errors), "web_search_requests": searches}
+
+
+def _search_failure(cls: type, message: str, usage: Dict[str, int], served: str,
+                    searches: Optional[int]) -> ClaudeException:
+    """An abnormal web-search answer's exception: billed (tokens by kind, the model) and carrying its
+    searches, so a spend cap prices the failed call in full."""
+    exc = cls(message, **_billed(usage, served))
+    exc.web_searches = searches
+    return exc
+
+
 class ClaudeClient:
-    """`generate_json` only — the router's one call shape (plus, for `ClaudeOnly`, images and a
-    shorter deadline)."""
+    """`generate_json` — the router's one call shape (plus, for `ClaudeOnly`, images and a shorter
+    deadline) — and `cited_web_search`, the jump search's fallback lookup (2026-11-27)."""
 
     async def generate_json(
         self,
@@ -481,12 +651,7 @@ class ClaudeClient:
         served = getattr(response, "model", None) or model_name
         # The image count rides at the END and only on a call that sent images, so every other
         # call's line is exactly today's.
-        logger.info(
-            "CLAUDE_USAGE tag=%s model=%s input=%d output=%d cache_read=%d cache_write=%d "
-            "total=%d stop=%s%s", usage_tag or "-", served, usage["input"], usage["output"],
-            usage["cache_read"], usage["cache_write"], usage["total"], stop,
-            f" images={len(blocks)}" if blocks else "",
-        )
+        _log_usage(usage_tag, served, usage, stop, f" images={len(blocks)}" if blocks else "")
         if stop == "refusal":
             details = getattr(response, "stop_details", None)
             category = getattr(details, "category", None)
@@ -514,6 +679,104 @@ class ClaudeClient:
             "tokens_used": usage["total"],
             "finish_reason": "STOP",
             "usage": {k: usage[k] for k in USAGE_KINDS},
+        }
+
+    async def cited_web_search(
+        self,
+        prompt: str,
+        *,
+        model_name: str,
+        system_instruction: Optional[str],
+        max_uses: int,
+        max_tokens: int,
+        effort: Optional[str],
+        thinking: Optional[Dict[str, Any]],
+        blocked_domains: Sequence[str] = (),
+        user_location: Optional[Dict[str, str]] = None,
+        usage_tag: Optional[str],
+        deadline_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """ONE call with the server-side web search tool (WEB_SEARCH_TOOL_TYPE), answered in plain
+        text with citations (2026-11-27, the Updates jump search's fallback lookup).
+
+        Sends: the prompt, the system instruction, `thinking` and `effort` as given, and ONE tool —
+        `max_uses`, `blocked_domains` (omitted when empty) and `user_location` (omitted when None).
+        Never temperature/top_p/top_k (API version 2026-10-21), no `tool_choice` (a forced tool is a
+        400 on Sonnet 5.5 and Opus 5.5), no `output_config.format` (citations and structured outputs
+        do not mix), no `fallbacks`, no cache. One attempt under the total deadline (`call_deadline`).
+
+        Returns {"text", "model", "tokens_used", "usage", "web_search_requests", "results",
+        "citations", "search_errors", "stop_reason"} (`_web_search_answer`; `web_search_requests` is
+        None when the answer's usage could not be read). A refusal, a cut answer (max_tokens), a
+        paused turn (pause_turn — never resumed, so the cost stays bounded) or any other stop reason
+        raises its typed exception, billed and carrying `web_searches`. An empty text is returned,
+        not raised: the caller keeps only cited pages, and none means none."""
+        tool = web_search_tool(max_uses, blocked_domains, user_location, usage_tag=usage_tag)
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ClaudeRequestInvalidException(f"the web search prompt is empty (tag={usage_tag})")
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 32000:
+            raise ClaudeRequestInvalidException(
+                f"max_tokens={_value_shown(max_tokens)} is not a whole number from 1 to 32000 (tag={usage_tag})")
+        deadline = call_deadline(deadline_seconds, usage_tag=usage_tag)
+        client = _get_client()
+        kwargs: Dict[str, Any] = {
+            "model": model_name,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": [tool],
+        }
+        if system_instruction:
+            kwargs["system"] = system_instruction
+        if thinking is not None:
+            kwargs["thinking"] = thinking
+        if effort:
+            kwargs["output_config"] = {"effort": effort}
+
+        try:
+            response = await asyncio.wait_for(client.messages.create(**kwargs), timeout=deadline)
+        except asyncio.TimeoutError:
+            raise ClaudeTimeoutException(
+                f"Claude web search call ran past its {deadline:g}s deadline (model={model_name}, "
+                f"tag={usage_tag})") from None
+        except anthropic.AnthropicError as e:
+            raise _translate(e) from e
+
+        usage = _usage_tokens(response)
+        stop = getattr(response, "stop_reason", None)
+        served = getattr(response, "model", None) or model_name
+        answer = _web_search_answer(response)
+        searches = answer["web_search_requests"]
+        # The search count rides at the END and only on this call: every other line is unchanged.
+        _log_usage(usage_tag, served, usage, stop,
+                   f" web_searches={searches if searches is not None else '?'}")
+        if stop == "refusal":
+            details = getattr(response, "stop_details", None)
+            raise _search_failure(
+                ClaudeRefusalException,
+                f"Claude declined the web search (category={getattr(details, 'category', None)}, "
+                f"model={served}, tag={usage_tag})", usage, served, searches)
+        if stop == "max_tokens":
+            raise _search_failure(
+                ClaudeTruncatedException,
+                f"Claude web search answer cut at max_tokens (model={served}, tag={usage_tag})",
+                usage, served, searches)
+        if stop not in ("end_turn", "stop_sequence"):
+            # pause_turn included: resuming the server's loop would spend more searches and tokens
+            # than the caller's pre-charged worst case.
+            raise _search_failure(
+                ClaudeBadAnswerException,
+                f"unexpected stop_reason={stop} on a web search (model={served}, tag={usage_tag})",
+                usage, served, searches)
+        return {
+            "text": answer["text"],
+            "model": served,
+            "tokens_used": usage["total"],
+            "usage": {k: usage[k] for k in USAGE_KINDS},
+            "web_search_requests": searches,
+            "results": answer["results"],
+            "citations": answer["citations"],
+            "search_errors": answer["search_errors"],
+            "stop_reason": stop,
         }
 
 

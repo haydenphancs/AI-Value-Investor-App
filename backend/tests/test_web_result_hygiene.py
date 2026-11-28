@@ -111,3 +111,53 @@ def test_parse_relative_age_refuses_anything_else(raw):
 def test_known_publishers_are_the_named_hosts():
     assert wrh._known_publisher("www.cnbc.com") and wrh._known_publisher("cnbc.com")
     assert not wrh._known_publisher("promo-signals.example")
+
+
+# ── the jump search's fallback provider (2026-11-27) ─────────────────────
+
+def test_the_denied_hosts_are_public_and_the_same_object():
+    # The fallback provider passes them as its blocked-domain list: ONE host policy.
+    assert wrh.DENIED_HOSTS is wrh._DENIED_HOSTS
+    assert {"reddit.com", "x.com", "google.com", "robinhood.com"} <= wrh.DENIED_HOSTS
+    assert all("/" not in h and h == h.lower() for h in wrh.DENIED_HOSTS)
+
+
+# 14:00 ET, Wed 2026-11-25 — and 00:00 ET that day is 05:00 UTC.
+FB_NOW = datetime(2026, 11, 25, 19, 0, tzinfo=timezone.utc)
+ET_MIDNIGHT = datetime(2026, 11, 25, 5, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("2026-11-25T16:10:00Z", (datetime(2026, 11, 25, 16, 10, tzinfo=timezone.utc), True)),
+    ("2026-11-25T11:10:00-05:00", (datetime(2026, 11, 25, 16, 10, tzinfo=timezone.utc), True)),
+    ("2 hours ago", (FB_NOW - timedelta(hours=2), True)),
+    ("an hour ago", (FB_NOW - timedelta(hours=1), True)),
+    # Today's ET date with no time: 00:00 ET, NOT precise (the card must print no time).
+    ("2026-11-25", (ET_MIDNIGHT, False)),
+    ("2026-11-25T00:00:00", (ET_MIDNIGHT, False)),
+    ("November 25, 2026", (ET_MIDNIGHT, False)),
+    ("Nov 25, 2026", (ET_MIDNIGHT, False)),
+    ("  November 25 2026 ", (ET_MIDNIGHT, False)),
+])
+def test_parse_fallback_page_age_reads_instants_and_todays_date(raw, expected):
+    assert wrh.parse_fallback_page_age(raw, FB_NOW) == expected
+
+
+@pytest.mark.parametrize("raw", [
+    "2026-11-24", "November 24, 2026", "Nov 26, 2026",   # another day
+    "1 day ago", "2 days ago", "yesterday", "last week",
+    "", "   ", None, 20261125, "x" * 41, "November 25, 2026 at 10:30 AM",
+    "2026-02-30", "1899-01-01",
+])
+def test_parse_fallback_page_age_refuses_anything_else(raw):
+    assert wrh.parse_fallback_page_age(raw, FB_NOW) == (None, False)
+
+
+def test_todays_date_is_the_et_date_not_the_utc_date():
+    # 23:30 ET on the 25th is already the 26th in UTC: the 25th is still "today".
+    late = datetime(2026, 11, 26, 4, 30, tzinfo=timezone.utc)
+    assert wrh.parse_fallback_page_age("November 25, 2026", late) == (ET_MIDNIGHT, False)
+    assert wrh.parse_fallback_page_age("November 26, 2026", late) == (None, False)
+    # A naive `now` is read as UTC, never as the machine's local time.
+    assert wrh.parse_fallback_page_age("2026-11-25", FB_NOW.replace(tzinfo=None)) == (
+        ET_MIDNIGHT, False)

@@ -63,9 +63,9 @@ import logging
 import random
 import time
 from collections import Counter
-from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.database import get_supabase
 from app.integrations.fmp import get_fmp_client
@@ -86,7 +86,30 @@ from app.services.news_cache_service import (
 from app.services.news_insight_service import (
     INSIGHT_MODEL,
     get_news_insight_service,
+    select_market_items,
+    select_move_corpus,
     select_recent_corpus,
+)
+from app.services.insight_move import (
+    BASIS_BAND,
+    BASIS_FLOOR,
+    BASIS_HELD,
+    BASIS_REVERSAL,
+    BASIS_SIGMA,
+    KIND_COMPANY,
+    KIND_MARKET,
+    KIND_NONE,
+    MOVE_KEPT,
+    MOVE_KINDS,
+    MarketContext,
+    MoveContext,
+    MoveOutcome,
+    MoveTag,
+    direction_of,
+    format_move_tag,
+    held_move,
+    parse_move_tag,
+    with_move_tag,
 )
 from app.services.asset_class import resolve_asset_class
 from app.services.jump_web_search_service import (
@@ -99,17 +122,33 @@ from app.config import settings
 from app.services.updates_materiality import (
     ACTION_GENERATE,
     ACTION_TOUCH,
+    BAND_EXTREME,
+    JUMP_FLOOR,
+    JUMP_FLOOR_SESSION_PCT,
     JUMP_TIERS,
+    REASON_MOVE_HELD,
+    REASON_NO_CAUSE_WAITING,
+    UNJUDGED_FAILURE_PREFIX,
     WEB_ONLY_REASON,
     Decision,
     attempt_cap_for,
+    canonical_band,
+    classify_move,
     daily_cap_for,
     decide,
     jump_band,
+    market_confirmation,
     move_score,
     mwcb_in_force,
 )
-from app.utils.market_hours import ET, SESSION_PREMARKET, is_market_active, session_phase
+from app.utils.market_hours import (
+    ET,
+    SESSION_AFTERHOURS,
+    SESSION_PREMARKET,
+    is_market_active,
+    session_phase,
+    session_trading_date,
+)
 from app.services.price_service import (
     current_session_quote,
     price_source,
@@ -159,6 +198,8 @@ _CLAIM_STALE_SECONDS = 120
 # treated as ordinary). Which scopes are jumping is decided ONCE per sweep by
 # `jump_band` from the current-session quote, never from `decision.price_band`
 # (a stale `last_price_band` when the quote is unusable, None on `no_corpus`).
+# Since 2026-11-27 it includes the ≥10% `JUMP_FLOOR`, a `jump_band` label only: a floor
+# jumper's gate band is its σ class, so `_run` alerts it with the live jump band.
 _CATALYST_TIERS = JUMP_TIERS
 
 # Skip reasons after which the card is "as current as policy allows": the sweeper
@@ -177,10 +218,20 @@ _CATALYST_TIERS = JUMP_TIERS
 # checked, and policy has ruled out a refresh until a known moment (the close, or
 # the results landing). `failure_cooldown` is ABSENT like `cooldown`: that scope
 # WILL retry within one cooldown.
+#
+# Move cards (2026-11-27): `move_card_held` joins them — a held company or market cause
+# card (or a no-cause card whose search is over) is the card policy keeps until a breaker.
+# `no_cause_waiting` is deliberately ABSENT: the search for a cause is still running, so
+# "checking for updates" is the truth. One exception is applied per scope
+# (`_stamp_current`): a held NO-CAUSE card is current only once its search is over — and
+# never for a cap or a reserve, which says nothing about the cause. A card the stock now
+# contradicts is stamped like any other: the gate will not rewrite it on such a skip.
 _VERIFIED_CURRENT_REASONS = frozenset({
     "fingerprint_unchanged", "daily_cap", "attempt_cap", "premarket_reserved",
-    "earnings_reserved",
+    "earnings_reserved", REASON_MOVE_HELD,
 })
+# The verified reasons that are a cap or a reserve, not a check of the card's content.
+_CAP_REASONS = frozenset({"daily_cap", "attempt_cap", "premarket_reserved", "earnings_reserved"})
 
 # ── Proactive per-article enrichment (news pass) ──────────────────────
 # After building each scope's windowed corpus for the card, the news pass also
@@ -224,10 +275,46 @@ _ALERT_MEMO_SECONDS = 1800
 # never trips it anyway). Neither web-only reason is in `_VERIFIED_CURRENT_REASONS`: like
 # `no_corpus` they are not verdicts about the card, and a real FMP story can still
 # regenerate the scope the same day.
+#
+# The two move-card holds (2026-11-27) are listed as a belt: the pre-check asks with
+# `web_refreshed_at=now`, which breaks a hold whenever the live move is material (and
+# every candidate's is), so neither should ever answer it.
 _WEB_NOT_ELIGIBLE = frozenset({
     "daily_cap", "attempt_cap", "premarket_reserved", "earnings_reserved",
     "mwcb_market_only", "gate_error", "no_corpus", "web_only_failure_cap",
+    REASON_MOVE_HELD, REASON_NO_CAUSE_WAITING,
 })
+
+# ── Move cards (2026-11-27) ───────────────────────────────────────────
+# A big mover's card states what caused the move, or honestly that no news explains it yet
+# (owner decisions: "Say so honestly", "Yes, when code confirms it", "Also count 10% or
+# more", "Yes, judge the cause"). The sweeper decides which scopes are in MOVE MODE, builds
+# their move corpus once, confirms a market-wide move, and hands the writer an
+# `insight_move.MoveContext`. MOVE MODE = the live jumpers, the reversal scopes (a held
+# move card whose stock now moves the other way, at least Notable) and the held scopes whose
+# live move is still material — never the market scope, an MWCB day, or a ticker's report
+# day after the close (its earnings card must be free to replace the move card), unless its
+# held card was written after the results landed. On a report day after the close the card
+# stays HELD while the results are pending, and is released once they land after it.
+#
+# A live move is MATERIAL at a canonical class of at least Notable or at the ≥10% floor:
+# the gate's own rule for a held card (`updates_materiality._decide_inner`), so the two
+# never disagree on which held scope may still be rewritten.
+_MATERIAL_CLASSES = frozenset({"notable", "unusual", "extreme"})
+# The move basis of a live jumper, by its `jump_band` label (the prompt says "a large
+# move" for the floor, "an unusually large move" otherwise).
+_JUMP_BASIS = {JUMP_FLOOR: BASIS_FLOOR, BAND_EXTREME: BASIS_BAND}
+# How long the shutdown waits for the jump search's fallback lookups to unwind.
+_WEB_CLOSE_SECONDS = 5.0
+# A move-mode scope's corpus is watched sweep to sweep for rows that ARRIVE late
+# (`InsightSweeper._first_seen_rows`). A row first seen while the scope was watched within
+# this many seconds (three 5-minute ticks) arrived at that sweep; after a longer gap — a
+# restart, the scope out of move mode, the off-hours — it cannot be placed, so it counts
+# from its publication time, as before.
+_ARRIVAL_GAP_SECONDS = 15 * 60
+# The loop's start delay (behind the 30/45/120 s pre-warmers); a module value so a test can
+# drive the loop without waiting.
+_START_DELAY_SECONDS = 150
 
 
 class _MarkedRead(dict):
@@ -257,6 +344,246 @@ def _move_direction(quote: Optional[Dict[str, Any]], now: datetime) -> Optional[
     if change is None or round(change, 2) == 0.0:
         return None
     return "up" if change > 0 else "down"
+
+
+def _live_move(quote: Any, sigma: Any, now: datetime) -> Tuple[Optional[str], bool, str]:
+    """``(direction, material, move class)`` of the CURRENT session's move: the direction as
+    `_move_direction` reads it; whether the move is material — a canonical class of at least
+    Notable or at least the ≥10% floor, the gate's own rule for a held move card; and the
+    `classify_move` label (for `move_score`). ``(None, False, "unknown")`` without a usable
+    move. Never raises: one bad row is not material."""
+    direction = _move_direction(quote if isinstance(quote, dict) else None, now)
+    if direction is None:
+        return None, False, "unknown"
+    change = session_change_percent(quote, now)
+    try:
+        band = classify_move(change, sigma, market_cap=quote.get("marketCap"))
+    except Exception as e:  # noqa: BLE001 — one bad row must not stop the sweep
+        logger.warning(
+            "Move class check failed (%s: %s) — read as not material", type(e).__name__, e,
+        )
+        return direction, False, "unknown"
+    material = (
+        canonical_band(band) in _MATERIAL_CLASSES
+        or abs(change) >= JUMP_FLOOR_SESSION_PCT
+    )
+    return direction, material, band
+
+
+def _aware_ts(value: Any) -> Optional[datetime]:
+    """An aware datetime from a datetime or an ISO string (naive read as UTC), else None.
+    Never raises."""
+    # `date` with a `tzinfo` attribute is a datetime (a bare date has none); read through
+    # `date` because the suite pins this module's `datetime` name to a clock subclass.
+    if isinstance(value, date) and hasattr(value, "tzinfo"):
+        when = value
+    elif isinstance(value, str) and value.strip():
+        try:
+            when = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return when if when.tzinfo is not None else when.replace(tzinfo=timezone.utc)
+
+
+def _card_postdates_results(tag: Optional[MoveTag], row: Any, reported_at: Any) -> bool:
+    """On a report day: was the held move card written AFTER this process saw the results
+    land (a before-the-open reporter's card, written in the session)? Then it already
+    tells them and stays held, in move mode, after the close (review 2026-11-27: a plain
+    card replaced such a card every evening). False without a held card, or when either
+    time is unknown — a landing this process never saw (a restart after it) cannot be
+    placed before the card, so the card is released as before."""
+    if tag is None or not isinstance(row, dict):
+        return False
+    landed = _aware_ts(reported_at)
+    written = _aware_ts(row.get("last_generated_at"))
+    return landed is not None and written is not None and landed <= written
+
+
+def _released_after_close(
+    after_close_report: bool, gate_inputs: Tuple[Any, ...], card_tells_results: bool,
+) -> bool:
+    """Is a held move card released after the close of its report day, so the earnings
+    card is free to replace it? Only once the results are no longer pending: while they
+    are, the card stays held (review 2026-11-27: releasing it at 16:00 re-keyed the
+    fingerprint and paid for a general card before the release, whose 30-minute report-day
+    cooldown then delayed the earnings card). A card written after the results is never
+    released (`_card_postdates_results`)."""
+    pending = len(gate_inputs) > 1 and bool(gate_inputs[1])
+    return after_close_report and not pending and not card_tells_results
+
+
+@dataclass
+class _MovePlan:
+    """Which scopes are in move mode this sweep, decided once (`InsightSweeper._plan_moves`)."""
+
+    #: Every same-ET-day move tag in state (never the market scope): what each card IS.
+    held: Dict[str, MoveTag] = field(default_factory=dict)
+    #: The tags the gate holds — all of ``held`` but a report-day ticker after the close
+    #: whose results landed after its card, or at a time unknown (`_released_after_close`).
+    gate_held: Dict[str, MoveTag] = field(default_factory=dict)
+    #: Move-mode scopes → their `MoveContext` basis, and their live direction.
+    basis: Dict[str, str] = field(default_factory=dict)
+    direction: Dict[str, str] = field(default_factory=dict)
+    #: Move-mode scopes whose held card the live move contradicts → the live move class.
+    reversals: Dict[str, str] = field(default_factory=dict)
+
+    def drop(self, scope: str) -> None:
+        """Take ``scope`` out of move mode (its corpus or context could not be built)."""
+        self.basis.pop(scope, None)
+        self.direction.pop(scope, None)
+        self.reversals.pop(scope, None)
+
+
+def _stamped_this_session(quote: Any, now: datetime) -> bool:
+    """True only when the row carries a readable ``changeSession`` stamp for the CURRENT
+    session. The market confirmation's index basis needs it (an UNSTAMPED row cannot say
+    which session its change describes; `current_session_quote` already blanked a row
+    stamped with an earlier one). Never raises."""
+    if not isinstance(quote, dict):
+        return False
+    raw = quote.get("changeSession")
+    if not raw:
+        return False
+    try:
+        stamped = date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return False
+    return stamped >= session_trading_date(now)
+
+
+# How far the S&P 500 must have moved the OTHER way before a held market card's "moves with
+# the broader market" stops holding (review 2026-11-27). A sign flip of a few basis points is
+# noise; half a percent is a turn a reader would notice.
+_INDEX_AGAINST_MIN_PCT = 0.5
+
+
+def _index_against(held: Optional[MoveTag], market_quote: Any, market_change: Any,
+                   now: datetime) -> bool:
+    """True when ``held`` is a MARKET card and the session-stamped S&P 500 change now has the
+    other sign, by at least `_INDEX_AGAINST_MIN_PCT`. False for any other card, an unstamped
+    or unusable index row, or junk. Never raises."""
+    try:
+        if held is None or held.kind != KIND_MARKET:
+            return False
+        if not _stamped_this_session(market_quote, now):
+            return False
+        direction = direction_of(market_change)
+        if direction is None or direction == held.direction:
+            return False
+        return abs(float(market_change)) >= _INDEX_AGAINST_MIN_PCT
+    except Exception as e:  # noqa: BLE001 — a bookkeeping input must never break a sweep
+        logger.warning("index_against check failed (%s: %s)", type(e).__name__, e)
+        return False
+
+
+def _row_key(row: Dict[str, Any]) -> Optional[str]:
+    """A corpus row's stable identity, as the gate's fingerprint reads it
+    (`updates_materiality.corpus_article_ids`): the article URL before the DB id."""
+    key = row.get("external_id") or row.get("article_url") or row.get("id")
+    return str(key) if key else None
+
+
+def _newest_arrival(
+    rows: Sequence[Any], first_seen: Optional[Mapping[str, datetime]] = None,
+) -> Optional[datetime]:
+    """When the newest row of a move corpus ARRIVED (aware), or None: per row the latest of
+    its ``published_at``, its ``cached_at`` when the read carries it, and ``first_seen``
+    (the sweep this process first saw it in, `InsightSweeper._first_seen_rows`). A move
+    corpus holds only news-bearing, subject-led rows, so this is the gate's
+    ``fresh_news_at``. Arrival, not publication alone (review 2026-11-27): FMP delivers a
+    story after its publication time, and a story published before the card's last attempt
+    but delivered after it was never read by any attempt — it must still be able to break
+    the hold. A row whose ``published_at`` is unreadable is skipped. Never raises."""
+    seen = first_seen if isinstance(first_seen, Mapping) else {}
+    newest: Optional[datetime] = None
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        published = _aware_ts(row.get("published_at"))
+        if published is None:
+            continue
+        key = _row_key(row)
+        stamps = [published, _aware_ts(row.get("cached_at")), _aware_ts(seen.get(key))]
+        when = max(t for t in stamps if t is not None)
+        if newest is None or when > newest:
+            newest = when
+    return newest
+
+
+def _is_kept(error: Any) -> bool:
+    """A kept attempt: the writer refused to replace a better same-day move card (failure
+    reason ``move_kept: <held>-><new>``, `insight_move.MOVE_KEPT`)."""
+    return isinstance(error, str) and error.startswith(MOVE_KEPT)
+
+
+def _kept_held_kind(error: Any) -> Optional[str]:
+    """The held kind of a kept attempt's failure reason (``move_kept: <held>-><new>``), or
+    None for any other reason or an unknown kind."""
+    if not _is_kept(error):
+        return None
+    held = error[len(MOVE_KEPT):].lstrip(": ").split("->", 1)[0].strip()
+    return held if held in MOVE_KINDS else None
+
+
+def _kept_tag(error: Any, direction: Any) -> Optional[MoveTag]:
+    """The STORED move card a kept attempt left in place: its kind from the failure reason
+    and the attempt's own direction — the writer keeps only a card for the direction it was
+    writing (`insight_move.is_move_downgrade`, and the judge-outage keep checks the same) —
+    or None for any other attempt."""
+    return parse_move_tag(format_move_tag(direction, _kept_held_kind(error)))
+
+
+# The `MoveOutcome.why` codes (set by `news_insight_service`) of a move-mode attempt that
+# JUDGED NOTHING: the model call failed or answered out of shape, the stored card could not
+# be read, the cause judge was unavailable or out of time (the held card was kept unjudged),
+# or the card could not be written. Pinned against the writer's source by a test.
+_UNJUDGED_MOVE_WHYS = frozenset({
+    "model_unavailable", "stored_unreadable", "judge_unavailable", "judge_budget",
+    "write_failed",
+})
+# The failure reasons (`pop_failure_reason`) of an ORDINARY attempt that judged its evidence
+# and refused it: a guard, the web-only judge's ruling, pages that cannot be cited or say
+# nothing, nothing to summarise, a kept move card. Any other reason (a model or storage
+# failure, "web_only_judge: unavailable" / "budget") judged nothing. Pinned by a test.
+_JUDGED_FAILURE_PREFIXES = (
+    "price_guard", "web_only_guard", "conclusion_guard", "web_only_no_source",
+    "web_only_no_content", "web_only_judge: headline=", "empty corpus", MOVE_KEPT,
+)
+
+
+def _attempt_unjudged(error: Any, outcome: Any) -> bool:
+    """Did an attempt that wrote no card end with NO judgement of its evidence (review
+    2026-11-27)? Then it must not consume that evidence: the sweeper leads its `last_error`
+    with `UNJUDGED_FAILURE_PREFIX` and the gate's evidence floor ignores it, so the page
+    set, the earnings landing or the fresh news that bought the attempt is retried after
+    the failure cooldown. A move-mode attempt is read from its `MoveOutcome`; an ordinary
+    one from its failure reason. A raise or a shutdown is decided by the caller."""
+    if isinstance(outcome, MoveOutcome):
+        return outcome.why in _UNJUDGED_MOVE_WHYS
+    return not (isinstance(error, str) and error.startswith(_JUDGED_FAILURE_PREFIXES))
+
+
+def _mark_unjudged(error: Any) -> str:
+    """``error`` led by `UNJUDGED_FAILURE_PREFIX` (once)."""
+    text = error if isinstance(error, str) and error else "generation returned no card"
+    return text if text.startswith(UNJUDGED_FAILURE_PREFIX) else UNJUDGED_FAILURE_PREFIX + text
+
+
+def _without_unjudged(error: Any) -> Any:
+    """``error`` without a leading `UNJUDGED_FAILURE_PREFIX` (anything else unchanged)."""
+    if isinstance(error, str) and error.startswith(UNJUDGED_FAILURE_PREFIX):
+        return error[len(UNJUDGED_FAILURE_PREFIX):]
+    return error
+
+
+def _is_reversal(reason: Any) -> bool:
+    """A GENERATE decision the gate took for a reversal (``reversal <old>-><new>`` part)."""
+    return isinstance(reason, str) and any(
+        part.startswith("reversal ") for part in reason.split(" + ")
+    )
+
 
 _STATE_TABLE = "updates_insight_state"
 
@@ -518,7 +845,31 @@ class InsightSweeper:
         success: bool,
         error: Optional[str] = None,
     ) -> None:
-        """Release the claim and record the outcome."""
+        """Release the claim and record the outcome.
+
+        On success ``decision.reason`` is stored as ``last_trigger_reason``: `_run` passes the
+        decision with the reason the WRITER stored (``card["stored_reason"]``), so a move
+        card's tag leads the state row exactly as it leads the cache row — the gate reads the
+        held card from here (`insight_move.held_move`), the reserve is rebuilt from it after
+        a restart, and a tag that is not the leading text is no tag at all.
+
+        A KEPT attempt (failure reason ``move_kept: …``: the writer refused to replace a
+        better same-day move card) is a failure — ``last_failure_at`` moves the gate's
+        evidence floor, so the evidence that bought it is consumed — and ALSO advances
+        ``last_inputset_id`` / ``last_price_band``: the corpus was read and judged, and
+        without that the unchanged corpus would re-trip ``new_articles`` every cooldown.
+
+        An attempt that judged nothing arrives with ``error`` led by
+        `UNJUDGED_FAILURE_PREFIX` (`_attempt_unjudged`): stored as is, it leaves the gate's
+        evidence floor where it was, and it advances no fingerprint, kept or not.
+
+        A failed attempt whose ``decision.reason`` LEADS with a move tag (only `_run` makes
+        one: ``<tag> + move_kept``) kept a stored move card the state row does not name — a
+        state write that failed after the card was stored, say. That tag becomes
+        ``last_trigger_reason`` (no success is counted, ``last_generated_at`` is untouched),
+        so the gate holds the card that IS stored instead of reading the live move as a
+        reversal of a stale tag on every failure cooldown until the attempt cap.
+        """
         patch: Dict[str, Any] = {
             "claim_at": None,
             "last_evaluated_at": now.isoformat(),
@@ -539,6 +890,16 @@ class InsightSweeper:
                 "last_failure_at": now.isoformat(),
                 "last_error": (error or "generation returned no card")[:500],
             })
+            if _is_kept(error) and decision.inputset_id is not None:
+                patch.update({
+                    "last_inputset_id": decision.inputset_id,
+                    "last_price_band": decision.price_band,
+                })
+            if (
+                parse_move_tag(decision.reason) is not None
+                and _is_kept(_without_unjudged(error))
+            ):
+                patch["last_trigger_reason"] = decision.reason
         try:
             self.supabase.table(_STATE_TABLE).upsert(
                 {"scope": scope, **patch}, on_conflict="scope"
@@ -727,24 +1088,70 @@ class InsightSweeper:
                 due.append(scope)
         return due
 
-    def _reserve_jumpers(self, jumpers: Dict[str, str], now: datetime) -> frozenset:
-        """Every scope that has jumped today in this process: the ones whose caps carry
-        the jump reserve, in the gate AND the claim.
+    def _reserve_jumpers(
+        self, jumpers: Dict[str, str], now: datetime, held: Iterable[str] = (),
+    ) -> frozenset:
+        """Every scope that has jumped today: the ones whose caps carry the jump reserve, in
+        the gate AND the claim.
 
         The reserve is a per-ET-day allowance, so it outlives the move: read off the live
         set, a pending reporter that jumped in the session and then faded before the close
         dropped back to its plain cap, and its in-session jump cards ate the after-close
         six — the release card was lost (review 2026-10-29; the ORCL 2026-09-10 failure
         `AFTER_CLOSE_EARNINGS_RESERVE` exists for). The alert, the faster news, the search
-        and the MOVE rule follow the LIVE set. A restart forgets it. Created lazily: the
-        suite's sweeper stubs never run `__init__`."""
+        and move mode follow the LIVE set (and the held move cards). Created lazily: the
+        suite's sweeper stubs never run `__init__`.
+
+        ``held`` — the scopes whose state row holds a move card written today (its leading
+        tag, `insight_move.held_move`): a move card is only ever written for a scope that
+        jumped today, and the tag is durable, so a restart or a second instance rebuilds the
+        latch from it (2026-11-27) instead of dropping a faded jumper back to its plain cap.
+        """
         latch = self.__dict__.setdefault("_jump_reserve_latch", {"day": None, "scopes": set()})
         day = et_date(now)
         if latch["day"] != day:
             latch["day"] = day
             latch["scopes"] = set()
         latch["scopes"].update(jumpers)
+        latch["scopes"].update(s for s in held if s != MARKET_SCOPE)
         return frozenset(latch["scopes"])
+
+    def _first_seen_rows(
+        self, scope: str, rows: Sequence[Any], now: datetime,
+    ) -> Dict[str, datetime]:
+        """``{row key: when this process first saw the row}`` in ``scope``'s move corpus, for
+        `_newest_arrival`. The read carries no ingestion time, so a row first seen while the
+        scope was watched in the previous few sweeps (`_ARRIVAL_GAP_SECONDS`) arrived at this
+        sweep (``now``, the sweep clock an attempt's state stamps use); one first seen after
+        a longer gap is given its publication time, since it may have arrived at any point of
+        the gap. Per ET day, in-process, created lazily (the suite's stubs never run
+        `__init__`). Never raises: a bad row is skipped."""
+        memo = self.__dict__.setdefault("_move_rows_seen", {"day": None, "scopes": {}})
+        day = et_date(now)
+        if memo["day"] != day:
+            memo["day"] = day
+            memo["scopes"] = {}
+        entry = memo["scopes"].setdefault(scope, {"at": None, "seen": {}})
+        last = _aware_ts(entry["at"])
+        current = _aware_ts(now)
+        watched = (
+            last is not None and current is not None
+            and 0 <= (current - last).total_seconds() <= _ARRIVAL_GAP_SECONDS
+        )
+        seen: Dict[str, datetime] = entry["seen"]
+        for row in rows or ():
+            if not isinstance(row, dict):
+                continue
+            key = _row_key(row)
+            if key is None or key in seen:
+                continue
+            published = _aware_ts(row.get("published_at"))
+            if watched:
+                seen[key] = current
+            elif published is not None:
+                seen[key] = published
+        entry["at"] = current
+        return dict(seen)
 
     async def _alert_jumper(
         self,
@@ -804,6 +1211,8 @@ class InsightSweeper:
         gate_inputs: Dict[str, Tuple[bool, bool, Optional[datetime]]],
         *,
         web_only_ok: bool,
+        reversals: Optional[Mapping[str, str]] = None,
+        held: Optional[Mapping[str, MoveTag]] = None,
     ) -> List[JumpCandidate]:
         """The jumpers worth a web search this tick, biggest move first.
 
@@ -818,15 +1227,28 @@ class InsightSweeper:
         that flag vouches for, and the caller passes False when a read behind the corpus
         failed this sweep (then an empty corpus is `no_corpus` and buys no search). The company name is the FMP screener's (the quote row), never the
         client-writable watchlist name: it becomes the search query.
+
+        Move cards (2026-11-27): ``reversals`` (``{scope: live move class}``) adds the
+        scopes whose held move card the stock now contradicts — a latched jumper that turned
+        the other way is searched at once in the new direction (``live=False`` when it is not
+        a live jumper). ``held`` (the gate's held move cards) reaches the pre-check, and each
+        candidate carries ``held_kind`` — the held card's kind, only when it is for the move
+        the stock makes NOW (a company cause for the other direction never stops this one's
+        search). ``corpora`` is the move corpus for move-mode scopes, as the gate sees it.
         """
+        held = held or {}
         out: List[JumpCandidate] = []
-        for scope, band in jumpers.items():
+        bands: Dict[str, str] = dict(jumpers)
+        for scope, live_class in (reversals or {}).items():
+            bands.setdefault(scope, live_class)
+        for scope, band in bands.items():
             quote = quotes_by_symbol.get(scope) or {}
             if not self._searchable_equity(scope, quote):
                 continue
             change = session_change_percent(quote, now)
             if change is None:
                 continue
+            tag = held.get(scope)
             pre = decide(
                 scope=scope, corpus=corpora.get(scope, []), quote=quote,
                 state=states.get(scope), market_change_percent=market_change,
@@ -844,15 +1266,19 @@ class InsightSweeper:
                 # (review 2026-10-29).
                 web_refreshed_at=now,
                 web_result_count=1,
-                # A live equity jumper (the filters above): an empty corpus may be filled
-                # by the web pages alone (2026-11-12) — unless a read failed this sweep.
+                # A live equity jumper or a reversal (the filters above): an empty corpus may
+                # be filled by the web pages alone (2026-11-12) — unless a read failed.
                 web_only_ok=web_only_ok is True,
+                held_move=tag,
             )
             if pre.reason in _WEB_NOT_ELIGIBLE:
                 continue
+            direction = direction_of(change)
             out.append(JumpCandidate(
                 scope=scope, name=quote.get("name"), change_percent=float(change),
                 score=move_score(band, change),
+                live=scope in jumpers,
+                held_kind=tag.kind if tag is not None and tag.direction == direction else None,
             ))
         return out
 
@@ -913,6 +1339,198 @@ class InsightSweeper:
             if band is not None:
                 out[scope] = band
         return out
+
+    # ── Move cards (2026-11-27) ───────────────────────────────────────
+
+    @staticmethod
+    def _plan_moves(
+        scopes: Sequence[str],
+        jumpers: Mapping[str, str],
+        quotes_by_symbol: Mapping[str, Any],
+        sigmas: Mapping[str, Any],
+        states: Mapping[str, Any],
+        gate_inputs: Mapping[str, Tuple[bool, bool, Optional[datetime]]],
+        phase: str,
+        mwcb: bool,
+        now: datetime,
+    ) -> _MovePlan:
+        """Decide, once per sweep, which scopes are in MOVE MODE and why.
+
+        * HELD: a state row whose ``last_trigger_reason`` leads with a move tag written on
+          today's ET date (`insight_move.held_move`). The gate holds it — on a ticker's
+          report day after the close too, until its results land after the card
+          (`_released_after_close`): then the earnings card must be free to replace it.
+        * MOVE MODE: a live jumper (basis from its `jump_band` label: floor / band / sigma);
+          else a held card whose live move is MATERIAL — "reversal" when the stock now moves
+          the other way, "held" when it keeps the card's direction. Never the market scope,
+          an MWCB day, or a move with no direction; on a report day after the close only for
+          a held card written after its results landed (a before-the-open reporter's card
+          already tells them, so nothing is waiting to replace it).
+
+        Pure apart from logging; never raises for one bad row (`_live_move`)."""
+        plan = _MovePlan()
+        sigmas = sigmas or {}
+        for scope in scopes:
+            if scope == MARKET_SCOPE:
+                continue
+            row = states.get(scope) if isinstance(states, Mapping) else None
+            tag = (
+                held_move(row.get("last_trigger_reason"), row.get("last_generated_at"), now)
+                if isinstance(row, dict) else None
+            )
+            direction, material, live_class = _live_move(
+                quotes_by_symbol.get(scope), sigmas.get(scope), now,
+            )
+            inputs = gate_inputs.get(scope) or (False, False, None)
+            after_close_report = bool(inputs[0]) and phase == SESSION_AFTERHOURS
+            card_tells_results = after_close_report and _card_postdates_results(
+                tag, row, inputs[2] if len(inputs) > 2 else None,
+            )
+            if tag is not None:
+                plan.held[scope] = tag
+                if not _released_after_close(after_close_report, inputs, card_tells_results):
+                    plan.gate_held[scope] = tag
+            if mwcb or direction is None or (after_close_report and not card_tells_results):
+                continue
+            if scope in jumpers:
+                basis = _JUMP_BASIS.get(jumpers[scope], BASIS_SIGMA)
+            elif tag is not None and material:
+                basis = BASIS_REVERSAL if tag.direction != direction else BASIS_HELD
+            else:
+                continue
+            plan.basis[scope] = basis
+            plan.direction[scope] = direction
+            if tag is not None and material and tag.direction != direction:
+                plan.reversals[scope] = jumpers.get(scope) or live_class
+        return plan
+
+    def _market_contexts(
+        self,
+        plan: _MovePlan,
+        jumpers: Mapping[str, str],
+        quotes_by_symbol: Mapping[str, Any],
+        market_quote: Any,
+        market_change: Any,
+        market_rows: Any,
+        now: datetime,
+    ) -> Dict[str, MarketContext]:
+        """``{scope: MarketContext}`` for every move-mode EQUITY whose move the code confirms
+        as market- or group-wide (owner: "Yes, when code confirms it";
+        `updates_materiality.market_confirmation`): the index basis needs a SPY row stamped
+        for the current session; the breadth basis reads the OTHER live searchable equity
+        jumpers. Never a coin, a fund or the market scope. The context is passed whenever
+        the move is confirmed, even with no market item (the confirmed no-cause wording).
+
+        The market items — at most 5 licensed FMP general-news rows from the market scope's
+        own corpus (`news_insight_service.select_market_items`) — are selected ONCE per sweep,
+        and only when a first move is confirmed. ``card_headline`` stays None: the stored
+        market card would cost a read and could only ever be context."""
+        out: Dict[str, MarketContext] = {}
+        if not plan.basis:
+            return out
+        peers = {
+            s: session_change_percent(quotes_by_symbol.get(s), now)
+            for s in jumpers
+            if self._searchable_equity(s, quotes_by_symbol.get(s))
+        }
+        index_ok = _stamped_this_session(market_quote, now)
+        items: Optional[Tuple[Dict[str, Any], ...]] = None
+        for scope in plan.basis:
+            quote = quotes_by_symbol.get(scope)
+            if not self._searchable_equity(scope, quote):
+                continue
+            basis = market_confirmation(
+                session_change_percent(quote, now), market_change,
+                {s: c for s, c in peers.items() if s != scope},
+                index_session_ok=index_ok, is_market_scope=False,
+                is_crypto=is_crypto_scope(scope),
+            )
+            if basis is None:
+                continue
+            if items is None:
+                try:
+                    items = tuple(select_market_items(market_rows or [], now))
+                except Exception as e:  # noqa: BLE001 — never raises by contract; belt
+                    logger.warning(
+                        "Market items unavailable this sweep (%s: %s) — a confirmed move is "
+                        "passed with none", type(e).__name__, e, exc_info=True,
+                    )
+                    items = ()
+            try:
+                out[scope] = MarketContext(basis=basis, items=items)
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    "Market context refused for %s (%s: %s) — no market context",
+                    scope, type(e).__name__, e,
+                )
+        return out
+
+    @staticmethod
+    def _search_over(web: Any, web_on: bool, scope: str, now: datetime, direction: str) -> bool:
+        """Is the search for this move's cause over (``decide(move_search_exhausted=)``)? True
+        when nothing searches at all (no service, the switch off, the crypto pass); else the
+        jump search's word (`episode_exhausted`). A failure reads as NOT over: a held no-cause
+        card then keeps reading "checking for updates" rather than being called current."""
+        if web is None or not web_on:
+            return True
+        try:
+            return web.episode_exhausted(scope, now, direction=direction) is True
+        except Exception as e:  # noqa: BLE001 — the service never raises; belt
+            logger.warning(
+                "Jump search exhaustion check failed for %s (%s: %s) — read as still searching",
+                scope, type(e).__name__, e, exc_info=True,
+            )
+            return False
+
+    @staticmethod
+    def _stamp_current(
+        reason: Optional[str],
+        held: Optional[MoveTag],
+        search_over: bool,
+        index_against: bool = False,
+    ) -> bool:
+        """May a skipped scope be re-stamped verified current (`mark_verified_current`)?
+
+        Its reason must be in `_VERIFIED_CURRENT_REASONS`, and when it holds a NO-CAUSE card
+        its search must be over and the reason must not be a cap or a reserve — "No news yet
+        explains …" capped at noon is not a card anyone checked.
+
+        A card the live move now CONTRADICTS (the stock moves the other way) is stamped like
+        any other (approved plan: `move_card_held` is verified current; review 2026-11-27):
+        a skip with one of these reasons means the gate will not rewrite it — a contradiction
+        that is material and uncapped is a reversal, which regenerates instead of skipping.
+        Withholding the stamp brought back "checking for updates" for the rest of the
+        session, a refresh that could not come (the ORCL 2026-09-11 bug)."""
+        if reason not in _VERIFIED_CURRENT_REASONS:
+            return False
+        if held is None:
+            return True
+        if held.kind == KIND_NONE:
+            return search_over is True and reason not in _CAP_REASONS
+        if held.kind == KIND_MARKET and index_against is True:
+            # Its "moves with the broader market" no longer holds (the S&P 500 turned):
+            # never called up to date, whatever the reason it was skipped.
+            return False
+        return True
+
+    def _take_move_outcome(self, scope: str, now: datetime, web: Any) -> Any:
+        """Pop the writer's `MoveOutcome` for this attempt (set after every move-mode attempt,
+        None after an ordinary one) and hand it to the jump search (its Claude trigger 3 and
+        its company-cause skip). Never raises: bookkeeping must not fail a stored card."""
+        pop = getattr(self.insights, "pop_move_outcome", None)
+        if not callable(pop):
+            return None
+        try:
+            outcome = pop(scope)
+            if outcome is not None and web is not None:
+                web.note_move_outcome(scope, now, outcome)
+            return outcome
+        except Exception as e:  # noqa: BLE001 — never fails the card
+            logger.warning(
+                "Move outcome bookkeeping failed for %s (%s: %s)",
+                scope, type(e).__name__, e, exc_info=True,
+            )
+            return None
 
     def _release_claim(self, scope: str, now: datetime, reason: str) -> None:
         """Give the claim back without recording a generation.
@@ -1106,13 +1724,12 @@ class InsightSweeper:
 
         # 1c'. JUMPERS — decided ONCE per sweep from the current-session move (2026-10-28,
         #      ORCL +12% behind a spent daily cap). This live set feeds the decoupled alert,
-        #      the faster news pass, the web search and the MOVE rule; the gate's and the
-        #      claim's jump reserve read `reserve_jumpers` (latched for the ET day). None on
+        #      the faster news pass, the web search and move mode; the gate's and the
+        #      claim's jump reserve read `reserve_jumpers` (latched for the ET day, and
+        #      rebuilt from the held move tags once the state rows are read — 4'). None on
         #      an MWCB day: the whole tape is moving.
         mwcb = mwcb_in_force(market_change)
         jumpers = {} if mwcb else self._jump_set(scopes, quotes_by_symbol, sigmas, now)
-        # The caps' view: today's jumpers so far, so a reserve survives a fading move.
-        reserve_jumpers = self._reserve_jumpers(jumpers, now)
         # Biggest move first wherever jumpers share an allowance: the faster news pass and the
         # decoupled alerts (a watcher gets a few watchlist alerts a day, and on a broad move
         # they must go to the biggest movers, not the most-watched names).
@@ -1215,6 +1832,9 @@ class InsightSweeper:
         # a new filler row never re-keys a card. Its first deploy re-keys, once, every
         # scope whose window held filler (each regenerates under the usual caps).
         names = await asyncio.to_thread(self._company_names, scopes)
+        # The rows as read, for the move corpora and the market items (4'), which apply
+        # their own windows. `corpora` below is the card window (and enrichment's, always).
+        raw_corpora = corpora
         corpora = {
             scope: select_recent_corpus(
                 rows, now,
@@ -1250,23 +1870,94 @@ class InsightSweeper:
                 ", ".join(degraded), len(jumpers),
             )
 
+        # 4'. Move cards (2026-11-27). Which scopes hold a move card written today (the
+        #     durable tag leading `last_trigger_reason`), which are in MOVE MODE (live
+        #     jumpers, reversals, held scopes still moving materially — `_plan_moves`), and
+        #     the jump reserve: the latch plus every held scope, so a restart or a second
+        #     instance keeps a faded jumper's reserve (both consumers, the gate and the
+        #     claim, read it below).
+        plan = self._plan_moves(
+            scopes, jumpers, quotes_by_symbol, sigmas, states, gate_inputs, phase, mwcb, now,
+        )
+        reserve_jumpers = self._reserve_jumpers(jumpers, now, held=plan.held)
+        # A market- or group-wide move the CODE confirmed (equities, outside the crypto pass).
+        market_ctx: Dict[str, MarketContext] = (
+            {} if crypto_only else self._market_contexts(
+                plan, jumpers, quotes_by_symbol, market_quote, market_change,
+                raw_corpora.get(MARKET_SCOPE), now,
+            )
+        )
+        # ONE move corpus per move-mode scope (`select_move_corpus`: since the previous
+        # regular close, at least 24 h; filler, other companies' stories and price recaps
+        # out), used by the gate's fingerprint, the search's pre-check and the writer alike
+        # — the same-corpus rule. Enrichment keeps the card window (`corpora`).
+        card_corpora: Dict[str, List[Dict[str, Any]]] = dict(corpora)
+        move_ctx: Dict[str, MoveContext] = {}
+        # A held MARKET card whose S&P 500 has since turned the other way: the gate breaks
+        # its hold, the writer replaces it, and it is never stamped current meanwhile.
+        index_against: Dict[str, bool] = {
+            s: True for s, tag in plan.held.items()
+            if _index_against(tag, market_quote, market_change, now)
+        }
+        for scope in list(plan.basis):
+            try:
+                rows, recaps = select_move_corpus(
+                    raw_corpora.get(scope) or [], now, scope, names.get(scope),
+                )
+                move_ctx[scope] = MoveContext(
+                    direction=plan.direction[scope], basis=plan.basis[scope],
+                    market=market_ctx.get(scope), recaps=tuple(recaps),
+                    held=plan.held.get(scope), is_crypto=is_crypto_scope(scope),
+                    index_against=index_against.get(scope, False),
+                )
+            except Exception as e:  # noqa: BLE001 — one scope's move corpus, not the sweep
+                logger.warning(
+                    "Move mode off for %s this sweep: its move corpus or context failed "
+                    "(%s: %s) — written as an ordinary card", scope, type(e).__name__, e,
+                    exc_info=True,
+                )
+                plan.drop(scope)
+                market_ctx.pop(scope, None)
+                move_ctx.pop(scope, None)
+                continue
+            card_corpora[scope] = list(rows)
+        # When the newest news-bearing row of a held scope's move corpus ARRIVED: fresh news
+        # may break a held card's hold (the gate spaces it, 60 min company / 45 min market or
+        # none). Every move-mode scope's rows are watched, so a jumper is watched before its
+        # first move card; only a held scope's arrival reaches the gate.
+        fresh_news: Dict[str, Optional[datetime]] = {}
+        for s in plan.basis:
+            rows = card_corpora.get(s, [])
+            arrived = _newest_arrival(rows, self._first_seen_rows(s, rows, now))
+            if s in plan.gate_held:
+                fresh_news[s] = arrived
+
         # 4a. The jump search (2026-10-28): for every EQUITY jumper that can still
         #     regenerate today, ask the web WHY it is moving. Its kept pages are a gate input
         #     (a new set is a one-shot trigger, never a fingerprint input) and a generation
         #     input (a fenced prompt block, and the first entries of the card's sources).
         #     After `_load_state`, so a capped scope is not searched; before the gate, so
         #     the gate sees this tick's pages. Brave is bounded at its timeout + 2 s.
+        #     Since 2026-11-27 a REVERSAL (a held move card the stock now contradicts) is
+        #     a candidate too, searched at once in the new direction.
         web = getattr(self, "web", None)
         web_on = web is not None and not crypto_only and web.enabled()
         web_counts: Dict[str, int] = {}
-        if web_on and jumpers:
+        if web_on and (jumpers or plan.reversals):
             candidates = self._jump_candidates(
-                jumpers, quotes_by_symbol, corpora, states, sigmas, market_change,
+                jumpers, quotes_by_symbol, card_corpora, states, sigmas, market_change,
                 cycle_start, now, market_active, phase, earnings_scopes, gate_inputs,
                 web_only_ok=web_only_vouched,
+                reversals=plan.reversals, held=plan.gate_held,
             )
             if candidates:
                 web_counts = await web.refresh(candidates, now)
+        # Is the search for each held card's move over? Read AFTER this tick's search. A held
+        # no-cause card reads `no_cause_waiting` (not current) until it is.
+        search_over = {
+            s: self._search_over(web, web_on, s, now, tag.direction)
+            for s, tag in plan.held.items()
+        }
         web_context: Dict[str, Tuple[Any, ...]] = {}
         web_refreshed: Dict[str, Optional[datetime]] = {}
         if web_on:
@@ -1290,9 +1981,11 @@ class InsightSweeper:
 
         for scope in scopes:
             is_market = scope == MARKET_SCOPE
+            held_tag = plan.gate_held.get(scope)
             decision = decide(
                 scope=scope,
-                corpus=corpora.get(scope, []),
+                # The move corpus for a move-mode scope (the same rows the writer gets).
+                corpus=card_corpora.get(scope, []),
                 quote=market_quote if is_market else quotes_by_symbol.get(scope),
                 state=states.get(scope),
                 market_change_percent=market_change,
@@ -1316,11 +2009,23 @@ class InsightSweeper:
                 # The LIVE jump set, never `reserve_jumpers`: a move that faded keeps its
                 # reserve for the day but no longer earns a card from web pages alone. And
                 # only an equity the search may cover (`_searchable_equity`) — pages for a
-                # coin or a fund never exist today, so this is the belt to that brace.
+                # coin or a fund never exist today, so this is the belt to that brace. A
+                # REVERSAL (2026-11-27) is searched like a live jumper, so it may be too.
                 web_only_ok=(
                     web_only_vouched
-                    and scope in jumpers
+                    and (scope in jumpers or scope in plan.reversals)
                     and self._searchable_equity(scope, quotes_by_symbol.get(scope))
+                ),
+                # Move cards (2026-11-27): the card held today, the newest news in its move
+                # corpus and whether the search for its cause is over — all no-ops without
+                # a held card (the market scope never holds one).
+                held_move=held_tag,
+                fresh_news_at=fresh_news.get(scope) if held_tag is not None else None,
+                move_search_exhausted=(
+                    search_over.get(scope, False) if held_tag is not None else False
+                ),
+                index_against_held=(
+                    index_against.get(scope, False) if held_tag is not None else False
                 ),
             )
             reasons[decision.reason] += 1
@@ -1338,9 +2043,14 @@ class InsightSweeper:
         # "Catching up…" on every quiet ticker. Costs one batched UPDATE, no LLM.
         # A scope CAPPED for the day (or reserved until the bell) was checked too
         # and is final until a known boundary, so it is stamped as well (see
-        # _VERIFIED_CURRENT_REASONS).
+        # _VERIFIED_CURRENT_REASONS). A held no-cause card still being searched for (or
+        # merely capped) is not (`_stamp_current`).
         verified = [
-            scope for scope, d in skips if d.reason in _VERIFIED_CURRENT_REASONS
+            scope for scope, d in skips
+            if self._stamp_current(
+                d.reason, plan.held.get(scope), search_over.get(scope, False),
+                index_against=index_against.get(scope, False),
+            )
         ]
         await self.insights.mark_verified_current(verified, market_active)
 
@@ -1365,8 +2075,9 @@ class InsightSweeper:
         def _urgent(scope: str, decision: Decision) -> bool:
             # The LIVE jump set, never `decision.price_band`: that is the stale
             # `last_price_band` when the quote is unusable, so a ticker that moved
-            # yesterday used to be ranked urgent all morning.
-            return bool(hot.get(scope)) or scope in jumpers
+            # yesterday used to be ranked urgent all morning. A REVERSAL (2026-11-27) is
+            # urgent too: its card describes the move the stock no longer makes.
+            return bool(hot.get(scope)) or scope in jumpers or _is_reversal(decision.reason)
 
         # Web-only decisions this sweep (counted before admission, like `reasons`).
         web_only = sum(1 for _, d in pending if WEB_ONLY_REASON in (d.reason or ""))
@@ -1383,6 +2094,8 @@ class InsightSweeper:
 
         sem = asyncio.Semaphore(_GEN_CONCURRENCY)
         generated = 0
+        # Move-card attempts this sweep, counts only (the sweep log).
+        move_counts: Counter = Counter()
 
         async def _run(scope: str, decision: Decision) -> bool:
             async with sem:
@@ -1418,6 +2131,13 @@ class InsightSweeper:
                     return False
                 card = None
                 error = None
+                outcome = None
+                # A raise or a shutdown judged nothing (`_attempt_unjudged`).
+                raised = False
+                # What `_finish_claim` stores: the decision, with the reason the WRITER
+                # stored once a card is written (a move card's tag leads it).
+                finished = decision
+                move = move_ctx.get(scope)
                 try:
                     # No "why it moved" block any more: it came from a grounded Google
                     # search, retired 2026-10-02 for the Grounding terms. `_store`
@@ -1429,7 +2149,8 @@ class InsightSweeper:
                         reason = f"{reason} + web ({len(pages)})"
                     card = await self.insights.generate_and_store(
                         scope=scope,
-                        corpus=corpora.get(scope, []),
+                        # The move corpus in move mode: the rows the gate fingerprinted.
+                        corpus=card_corpora.get(scope, []),
                         inputset_id=decision.inputset_id or "",
                         price_band=decision.price_band,
                         trigger_reason=reason,
@@ -1445,7 +2166,11 @@ class InsightSweeper:
                         # Lets the price guard read "CoreWeave Gains 4%" as CRWV's price.
                         company_name=names.get(scope),
                         web_context=pages,
-                        jumping=scope in jumpers,
+                        # Move mode (2026-11-27), never a bare "jumping": the writer derives
+                        # move mode from `jumping=True` alone, so a jumper kept out of it (a
+                        # report day after the close) must not pass it.
+                        jumping=move is not None,
+                        move=move,
                     )
                     if card is None:
                         # "conclusion_guard: figure $5,000" is a very different
@@ -1454,6 +2179,45 @@ class InsightSweeper:
                         pop_reason = getattr(self.insights, "pop_failure_reason", None)
                         if callable(pop_reason):
                             error = pop_reason(scope)
+                    else:
+                        stored_reason = card.get("stored_reason") if isinstance(card, dict) else None
+                        if isinstance(stored_reason, str) and stored_reason.strip():
+                            finished = replace(decision, reason=stored_reason)
+                        if (
+                            move is not None and isinstance(card, dict)
+                            and "move_tag" in card and card.get("move_tag") is None
+                        ):
+                            # A move-mode card stored with no tag cannot be held: the next
+                            # plain regeneration would replace it (contract drift).
+                            move_counts["untagged"] += 1
+                            logger.warning(
+                                "Insight move-mode card for %s was stored without a move tag "
+                                "— it will not be held", scope,
+                            )
+                    outcome = self._take_move_outcome(scope, now, web)
+                    if outcome is not None:
+                        move_counts["attempts"] += 1
+                    kept_tag = (
+                        _kept_tag(error, move.direction)
+                        if card is None and move is not None else None
+                    )
+                    if kept_tag is not None and kept_tag != plan.held.get(scope):
+                        # The writer kept a stored move card the state row does not name (a
+                        # state write that failed after it was stored, say): name it, or the
+                        # gate reads the live move as a reversal of the stale tag on every
+                        # failure cooldown until the attempt cap (`_finish_claim`).
+                        finished = replace(
+                            decision,
+                            reason=with_move_tag(
+                                MOVE_KEPT,
+                                format_move_tag(kept_tag.direction, kept_tag.kind),
+                            ),
+                        )
+                        logger.warning(
+                            "Insight state for %s named another move card than the stored one "
+                            "(state %s, stored %s %s) — the stored card's tag is recorded",
+                            scope, plan.held.get(scope), kept_tag.kind, kept_tag.direction,
+                        )
                 except asyncio.CancelledError:
                     # A deploy/shutdown cancels the sweeper mid-generation.
                     # CancelledError is a BaseException, so `except Exception`
@@ -1462,15 +2226,24 @@ class InsightSweeper:
                     # Release explicitly, then re-raise so cancellation still
                     # propagates and the loop actually stops.
                     error = "cancelled"
+                    raised = True
                     logger.info("Insight generation cancelled for %s (shutdown)", scope)
                     raise
                 except Exception as e:
                     error = f"{type(e).__name__}: {e}"
+                    raised = True
                     logger.error(
                         "Insight generation raised for %s: %s",
                         scope, error, exc_info=True,
                     )
                 finally:
+                    if card is None and (raised or _attempt_unjudged(error, outcome)):
+                        # An outage judged nothing: recorded as such, it consumes none of
+                        # the evidence that bought it (the gate's floor ignores it), kept
+                        # or not; the failure cooldown and the attempt cap bound the retry.
+                        error = _mark_unjudged(error)
+                        if outcome is not None:
+                            move_counts["unjudged"] += 1
                     # `finally`, not the happy path: the claim must be released
                     # even when the generation is cancelled, or the scope stays
                     # locked for the full stale window after every deploy.
@@ -1478,10 +2251,26 @@ class InsightSweeper:
                     # that triggered it.
                     await asyncio.shield(
                         asyncio.to_thread(
-                            self._finish_claim, scope, now, decision,
+                            self._finish_claim, scope, now, finished,
                             card is not None, error,
                         )
                     )
+                if card is None and _is_kept(error):
+                    # The writer kept today's better move card after JUDGING the new one
+                    # (`_finish_claim` recorded the attempt as a failure that consumed its
+                    # evidence; a keep that judged nothing is led by the unjudged mark and
+                    # is retried instead). A kept COMPANY or MARKET cause is as current as
+                    # policy allows: re-stamp it, as the `move_card_held` skip would have.
+                    # A kept no-cause card is not.
+                    move_counts["kept"] += 1
+                    if _kept_held_kind(error) in (KIND_COMPANY, KIND_MARKET):
+                        try:
+                            await self.insights.mark_verified_current([scope], market_active)
+                        except Exception as e:  # noqa: BLE001 — the card is unaffected
+                            logger.warning(
+                                "Could not re-stamp the kept move card for %s (%s: %s)",
+                                scope, type(e).__name__, e, exc_info=True,
+                            )
                 # A fresh card for a WATCHED ticker that moved materially is the one
                 # thing in this app worth interrupting someone for. Everything the
                 # alert needs was just computed — the tier and the move — so notifying
@@ -1495,8 +2284,15 @@ class InsightSweeper:
                 # card — and the alert never reads the card (its body is the move itself).
                 price_refused = card is None and str(error or "").startswith("price_guard")
                 if (card is not None or price_refused) and not is_market:
+                    alert_decision = decision
+                    if scope in jumpers and decision.price_band not in _CATALYST_TIERS:
+                        # A ≥10% FLOOR jumper (2026-11-27): its gate band is the σ class
+                        # (Typical / Notable), which the alert gate would refuse — and the
+                        # `_alert_due` below would then also stop the 6b alert. The live
+                        # jump band says it "counts as a jump" (owner decision).
+                        alert_decision = replace(decision, price_band=jumpers[scope])
                     await self._notify_watchers(
-                        scope, decision, card, now,
+                        scope, alert_decision, card, now,
                         quote=quotes_by_symbol.get(scope),
                     )
                     if scope in jumpers:
@@ -1585,14 +2381,20 @@ class InsightSweeper:
             "enriched=%d enrich_deferred=%d prior_session=%d earnings_boosted=%d "
             "earnings_status=%d earnings_hot=%d jumpers=%d jump_alerts=%d "
             "extra_news=%d web=%s web_only=%d mwcb=%s market=%s active=%s phase=%s "
-            "widget_push=%s reasons=%s",
+            "widget_push=%s held=%d move_mode=%d reversals=%d market_confirmed=%d "
+            "move_attempts=%d kept=%d untagged=%d unjudged=%d reasons=%s",
             ("crypto " if crypto_only else "") + ("news+price" if refresh_news else "price"),
             len(scopes), generated, len(touches), dropped,
             enriched_rows, enrich_deferred, prior_session, boosted,
             len(statuses), sum(1 for v in hot.values() if v),
             len(jumpers), jump_alerts, extra_news, web_counts or "-", web_only, mwcb,
             f"{market_change:+.2f}%" if isinstance(market_change, (int, float)) else "n/a",
-            market_active, phase, widget_push, dict(reasons.most_common(8)),
+            market_active, phase, widget_push,
+            # Move cards (2026-11-27) — counts only.
+            len(plan.held), len(move_ctx), len(plan.reversals), len(market_ctx),
+            move_counts["attempts"], move_counts["kept"], move_counts["untagged"],
+            move_counts["unjudged"],
+            dict(reasons.most_common(8)),
         )
         return {
             "scopes": len(scopes), "generated": generated,
@@ -1735,7 +2537,7 @@ async def run_insight_sweeper_loop() -> None:
     """
     # Stagger behind the existing 30/45/120s pre-warmers so startup isn't a
     # thundering herd against FMP.
-    await asyncio.sleep(150)
+    await asyncio.sleep(_START_DELAY_SECONDS)
     sweeper = get_insight_sweeper()
     state = _LoopState()
     logger.info(
@@ -1744,19 +2546,46 @@ async def run_insight_sweeper_loop() -> None:
         PRICE_INTERVAL_SECONDS, NEWS_EVERY_N_CYCLES, CRYPTO_OFF_HOURS_INTERVAL_SECONDS,
         INSIGHT_MODEL,
     )
-    while True:
-        try:
-            await _run_one_tick(
-                sweeper, state,
-                market_active=is_market_active(), monotonic=time.monotonic(),
-            )
-        except asyncio.CancelledError:
-            logger.info("Insight sweeper cancelled")
-            raise
-        except Exception as e:
-            logger.error(
-                "Insight sweep cycle failed: %s: %s", type(e).__name__, e,
-                exc_info=True,
-            )
-        # Jitter so multiple instances don't align their sweeps.
-        await asyncio.sleep(PRICE_INTERVAL_SECONDS * random.uniform(0.85, 1.15))
+    try:
+        while True:
+            try:
+                await _run_one_tick(
+                    sweeper, state,
+                    market_active=is_market_active(), monotonic=time.monotonic(),
+                )
+            except asyncio.CancelledError:
+                logger.info("Insight sweeper cancelled")
+                raise
+            except Exception as e:
+                logger.error(
+                    "Insight sweep cycle failed: %s: %s", type(e).__name__, e,
+                    exc_info=True,
+                )
+            # Jitter so multiple instances don't align their sweeps.
+            await asyncio.sleep(PRICE_INTERVAL_SECONDS * random.uniform(0.85, 1.15))
+    finally:
+        # Most shutdowns land in the sleep above, outside the tick's handler.
+        await _close_jump_search(sweeper)
+
+
+async def _close_jump_search(sweeper: Any) -> None:
+    """Cancel the jump search's fallback lookups at shutdown (2026-11-27). From the sweeper,
+    never `main.py`: the sweeper is the only module allowed to import the jump search
+    (`tests/test_brave_search_boundary.py`). Bounded by `_WEB_CLOSE_SECONDS`; never raises
+    (a lookup it cannot stop dies with the process)."""
+    web = getattr(sweeper, "web", None)
+    close = getattr(web, "aclose", None)
+    if not callable(close):
+        return
+    try:
+        await asyncio.wait_for(close(), timeout=_WEB_CLOSE_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Jump search fallback lookups did not stop within %.0fs at shutdown",
+            _WEB_CLOSE_SECONDS,
+        )
+    except Exception as e:  # noqa: BLE001 — shutdown must go on
+        logger.warning(
+            "Jump search close failed at shutdown (%s: %s)", type(e).__name__, e,
+            exc_info=True,
+        )

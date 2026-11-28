@@ -123,6 +123,11 @@ _INFLIGHT_MODULES = [
     # stops a burst of keystrokes starting duplicate 70k-row fetches, and the entry must
     # clear from the task's own completion (`add_done_callback`).
     "stock_search_service.py",
+    # Added 2026-11-27 with the Insights move cards. Task-based and never joined: the jump
+    # search's second-provider lookup runs as ONE detached task per process
+    # (`fallback_inflight` on the episode), so a slow lookup never holds the sweep; the flag
+    # clears from the task's own completion (`add_done_callback`) and `aclose` cancels it.
+    "jump_web_search_service.py",
     # Added 2026-11-13 with the "Delisted" label. Task-based: ONE delisted-companies window
     # load, one EOD read per symbol and one resolution per (symbol, ET day), each held in
     # `_inflight` and cleared from the task's own completion (`add_done_callback`). Callers

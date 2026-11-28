@@ -367,6 +367,67 @@ def _et_stamp(value: Any, now: Any) -> Optional[str]:
     return f"{stamp}, {ago}"
 
 
+def _move_marker_kind(card: Any) -> Optional[str]:
+    """The kind of a card's server-only ``move`` marker (`NewsInsightService._row_to_card`,
+    2026-11-27), whatever day it was written: "company" / "market" / "none", or None for a
+    general card or a marker outside the closed vocabularies. Never raises."""
+    from app.services.insight_move import MOVE_DIRECTIONS, MOVE_KINDS
+
+    raw = card.get("move") if isinstance(card, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    kind, direction = raw.get("kind"), raw.get("direction")
+    if kind not in MOVE_KINDS or direction not in MOVE_DIRECTIONS:
+        return None
+    return kind
+
+
+def _current_move_card(card: Any, scope: str, now: Any) -> Any:
+    """The feed's rule for "is this move card's move the current one": the ONE shared
+    `news_insight_service.move_card_current` (an equity's move card on the ET day it was written,
+    a coin's for 24 h across ET midnight). A `MoveTag` or None. Never raises: an error reads as
+    "not current" (logged)."""
+    from app.services.news_insight_service import move_card_current
+
+    try:
+        return move_card_current(card, scope, now)
+    except Exception as e:  # noqa: BLE001 — a card line must never fail the chat
+        logger.warning(
+            "move-card currency check failed for %s (%s: %s)", scope, type(e).__name__, e,
+        )
+        return None
+
+
+def _move_card_note(tag: Any) -> str:
+    """What a CURRENT move card is, appended to its card line (" (…)"), or "".
+
+    ``tag`` is `_current_move_card` (a `MoveTag` for a move card written on today's ET date —
+    a coin's, in the last 24 h — else None). Owner decisions 2026-11-27: a company card names the cause; a
+    market card's story is one the code confirmed (the S&P 500 or many watched stocks moved the
+    same way); a no-cause card is the honest "no news explains it yet", so the model answers from
+    its own tools instead of restating it as a cause. Never a figure, a model or a vendor."""
+    from app.services.insight_move import (
+        KIND_COMPANY,
+        KIND_MARKET,
+        KIND_NONE,
+        MOVE_DIRECTIONS,
+    )
+
+    kind = getattr(tag, "kind", None)
+    direction = getattr(tag, "direction", None)
+    if direction not in MOVE_DIRECTIONS:
+        return ""
+    if kind == KIND_COMPANY:
+        return f" (it names what drove today's move {direction})"
+    if kind == KIND_MARKET:
+        return (" (it attributes today's move to the wider market story, which Caydex "
+                "confirmed)")
+    if kind == KIND_NONE:
+        return (" (when written, it found no news explaining today's move; answer from your "
+                "own tools)")
+    return ""
+
+
 _GUIDANCE_READS = ("raised", "maintained", "lowered")
 
 
@@ -2087,6 +2148,14 @@ class ChatContextResolver:
         gets ONE line saying such a card exists and is not on screen — never its headline,
         sentiment or bullets, so chat cannot restate an earlier day's web-derived cause the
         app no longer shows.
+
+        A MOVE card (2026-11-27, `insight_move`) written today says what it is on its card
+        line: a company card names what drove today's move, a market card's story is one
+        Caydex confirmed, and a no-cause card says no news explained the move when it was
+        written, so the model answers from its own tools. A no-cause card from an EARLIER ET
+        day (a coin's: over 24 h old — its move is a rolling 24 h) is hidden by the feed (the
+        headline list shows instead), so it is "not on screen" here too; a company or market
+        card from an earlier day reads as an ordinary card.
         """
         scope = _updates_scope(reference_id)
         if scope is None:
@@ -2095,8 +2164,14 @@ class ChatContextResolver:
 
         from datetime import datetime, timezone
 
-        from app.services.news_cache_service import MARKET_SCOPE, get_news_cache_service
+        from app.services.news_cache_service import (
+            MARKET_SCOPE,
+            get_news_cache_service,
+            is_crypto_scope,
+        )
+        from app.services.insight_move import KIND_NONE
         from app.services.news_insight_service import (
+            PRIMARY_WINDOW_HOURS,
             get_news_insight_service,
             select_recent_corpus,
             web_only_card_visible,
@@ -2181,12 +2256,23 @@ class ChatContextResolver:
             + (" (general market news)." if is_market else ".")
         ]
         web_only_hidden = False
+        # A no-cause move card ("no news explains the move yet", 2026-11-27) whose move is
+        # over — an equity's from an EARLIER ET day, a coin's 24 h old: the feed hides it (its
+        # "yet" and its move belong to that day), so it is not on screen — the feed's rule
+        # (`_current_move_card`, pinned equal to the endpoint's).
+        stale_no_cause = False
+        move_note = ""
         if card:
             written = _et_stamp(card.get("generated_at"), now)
             web_only = card.get("web_only") is True
             # The feed's rule, through the same helper: a web-only card is on screen on its
             # ET day only, whatever the window holds.
             web_only_hidden = web_only and not web_only_card_visible(card, now)
+            move_today = _current_move_card(card, scope, now)
+            stale_no_cause = _move_marker_kind(card) == KIND_NONE and move_today is None
+            # Only a card whose move is current (written TODAY; a coin's, in the last 24 h)
+            # says what kind of move card it is: later, its "today's move" is another day's.
+            move_note = _move_card_note(move_today)
             web_card = web_only or bool(card.get("web_assisted"))
             if web_card and meta is not None:
                 # Kept even when the card's text is withheld below: the turn still knows a
@@ -2203,8 +2289,14 @@ class ChatContextResolver:
                 "not describe or restate it."
             )
         elif card:
-            on_screen = web_only or bool(feed_recent)
-            hidden_why = "the feed has no news in its window right now"
+            on_screen = (web_only or bool(feed_recent)) and not stale_no_cause
+            hidden_why = (
+                "the feed has no news in its window right now" if not stale_no_cause
+                else "it said no news explained the coin's move when it was written, and such "
+                f"a card shows only for {PRIMARY_WINDOW_HOURS} hours" if is_crypto_scope(scope)
+                else "it said no news explained a stock move on the day it was written, and "
+                "such a card shows only on that day"
+            )
             lines.append(
                 ("Cay AI Insights card on screen" if on_screen
                  else f"The most recent Cay AI Insights card (not on screen: {hidden_why})")
@@ -2215,14 +2307,15 @@ class ChatContextResolver:
                    if web_card else "")
                 + f" — sentiment {card.get('sentiment') or 'Neutral'}: "
                 + _cap(str(card.get("headline") or ""), _UPDATES_HEADLINE_CAP)
+                + move_note
             )
             for bullet in card.get("bullets") or []:
                 lines.append("• " + _cap(str(bullet), _UPDATES_BULLET_CAP))
-        if (not card or web_only_hidden) and headline_lines:
-            # No card, or a web-only card from an earlier day the feed hides: either way
-            # the feed shows its plain headline list.
+        if (not card or web_only_hidden or stale_no_cause) and headline_lines:
+            # No card, or a card from an earlier day the feed hides (web-only, or no-cause):
+            # either way the feed shows its plain headline list.
             lines.append(
-                ("No Cay AI summary is on screen today" if web_only_hidden
+                ("No Cay AI summary is on screen today" if (web_only_hidden or stale_no_cause)
                  else "There is no Cay AI summary for this feed yet")
                 + ": the card on screen is the plain "
                 "\"Latest headlines\" list, i.e. the newest headlines below, verbatim."

@@ -618,7 +618,293 @@ def test_the_new_exceptions_classify_as_the_ai_engine_too():
         assert code == ErrorCode.GEMINI_UNAVAILABLE, cls.__name__
 
 
-def test_the_module_docstring_names_the_art_use_and_no_other():
+def test_the_module_docstring_names_the_art_use_the_jump_lookup_and_no_other():
+    """Reworded with the jump search's fallback lookup (2026-11-27): the one app feature that reaches
+    Claude, through `ClaudeOnly.cited_web_search` only — the boundary test pins who may call it."""
     doc = ac.__doc__ or ""
     assert "ClaudeOnly" in doc and "per-post ART" in doc
     assert "four roles" in doc and "Nothing else in the app calls Claude" in doc
+    assert "cited_web_search" in doc and "jump_claude_lookup_service" in doc
+    assert "test_claude_web_search_boundary.py" in doc
+
+
+# ── cited_web_search: the jump search's fallback lookup (2026-11-27) ─────────────────────────────
+# Hand-written pages only (never a real card or page). The real SDK builds and parses every message.
+
+_URL_A = "https://news.example.org/acme-order"
+_URL_B = "https://wire.example.net/acme-plant"
+_URL_C = "https://blog.example.com/uncited"
+
+
+def _search_message(stop: str = "end_turn", *, searches: Any = 2, content: Any = None,
+                    usage_extra: Any = None) -> Dict[str, Any]:
+    usage: Dict[str, Any] = {"input_tokens": 9000, "output_tokens": 300, "cache_read_input_tokens": 0,
+                             "cache_creation_input_tokens": 0}
+    if searches is not None:
+        usage["server_tool_use"] = {"web_search_requests": searches, "web_fetch_requests": 0}
+    if usage_extra:
+        usage.update(usage_extra)
+    if content is None:
+        content = [
+            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+             "input": {"query": "acme widgets news"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": [
+                {"type": "web_search_result", "url": _URL_A, "title": "Acme Widgets lands a utility order",
+                 "page_age": "November 27, 2026", "encrypted_content": "ENC-SECRET-A"},
+                {"type": "web_search_result", "url": _URL_B, "title": "Acme opens a second plant",
+                 "page_age": None, "encrypted_content": "ENC-SECRET-B"},
+                {"type": "web_search_result", "url": _URL_C, "title": "An unrelated post",
+                 "encrypted_content": "ENC-SECRET-C"},
+            ]},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_2",
+             "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}},
+            {"type": "text", "text": "Acme rose after news of an order.", "citations": [
+                {"type": "web_search_result_location", "url": _URL_A, "title": "Acme Widgets lands a utility order",
+                 "cited_text": "Acme Widgets said a utility placed a multi-year order.",
+                 "encrypted_index": "IDX-SECRET-A"},
+            ]},
+            {"type": "text", "text": " It also opened a plant.", "citations": [
+                {"type": "web_search_result_location", "url": _URL_B, "title": None,
+                 "cited_text": "The company opened its second plant this week.", "encrypted_index": "IDX-SECRET-B"},
+            ]},
+        ]
+    return {"id": "msg_search", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5",
+            "content": content, "stop_reason": stop, "stop_sequence": None, "usage": usage}
+
+
+_HOSTS = ["fb.com", "markets.ft.com", "reddit.com", "t.co"]
+_LOCATION = {"type": "approximate", "country": "US", "timezone": "America/New_York"}
+
+
+async def _search(**kw: Any) -> Dict[str, Any]:
+    args = dict(model_name="claude-sonnet-5-5", system_instruction="SYS", max_uses=2, max_tokens=3000,
+                effort="low", thinking={"type": "between_tools"}, blocked_domains=_HOSTS,
+                user_location=_LOCATION, usage_tag="updates_jump_lookup", deadline_seconds=90.0)
+    prompt = kw.pop("prompt", "PROMPT")
+    args.update(kw)
+    return await ac.ClaudeClient().cited_web_search(prompt, **args)
+
+
+@pytest.mark.asyncio
+async def test_cited_web_search_request_and_mapping(monkeypatch):
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_search_message())])
+    result = await _search()
+    body = json.loads(seen[0].content)
+    assert body["tools"] == [{"type": "web_search_20260209", "name": "web_search", "max_uses": 2,
+                              "blocked_domains": _HOSTS, "user_location": _LOCATION}]
+    assert body["messages"] == [{"role": "user", "content": "PROMPT"}]
+    assert body["system"] == "SYS" and body["max_tokens"] == 3000
+    assert body["thinking"] == {"type": "between_tools"}
+    assert body["output_config"] == {"effort": "low"}, "no structured output: citations need plain text"
+    for banned in ("temperature", "top_p", "top_k", "tool_choice", "fallbacks", "cache_control"):
+        assert banned not in body, banned
+    assert seen[0].headers.get("anthropic-version") == "2026-10-21"
+    assert len(seen) == 1, "one attempt"
+    # the answer: results and web citations only, never an encrypted field
+    assert result["results"] == [
+        {"url": _URL_A, "title": "Acme Widgets lands a utility order", "page_age": "November 27, 2026"},
+        {"url": _URL_B, "title": "Acme opens a second plant", "page_age": None},
+        {"url": _URL_C, "title": "An unrelated post", "page_age": None},
+    ]
+    assert result["citations"] == [
+        {"url": _URL_A, "title": "Acme Widgets lands a utility order",
+         "cited_text": "Acme Widgets said a utility placed a multi-year order."},
+        {"url": _URL_B, "title": None, "cited_text": "The company opened its second plant this week."},
+    ]
+    assert result["search_errors"] == {"max_uses_exceeded": 1}, "an error object is counted, not raised"
+    assert result["web_search_requests"] == 2
+    assert result["text"] == "Acme rose after news of an order. It also opened a plant."
+    assert result["stop_reason"] == "end_turn" and result["model"] == "claude-sonnet-5-5"
+    assert result["usage"] == {"input": 9000, "output": 300, "cache_read": 0, "cache_write": 0}
+    assert result["tokens_used"] == 9300
+    assert "SECRET" not in json.dumps(result), "encrypted_content / encrypted_index are never returned"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_domain_list_and_no_location_send_neither_key(monkeypatch):
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_search_message())])
+    await _search(blocked_domains=(), user_location=None, thinking=None, effort=None, system_instruction=None)
+    body = json.loads(seen[0].content)
+    assert body["tools"] == [{"type": "web_search_20260209", "name": "web_search", "max_uses": 2}]
+    for absent in ("thinking", "output_config", "system"):
+        assert absent not in body, absent
+
+
+@pytest.mark.parametrize("stop,exc", [
+    ("pause_turn", ac.ClaudeBadAnswerException),
+    ("tool_use", ac.ClaudeBadAnswerException),
+    ("model_context_window_exceeded", ac.ClaudeBadAnswerException),
+    ("refusal", ac.ClaudeRefusalException),
+    ("max_tokens", ac.ClaudeTruncatedException),
+])
+@pytest.mark.asyncio
+async def test_cited_web_search_abnormal_stops_are_billed_typed_and_never_resumed(monkeypatch, stop, exc):
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_search_message(stop))] * 2)
+    with pytest.raises(exc) as info:
+        await _search()
+    assert len(seen) == 1, "a paused turn is never resumed: the cost stays inside the caller's reserve"
+    assert info.value.tokens_used == 9300 and info.value.model == "claude-sonnet-5-5"
+    assert info.value.usage == {"input": 9000, "output": 300, "cache_read": 0, "cache_write": 0}
+    assert info.value.web_searches == 2, "the searches it billed ride on the exception"
+    assert "PROMPT" not in str(info.value) and "acme" not in str(info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_an_empty_answer_is_returned_not_raised(monkeypatch):
+    _install(monkeypatch, [httpx2.Response(200, json=_search_message(content=[], searches=0))])
+    result = await _search()
+    assert (result["text"], result["results"], result["citations"], result["web_search_requests"]) == ("", [], [], 0)
+
+
+@pytest.mark.asyncio
+async def test_unreadable_search_usage_is_none_only_when_results_exist(monkeypatch):
+    _install(monkeypatch, [httpx2.Response(200, json=_search_message(searches=None)),
+                           httpx2.Response(200, json=_search_message(searches=None, content=[]))])
+    assert (await _search())["web_search_requests"] is None, "searched, count unknown → priced at its worst"
+    assert (await _search())["web_search_requests"] == 0, "no result block, no search"
+
+
+@pytest.mark.asyncio
+async def test_odd_blocks_are_skipped_never_raised(monkeypatch):
+    content = [
+        {"type": "web_search_tool_result", "tool_use_id": "s1", "content": [
+            {"type": "web_search_result", "url": 5, "title": "x", "encrypted_content": "e"},
+            {"type": "web_search_result", "url": _URL_A, "title": None, "encrypted_content": "e"},
+            {"type": "something_else", "url": _URL_A},
+        ]},
+        {"type": "web_search_tool_result", "tool_use_id": "s2", "content": {"type": "web_search_tool_result_error",
+                                                                          "error_code": "Bad Code!"}},
+        {"type": "text", "text": "x", "citations": [
+            {"type": "char_location", "cited_text": "not a web citation", "document_index": 0,
+             "document_title": None, "start_char_index": 0, "end_char_index": 1},
+            {"type": "web_search_result_location", "url": _URL_A, "cited_text": None, "encrypted_index": "i"},
+        ]},
+    ]
+    _install(monkeypatch, [httpx2.Response(200, json=_search_message(content=content))])
+    result = await _search()
+    assert result["results"] == [] and result["citations"] == []
+    assert result["search_errors"] == {"unknown": 1}
+
+
+@pytest.mark.asyncio
+async def test_the_usage_line_appends_web_searches_only_on_the_search_call(monkeypatch, caplog):
+    _install(monkeypatch, [httpx2.Response(200, json=_search_message()),
+                           httpx2.Response(200, json=_message(i=100, o=20)),
+                           httpx2.Response(200, json=_search_message(searches=None))])
+    with caplog.at_level("INFO", logger="app.integrations.anthropic_client"):
+        await _search()
+        await _call(usage_tag="marketing_writer")
+        await _search()
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("CLAUDE_USAGE")]
+    assert lines == [
+        "CLAUDE_USAGE tag=updates_jump_lookup model=claude-sonnet-5-5 input=9000 output=300 cache_read=0 "
+        "cache_write=0 total=9300 stop=end_turn web_searches=2",
+        "CLAUDE_USAGE tag=marketing_writer model=claude-sonnet-5-5 input=100 output=20 cache_read=0 "
+        "cache_write=0 total=120 stop=end_turn",
+        "CLAUDE_USAGE tag=updates_jump_lookup model=claude-sonnet-5-5 input=9000 output=300 cache_read=0 "
+        "cache_write=0 total=9300 stop=end_turn web_searches=?",
+    ], "every other call's line is exactly today's"
+    joined = " ".join(lines)
+    assert _URL_A not in joined and "Acme" not in joined and "PROMPT" not in joined
+
+
+@pytest.mark.parametrize("status,body,exc,code", [
+    (400, {"type": "error", "error": {"type": "invalid_request_error",
+                                      "message": "Your credit balance is too low to access the Anthropic API."}},
+     ac.ClaudeCreditsExhaustedException, 400),
+    (401, {"type": "error", "error": {"type": "authentication_error", "message": "invalid x-api-key"}},
+     ac.ClaudeAuthException, 401),
+    (403, {"type": "error", "error": {"type": "permission_error", "message": "web search is not enabled"}},
+     ac.ClaudeAuthException, 403),
+    (429, {"type": "error", "error": {"type": "rate_limit_error", "message": "slow down"}},
+     ac.ClaudeRateLimitException, 429),
+    (529, {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}},
+     ac.ClaudeUnavailableException, 529),
+    (400, {"type": "error", "error": {"type": "invalid_request_error", "message": "bad tool"}},
+     ac.ClaudeException, 400),
+])
+@pytest.mark.asyncio
+async def test_cited_web_search_failures_are_typed_and_carry_their_http_status(monkeypatch, status, body, exc, code):
+    seen = _install(monkeypatch, [httpx2.Response(status, json=body)] * 2)
+    with pytest.raises(exc) as info:
+        await _search()
+    assert type(info.value) is exc and info.value.status_code == code
+    assert len(seen) == 1 and info.value.web_searches == 0, "an HTTP error answered nothing: no search billed"
+    assert _KEY not in str(info.value) and "PROMPT" not in str(info.value)
+
+
+@pytest.mark.asyncio
+async def test_status_code_is_none_for_a_timeout_and_a_dropped_connection(monkeypatch):
+    _install(monkeypatch, [])
+
+    async def slow(**_kw: Any) -> Any:
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(ac._client.messages, "create", slow)
+    with pytest.raises(ac.ClaudeTimeoutException) as info:
+        await _search(deadline_seconds=0.05)
+    assert info.value.status_code is None and info.value.billing_unknown is True
+    assert "0.05s deadline" in str(info.value)
+
+
+def _bad_search_args():
+    return {
+        "max_uses_zero": dict(max_uses=0),
+        "max_uses_bool": dict(max_uses=True),
+        "max_uses_float": dict(max_uses=2.0),
+        "max_uses_too_many": dict(max_uses=ac.MAX_WEB_SEARCH_USES + 1),
+        "domains_str": dict(blocked_domains="reddit.com"),
+        "domains_set": dict(blocked_domains={"reddit.com"}),
+        "domains_generator": dict(blocked_domains=(d for d in ["reddit.com"])),
+        "domains_scheme": dict(blocked_domains=["https://reddit.com"]),
+        "domains_path": dict(blocked_domains=["reddit.com/r/x"]),
+        "domains_upper": dict(blocked_domains=["Reddit.com"]),
+        "domains_single_label": dict(blocked_domains=["localhost"]),
+        "domains_ip": dict(blocked_domains=["10.0.0.1"]),
+        "domains_not_str": dict(blocked_domains=[7]),
+        "domains_repeat": dict(blocked_domains=["reddit.com", "reddit.com"]),
+        "domains_too_many": dict(blocked_domains=[f"h{i}.example.com" for i in range(ac.MAX_BLOCKED_DOMAINS + 1)]),
+        "location_not_dict": dict(user_location="US"),
+        "location_type": dict(user_location={"type": "exact", "country": "US"}),
+        "location_key": dict(user_location={"type": "approximate", "street": "1 Main"}),
+        "location_value": dict(user_location={"type": "approximate", "country": 1}),
+        "prompt_empty": dict(prompt="   "),
+        "max_tokens_zero": dict(max_tokens=0),
+        "max_tokens_bool": dict(max_tokens=True),
+        "max_tokens_huge": dict(max_tokens=64000),
+        "deadline_zero": dict(deadline_seconds=0),
+    }
+
+
+@pytest.mark.parametrize("name", list(_bad_search_args()))
+@pytest.mark.asyncio
+async def test_a_bad_search_request_is_refused_typed_before_any_io(monkeypatch, name):
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_search_message())])
+    with pytest.raises(ac.ClaudeRequestInvalidException) as info:
+        await _search(**_bad_search_args()[name])
+    assert seen == [], "nothing was sent"
+    assert info.value.tokens_used == 0 and info.value.billing_unknown is False
+
+
+def test_exactly_64_plain_hostnames_are_accepted_and_the_jump_deny_list_fits():
+    hosts = [f"h{i}.example.com" for i in range(ac.MAX_BLOCKED_DOMAINS)]
+    assert ac.web_search_tool(2, hosts)["blocked_domains"] == hosts
+    from app.services import web_result_hygiene as hygiene
+
+    deny = sorted(getattr(hygiene, "DENIED_HOSTS", None) or hygiene._DENIED_HOSTS)
+    assert ac.web_search_tool(2, deny)["blocked_domains"] == deny, "every deny-list host is a plain hostname"
+    assert len(deny) <= ac.MAX_BLOCKED_DOMAINS
+
+
+def test_every_new_exception_attribute_defaults_to_nothing_billed():
+    e = ac.ClaudeException("x")
+    assert (e.status_code, e.web_searches) == (None, 0)
+    assert ac.WEB_SEARCH_TOOL_TYPE == "web_search_20260209" and ac.WEB_SEARCH_TOOL_NAME == "web_search"
+
+
+@pytest.mark.asyncio
+async def test_generate_json_is_untouched_by_the_web_search_call(monkeypatch):
+    """The JSON call never sends a tool and keeps its exact body (no `tools` key)."""
+    seen = _install(monkeypatch, [httpx2.Response(200, json=_message())])
+    await _call()
+    assert "tools" not in json.loads(seen[0].content)

@@ -2047,6 +2047,141 @@ _term_patterns(False)
 _term_patterns(True)
 
 
+# ── move cards only: the extra rows of `move_price_claims` (2026-11-27) ─────────────────────
+#
+# A big mover's MOVE card (news_insight_service, move mode) must say what caused the move, or
+# honestly that nothing does — never narrate the tape. Three shapes reached cards on the two days
+# behind the change and `price_claims` lets them through: a peer GROUP's move in the present tense
+# ("<group> stocks slide"), a rally or sell-off that "fades" / "stalls" with no determiner, and the
+# stock "showing signs of recovery". They live HERE, apart, on purpose: `price_claims` feeds the
+# widget's lean gate (`daily_move_attribution.usable_lean_headline`), the stored card's read-time
+# net and the web-page news test, and none of those may change with this. Every string in the
+# tests is hand-written.
+
+# A peer group's shares moving, in the forms `group_stocks_move` lacks (present tense and a few
+# past / -ing forms). The same stockpile look-behinds: "crude stocks fall by 3 million barrels".
+_MV_GROUP_VERB = (
+    r"(?:rise|rises|rising|rose|fall|falls|drop|drops|jump|jumps|jumping|sink|sinks|slide|slides|"
+    r"tumble|tumbles|surge|surges|soar|soars|climb|climbs|decline|declines|plunge|plunges|slump|"
+    r"slumps|sell\s+off|sells\s+off|retreat|retreats|retreated|retreating|rebound|rebounds|"
+    r"rebounded|rebounding|slip|slips|slipped|slipping|dip|dips|dipped|dipping|fade|fades|faded|"
+    r"fading|gain|gains|gained|gaining|advance|advances|advanced|advancing|rally|rallies)"
+)
+_MV_STOCKPILE_LB = (
+    r"(?<!\binventory\s)(?<!\bcrude\s)(?<!\bgasoline\s)(?<!\bdistillate\s)(?<!\bgas\s)"
+    r"(?<!\boil\s)(?<!\bfuel\s)(?<!\bgrain\s)(?<!\bfood\s)(?<!\bsafety\s)(?<!\bcopper\s)"
+    r"(?<!\baluminum\s)(?<!\baluminium\s)(?<!\bzinc\s)(?<!\bnickel\s)(?<!\bwheat\s)"
+    r"(?<!\bcorn\s)(?<!\bcotton\s)(?<!\bcoffee\s)(?<!\bsugar\s)(?<!\bcocoa\s)(?<!\bdealer\s)"
+    r"(?<!\bretail\s)(?<!\bfish\s)(?<!\bseed\s)(?<!\bhousing\s)(?<!\bwarehouse\s)"
+)
+# What a rally / sell-off does when the text narrates it ending, easing or deepening.
+_MV_FADE = (
+    r"(?:fades|faded|fading|fizzles|fizzled|stalls|stalled|cools|cooled|falters|faltered|unravels|"
+    r"unraveled|unravelled|reverses|reversed|deepens|deepened|evaporates|evaporated|eases|eased|"
+    r"abates|abated|(?:loses|lost|losing)\s+steam|(?:runs|ran|running)\s+out\s+of\s+steam)"
+)
+# "shows signs of recovery", "staged a sharp rebound", "is in a turnaround"
+_MV_RECOVERY = (
+    r"(?:shows|showed|showing|show|stages|staged|staging|mounts|mounted|mounting|makes|made|"
+    r"making|eyes|eyed|eyeing|attempts|attempted|attempting|signals|signaled|signalled|is\s+in|"
+    r"on\s+the\s+road\s+to)\s+(?:(?:signs|hints|glimmers)\s+of\s+)?(?:an?\s+)?"
+    r"(?:(?:sharp|strong|steep|swift|quick|modest|partial|slight|tentative|possible|early|"
+    r"v-shaped)\s+)?(?:recovery|rebound|turnaround|comeback|bounce(?:-?back)?)\b"
+)
+# A group's move told as an experience ("Fuel cell stocks experienced a notable decline", integration
+# review 2026-11-27): a light verb, at most two describing words, then a MOVE NOUN. A metric in the
+# gap ("posted strong revenue gains") is the business, not the stocks, and is never matched.
+_MV_LIGHT_VERB = (
+    r"(?:experienced|experiences|saw|sees|posted|posts|suffered|suffers|recorded|records|logged|"
+    r"notched|endured|staged|stages|registered|extended|extends)"
+)
+_MV_MOVE_NOUN = (
+    r"(?:decline|declines|drop|drops|gain|gains|rally|rallies|rise|rises|fall|falls|slide|slides|"
+    r"sell-?offs?|selloffs?|surge|surges|jump|jumps|losses|rebound|rebounds|pullbacks?|"
+    r"retreats?|slumps?|plunges?|advances?|bounce|bounces|run-?up|run-?ups)"
+)
+_MV_GAP_WORD = (
+    r"(?!(?:revenue|sales|earnings|profit|income|margin|order|deliver|shipment|subscriber|user|"
+    r"volume|traffic|demand|output|production|share\s+of)\w*\b)[a-z-]{1,15}"
+)
+
+MOVE_PRICE_CLAIM_PATTERNS: List[Tuple[str, "re.Pattern[str]"]] = [
+    # "Hydrogen stocks slide as rates climb", "Chip stocks jump after the order"
+    ("group_stocks_move_present", re.compile(
+        _MV_STOCKPILE_LB + r"\bstocks,?\s+(?:including\s+[^,.;]{1,40},\s+)?"
+        r"(?:are\s+|were\s+|have\s+|has\s+|had\s+)?" + _MV_GROUP_VERB + r"\b", _I)),
+    # "Fuel cell stocks, including X, experienced a notable decline", "Bank stocks saw a sell-off"
+    ("group_stocks_light_move", re.compile(
+        _MV_STOCKPILE_LB + r"\bstocks,?\s+(?:including\s+[^,.;]{1,40},\s+)?"
+        r"(?:have\s+|has\s+|had\s+)?" + _MV_LIGHT_VERB + r"\s+(?:an?\s+)?"
+        r"(?:" + _MV_GAP_WORD + r"\s+){0,2}" + _MV_MOVE_NOUN + r"\b", _I)),
+    # "as the tech rally fades", "AI rally loses steam", "Sell-off deepens on rate fears"
+    ("rally_fades", re.compile(
+        r"\b(?:rally|rallies|sell-?off|selloff|rout|swoon|meltdown|run-?up|short\s+squeeze)\s+"
+        + _MV_FADE + r"\b", _I)),
+    # "the stock shows signs of recovery", "shares staged a sharp rebound"
+    ("subject_recovery", re.compile(
+        _PC_SUBJ + r"(?:\s+" + _PC_AUX + r"){0,3}\s+" + _MV_RECOVERY, _I)),
+]
+# The same recovery shape with the stock's own SYMBOL (or, on a coin card, any of its names) as
+# the subject: "PLUG shows signs of a rebound". A company NAME stays the prompt's ("Plug Power
+# shows signs of recovery" is also the business recovering). Run over the sentinel-swapped text.
+_MOVE_TERM_ROWS: List[Tuple[str, "re.Pattern[str]"]] = [
+    ("term_recovery", re.compile(
+        r"(?<![\w'’.&-])(?-i:" + _PC_SENT_STRONG + r")(?![\w-])(?:\s+(?:stock|shares)\b)?"
+        r"(?:\s+" + _PC_AUX + r"){0,3}\s+" + _MV_RECOVERY, _I)),
+]
+
+
+def _move_spans(text: str, terms: Sequence[str]) -> List[Tuple[int, int, str]]:
+    """(start, end, row) of every move-only row match in ``text``."""
+    spans: List[Tuple[int, int, str]] = []
+    for name, pat in MOVE_PRICE_CLAIM_PATTERNS:
+        for m in pat.finditer(text):
+            if m.end() > m.start():
+                spans.append((m.start(), m.end(), name))
+    cleaned = _clean_terms(terms)
+    if cleaned:
+        swapped, swaps, _coin = _swap_terms(text, cleaned)
+        for name, pat in _MOVE_TERM_ROWS:
+            for m in pat.finditer(swapped):
+                if m.end() > m.start():
+                    spans.append((_to_original(m.start(), swaps, False),
+                                  _to_original(m.end(), swaps, True), name))
+    return spans
+
+
+def move_price_claim_rows(text: str, terms: Sequence[str] = ()) -> List[str]:
+    """The names of the MOVE-ONLY rows that match ``text`` (the row-weight tests use it)."""
+    if not isinstance(text, str) or not text.strip():
+        return []
+    return list(dict.fromkeys(name for _a, _b, name in _move_spans(text, terms)))
+
+
+def move_price_claims(text: str, terms: Sequence[str] = ()) -> List[str]:
+    """`price_claims` plus the move-only rows above — for a MOVE card's write checks only.
+
+    Every `price_claims` phrase comes first, unchanged; a move-only phrase follows when it is
+    not already one of them or inside one (and does not hold one). Never raises: a non-str
+    ``text`` gives []. `price_claims` itself is untouched (see the block comment)."""
+    if not isinstance(text, str) or not text.strip():
+        return []
+    found = list(price_claims(text, terms))
+    spans = sorted(_move_spans(text, terms), key=lambda s: (s[0], -s[1]))
+    reach = -1
+    for a, b, _name in spans:
+        if a < reach:
+            continue
+        reach = b
+        phrase = text[a:b].strip()
+        if not phrase or phrase in found:
+            continue
+        if any(phrase in f or f in phrase for f in found):
+            continue
+        found.append(phrase)
+    return found
+
+
 # ── the combined verdict ───────────────────────────────────────────────────
 
 @dataclass

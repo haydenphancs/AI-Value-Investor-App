@@ -25,6 +25,8 @@ from app.services.news_cache_service import NewsCacheService
 _SWEEPER_READS = {
     "id", "external_id", "headline", "summary", "published_at", "article_url",
     "source_name", "related_tickers", "ai_processed", "sentiment", "ticker",
+    # The move cards' fresh-news breaker (`updates_insight_sweeper._newest_arrival`).
+    "cached_at",
 }
 
 

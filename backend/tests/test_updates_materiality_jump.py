@@ -8,7 +8,10 @@ no-ops at their defaults:
 
 * `jump_band` — the one definition of JUMPING (an Unusual/Extreme move in the
   CURRENT session, never the market scope, never a stale band);
-* ``jumping`` ADDS `JUMP_RESERVE` to the daily and attempt caps (never the market's);
+* ``jumping`` ADDS `JUMP_RESERVE` (10 since 2026-11-27, was 6) to the daily and attempt
+  caps (never the market's);
+* the ≥10% session floor (2026-11-27, owner: "Also count 10% or more"): `jump_band`
+  returns `JUMP_FLOOR` for a move of at least 10% that the σ class does not call a jump;
 * ``web_refreshed_at`` regenerates a card written before the jump's web search found
   a new set of pages — once, through the fingerprint, never through a cap or cooldown;
 * `mwcb_in_force` — a market-wide dislocation suspends every per-ticker card.
@@ -26,6 +29,8 @@ from app.services.updates_materiality import (
     AFTER_CLOSE_EARNINGS_RESERVE,
     BAND_EXTREME,
     COOLDOWN_SESSION_SECONDS,
+    JUMP_FLOOR,
+    JUMP_FLOOR_SESSION_PCT,
     JUMP_RESERVE,
     JUMP_TIERS,
     PER_SCOPE_DAILY_CAP,
@@ -33,6 +38,8 @@ from app.services.updates_materiality import (
     PER_SCOPE_FAILURE_ALLOWANCE,
     PROMPT_VERSION,
     TIER_EXTREME,
+    TIER_NOTABLE,
+    TIER_TYPICAL,
     TIER_UNUSUAL,
     attempt_cap_for,
     canonical_band,
@@ -42,6 +49,7 @@ from app.services.updates_materiality import (
     daily_cap_for,
     decide,
     jump_band,
+    move_score,
     mwcb_in_force,
     premarket_cap_for,
 )
@@ -139,8 +147,76 @@ def test_the_fixed_band_fallback_without_sigma(change, cap, expected, sigma):
     assert jump_band(change, sigma, cap, is_market_scope=False) == expected
 
 
+# ── the ≥10% floor (2026-11-27) ───────────────────────────────────────────
+# PLUG +8.9% on 2026-11-27 (σ ≈ 4.7%) was only Notable: no search, no move mode. The
+# owner: "Also count 10% or more". A σ class that is already a jump keeps its label.
+
+@pytest.mark.parametrize("change", [10.0, -10.0, 10.01, -14.9, 11.5])
+def test_a_ten_percent_move_that_sigma_calls_ordinary_is_a_floor_jump(change):
+    # σ = 12%: +10% is z ≈ 0.83, Typical — and still a jump under the floor.
+    assert classify_move(change, 0.12, market_cap=4e11) in (TIER_TYPICAL, TIER_NOTABLE)
+    assert jump_band(change, 0.12, 4e11, is_market_scope=False) == JUMP_FLOOR
+
+
+@pytest.mark.parametrize("change", [9.99, -9.99, 5.0])
+def test_below_ten_percent_the_floor_never_applies(change):
+    assert jump_band(change, 0.12, 4e11, is_market_scope=False) is None
+
+
+def test_a_notable_sigma_move_of_ten_percent_is_a_floor_jump():
+    # PLUG-like: σ = 5.5% → +10.5% is z ≈ 1.9, Notable.
+    assert classify_move(10.5, 0.055, market_cap=2e9) == TIER_NOTABLE
+    assert jump_band(10.5, 0.055, 2e9, is_market_scope=False) == JUMP_FLOOR
+
+
+@pytest.mark.parametrize("change,sigma,expected", [
+    (12.0, 0.03, TIER_EXTREME),   # a σ jump keeps its own label
+    (10.0, 0.045, TIER_UNUSUAL),  # z ≈ 2.2
+    (-10.0, 0.03, TIER_EXTREME),
+])
+def test_a_sigma_jump_keeps_its_own_label_over_the_floor(change, sigma, expected):
+    assert jump_band(change, sigma, 4e11, is_market_scope=False) == expected
+
+
+@pytest.mark.parametrize("cap", [4e11, 1e9, None])
+@pytest.mark.parametrize("sigma", [None, 0.0, float("nan")])
+@pytest.mark.parametrize("change", [10.0, -10.0, 25.0])
+def test_the_floor_is_a_no_op_on_the_fixed_band(change, sigma, cap):
+    """Without σ (thin history, coins) any ≥10% move is already the fixed-band EXTREME."""
+    assert jump_band(change, sigma, cap, is_market_scope=False) == BAND_EXTREME
+
+
+def test_the_market_scope_never_gets_the_floor():
+    assert jump_band(12.0, 0.2, None, is_market_scope=True) is None
+
+
+@pytest.mark.parametrize("change", [None, float("nan"), float("inf"), -math.inf, True, "x"])
+def test_an_unusable_change_is_never_a_floor_jump(change):
+    assert jump_band(change, 0.12, 4e11, is_market_scope=False) is None
+
+
+def test_the_floor_ranks_like_unusual():
+    assert move_score(JUMP_FLOOR, 10.5) == move_score(TIER_UNUSUAL, 10.5) == 25.5
+    assert move_score(JUMP_FLOOR, -11.0) == 26.0
+    assert move_score(TIER_NOTABLE, 10.5) < move_score(JUMP_FLOOR, 10.5) < move_score(
+        TIER_EXTREME, 10.5)
+
+
+def test_the_floor_never_reaches_the_fingerprint_or_the_gate_band():
+    """The gate's band is `classify_move`'s, never the floor label: a +11% Typical move
+    keys the fingerprint as "flat" exactly as before, and `price_band` stays Typical."""
+    q = {"changePercentage": 11.0, "marketCap": 4e11}
+    d = _decide(quote=q, sigma=0.12, state=_state(successes=1))
+    assert d.price_band == TIER_TYPICAL
+    assert d.inputset_id == compute_inputset_id(
+        corpus_article_ids(CORPUS), "flat", MODEL, PROMPT_VERSION)
+
+
 def test_jump_tiers_are_exactly_the_alert_tiers():
-    assert set(JUMP_TIERS) == {TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME}
+    # 2026-11-27: the ≥10% floor joins deliberately — it "counts as a jump" (reserve,
+    # alert, extra news, search and move mode).
+    assert set(JUMP_TIERS) == {TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME, JUMP_FLOOR}
+    assert JUMP_FLOOR == "floor" and JUMP_FLOOR_SESSION_PCT == 10.0
 
 
 # ── MWCB ─────────────────────────────────────────────────────────────────
@@ -160,10 +236,12 @@ def test_mwcb_suspends_a_jumping_ticker():
 
 # ── the reserve: both caps, never the market ─────────────────────────────
 
-def test_the_jump_reserve_adds_six_to_the_ticker_caps():
-    assert JUMP_RESERVE == 6
-    assert daily_cap_for(False, jumping=True) == PER_SCOPE_DAILY_CAP + JUMP_RESERVE == 16
-    assert attempt_cap_for(False, jumping=True) == 16 + PER_SCOPE_FAILURE_ALLOWANCE == 20
+def test_the_jump_reserve_adds_ten_to_the_ticker_caps():
+    # 6 → 10 on 2026-11-27: a held move card is replaced once the cause appears, which
+    # on 2026-11-23 (CRWV) was about 2.5 hours after the jump.
+    assert JUMP_RESERVE == 10
+    assert daily_cap_for(False, jumping=True) == PER_SCOPE_DAILY_CAP + JUMP_RESERVE == 20
+    assert attempt_cap_for(False, jumping=True) == 20 + PER_SCOPE_FAILURE_ALLOWANCE == 24
     assert daily_cap_for(False) == PER_SCOPE_DAILY_CAP   # the default is unchanged
 
 
@@ -201,13 +279,13 @@ def test_orcl_capped_at_ten_regenerates_only_while_jumping():
 
 
 def test_the_reserve_runs_out():
-    spent = _state(successes=16, last_generated_at=NOW - timedelta(minutes=30))
+    spent = _state(successes=20, last_generated_at=NOW - timedelta(minutes=30))
     d = _decide(quote=JUMP_QUOTE, state=spent, jumping=True)
     assert (d.action, d.reason) == (ACTION_SKIP, "daily_cap")
 
 
 def test_failures_hit_the_widened_attempt_cap():
-    failing = _state(successes=12, attempts=20, last_generated_at=NOW - timedelta(minutes=30))
+    failing = _state(successes=12, attempts=24, last_generated_at=NOW - timedelta(minutes=30))
     d = _decide(quote=JUMP_QUOTE, state=failing, jumping=True)
     assert (d.action, d.reason) == (ACTION_SKIP, "attempt_cap")
 
@@ -219,13 +297,13 @@ def test_no_jump_reserve_token_below_the_ordinary_cap():
 
 
 def test_a_pending_reporter_spends_the_jump_reserve_but_holds_the_after_close_six():
-    # Report day, results not in: the session may use the ordinary 10 + the jump 6;
+    # Report day, results not in: the session may use the ordinary 10 + the jump 10;
     # the after-close 6 stay held for the release.
     kwargs = dict(quote=JUMP_QUOTE, jumping=True, report_day=True, earnings_pending_today=True)
-    ok = _decide(state=_state(successes=12, last_generated_at=NOW - timedelta(minutes=30)),
+    ok = _decide(state=_state(successes=19, last_generated_at=NOW - timedelta(minutes=30)),
                  **kwargs)
     assert ok.action == ACTION_GENERATE
-    held = _decide(state=_state(successes=16, last_generated_at=NOW - timedelta(minutes=30)),
+    held = _decide(state=_state(successes=20, last_generated_at=NOW - timedelta(minutes=30)),
                    **kwargs)
     assert (held.action, held.reason) == (ACTION_SKIP, "earnings_reserved")
 
@@ -250,7 +328,7 @@ def test_a_capped_scope_with_an_unchanged_fingerprint_reports_its_cap_to_a_web_q
     """Review 2026-10-29: the sweeper asks whether NEW pages could regenerate the card
     (`web_refreshed_at=now`) before it buys a search. Without a web input the fingerprint
     answers first and hides the cap."""
-    capped = _state(successes=16, last_generated_at=NOW - timedelta(minutes=40), band=True,
+    capped = _state(successes=20, last_generated_at=NOW - timedelta(minutes=40), band=True,
                     quote=JUMP_QUOTE)
     assert _decide(quote=JUMP_QUOTE, state=capped, jumping=True).reason == "fingerprint_unchanged"
     asked = _decide(quote=JUMP_QUOTE, state=capped, jumping=True,

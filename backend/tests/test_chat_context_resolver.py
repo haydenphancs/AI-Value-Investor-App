@@ -3798,3 +3798,171 @@ async def test_report_chat_states_a_global_row_on_a_full_size_report(resolver, m
     head = block.split("(an excerpt; long sections are shortened):\n", 1)[0]
     line = next(l for l in head.splitlines() if l.startswith("Market row on the card (Global chip market): "))
     assert "+12.5%/yr" in line and "European Commission" not in block
+
+
+# ── UPDATES_SCOPE: the move card's kind on its card line (2026-11-27) ───────────────────
+#
+# A big mover's Insights card leads its stored reason with `move:<direction>:<kind>`
+# (`insight_move`), which `_row_to_card` serves as the server-only marker `card["move"]`. Ask Cay
+# is told what kind of card is on screen — a cause, a market story Caydex confirmed, or the honest
+# "no news explains it yet" (so the model answers from its own tools) — but only for a card written
+# on TODAY's ET date; a no-cause card from an earlier day is not on screen (the feed hides it).
+# The feed/chat parity for these cards is pinned in tests/test_updates_move_card_read.py. Every
+# card text below is hand-written (a fictional company).
+
+import app.services.chat_context_resolver as _ccr_move
+from datetime import datetime as _mdt, timedelta as _mtd, timezone as _mtz
+
+
+def test_the_move_note_names_each_kind_and_only_a_valid_one():
+    from app.services.insight_move import MoveTag
+
+    assert _ccr_move._move_card_note(MoveTag("company", "up")) == (
+        " (it names what drove today's move up)")
+    assert _ccr_move._move_card_note(MoveTag("company", "down")) == (
+        " (it names what drove today's move down)")
+    assert _ccr_move._move_card_note(MoveTag("market", "down")) == (
+        " (it attributes today's move to the wider market story, which Caydex confirmed)")
+    assert _ccr_move._move_card_note(MoveTag("none", "up")) == (
+        " (when written, it found no news explaining today's move; answer from your own tools)")
+    for junk in (None, MoveTag("rumour", "up"), MoveTag("company", "sideways"), "company", 3):
+        assert _ccr_move._move_card_note(junk) == ""
+
+
+@pytest.mark.parametrize("card, kind", [
+    ({"move": {"kind": "none", "direction": "up"}}, "none"),
+    ({"move": {"kind": "company", "direction": "down"}}, "company"),
+    ({"move": {"kind": "none"}}, None),
+    ({"move": {"kind": "none", "direction": "flat"}}, None),
+    ({"move": {"kind": "vibes", "direction": "up"}}, None),
+    ({"move": "none"}, None),
+    ({"move": None}, None),
+    ({}, None),
+    ("not a card", None),
+    (None, None),
+])
+def test_the_move_marker_kind_is_read_strictly(card, kind):
+    assert _ccr_move._move_marker_kind(card) == kind
+
+
+_MOVE_SCOPE = "KLMN"
+_MOVE_HEADLINES = {
+    "company": "Kelmon Robotics signs a warehouse automation contract with a grocer",
+    "market": "Kelmon Robotics moves with the broader market after a jobs report",
+    "none": "No news yet explains Kelmon Robotics' move",
+}
+
+
+def _move_card(kind, *, hours_ago=0.0, direction="up"):
+    """A move card exactly as `_row_to_card` serves it (marker included), written `hours_ago`."""
+    from app.services.news_insight_service import NewsInsightService
+
+    at = _mdt.now(_mtz.utc) - _mtd(hours=hours_ago)
+    svc = NewsInsightService.__new__(NewsInsightService)
+    card = svc._row_to_card({
+        "scope": _MOVE_SCOPE, "headline": _MOVE_HEADLINES[kind],
+        "bullets": ["Kelmon Robotics said a regional grocer will deploy its picking arms.",
+                    "The company called it its largest retail order so far."],
+        "sentiment": {"company": "bullish", "market": "bullish", "none": "neutral"}[kind],
+        "article_count": 2, "generated_at": at.isoformat(), "prompt_version": 8,
+        "trigger_reason": f"move:{direction}:{kind} + new_articles (2)",
+        "sources": [{"title": "Kelmon Robotics story", "url": "https://n.example.com/k1",
+                     "publisher": "Benzinga"}],
+    }, market_active=False)
+    assert card is not None and card["move"] == {"kind": kind, "direction": direction}
+    return card
+
+
+def _move_feed_rows():
+    now = _mdt.now(_mtz.utc)
+    return [{
+        "id": f"k{i}", "headline": f"Kelmon Robotics story {i}", "summary": "body",
+        "published_at": (now - _mtd(hours=1, minutes=i)).isoformat(),
+        "article_url": f"https://n.example.com/k{i}", "related_tickers": [_MOVE_SCOPE],
+        "source_name": "Benzinga", "ai_processed": False, "sentiment": None,
+    } for i in range(3)]
+
+
+async def _move_chat(monkeypatch, card, rows):
+    import app.services.news_cache_service as news_mod
+    import app.services.news_insight_service as insight_mod
+    import app.services.news_sentiment_trend_service as trend_mod
+
+    class _Cards:
+        async def get_cards(self, scopes):
+            return {s: card for s in scopes}
+
+    class _Rows:
+        def get_cached_bulk(self, scopes, per_scope_limit=25):
+            return {s: list(rows) for s in scopes}
+
+    class _Trend:
+        async def get_trend(self, scope, days, *, now=None):
+            return {"scope": scope, "days": days, "series": [], "tracking_since": None}
+
+    monkeypatch.setattr(insight_mod, "get_news_insight_service", lambda: _Cards())
+    monkeypatch.setattr(news_mod, "get_news_cache_service", lambda: _Rows())
+    monkeypatch.setattr(trend_mod, "get_news_sentiment_trend_service", lambda: _Trend())
+    meta: dict = {}
+    block = await ChatContextResolver().resolve("UPDATES_SCOPE", _MOVE_SCOPE, meta=meta)
+    return block, meta
+
+
+def _the_card_line(block):
+    lines = [ln for ln in block.splitlines() if "Cay AI Insights card" in ln]
+    assert len(lines) == 1, block
+    return lines[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, direction, note", [
+    ("company", "up", " (it names what drove today's move up)"),
+    ("company", "down", " (it names what drove today's move down)"),
+    ("market", "up",
+     " (it attributes today's move to the wider market story, which Caydex confirmed)"),
+    ("none", "down",
+     " (when written, it found no news explaining today's move; answer from your own tools)"),
+])
+async def test_todays_move_card_line_names_its_kind(monkeypatch, kind, direction, note):
+    card = _move_card(kind, direction=direction)
+    block, meta = await _move_chat(monkeypatch, card, _move_feed_rows())
+    line = _the_card_line(block)
+    assert line.startswith("Cay AI Insights card on screen")
+    assert line.endswith(_MOVE_HEADLINES[kind] + note)
+    assert meta == {}
+    # The note is the card line's only addition: no figure, no vendor, no model.
+    for word in ("Brave", "Anthropic", "Claude", "Gemini", "Google", "%"):
+        assert word not in note
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["company", "market"])
+async def test_an_earlier_day_cause_card_reads_as_an_ordinary_card(monkeypatch, kind):
+    block, _ = await _move_chat(monkeypatch, _move_card(kind, hours_ago=26), _move_feed_rows())
+    line = _the_card_line(block)
+    assert line.startswith("Cay AI Insights card on screen")
+    assert line.endswith(_MOVE_HEADLINES[kind]), "no 'today's move' note on a later day"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_news", [True, False], ids=["feed_news", "empty_feed"])
+async def test_an_earlier_day_no_cause_card_is_not_on_screen(monkeypatch, with_news):
+    rows = _move_feed_rows() if with_news else []
+    block, _ = await _move_chat(monkeypatch, _move_card("none", hours_ago=26), rows)
+    line = _the_card_line(block)
+    assert line.startswith(
+        "The most recent Cay AI Insights card (not on screen: it said no news explained a "
+        "stock move on the day it was written, and such a card shows only on that day)")
+    assert "today's move" not in line
+    assert "Cay AI Insights card on screen" not in block
+    assert ("No Cay AI summary is on screen today: the card on screen is the plain "
+            "\"Latest headlines\" list") in block if with_news else (
+        "Latest headlines" not in block)
+
+
+@pytest.mark.asyncio
+async def test_todays_no_cause_card_over_news_is_on_screen(monkeypatch):
+    """Anti-vacuity twin: the same card on its own ET day is on screen, with its note."""
+    block, _ = await _move_chat(monkeypatch, _move_card("none"), _move_feed_rows())
+    assert _the_card_line(block).startswith("Cay AI Insights card on screen")
+    assert "No Cay AI summary is on screen today" not in block

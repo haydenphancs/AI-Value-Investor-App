@@ -133,6 +133,7 @@ from typing import Any, Awaitable, Callable, Dict, FrozenSet, Iterable, List, Na
 from app.config import settings
 from app.integrations import telegram
 from app.integrations.telegram import MAX_MESSAGE_CHARS, TelegramException, TelegramRateLimitException
+from app.services.llm_provider import CLAUDE_MICROS_PER_MILLION_TOKENS, claude_rates  # noqa: F401 — re-exported
 from app.schemas.marketing import (
     IMAGE_FALLBACK_REASONS,
     POST_FORMATS,
@@ -281,20 +282,10 @@ X_CHARGE_ROW_LIMIT = 500
 #:   the whole app) are not counted.
 #: * Upload-Post: the plan's fixed monthly fee (MARKETING_UPLOAD_POST_MONTHLY_USD) × 7 / 30.4375.
 GEMINI_MICROS_PER_MILLION_TOKENS = 1_500_000
-#: Anthropic's list prices per 1M tokens, in micro-dollars: (input, output, cache read, cache write) —
-#: as published 2026-10-06, checked 2026-10-31 (Sonnet 5.5 $2 / $10, Opus 5.5 $4 / $20, Fable 5.1 $10 / $50;
-#: cache reads $0.20 / $0.20 / $0.25). Cache writes at 1.25× input, the 5-minute TTL's rate (these roles
-#: send no cache_control, so both cache kinds stay 0 in practice). Haiku 5.5 at its rate for prompts up to
-#: 100K tokens (every prompt of these roles is far below; $0.50 / $2.50 above), with no published cache-read
-#: rate (None). A served model is matched by its id or its id plus a dated snapshot suffix (-YYYYMMDD). A
-#: model or token kind with no rate here makes the Claude part "unreadable", logged with the model — add
-#: its row, never a guess. Revisit with any Anthropic price change.
-CLAUDE_MICROS_PER_MILLION_TOKENS: Dict[str, Tuple[Optional[int], Optional[int], Optional[int], Optional[int]]] = {
-    "claude-sonnet-5-5": (2_000_000, 10_000_000, 200_000, 2_500_000),
-    "claude-opus-5-5": (4_000_000, 20_000_000, 200_000, 5_000_000),
-    "claude-fable-5-1": (10_000_000, 50_000_000, 250_000, 12_500_000),
-    "claude-haiku-5-5": (100_000, 500_000, None, 125_000),
-}
+#: Anthropic's list prices (`CLAUDE_MICROS_PER_MILLION_TOKENS`) and `claude_rates` moved to
+#: `app/services/llm_provider.py` on 2026-11-27 (an app feature's spend cap, the Updates jump lookup,
+#: prices Claude too and must not import a marketing module); re-exported here under their old names, so
+#: every import and the price pin in tests/test_marketing_metrics.py keep working unchanged.
 #: The token kinds of `claude_usage`, in the order of each price row.
 CLAUDE_TOKEN_KINDS = ("input", "output", "cache_read", "cache_write")
 RAILWAY_NANO_PER_GB_SECOND = 3_860
@@ -2243,17 +2234,6 @@ def _worker_week(runs: Optional[List[Any]], first: date, last: date) -> Optional
             return None
         total += micros
     return total if total <= _MICROS_BOUND else None
-
-
-def claude_rates(model: str) -> Optional[Tuple[Optional[int], ...]]:
-    """A served Claude model's price row: by its id, or by its id with a dated snapshot suffix
-    ("claude-sonnet-5-5-20261001"); None for a model without one."""
-    rates = CLAUDE_MICROS_PER_MILLION_TOKENS.get(model)
-    if rates is None:
-        base, _, suffix = model.rpartition("-")
-        if len(suffix) == 8 and suffix.isascii() and suffix.isdigit():
-            rates = CLAUDE_MICROS_PER_MILLION_TOKENS.get(base)
-    return rates
 
 
 def _claude_row(row: Dict[str, Any]) -> Tuple[bool, Optional[int], Optional[int], str]:

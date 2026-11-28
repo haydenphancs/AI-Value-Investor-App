@@ -7,13 +7,15 @@ budget store replaced at the bindings the service uses (no network):
 * the query is code-authored from the FMP company name, cleaned ("Tesla, Inc." → "tesla") and
   then whitelisted — a hostile name never reaches Brave;
 * the durable bucket is claimed BEFORE every call, fails closed, refunds only on not_run;
-* per scope and ET day: at most 4 searches, 15 minutes apart, at once on a sign flip; at most
-  8 searches start in one sweep;
+* at most 8 searches start in one sweep (the ladder, pacing and the fallback provider are pinned
+  in `test_jump_search_ladder.py`);
 * only fresh, on-subject pages from allowed hosts are kept (≤3 — every page the card reads is
-  listed), a re-search that keeps nothing never erases the set, and the set is returned only
-  while the move keeps the direction it was searched for; `refreshed_at` moves only when the
-  SET changes;
+  listed), a re-search that keeps nothing never erases the set, and a set is returned only for
+  the direction it was searched for; `refreshed_at` moves only when the set gains a new page
+  (the ladder file pins the aged-out and judged cases);
 * the switch ships ON (owner decision) and OFF means no search.
+
+Every page text here is hand-written (never copied from a web page or a card written from one).
 """
 
 from __future__ import annotations
@@ -30,8 +32,6 @@ from app.services.chat_budget_service import ChatBudgetUnavailable
 from app.services.jump_web_search_service import (
     MAX_KEPT,
     MAX_SEARCHES_PER_REFRESH,
-    RESEARCH_SECONDS,
-    SEARCHES_PER_SCOPE_PER_DAY,
     JumpCandidate,
     JumpWebSearchService,
     WebPage,
@@ -40,7 +40,8 @@ from app.services.jump_web_search_service import (
 )
 from app.services.news_insight_service import MAX_WEB_CONTEXT, MAX_WEB_SOURCES
 
-NOW = datetime(2026, 10, 28, 18, 45, tzinfo=timezone.utc)   # 14:45 ET, Wed
+# 16:30 ET, Wed — after the close, so the paced limit is the whole cap (pacing has its own tests).
+NOW = datetime(2026, 10, 28, 20, 30, tzinfo=timezone.utc)
 
 
 def _page(url, title="Oracle stock pops as revenue forecast eases debt concerns",
@@ -85,10 +86,10 @@ class _Budget:
 
 @pytest.fixture
 def env(monkeypatch):
-    """Brave + budget fakes at the service's own bindings; a controllable monotonic clock."""
+    """Brave + budget fakes at the service's own bindings; the ladder runs on each sweep's `now`."""
     state = {"queries": [], "payload": {"results": [dict(p) for p in ORCL_PAGES]},
              "raise": None,
-             "budget": _Budget(), "clock": 10_000.0, "order": []}
+             "budget": _Budget(), "order": []}
 
     async def _search(query, *, count=10, freshness=None, extra_snippets=False):
         state["order"].append("search")
@@ -108,9 +109,10 @@ def env(monkeypatch):
     monkeypatch.setattr(jws.brave_search, "web_search", _search)
     monkeypatch.setattr(jws.brave_search, "is_configured", lambda: True)
     monkeypatch.setattr(jws, "get_chat_budget_service", lambda: state["budget"])
-    monkeypatch.setattr(jws, "_clock", lambda: state["clock"])
     monkeypatch.setattr(settings, "UPDATES_JUMP_WEB_SEARCH_ENABLED", True)
-    monkeypatch.setattr(settings, "UPDATES_JUMP_WEB_SEARCH_DAILY_CAP", 40)
+    monkeypatch.setattr(settings, "UPDATES_JUMP_WEB_SEARCH_DAILY_CAP", 80)
+    # The fallback provider never runs here (its triggers are pinned in test_jump_search_ladder).
+    monkeypatch.setattr(jws, "_fallback_module", lambda: None)
     return state
 
 
@@ -184,8 +186,9 @@ def test_the_unit_is_claimed_before_the_call(env):
     svc = JumpWebSearchService()
     assert _run(svc, [_orcl()]) == {"ok": 1}
     assert env["order"] == ["claim", "search"]
-    assert env["budget"].claims == [(jws._BUDGET_BUCKET, 40)]
-    assert env["queries"] == [("why is oracle stock up today", 10, "pd")]
+    assert env["budget"].claims == [(jws._BUDGET_BUCKET, 80)]
+    # 20 rows: Brave bills per request, so the larger answer costs the same.
+    assert env["queries"] == [("why is oracle stock up today", 20, "pd")]
 
 
 def test_the_bucket_is_never_chats(env):
@@ -194,7 +197,7 @@ def test_the_bucket_is_never_chats(env):
 
 
 def test_a_capped_bucket_searches_nothing_and_latches(env):
-    env["budget"].used = 40
+    env["budget"].used = 80
     svc = JumpWebSearchService()
     assert _run(svc, [_orcl()]) == {"capped": 1}
     assert env["queries"] == []
@@ -219,7 +222,7 @@ def test_a_budget_outage_fails_closed(env, exc):
 
 def test_a_search_that_provably_did_not_run_is_refunded(env):
     env["raise"] = brave_search.BraveSearchRateLimitException("429")
-    assert _run(JumpWebSearchService(), [_orcl()]) == {"error": 1}
+    assert _run(JumpWebSearchService(), [_orcl()]) == {"rate_limited": 1}
     assert env["budget"].refunds == [jws._BUDGET_BUCKET]
 
 
@@ -251,7 +254,7 @@ def test_a_cancelled_search_keeps_the_unit_and_propagates(env, monkeypatch):
 
 
 def test_the_bigger_move_gets_the_last_unit(env):
-    env["budget"].used = 39
+    env["budget"].used = 79
     svc = JumpWebSearchService()
     small = JumpCandidate("AAPL", "Apple Inc.", 6.0, 26.0)
     big = _orcl(score=32.0)
@@ -260,37 +263,23 @@ def test_the_bigger_move_gets_the_last_unit(env):
     assert env["queries"][0][0] == "why is oracle stock up today"
 
 
-# ── cadence ───────────────────────────────────────────────────────────────
-
-def test_a_second_search_waits_fifteen_minutes(env):
-    svc = JumpWebSearchService()
-    _run(svc, [_orcl()])
-    assert _run(svc, [_orcl()]) == {"not_due": 1}
-    env["clock"] += RESEARCH_SECONDS
-    assert _run(svc, [_orcl()]) == {"ok": 1}
-    assert len(env["queries"]) == 2
-
+# ── cadence (the ladder itself: test_jump_search_ladder.py) ────────────────
 
 def test_a_sign_flip_searches_at_once(env):
     svc = JumpWebSearchService()
     _run(svc, [_orcl(pct=12.0)])
     assert _run(svc, [_orcl(pct=-9.0)]) == {"ok": 1}
     assert env["queries"][-1][0] == "why is oracle stock down today"
-
-
-def test_at_most_four_searches_a_day(env):
-    svc = JumpWebSearchService()
-    for _ in range(SEARCHES_PER_SCOPE_PER_DAY + 2):
-        _run(svc, [_orcl()])
-        env["clock"] += RESEARCH_SECONDS
-    assert len(env["queries"]) == SEARCHES_PER_SCOPE_PER_DAY == 4
+    # The page saying the stock "pops" is not kept for the fall; the two neutral ones are.
+    down, _ = svc.context("ORCL", NOW, direction="down")
+    assert [p.publisher for p in down] == ["Reuters", "PR Newswire"]
 
 
 def test_a_new_et_day_starts_fresh(env):
     svc = JumpWebSearchService()
-    for _ in range(SEARCHES_PER_SCOPE_PER_DAY):
-        _run(svc, [_orcl()])
-        env["clock"] += RESEARCH_SECONDS
+    for minutes in (0, 20, 45, 90, 180, 300):
+        _run(svc, [_orcl()], now=NOW - timedelta(hours=6) + timedelta(minutes=minutes))
+    assert len(env["queries"]) == 6
     tomorrow = NOW + timedelta(days=1)
     for p in env["payload"]["results"]:
         p["page_age"] = "2026-10-29T18:21:00"
@@ -331,7 +320,6 @@ def test_an_empty_re_search_never_erases_the_set(env):
     svc = JumpWebSearchService()
     _run(svc, [_orcl()])
     env["payload"] = {"results": []}
-    env["clock"] += RESEARCH_SECONDS
     assert _run(svc, [_orcl()], now=NOW + timedelta(minutes=20)) == {"no_results": 1}
     pages, refreshed = svc.context("ORCL", NOW + timedelta(minutes=20), direction="up")
     assert len(pages) == 3 and refreshed == NOW
@@ -345,36 +333,36 @@ def test_pages_are_returned_only_for_the_direction_they_were_searched_for(env):
     assert len(svc.context("ORCL", NOW, direction="up")[0]) == 3
     assert svc.context("ORCL", NOW, direction="down") == ((), None)
     assert svc.context("ORCL", NOW, direction=None) == ((), None)     # no usable move
-    # The flip re-searches at once; one that keeps nothing leaves the UP set for an up move only.
+    # The flip searches at once (a new episode); one that keeps nothing leaves the UP set for an
+    # up move only.
     env["payload"] = {"results": []}
     later = NOW + timedelta(minutes=5)
     assert _run(svc, [_orcl(pct=-9.0)], now=later) == {"no_results": 1}
     assert svc.context("ORCL", later, direction="down") == ((), None)
     assert len(svc.context("ORCL", later, direction="up")[0]) == 3
-    # A flip re-search that keeps pages replaces the set, now for the fall.
+    # The down episode's next step (+20 min from its own start) keeps pages for the fall; the
+    # up episode keeps its own pages for an up move (2026-11-27: one set per direction).
     env["payload"] = {"results": [_page(
         "https://www.marketwatch.com/story/oracle-slides",
         title="Oracle reverses after report denied")]}
-    env["clock"] += RESEARCH_SECONDS
     latest = NOW + timedelta(minutes=25)
     assert _run(svc, [_orcl(pct=-9.0)], now=latest) == {"ok": 1}
     pages, refreshed = svc.context("ORCL", latest, direction="down")
     assert [p.publisher for p in pages] == ["MarketWatch"] and refreshed == latest
-    assert svc.context("ORCL", latest, direction="up") == ((), None)
+    up, up_refreshed = svc.context("ORCL", latest, direction="up")
+    assert len(up) == 3 and up_refreshed == NOW
 
 
 def test_the_same_set_does_not_move_refreshed_at(env):
     svc = JumpWebSearchService()
     _run(svc, [_orcl()])
-    env["clock"] += RESEARCH_SECONDS
     later = NOW + timedelta(minutes=20)
     _run(svc, [_orcl()], now=later)
     assert svc.context("ORCL", later, direction="up")[1] == NOW
     env["payload"] = {"results": [_page(
         "https://www.marketwatch.com/story/heres-what-just-sent-oracles-stock-soaring"),
         *ORCL_PAGES]}
-    env["clock"] += RESEARCH_SECONDS
-    latest = NOW + timedelta(minutes=40)
+    latest = NOW + timedelta(minutes=45)
     _run(svc, [_orcl()], now=latest)
     assert svc.context("ORCL", latest, direction="up")[1] == latest
 
@@ -400,7 +388,8 @@ def test_a_page_repr_carries_no_title_snippet_or_link():
 
 def test_the_switch_ships_on_and_off_means_no_search(env, monkeypatch):
     assert Settings.model_fields["UPDATES_JUMP_WEB_SEARCH_ENABLED"].default is True
-    assert Settings.model_fields["UPDATES_JUMP_WEB_SEARCH_DAILY_CAP"].default == 40
+    # Owner 2026-11-27: "do Brave 80 a day".
+    assert Settings.model_fields["UPDATES_JUMP_WEB_SEARCH_DAILY_CAP"].default == 80
     monkeypatch.setattr(settings, "UPDATES_JUMP_WEB_SEARCH_ENABLED", False)
     assert _run(JumpWebSearchService(), [_orcl()]) == {}
     assert env["queries"] == []
@@ -526,11 +515,14 @@ def test_a_page_is_about_the_company_only_as_its_name_is_written(scope, name, te
     page leads the SHARED card's Sources."""
     kept, drops = digest({"results": [_page("https://www.cnbc.com/x", title=text, snippet="")]},
                          scope, name, NOW)
-    assert (len(kept) == 1) is about, (kept, drops)
+    # The subject rule only: a title that is about the company may still be dropped as price
+    # talk alone (2026-11-27), which is not this rule's answer.
+    assert ("off_subject" not in drops) is about, (kept, drops)
+    assert len(kept) + sum(drops.values()) == 1
 
 
 def test_the_symbol_counts_as_the_subject_only_when_long_enough():
-    kept, _ = _digest([_page("https://www.cnbc.com/x", title="ORCL jumps on targets",
+    kept, _ = _digest([_page("https://www.cnbc.com/x", title="ORCL sets new cloud revenue targets",
                              snippet="Shares rose.")])
     assert len(kept) == 1
     short, drops = digest({"results": [_page("https://www.cnbc.com/x", title="F shares rally",

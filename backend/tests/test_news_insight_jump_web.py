@@ -84,18 +84,81 @@ class _Gemini:
 
 # ── the prompt ──────────────────────────────────────────────────────────────
 
-def test_a_jumper_gets_the_move_rule_with_its_escape_clause():
-    svc = _Svc()
-    jump = svc._build_prompt("ORCL", ROWS, "x", "Extreme", {"changePercentage": 12.0},
-                             now=NOW, jumping=True)
+class _MoveGemini:
+    """A move-mode jumper (2026-11-27): the move-card schema, answered "none"."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def generate_json(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"text": json.dumps({
+            "cause_kind": "none", "cause_refs": [], "market_story": "", "headline": "",
+            "points": ["Oracle set a fiscal 2030 revenue target of $225 billion."],
+            "sentiment": "neutral", "conclusion": "",
+        })}
+
+
+class _EmptyTable:
+    def table(self, _n):
+        return self
+
+    def select(self, *_a):
+        return self
+
+    def eq(self, *_a):
+        return self
+
+    def limit(self, _n):
+        return self
+
+    def execute(self):
+        class _R:
+            data = []
+        return _R()
+
+
+@pytest.mark.asyncio
+async def test_a_jumper_gets_the_move_card_prompt_not_the_old_escape_clause():
+    """Move cards (2026-11-27) replace the MOVE rule's "summarise the news as usual" escape
+    clause: a jumper's prompt states the direction in WORDS (never a figure) and asks for the
+    cause — "company", "market" (only when the code confirmed it) or "none", a correct answer.
+    `jumping=True` with a quote derives the move; the sweeper passes `move=` itself."""
+    from app.services.news_insight_service import _MOVE_CARD_SCHEMA
+
+    gem = _MoveGemini()
+    svc = _Svc(gem)
+    svc.supabase = _EmptyTable()
+    card = await svc.generate_and_store(
+        scope="ORCL", corpus=ROWS, inputset_id="iid", price_band="Extreme",
+        trigger_reason="band Typical->Extreme (+12.04%)", quote={"changePercentage": 12.0},
+        market_active=True, now=NOW, jumping=True,
+    )
+    assert card is not None and card["move_tag"] == "move:up:none"
+    call = gem.calls[0]
+    prompt = call["prompt"]
+    assert call["response_schema"] is _MOVE_CARD_SCHEMA
+    assert "summarise the news as usual" not in prompt and "- MOVE." not in prompt
+    assert "an unusually large move up in the latest regular session" in prompt
+    assert '"none" is a correct, expected answer' in prompt
+    # No figure ever enters a ticker prompt (v8): the direction is words only.
+    assert "12.0" not in prompt and "12.04" not in prompt
+    # The PRICE rule is today's, verbatim.
     plain = svc._build_prompt("ORCL", ROWS, "x", "Extreme", {"changePercentage": 12.0}, now=NOW)
-    assert "- MOVE." in jump and "- MOVE." not in plain
-    assert "do not suggest a cause" in jump
-    assert "never mention the share price, the move, its size or its direction" in jump
-    # No figure and no direction ever enters a ticker prompt (v8).
-    assert "12.0" not in jump and " up " not in jump.split("- MOVE.")[1].split("\n")[0]
-    # The rule is the only difference.
-    assert jump.replace(jump[jump.index("\n- MOVE."):jump.index("\n\nInput set:")], "") == plain
+    rule = plain[plain.index("- PRICE."):plain.index("\n\nInput set:")]
+    assert rule in prompt
+
+
+def test_the_move_prompt_puts_the_web_pages_first():
+    from app.services.insight_move import MoveContext
+    from app.services.news_insight_service import _build_move_prompt
+
+    prompt, items = _build_move_prompt("ORCL", ROWS, _web_rows(WEB[:2]), MoveContext("up"), "x",
+                                       now=NOW, company_name="Oracle Corporation")
+    assert prompt.index("<<<WEB 1>>>") < prompt.index("<<<ARTICLE 0>>>")
+    assert "[W0] (" in prompt and "CNBC) Oracle stock pops" in prompt
+    assert "they count as items for every rule above" in prompt
+    assert set(items) == {"W0", "W1", "A0"}
 
 
 def test_the_market_card_never_gets_jump_text():

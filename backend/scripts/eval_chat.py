@@ -112,6 +112,9 @@ settings.CHAT_AUTO_WEB_SEARCH_MODE = "off"
 # The Updates jump search (2026-10-28) too: OFF withholds every stored Insights card written
 # from web pages (`news_insight_service._row_to_card`), so no probe answer is built on one.
 settings.UPDATES_JUMP_WEB_SEARCH_ENABLED = False
+# …and its second-provider fallback (2026-11-27): an eval run never pays for, nor reads, a web
+# lookup from it (it ships off; forced off here whatever the environment says).
+settings.UPDATES_JUMP_CLAUDE_FALLBACK_ENABLED = False
 
 # ── The post-deploy probes (`--probes`) ───────────────────────────────────────
 #

@@ -30,7 +30,12 @@ from app.services.updates_materiality import (
     BAND_EXTREME,
     TIER_EXTREME,
     Decision,
+    daily_cap_for,
 )
+
+# A jumper's full allowance: the ordinary ticker cap plus the jump reserve (10 since the move
+# cards of 2026-11-27, so 20). A "capped jumper" below is one at this many successes.
+_JUMPER_CAP = daily_cap_for(False, jumping=True)
 from app.utils.market_hours import session_trading_date
 from _price_fakes import PriceFromFMPFake
 
@@ -113,7 +118,11 @@ class _Stub(InsightSweeper):
 
     def get_cached_bulk(self, scopes, limit):
         fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        return BulkCorpus({s: [{"external_id": f"{s}-1", "headline": f"{s} news",
+        # News-bearing on purpose: a jumper's card reads its MOVE corpus (2026-11-27), which
+        # drops a headline that says nothing beyond the symbol ("ORCL news") as a price recap.
+        return BulkCorpus({s: [{"external_id": f"{s}-1",
+                                "headline": f"{s} signs a multiyear cloud contract with a "
+                                            "hospital network",
                                 "published_at": fresh}] for s in scopes}, complete=True)
 
     async def mark_verified_current(self, scopes, market_active):
@@ -384,6 +393,17 @@ class _FakeWeb:
             return (), None
         return pages, self.refreshed_at
 
+    # The move-card seams (2026-11-27): the sweeper reports every move-mode attempt and asks
+    # whether the search for a held card's cause is over.
+    def note_move_outcome(self, scope, now, outcome):
+        self.__dict__.setdefault("outcomes", []).append((scope, outcome))
+
+    def episode_exhausted(self, scope, now, *, direction):
+        return False
+
+    async def aclose(self):
+        self.__dict__["closed"] = True
+
 
 def _web_stub(rows, universe, web, **kw):
     stub = _Stub(rows, universe, **kw)
@@ -401,7 +421,8 @@ async def test_only_an_equity_jumper_that_can_still_regenerate_is_searched():
     )
     today = mod.et_date(datetime.now(timezone.utc)).isoformat()
     stub._load_state = lambda scopes: {
-        "CAPD": {"regen_day": today, "regen_count_today": 16, "attempts_today": 16},
+        "CAPD": {"regen_day": today, "regen_count_today": _JUMPER_CAP,
+                 "attempts_today": _JUMPER_CAP},
     }
     await stub.run_sweep(refresh_news=False)
     assert [c.scope for c in web.asked[0]] == ["ORCL"]
@@ -504,8 +525,8 @@ async def test_a_capped_jumper_with_an_unchanged_fingerprint_is_not_searched(mon
     web.asked.clear()
     now = datetime.now(timezone.utc)
     stub._load_state = lambda scopes: {"CAPD": {
-        "regen_day": mod.et_date(now).isoformat(), "regen_count_today": 16,
-        "attempts_today": 16, "last_inputset_id": fingerprints["CAPD"],
+        "regen_day": mod.et_date(now).isoformat(), "regen_count_today": _JUMPER_CAP,
+        "attempts_today": _JUMPER_CAP, "last_inputset_id": fingerprints["CAPD"],
         "last_generated_at": (now - timedelta(hours=1)).isoformat(),
     }}
     await stub.run_sweep(refresh_news=False)
@@ -698,7 +719,7 @@ async def test_a_coin_or_fund_jumper_with_no_news_gets_no_web_only_card(monkeypa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state, why", [
-    ({"regen_count_today": 16, "attempts_today": 16}, "daily_cap"),
+    ({"regen_count_today": _JUMPER_CAP, "attempts_today": _JUMPER_CAP}, "daily_cap"),
     ({"regen_count_today": 1, "attempts_today": 3}, "web_only_failure_cap"),
 ])
 async def test_a_capped_zero_news_jumper_is_neither_searched_nor_carded(monkeypatch, state, why):
@@ -724,6 +745,17 @@ def test_the_web_only_failure_cap_buys_no_search_but_a_retried_set_may():
     assert "web_only_retried" not in mod._WEB_NOT_ELIGIBLE
     for reason in ("web_only_failure_cap", "web_only_retried"):
         assert reason not in mod._VERIFIED_CURRENT_REASONS
+
+
+def test_the_move_card_holds_buy_no_search_and_only_a_settled_hold_is_current():
+    """2026-11-27: both holds are a belt in `_WEB_NOT_ELIGIBLE` (the pre-check's new page set
+    breaks a hold whenever the move is material). `move_card_held` is a verdict about the card
+    (verified current); `no_cause_waiting` is not — the search for a cause is still running."""
+    from app.services.updates_materiality import REASON_MOVE_HELD, REASON_NO_CAUSE_WAITING
+
+    assert {REASON_MOVE_HELD, REASON_NO_CAUSE_WAITING} <= mod._WEB_NOT_ELIGIBLE
+    assert REASON_MOVE_HELD in mod._VERIFIED_CURRENT_REASONS
+    assert REASON_NO_CAUSE_WAITING not in mod._VERIFIED_CURRENT_REASONS
 
 
 @pytest.mark.asyncio
@@ -872,7 +904,8 @@ async def test_a_failed_read_leaves_the_article_path_untouched(monkeypatch):
     stub = _Stub([_row("ORCL", 12.04)], ["ORCL"])
     fresh = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     stub.get_cached_bulk = lambda scopes, limit: BulkCorpus(
-        {"ORCL": [{"external_id": "ORCL-1", "headline": "ORCL news",
+        {"ORCL": [{"external_id": "ORCL-1",
+                   "headline": "ORCL signs a multiyear cloud contract with a hospital network",
                    "published_at": fresh}]},
         complete=False,
     )

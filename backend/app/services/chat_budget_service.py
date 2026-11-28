@@ -10,14 +10,21 @@ Contract, mirroring CreditService's NULL-vs-raise split:
     only when the RPC round-trip itself fails (Supabase/network/PostgREST). The
     endpoint FAILS OPEN on that — a DB blip must never wall a user out of chat.
   - `record_tokens` is best-effort spend accounting; it swallows+logs failures.
+  - `read_tokens` / `add_tokens_strict` (2026-11-27) RAISE `ChatBudgetUnavailable` instead: they
+    back a fail-CLOSED money cap (the Updates jump search's fallback lookup keeps its month's
+    spend, in micro-dollars, in `token_count` of its own uuid5 bucket keyed on the LAST day of the
+    ET month, which the 7-day sweep below never reaches mid-month).
+
+`try_claim_turn`, `refund_turn` and `record_tokens` take an optional keyword-only `day` (an ISO
+date; default today in ET, so every existing call is unchanged) — the RPCs already take `p_day`.
 
 The bucket key is the chat abuse/cost identity (a real user id, or a per-INSTALL
 guest id) — NOT `chat_sessions.user_id`. See `dependencies.chat_identity_key`.
 """
 
 import logging
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from app.config import settings
@@ -42,6 +49,38 @@ def _budget_day() -> str:
     return datetime.now(_BUDGET_TZ).date().isoformat()
 
 
+def _day_key(day: Optional[str]) -> str:
+    """`day` as a budget-day key: None → today (ET); an ISO date string as is. Anything else is a
+    caller's bug and raises ValueError before any RPC."""
+    if day is None:
+        return _budget_day()
+    if not isinstance(day, str):
+        raise ValueError(f"budget day must be an ISO date string, not {type(day).__name__}")
+    try:
+        parsed = date.fromisoformat(day)
+    except ValueError:
+        raise ValueError(f"budget day {day[:20]!r} is not an ISO date") from None
+    if parsed.isoformat() != day:
+        raise ValueError(f"budget day {day[:20]!r} is not in YYYY-MM-DD form")
+    return day
+
+
+#: `add_chat_tokens` takes an INTEGER (int4) amount.
+_MAX_TOKENS_PER_ADD = 2_147_483_647
+
+
+def _token_count(value: Any) -> Optional[int]:
+    """A `token_count` (BIGINT) as PostgREST returns it: a non-negative int, or an all-digit string.
+    None for anything else (a bool, a float, a negative)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.isascii() and value.isdigit():
+        return int(value)
+    return None
+
+
 def budget_day() -> str:
     """Today's budget-day key (ET, ISO date) — the day every `chat_usage_budget` row is keyed on.
 
@@ -56,8 +95,9 @@ class ChatBudgetService:
     def __init__(self):
         self.supabase = get_supabase()
 
-    def try_claim_turn(self, bucket_key: str, limit: Optional[int] = None) -> int:
-        """Atomically claim one chat turn for `bucket_key` today.
+    def try_claim_turn(self, bucket_key: str, limit: Optional[int] = None, *,
+                       day: Optional[str] = None) -> int:
+        """Atomically claim one chat turn for `bucket_key` today (or on `day`, an ISO date).
 
         Returns the new turn count on success, or -1 when the daily cap is reached
         (no mutation). Raises `ChatBudgetUnavailable` if the RPC round-trip fails.
@@ -67,12 +107,13 @@ class ChatBudgetService:
         much higher ceiling — see `CHAT_DAILY_TURN_LIMIT_PER_IP`.
         """
         limit = settings.CHAT_DAILY_TURN_LIMIT if limit is None else limit
+        day_key = _day_key(day)
         try:
             result = self.supabase.rpc(
                 "claim_chat_turn",
                 {
                     "p_user_id": bucket_key,
-                    "p_day": _budget_day(),
+                    "p_day": day_key,
                     "p_turn_limit": limit,
                 },
             ).execute()
@@ -104,15 +145,17 @@ class ChatBudgetService:
             )
         return count
 
-    def refund_turn(self, bucket_key: str) -> None:
+    def refund_turn(self, bucket_key: str, *, day: Optional[str] = None) -> None:
         """Best-effort: release a previously-claimed turn (migration 097) when generation FAILED,
         so a Gemini outage doesn't drain a user's daily cap. Never raises — a refund failure must
         not affect the (already-failed) turn's error response. The RPC floors at 0, so a stray
-        double-release can't grant extra turns."""
+        double-release can't grant extra turns. `day` (an ISO date) releases a turn claimed on that
+        day; default today (ET)."""
+        day_key = _day_key(day)
         try:
             self.supabase.rpc(
                 "release_chat_turn",
-                {"p_user_id": bucket_key, "p_day": _budget_day()},
+                {"p_user_id": bucket_key, "p_day": day_key},
             ).execute()
         except Exception as e:
             logger.warning(
@@ -186,17 +229,18 @@ class ChatBudgetService:
                 session_id, type(e).__name__, e,
             )
 
-    def record_tokens(self, bucket_key: str, tokens: int) -> None:
-        """Best-effort: accumulate approximate token spend for today. Never raises —
-        a failure here must not affect the answered turn."""
+    def record_tokens(self, bucket_key: str, tokens: int, *, day: Optional[str] = None) -> None:
+        """Best-effort: accumulate approximate token spend for today (or `day`, an ISO date). Never
+        raises on the RPC — a failure here must not affect the answered turn."""
         if not tokens or tokens <= 0:
             return
+        day_key = _day_key(day)
         try:
             self.supabase.rpc(
                 "add_chat_tokens",
                 {
                     "p_user_id": bucket_key,
-                    "p_day": _budget_day(),
+                    "p_day": day_key,
                     "p_tokens": int(tokens),
                 },
             ).execute()
@@ -206,10 +250,86 @@ class ChatBudgetService:
                 bucket_key, type(e).__name__, e,
             )
 
+    def read_tokens(self, bucket_key: str, day: str) -> int:
+        """The `token_count` of `bucket_key` on `day` (an ISO date); 0 when there is no row.
+
+        RAISES `ChatBudgetUnavailable` when the read fails or returns a shape it cannot vouch for
+        (a negative, a float, a bool, a non-digit string, a row without the column) — its caller is a
+        fail-CLOSED money cap, which must never read "nothing spent" from an error."""
+        day_key = _day_key(day)
+        try:
+            result = (
+                self.supabase.table("chat_usage_budget")
+                .select("token_count")
+                .eq("user_id", bucket_key)
+                .eq("budget_day", day_key)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            logger.error(
+                "chat_usage_budget read failed for bucket=%s day=%s: %s: %s",
+                bucket_key, day_key, type(e).__name__, e,
+            )
+            raise ChatBudgetUnavailable(
+                f"chat_usage_budget read failed for bucket={bucket_key}"
+            ) from e
+        rows = result.data
+        if rows is None or not isinstance(rows, list):
+            logger.error(
+                "chat_usage_budget read for bucket=%s day=%s returned %s, not a list — treating as "
+                "unavailable", bucket_key, day_key, type(rows).__name__,
+            )
+            raise ChatBudgetUnavailable(f"chat_usage_budget read returned no list for bucket={bucket_key}")
+        if not rows:
+            return 0
+        row = rows[0]
+        count = _token_count(row.get("token_count")) if isinstance(row, dict) else None
+        if count is None:
+            logger.error(
+                "chat_usage_budget read for bucket=%s day=%s returned an unreadable token_count — "
+                "treating as unavailable", bucket_key, day_key,
+            )
+            raise ChatBudgetUnavailable(f"chat_usage_budget token_count unreadable for bucket={bucket_key}")
+        return count
+
+    def add_tokens_strict(self, bucket_key: str, tokens: int, day: str) -> int:
+        """Add `tokens` (a whole number from 1 to the RPC's int4 maximum) to `bucket_key` on `day`
+        (an ISO date) and return the new total.
+
+        Unlike `record_tokens` this RAISES `ChatBudgetUnavailable` when the RPC fails or answers
+        something other than a non-negative total — it pre-charges a fail-CLOSED money cap, which
+        must not make a paid call after a charge it cannot confirm. A bad amount is a caller's bug
+        (ValueError, no RPC): `add_chat_tokens` floors anything ≤ 0 to 0, so it can never correct
+        a charge downward."""
+        if isinstance(tokens, bool) or not isinstance(tokens, int) or not 1 <= tokens <= _MAX_TOKENS_PER_ADD:
+            raise ValueError(f"add_tokens_strict needs a whole number from 1 to {_MAX_TOKENS_PER_ADD}")
+        day_key = _day_key(day)
+        try:
+            result = self.supabase.rpc(
+                "add_chat_tokens",
+                {"p_user_id": bucket_key, "p_day": day_key, "p_tokens": tokens},
+            ).execute()
+        except Exception as e:
+            logger.error(
+                "add_chat_tokens (strict) failed for bucket=%s day=%s: %s: %s",
+                bucket_key, day_key, type(e).__name__, e,
+            )
+            raise ChatBudgetUnavailable(f"add_chat_tokens failed for bucket={bucket_key}") from e
+        total = _token_count(result.data)
+        if total is None:
+            logger.error(
+                "add_chat_tokens (strict) for bucket=%s day=%s returned no readable total — treating "
+                "as unavailable", bucket_key, day_key,
+            )
+            raise ChatBudgetUnavailable(f"add_chat_tokens returned no total for bucket={bucket_key}")
+        return total
+
     # Rows older than this are deleted by the sweep below. Only TODAY's row is ever
-    # read (`_budget_day()`), so anything past the window is pure accumulation. Kept
-    # slightly wider than a day so a timezone edge or a clock skew can't delete a row
-    # that is still live.
+    # read (`_budget_day()`) — or, for the jump lookup's month bucket, a row keyed on the
+    # LAST day of the current month, which is never in the past while it is read — so
+    # anything past the window is pure accumulation. Kept slightly wider than a day so a
+    # timezone edge or a clock skew can't delete a row that is still live.
     RETENTION_DAYS = 7
 
     def cleanup_old_budget_rows(self) -> int:

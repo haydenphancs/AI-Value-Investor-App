@@ -797,3 +797,147 @@ def test_the_art_is_not_a_role_and_leaves_the_lease_alone(monkeypatch):
         assert lp.route_for(tag) is None, "an art tag never routes through the router"
     monkeypatch.setattr(settings, "MARKETING_JUDGE_PROVIDER", "claude")
     assert lp.any_marketing_role_on_claude() is True, "the roles' own switch still decides"
+
+
+# ── ClaudeOnly.cited_web_search: the Updates jump search's fallback lookup (2026-11-27) ──────────────
+# One attempt, the BREAKER_ACCOUNT read, and a NARROWER opening rule than the art's: only used-up
+# credits or a 401 — a 403/400 refusal of the web tool (web search not enabled for the organisation)
+# must never push the marketing roles to Gemini for an hour (review 2026-11-27).
+
+_SEARCH_KW = dict(system_instruction="SYS", max_uses=2, max_tokens=3000, deadline_seconds=90.0,
+                  blocked_domains=["reddit.com", "t.co"],
+                  user_location={"type": "approximate", "country": "US", "timezone": "America/New_York"},
+                  usage_tag="updates_jump_lookup")
+_SEARCH_USAGE = {"input": 9_000, "output": 300, "cache_read": 0, "cache_write": 0}
+
+
+def _http_error(cls, status: int, message: str = "x"):
+    e = cls(message)
+    e.status_code = status
+    return e
+
+
+class FakeSearchClaude:
+    def __init__(self, error: BaseException = None) -> None:
+        self.calls: List[tuple] = []
+        self.error = error
+
+    async def cited_web_search(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        # Bound to the REAL signature: a keyword the client does not take fails here as in production.
+        inspect.signature(ac.ClaudeClient.cited_web_search).bind(None, prompt, **kwargs)
+        self.calls.append((prompt, dict(kwargs)))
+        if self.error is not None:
+            raise self.error
+        return {"text": "t", "model": kwargs["model_name"], "tokens_used": 9_300, "usage": dict(_SEARCH_USAGE),
+                "web_search_requests": 2, "results": [], "citations": [], "search_errors": {},
+                "stop_reason": "end_turn"}
+
+
+@pytest.mark.asyncio
+async def test_cited_web_search_passes_the_call_through_with_sonnets_between_tools():
+    claude = FakeSearchClaude()
+    result = await lp.ClaudeOnly("claude-sonnet-5-5", claude=claude, breaker=lp.BREAKER_ACCOUNT).cited_web_search(
+        "FIND", effort="low", **_SEARCH_KW)
+    prompt, kw = claude.calls[0]
+    assert prompt == "FIND" and kw["model_name"] == "claude-sonnet-5-5"
+    assert kw["thinking"] == {"type": "between_tools"} and kw["effort"] == "low"
+    assert kw["max_uses"] == 2 and kw["max_tokens"] == 3000 and kw["deadline_seconds"] == 90.0
+    assert kw["blocked_domains"] == ["reddit.com", "t.co"] and kw["usage_tag"] == "updates_jump_lookup"
+    assert result["provider"] == "claude"
+    assert result[lp.CLAUDE_USAGE_KEY] == {"claude-sonnet-5-5": _SEARCH_USAGE}
+    # Opus 5.5 always thinks: no thinking field; an unknown effort is sent as low
+    opus = FakeSearchClaude()
+    await lp.ClaudeOnly("claude-opus-5-5", claude=opus, breaker=lp.BREAKER_ACCOUNT).cited_web_search(
+        "FIND", effort="turbo", **_SEARCH_KW)
+    assert opus.calls[0][1]["thinking"] is None and opus.calls[0][1]["effort"] == "low"
+
+
+_SEARCH_BREAKER_TABLE = [
+    # (error, opens the shared breaker on THIS path)
+    (ac.ClaudeCreditsExhaustedException("credit balance is too low"), True),
+    (_http_error(ac.ClaudeAuthException, 401), True),
+    (_http_error(ac.ClaudeAuthException, 403), False),
+    (ac.ClaudeAuthException("no status"), False),
+    (_http_error(ac.ClaudeException, 400, "web search tool not enabled"), False),
+    (_http_error(ac.ClaudeRateLimitException, 429), False),
+    (_http_error(ac.ClaudeUnavailableException, 529), False),
+    (ac.ClaudeTimeoutException("slow"), False),
+    (ac.ClaudeRefusalException("declined", tokens_used=12), False),
+    (ac.ClaudeBadAnswerException("pause_turn", tokens_used=12), False),
+    (ac.ClaudeConfigException("no key"), False),
+    (ac.ClaudeRequestInvalidException("bad domain"), False),
+]
+
+
+@pytest.mark.parametrize("error,opens", _SEARCH_BREAKER_TABLE)
+@pytest.mark.asyncio
+async def test_cited_web_search_opens_the_breaker_only_on_credits_or_a_401(error, opens):
+    claude = FakeSearchClaude(error)
+    with pytest.raises(type(error)):
+        await lp.ClaudeOnly("claude-sonnet-5-5", claude=claude, breaker=lp.BREAKER_ACCOUNT).cited_web_search(
+            "FIND", **_SEARCH_KW)
+    assert len(claude.calls) == 1, "one attempt, never retried"
+    assert lp.breaker_open() is opens
+    assert lp.search_opens_account_breaker(error) is opens
+    # without a policy nothing is ever opened
+    lp.reset_breaker()
+    with pytest.raises(type(error)):
+        await lp.ClaudeOnly("claude-sonnet-5-5", claude=FakeSearchClaude(error)).cited_web_search("FIND", **_SEARCH_KW)
+    assert lp.breaker_open() is False
+
+
+@pytest.mark.asyncio
+async def test_an_open_breaker_means_no_search_call():
+    lp._open_breaker("ClaudeCreditsExhaustedException (tag=marketing_judge)")
+    claude = FakeSearchClaude()
+    with pytest.raises(ac.ClaudeBreakerOpenException) as info:
+        await lp.ClaudeOnly("claude-sonnet-5-5", claude=claude, breaker=lp.BREAKER_ACCOUNT).cited_web_search(
+            "FIND", **_SEARCH_KW)
+    assert claude.calls == [] and info.value.tokens_used == 0 and info.value.billing_unknown is False
+
+
+@pytest.mark.asyncio
+async def test_a_search_with_retries_is_refused_before_any_io():
+    claude = FakeSearchClaude()
+    with pytest.raises(ac.ClaudeRequestInvalidException):
+        await lp.ClaudeOnly("claude-sonnet-5-5", claude=claude, retries=2, breaker=lp.BREAKER_ACCOUNT).cited_web_search(
+            "FIND", **_SEARCH_KW)
+    assert claude.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_billed_search_failure_carries_its_usage_and_a_cancel_opens_nothing():
+    import asyncio
+
+    cut = ac.ClaudeTruncatedException("cut", tokens_used=12, usage={"input": 10, "output": 2, "cache_read": 0,
+                                                                    "cache_write": 0}, model="claude-sonnet-5-5")
+    with pytest.raises(ac.ClaudeTruncatedException) as info:
+        await lp.ClaudeOnly("claude-sonnet-5-5", claude=FakeSearchClaude(cut), breaker=lp.BREAKER_ACCOUNT
+                            ).cited_web_search("FIND", **_SEARCH_KW)
+    assert lp.claude_usage_of(info.value) == {"claude-sonnet-5-5": {"input": 10, "output": 2, "cache_read": 0,
+                                                                     "cache_write": 0}}
+    with pytest.raises(asyncio.CancelledError):
+        await lp.ClaudeOnly("claude-sonnet-5-5", claude=FakeSearchClaude(asyncio.CancelledError()),
+                            breaker=lp.BREAKER_ACCOUNT).cited_web_search("FIND", **_SEARCH_KW)
+    assert lp.breaker_open() is False
+
+
+def test_the_search_is_not_a_role_and_leaves_the_lease_alone():
+    assert set(lp.ROLES) == {"marketing_writer", "marketing_judge", "learn_weekly_writer",
+                             "learn_weekly_judge", "learn_weekly_support"}
+    assert lp.route_for("updates_jump_lookup") is None
+
+
+def test_the_price_table_moved_here_and_marketing_re_exports_the_same_objects():
+    from app.services.marketing import digest_service as ds
+
+    assert ds.CLAUDE_MICROS_PER_MILLION_TOKENS is lp.CLAUDE_MICROS_PER_MILLION_TOKENS
+    assert ds.claude_rates is lp.claude_rates
+    assert lp.claude_rates("claude-sonnet-5-5") == (2_000_000, 10_000_000, 200_000, 2_500_000)
+    assert lp.claude_rates("claude-sonnet-5-5-20261001") == lp.claude_rates("claude-sonnet-5-5")
+    assert lp.claude_rates("claude-sonnet-5-5-2026") is None and lp.claude_rates("gpt-x") is None
+
+
+def test_the_docstring_names_the_one_app_feature_use():
+    doc = lp.__doc__ or ""
+    assert "cited_web_search" in doc and "jump_claude_lookup_service" in doc

@@ -4309,13 +4309,16 @@ scopes were capped by early afternoon that day.
 **Jumper.** One definition per sweep (`updates_materiality.jump_band`, computed by the sweeper right
 after quotes and σ): a non-market scope whose CURRENT-session move (`session_change_percent` — a
 prior session's change is None, so yesterday's move is never a jump this morning) is finite, non-zero
-and in `JUMP_TIERS` (Unusual z ≥ 2, Extreme z ≥ 3, or the fixed-band extreme when σ is missing). No
-jumpers on an MWCB day (`mwcb_in_force`). Pre-market changes are blanked and an after-hours move is
+and in `JUMP_TIERS` (Unusual z ≥ 2, Extreme z ≥ 3, the fixed-band extreme when σ is missing, or —
+since 2026-11-27, owner: "Also count 10% or more" — an equity's session move of 10% or more that σ
+calls ordinary, `JUMP_FLOOR`; it reaches `jump_band` only, never `classify_move` or the fingerprint,
+and its alert goes through `_alert_jumper`). No jumpers on an MWCB day (`mwcb_in_force`). Pre-market changes are blanked and an after-hours move is
 not in `changePercentage`, so v1 covers regular-session moves; a quote with NO session stamp (the
 per-symbol profile fallback: a foreign listing, a sub-$50M microcap, a new ticker) is not a jump before
 the bell either — it cannot say which session its change belongs to.
 
-**What a jumper gets.** `JUMP_RESERVE` (6) extra successes, fed to the gate AND the claim RPC
+**What a jumper gets.** `JUMP_RESERVE` (10 since 2026-11-27, was 6, so a move card can still be
+replaced late in the day) extra successes, fed to the gate AND the claim RPC
 (`p_daily_cap` / `p_attempt_cap`, migration 089 params; stacks with the report-day reserve, which
 `earnings_reserved` still holds back while a report is pending). The reserve is a per-ET-day
 allowance: once a scope has jumped it keeps the six for the rest of the day in the process
@@ -4341,9 +4344,18 @@ screener's company name (never the client-writable watchlist name), cleaned firs
 "tesla": no comma, no brand mark like "Yum!", no share-class tail, "A/S" / "S/A" / "SA/NV" as suffixes)
 and then whitelisted (letters of any script, digits, `. & ' -`, at most 80 characters — a comma once
 refused about half of all large caps; a name that cannot be searched logs its scope, never the name),
-`freshness=pd`, one durable fail-closed bucket outside chat's 180 (`UPDATES_JUMP_WEB_SEARCH_DAILY_CAP`,
-40), refunded only on `not_run`; per scope and ET day at most 4 searches, 15 minutes apart, at once
-on a sign flip, biggest move first, two at a time, at most 8 starting in one sweep. Kept: https pages
+`freshness=pd`, `count` 20, one durable fail-closed bucket outside chat's 180
+(`UPDATES_JUMP_WEB_SEARCH_DAILY_CAP`, 80 since 2026-11-27 — owner: "do Brave 80 a day"; it was 40 and
+was spent by 10:07 ET on 2026-11-23, before any article explained that day's moves), refunded only on
+`not_run`. Since 2026-11-27 the day is PACED (`paced_limit`: 15% before the open, 30% at the open
+rising to 100% at the close, 13:00 on half days; a paced refusal never latches the day) and each
+(scope, direction) runs a LADDER of searches at 0, 20, 45 and 90 minutes, 3 h and 5 h after its first
+candidacy (`LADDER_OFFSETS_SECONDS`; one step per sweep, missed steps skipped, never burst; at most
+`MAX_SEARCHES_PER_SCOPE_PER_DAY` (8) a day; a sign flip starts a new episode at once; steps are
+skipped while the held card is a judged company cause), every jumper's first search before anyone's
+next, two at a time, at most 8 starting in one sweep. A not-run failure uses no step (retried after
+5 min); an auth or plan refusal turns the search off for the ET day in the process (one ERROR); a
+429 holds every scope for its retry-after. Kept: https pages
 outside the shared deny-list (`web_result_hygiene`, moved out of the chat service), one per host,
 dated within 24 h by the page's own time or Brave's minute/hour age ("1 day ago" means 24-47 h, so it is
 not read as an instant), with a link short enough to store (500 characters), about the company — on
@@ -4354,15 +4366,18 @@ one-word press name ("Disney", "Google" — the widget's `_LEAN_BRAND_ALIASES`) 
 a longer name whose head is an ordinary word ("Rocket Lab"). Capitalisation alone cannot tell, since a
 Title Case headline capitalises every word ("Walmart Price Target Raised" is not about Target; "High-Beta
 Stocks" not about BETA Technologies); an ordinary head never counts alone ("American" is not American
-Airlines). At most 3, the number the card lists. The kept set lives in the process for the rest of the ET day (a re-search that keeps nothing
+Airlines). Since 2026-11-27 a page that describes the OPPOSITE move of the company (a small up/down
+lexicon tied to its own names, `describes_opposite_move`) or says nothing but price (`page_has_news`)
+is dropped, survivors rank NEWEST first (not Brave's order) and MERGE with the kept set
+(`merge_pages`: one per host, re-aged, pages the card already found no cause in ranked last). At most
+3, the number the card lists. The kept set lives in the process for the rest of the ET day (a re-search that keeps nothing
 never erases it; a restart starts over, so the per-day limits are per process lifetime) and is
 returned only while the move keeps the direction it was searched for. It is a gate input as a ONE-SHOT
 TRIGGER (`decide(web_refreshed_at=)`, like `earnings_reported_at`) and never a fingerprint input: two
 instances holding different sets would re-key the shared state row against each other. In generation it
-is a second fenced block (`<<<WEB i>>>`) after the articles, with the MOVE rule (lead with the
-development that explains the move — never the price, the move or its direction — or, when nothing
-explains it, suggest no cause); a prompt with neither a jump nor kept pages is byte-identical
-(`tests/data/insight_ticker_prompt_golden.json`). A scope whose jump faded keeps feeding its same-direction
+is a second fenced block (`<<<WEB i>>>`) after the articles of a non-move card; a scope in move mode
+gets a MOVE CARD instead (below), whose prompt puts the pages first. A prompt with neither a move nor
+kept pages is byte-identical (`tests/data/insight_ticker_prompt_golden.json`). A scope whose jump faded keeps feeding its same-direction
 pages to its cards for the rest of the ET day, without the MOVE rule (the plan's "any same-ET-day
 context"); after a reversal they stop. The card reads at most 3 pages and lists every one
 first in its sources (`origin: "web"`, stored only) — tappable in the in-app browser, as the owner
@@ -4376,8 +4391,10 @@ cause-bearing fixture — production refusals are countable, below).
 or otherwise improve artificial intelligence models or services"), with ONE narrow exception that is an
 ACCEPTED RISK, not a reading of the clause (owner, 2026-11-13: "Accept the risk"): the runtime grounding
 check of a web-only card against the pages it was written from, before it is shown — the word checks and
-the grounding judge below. The owner accepted the risk that this check falls within the clause, which
-names "evaluate" and "benchmark", not training alone. Nothing else is exempt (no offline grading,
+the grounding judge below — and, since 2026-11-27 (owner: "Yes, judge the cause"), the same kind of
+runtime check of a MOVE card's cause line and its web-fed points against the items it cites (the move
+judge and the web-only word checks, below). The owner accepted the risk that these checks fall within
+the clause, which names "evaluate" and "benchmark", not training alone. Nothing else is exempt (no offline grading,
 calibration, benchmark or prompt tuning on web results or on cards written from them), and chat stays
 as it was: a turn that read a web-sourced card — the Updates-scope grounding (resolver meta) or an
 `explain_price_move` reprint (`web_assisted` on the tool result) — is skipped by `CHAT_GROUNDING` and
@@ -4397,6 +4414,86 @@ card, and nothing deletes the row of a scope that leaves the swept universe (its
 served 96 h after its last check). Privacy §3 (a paragraph of its own:
 only a company name and the move's direction are sent; the shared card keeps the pages' titles and
 links), §4 (Brave) and Terms §7 (the flow-down covers the card's pages) dated October 28, 2026.
+
+**Move cards (2026-11-27, owner: "Say so honestly", "Yes, when code confirms it", "Yes, judge the
+cause").** TestFlight CRWV, Mon 2026-11-23: +22% on the day Nvidia reinstated its CEO (S&P +4.7%,
+18 jumpers); the 40 searches were gone by 10:07 ET, the pages kept were pre-market, the 09:50 jump
+card was overwritten at 10:07 by a plain `new_articles` card over a Monday 72 h corpus, and the
+prompt forbade the real cause (a market-wide move). PLUG, Wed 2026-11-25: −10% at the open, +15% at
+the close; the "up" search kept pages about the morning slide and the card was Bearish under +10%.
+Now a big mover's card says why it moved, or honestly that no news explains it yet:
+
+- **Contract** (`insight_move`, stdlib only, shared by the gate, the sweeper, the writer and the
+  search): a move card's stored `trigger_reason` LEADS with `move:<up|down>:<company|market|none>`
+  (after the `web_only` prefix, so the 200-character clip never cuts it), copied into
+  `last_trigger_reason`. Kinds rank company > market > none > a general card; on the same ET day and
+  direction a card is never replaced by a lower kind (`is_move_downgrade`, checked by the writer
+  against a fresh read of the stored row right before the write — `move_kept: …` otherwise).
+- **Move mode** (`updates_insight_sweeper._plan_moves`): live jumpers (σ tiers, the fixed band, the
+  10% floor), a held card whose stock turned the other way at ≥ Notable (a REVERSAL, searched at once
+  even when only latched), and a held card whose move is still material. Never the market scope, an
+  MWCB day, or a report-day ticker after the close whose results landed after its card. One move
+  corpus per scope (`select_move_corpus`: since the previous regular close, at least 24 h, filler and
+  other companies' stories out, price-recap rows out) feeds the gate's fingerprint, the search's
+  pre-check and the writer alike.
+- **The writer** (`news_insight_service`, `_MOVE_CARD_SCHEMA`, `INSIGHT_JUMP_AI_MODEL` unset = the card
+  model): the prompt gives the direction in words, never a figure, items in the order web pages, move
+  articles, then — only when the code confirmed the move on the index basis — `[M i]` market items;
+  today's PRICE rule verbatim; "none" is a correct answer. Code then checks, in order: the cited refs
+  exist; the sentiment agrees with the move (opposite → no cause); a company headline leads with the
+  name, ticker or possessive and passes `daily_move_attribution.usable_lean_headline` (one repair);
+  a market story has no figure, move word or catalyst word, and the code composes "{Name} moves with
+  the broader market after {story}"; then the MOVE JUDGE (`_judge_move_cause`, the web-only judge's
+  model, 25 s of its own, fails closed) checks the headline and first point against ONLY the cited
+  items. Every refusal in move mode writes the HONEST NO-CAUSE card instead of nothing: code-owned
+  "No news yet explains {Name's} move" (or "… moves with the broader market / a broad group of
+  stocks; no company news explains it yet" when the code confirmed that), Neutral, points that passed
+  every guard and the judge, else a code-owned point, and a code-owned conclusion — always after a
+  real model call. A judge outage writes nothing (`move_unverified: judge_…`, retried; the sweeper
+  marks such failures `UNJUDGED_FAILURE_PREFIX` so they consume no evidence). A web-only move card
+  uses the same schema with web items only plus today's web-only word checks and judge. Move-only
+  price-talk rows live in `move_price_claims`; the shared `price_claims` (the widget's lean gate, the
+  read-time `_price_net`) is unchanged. `pop_move_outcome` hands the verdict to the search.
+- **Market confirmation** (`updates_materiality.market_confirmation`, pure; equities outside the
+  crypto pass): the INDEX basis = a session-stamped SPY change of the same sign and at least
+  `MARKET_CONFIRM_INDEX_PCT` (1.5%), with the stock at most 6× the index; the BREADTH basis = at least
+  6 other live equity jumpers the same way, ≥ 80% of them. Only the index basis may name a story,
+  taken from the market scope's own licensed FMP general-news rows (`select_market_items`, never web,
+  never our market card's text). A held market card whose S&P 500 then turns the other way by 0.5%
+  or more (`_index_against`) loses its hold (`market_turned`) and is replaced.
+- **The gate holds a move card** (`decide(held_move=…, fresh_news_at=…, move_search_exhausted=…,
+  index_against_held=…)`; every default decides as before): a held card is not rewritten for fresh
+  ids, a window re-key or a band change; it breaks on a reversal, a new page set, earnings landing, a
+  turned index (market cards) or fresh news-bearing articles at most once per
+  `MOVE_HOLD_COMPANY_NEWS_SPACING_SECONDS` (60 min, company) / `MOVE_HOLD_NEWS_SPACING_SECONDS` (45
+  min, market and no-cause), each measured against the evidence floor (the later of the last success
+  and the last JUDGED failure). Skip reasons: `move_card_held` (stamped current) and
+  `no_cause_waiting` (not stamped while the search goes on — the footer says "checking for updates").
+  The reserve latch is rebuilt from held tags after a restart.
+- **Feed and chat**: a same-day move card (a coin's for 24 h, `move_card_current`) is badged
+  `max(24, cited)h`, never the Monday "72h" of the uncited window; a no-cause card from an earlier ET
+  day is hidden (the headline list shows). Ask Cay's card line names the kind; for a no-cause card it
+  says the card found no cause when written and to answer from its own tools. The widget is unchanged:
+  a company card leads with the name and agrees with the move, so its lean gate can show it; a no-cause
+  card is Neutral, so it shows "No clear catalyst". No new wire field; old builds render the headline,
+  points and chip they already draw. The push body stays cause-free.
+
+**Second search provider (2026-11-27, owner: "use Claude API (200 credits as fallback)", "Claude
+Sonnet 5.5", "40 a month"; SHIPS OFF).** `jump_claude_lookup_service` (imported only by the jump search)
+asks Claude's server-side web search for the pages when Brave cannot: T1 the day's (paced) Brave
+allowance is used up, T2 Brave failed or kept nothing, T3 the writer found no cause in Brave's pages an
+hour into the move — never before +20 min of an episode, at most 2 per episode an hour apart, never
+when a company cause is held or within 2 min of the close, one detached task per process. The prompt
+holds only the company name and up/down; Claude's prose is discarded — only the result blocks it cited
+become pages (verbatim cited text as the snippet), through the same digest, never stored beyond the
+card, logged as counts. Budget, fail-closed, no migration: `UPDATES_JUMP_CLAUDE_DAILY_LOOKUPS` (30) and
+`UPDATES_JUMP_CLAUDE_MONTHLY_BUDGET_USD` (40) as micro-dollars in a month-keyed `chat_usage_budget`
+bucket, each lookup PRE-CHARGED at its worst case (`reserve_micros`) and topped up from its usage. Credits
+exhausted or a 401 → off for the ET day plus the shared account breaker; a 403/400 tool refusal → off
+for the day for this feature only; a 429, overload or timeout → a 10-minute pause, never the marketing
+breaker. Switch `UPDATES_JUMP_CLAUDE_FALLBACK_ENABLED` (default False, read at call time); Privacy §3/§4
+and Terms §7 (dated November 27, 2026) name Anthropic as a second web search provider and must be live
+first. Claude stays out of every other app feature.
 
 **Web-only cards (2026-11-12, owner: "Web search fills it").** JOBY fell 8% on a Wednesday whose newest
 FMP story was 66 h old — past the 48 h midweek window — so it had no card, no fallback and no search: an
@@ -6014,7 +6111,7 @@ Migration 089 exists because two of these were mixed once already.
 | whale 13F + congress | same job, phase 2 | 0 (reads `whale_trades`) | `last_cursor` high-water mark |
 | price alerts | 60s — every rule while the market is active (04:00–20:00 ET), crypto-only rules while it is closed; a confirmed delisting's rules are PAUSED (below) | 1 batch-quote/cycle, over the tickers that are not paused | none — the dedup key is the lock |
 | profile match | daily, `PROFILE_MATCH_NOTIFY_HOUR_ET` | 0 (reads the shared signals cache) | `claim_notification_job` (a failed profile or tier read leaves the day open) + dedup key `profile_match:{day}:{user_id}` |
-| ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`) — and, for coins only, its crypto-only off-hours pass every 30 min while the market is closed — when the σ-scored move lands in a jump tier and the quote is usable — for an equity whatever happened to its card (capped, refused, claimed elsewhere; §9b.10a, 2026-10-28), for a coin only after its card regenerates; body = the move plus a pointer to the ticker (the grounded catalyst body was retired 2026-10-02; the card headline never was a body) | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
+| ticker move (`ticker_move`) | Updates insight sweeper PRICE pass, every 5 min (`updates_insight_sweeper.py`) — and, for coins only, its crypto-only off-hours pass every 30 min while the market is closed — when the σ-scored move lands in a jump tier (or, for an equity since 2026-11-27, a session move of 10% or more, `JUMP_FLOOR`) and the quote is usable — for an equity whatever happened to its card (capped, refused, claimed elsewhere; §9b.10a, 2026-10-28), for a coin only after its card regenerates; body = the move plus a pointer to the ticker (the grounded catalyst body was retired 2026-10-02; the card headline never was a body) | shares that pass's single batch-quote call | dedup key; carries `asset_type` so a coin opens the crypto screen |
 | research failed (`research_failed`) | inline, once the failure claim is won — the pipeline failed, or the sweeper refunds a dead run | 0 | dedup key `reportfail:{report_id}`; fires after the refund is attempted — after a refund LEAK it still fires with the credits line omitted (`refunded=False`) — so a paid-silent failure is impossible either way |
 
 Report-ready is placed AFTER the conditional completion write and AFTER the
@@ -9325,6 +9422,7 @@ split. `app/models/` exists but is empty: adding an ORM there would violate CLAU
 | 2026-10-28 | Updates Insights jump mode (§9b.10a): a ticker JUMPING in the current session (Unusual/Extreme, `jump_band`) gets 6 extra card refreshes in the gate AND the claim RPC, its `ticker_move` alert whatever happened to the card (equities; coins stay coupled), its FMP news every 5 minutes (≤12 extra pulls/day) and, for equities, a Brave web search for the reason whose pages feed the card (a fenced block, a one-shot gate trigger, never the fingerprint) and lead its Sources; the card — shared, and served until a newer card replaces it — may hold text and links from those pages (owner: "i pick option 2, i don't think we break any terms"; Sources: "i need to show the source link so users can click to read them"; cap: "Jump reserve only"; Ask Cay: "Yes, Ask Cay reads it", audits skipped); `UPDATES_JUMP_WEB_SEARCH_ENABLED` off also withholds stored web cards; Privacy §3/§4 and Terms §7 dated October 28, 2026 | TestFlight ORCL +12% (2026-10-28): the card had spent its 10/day cap at 13:24 ET, before the jump; FMP had the press release in `ticker_news_cache` 16 minutes after it went out, but the card could not refresh and the move alert never fired (it was sent only from inside a regeneration); 17 of 39 scopes were capped that day | Brave with a written storage licence first (Enterprise; owner declined to wait); Claude's web search tool (a new vendor); per-viewer read-time search (breaks the cache-only read path, needs consent v4 and an iOS release); raising the ordinary cap for everyone; web results in the fingerprint; reviving `price_move` / a "Why it moved" row (iOS release); chat's market-figure scrub on card inputs (drops the reason); SEC 8-K detection |
 | 2026-11-12 | Web-only Insights cards (§9b.10a): a LIVE equity jumper with no FMP news in its window gets the jump search and a card written from the pages alone, shown the same ET day with badge "24h"; the widget links a card-backed cause to the Updates card, and holds web-only causes from builds below 1.03 (owner: "Web search fills it"; badge "24h (Recommended)"; old builds "Hold for old builds (Recommended)"; version "keep all 1.03") | JOBY −8% on 2026-11-12 showed no card: newest FMP story 66 h old, past the 48 h midweek window, so `no_corpus` in the gate, the pre-check and the generator, and the feed hid the card | No change (no news, no card); a wider window for jumpers (stale stories as today's reason); showing the publisher on the widget tile (no link, no room) |
 | 2026-11-13 | Web-only cards get a grounding judge (§9b.10a): word checks keep only figures, numbers, names and move sizes; one Gemini call per web-only card judges every line against the pages, fails closed, and gets one conclusion repair (owner: "Add a grounding judge (Recommended)"); the check reads Brave results for this card only, an ACCEPTED RISK under Brave §3(b)(xiii) (owner: "Accept the risk") | Three review rounds of word lists either refused honest paraphrase (~33 of 72 honest cards) or missed invented causes, events and contradictions | Word checks loosened with no judge (inventions and contradictions pass); pausing web-only cards |
+| 2026-11-27 | Updates Insights MOVE CARDS (§9b.10a): a big mover's card states the cause (a company development, or a market story the code confirmed on the S&P 500) or honestly that no news explains it yet (Neutral, code-owned headline), with a judge on the cause; the gate holds a move card against plain regenerations and rewrites it on a reversal; a ≥10% session move counts as a jump; the Brave jump search goes to 80 a day, paced through the session on a per-move ladder, newest pages first and opposite-direction pages dropped; a Claude web-search fallback (Sonnet 5.5, $40/month, 30/day) ships off behind `UPDATES_JUMP_CLAUDE_FALLBACK_ENABLED` until Privacy/Terms name Anthropic (owner: "Say so honestly", "Yes, when code confirms it", "Also count 10% or more", "do Brave 80 a day, and use Claude API (200 credits as fallback)", "Claude Sonnet 5.5", "40 a month", "Yes, judge the cause") | TestFlight CRWV +22% (2026-11-23, Nvidia reinstated its CEO; the card was Neutral about backlog) and PLUG +15% (2026-11-25, a reversal from −10%; the card was Bearish): the 40 searches were spent by 10:07 ET before the explaining articles existed, pages were kept in rank order without a direction check, the prompt banned market causes and ended "summarise the news as usual", sentiment was never checked against the move, and a 10:07 `new_articles` card overwrote the 09:50 jump card | Claude's web search as the primary (6–20× Brave's cost per lookup); forcing the chip to the move's direction without a cause; a wider window for jumpers; widening the shared `price_claims` (would change the widget's lean gate); a new wire field or "Why it moved" row (iOS release) |
 | 2026-10-30 | Tracking → Assets shows the pre-market / after-hours move as a chip on the change line, left of the day change (`☾ +0.08%  ▲ +1.48%`; ☀ before the open), measured from the row's own regular-session price and read from the licensed `historical-chart/5min?extended=true` bars (`tracking_service._get_extended_prints`, a member of the feed gather: never in the regular session, never for a coin, an index or a licence-blocked symbol; a session-tagged per-ticker cache, 60 s live and 15 min closed). The last after-hours print stays overnight and at weekends until 04:00 ET pre-market (owner: "Keep last AH price"); 5-minute bars (owner: "5-minute bars"); the chip shows whole or not at all (`ViewThatFits`), so the card is no taller (owner: "i don't want to increase the height of the card") — on a 375pt phone it usually does not fit and only VoiceOver reads it | Owner, on the Assets tab at 4:56 PM ET: "do we have price after hours to show?" Nothing in the app showed one: the screener and the profile carry the regular-session price only, and FMP's `aftermarket-quote` is the unpurchased "Real-time Market Data" package (402) — but the Extended Hours toggle's bars already held every pre-market and after-hours trade | A third line under the price (taller cards); the after-hours price as the row's main number (Robinhood-style); the after-hours price in place of the company name (names hidden 4 PM-9:30 AM and all weekend); the after-hours PRICE in the chip (does not fit beside the day change on 375-393pt phones); 1-minute bars (about 5x the FMP data per call); buying "Real-time Market Data" for batch real-time after-hours quotes in one call (the switch if a real-time print is ever needed) |
 | 2026-10-30 | The Updates Insights card's headline is the FIRST answer for a move on the widget and in Ask Cay AI: `attribute` runs `detect_news_lean` before the dated detectors (earnings, analyst, classified news, group). Its gate is unchanged (agreeing sentiment, an Unusual move, no after-close card on a report day, a usable headline), so a card that fails it still falls through to them, and a dated win never carries the withheld lean (`web_assisted`). When the card wins, `cause.note` keeps the industry arithmetic, "moved with it" included. A new run reaches the tile while the app is open: storing a card drops the cached widget payloads that read its scope (`WidgetMoversService.forget_payloads_for`; a build that raced the write is served but not kept), and the app refreshes when the Updates screen fetches an AI card newer than the stored tile's `as_of` for the Holdings head mover or the market (`WidgetRefreshService.insightCardArrived`, a content change past the 60 s throttle) | Holdings tile, INTC −30.60% on 2026-10-30: it printed "INTC beat EPS estimates by 27.8%, reported after yesterday's close." while the Updates card read "Intel's weak PC outlook and guidance overshadows strong data center results" (Bearish, 15 min old). The earnings detector ran first, so the card that passed every gate was never consulted. Owner: "i need the widget to show it out. right after the Insight has new content or a new run" | Putting the card ahead of a CONTRADICTING dated cause only (a beat under a fall): a miss under a fall would still hide the card the owner asked to see. Relaxing the agreement or Unusual gate (the ACHR bug). A holdings-capable widget token or silent pushes so a CLOSED app updates the tile: the Holdings tile still changes only when the app runs |
 | 2026-10-31 | The report's Recent Price Movement section separates SIZE from CAUSE (`price_volatility.effective_tier`, `_build_price_action`, `_price_action_narrative_prompt`): a move of 20%+ over its window, or a 10%+ session in it, is at least Notable however volatile the stock (the "Normal range" sub-label is then hidden); the reason hunt also runs whenever an earnings report falls in or after the window; the prompt gets the report's EPS and revenue against estimates (the same FMP earnings-calendar call, `get_earning_calendar_full`), where it sits against the chart's last close, and the S&P 500 (SPY, the macro fetch's series) over the same days; a guard swaps an insight that says "routine / normal range / not a fundamental change" on such a card for a fact sentence. The σ estimator and the Updates tiers are unchanged | Intel −20.6% in 30 days into its Oct 29 report, σ ≈ 5%/day → z 0.87 "Typical"; no earnings or news scan ran below z 1 and the Typical prompt forced "routine trading … not a fundamental change in the business". Owner decisions: "Floor 20% / 10%", "AI context only", "Flag it in the insight", "Hide it when floored", "Report only" | A different σ (excluding the window: z 0.83; MAD: z 0.99 — neither fixes it, and both shift every stock); the floor in the Updates gate (re-bills cards, changes widget tiers); showing the S&P line on the card (needs an app release) |

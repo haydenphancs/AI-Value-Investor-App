@@ -585,6 +585,53 @@ def test_a_frame_holding_a_web_source_under_any_name_keeps_no_locals():
     assert "news" in str(_vars(plain))
 
 
+# The jump search's fallback lookup (2026-11-27): its module keeps no locals, and in the provider's
+# modules only the web-search call and its parsing lose theirs — every other Claude frame (the
+# marketing writer, the art check) keeps its locals for triage. Hand-written page text only.
+
+_LOOKUP_TITLE = "Acme Widgets lands a multi-year utility order"
+_LOOKUP_URL = "https://news.example.org/acme-order"
+
+
+def test_a_frame_of_the_fallback_lookup_keeps_no_locals():
+    out = scrub_sentry_event(_frame_event(
+        module="app.services.jump_claude_lookup_service", function="map_rows",
+        vars={"answer": {"results": [{"url": _LOOKUP_URL, "title": _LOOKUP_TITLE}]}, "scope": "'ACME'"}))
+    assert _LOOKUP_TITLE not in str(out) and _LOOKUP_URL not in str(out)
+    assert list(_vars(out)) == ["web_search"]
+    by_path = scrub_sentry_event(_frame_event(
+        abs_path="/app/backend/app/services/jump_claude_lookup_service.py", function="_lookup",
+        vars={"rows": [{"title": _LOOKUP_TITLE}]}))
+    assert _LOOKUP_TITLE not in str(by_path)
+
+
+def test_the_web_search_call_and_its_parsing_keep_no_locals():
+    for module, function in (("app.integrations.anthropic_client", "cited_web_search"),
+                             ("app.integrations.anthropic_client", "_web_search_answer"),
+                             ("app.services.llm_provider", "cited_web_search")):
+        out = scrub_sentry_event(_frame_event(
+            module=module, function=function,
+            vars={"response": f"Message(content=[TextBlock(text='{_LOOKUP_TITLE}')])", "answer": _LOOKUP_URL}))
+        assert _LOOKUP_TITLE not in str(out) and _LOOKUP_URL not in str(out), (module, function)
+        assert list(_vars(out)) == ["web_search"], (module, function)
+
+
+def test_every_other_claude_frame_keeps_its_locals():
+    for module, function in (("app.integrations.anthropic_client", "generate_json"),
+                             ("app.services.llm_provider", "generate_json"),
+                             ("app.services.llm_provider", "_ask_claude")):
+        out = scrub_sentry_event(_frame_event(module=module, function=function,
+                                              vars={"usage_tag": "'marketing_writer'", "attempt": "1"}))
+        assert _vars(out) == {"usage_tag": "'marketing_writer'", "attempt": "1"}, (module, function)
+
+
+def test_an_odd_function_name_never_breaks_the_scrub():
+    for function in (None, 7, ["cited_web_search"], {"x": 1}):
+        out = scrub_sentry_event(_frame_event(module="app.integrations.anthropic_client", function=function,
+                                              vars={"usage_tag": "'x'"}))
+        assert _vars(out) == {"usage_tag": "'x'"}, function
+
+
 # ── SEC-1: auth request models never reach Sentry through frame locals (2026-11-26) ──────
 #
 # The leak, reproduced offline before the fix: sentry-sdk serialises a pydantic model as its REPR

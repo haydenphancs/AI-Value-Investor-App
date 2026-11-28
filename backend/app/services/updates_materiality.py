@@ -45,6 +45,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import statistics
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Optional, Sequence
@@ -70,6 +72,19 @@ from app.services.price_volatility import (
     TIER_TYPICAL,
     TIER_UNUSUAL,
     _tier_for_z,
+)
+# The move-card contract (2026-11-27): the tag vocabulary, `MoveTag` and the market bases.
+# Stdlib only, so this module stays pure and no import cycle is possible.
+from app.services.insight_move import (
+    KIND_MARKET,
+    KIND_COMPANY,
+    KIND_NONE,
+    MARKET_BASIS_BREADTH,
+    MARKET_BASIS_INDEX,
+    MOVE_DIRECTIONS,
+    MOVE_KINDS,
+    MoveTag,
+    direction_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -256,10 +271,18 @@ REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS = 1800
 # the sweeper keeps passing `jumping=True` for the rest of the day in its process
 # (`InsightSweeper._reserve_jumpers`) — read off the live move, a pending reporter that
 # faded before the close lost its after-close six to its own jump cards (review
-# 2026-10-29). Never "fix" the latch back to the live set. Six at the 15-minute
-# cooldown covers about the first 90 minutes of a jump: the move, the press release,
-# the first wire stories. Same `daily_cap_for` feeds the gate AND the claim RPC.
-JUMP_RESERVE = 6
+# 2026-10-29). Never "fix" the latch back to the live set. Same `daily_cap_for` feeds
+# the gate AND the claim RPC (`claim_updates_insight_scope` takes the integers, so a
+# change here needs no migration).
+#
+# 6 → 10 on 2026-11-27 (move cards). Six at the 15-minute cooldown covered about the
+# first 90 minutes of a jump, but a big mover's card is now meant to be REPLACED once the
+# cause appears: on 2026-11-23 the explaining articles for CRWV landed about 2.5 hours
+# after the jump, and a held no-cause or market card breaks on fresh news or a new page
+# set (each at most once per 45-60 minutes, see the move-card section below). Ten keeps
+# the afternoon's upgrade within reach; a jumping ticker's ceilings are 20 successes and
+# 24 attempts.
+JUMP_RESERVE = 10
 
 # ── Web-only cards (2026-11-12) ──
 # JOBY, Wed 2026-11-12: −8% as an Unusual mover, but its newest FMP story was 66 h old,
@@ -287,6 +310,80 @@ WEB_ONLY_REASON = "web_only"
 # close the web-only path sooner, never open it — and two such non-failures on one
 # day therefore end that scope's web-only cards for the day.
 WEB_ONLY_FAILURE_CAP = 2
+
+# ── Move cards (2026-11-27) ──
+# CRWV, Mon 2026-11-23: a Bullish card written at 09:50 for a +20% move was replaced at
+# 10:07 by a plain `new_articles` regeneration over a 72 h corpus — the window re-keyed
+# and fresh wire ids arrived, nothing explained the move better. A MOVE CARD (a card
+# whose stored reason LEADS with `insight_move`'s ``move:<direction>:<kind>`` tag, read
+# by the caller through `insight_move.held_move`) is therefore HELD for its ET day: a
+# changed fingerprint alone no longer regenerates it. Only a BREAKER does, and every
+# breaker but the reversal is measured against the EVIDENCE FLOOR — the later of the
+# last success and the last failure — so one piece of new evidence buys one attempt:
+#
+#   * a REVERSAL: the live move turned the other way and is at least Notable (or the
+#     ≥10% floor). Checked BEFORE the fingerprint short-circuit, because the fingerprint
+#     is sign-blind (`canonical_band`). Reason ``reversal <old>-><new>``.
+#   * a NEW WEB PAGE SET found after the floor (the jump search: Brave or the fallback).
+#   * EARNINGS landing after the floor.
+#   * FRESH NEWS: the caller's newest news-bearing move-corpus row published after the
+#     floor, at most once per `MOVE_HOLD_COMPANY_NEWS_SPACING_SECONDS` (60 min) for a
+#     company card and `MOVE_HOLD_NEWS_SPACING_SECONDS` (45 min) for a market or
+#     no-cause card, counted from the floor — so a run of kept or refused attempts
+#     cannot spend the reserve at the 15-minute failure cooldown. The fresh-news stamp
+#     is when the row reached the corpus as much as when it was published (the caller's
+#     `_newest_arrival`): FMP delivers stories after their publication time.
+#
+# Only a JUDGED attempt moves the floor: a written card, a kept card or a content
+# refusal. An attempt that judged nothing — a model, judge or storage outage, a raise, a
+# shutdown — is recorded by the sweeper with `last_error` led by
+# `UNJUDGED_FAILURE_PREFIX`, and the floor is then the last success alone, so the
+# evidence that bought that attempt keeps its claim. The failure cooldown and the
+# attempt cap still bound the retries, exactly as before move cards.
+#
+# Never a breaker: a band change, a window re-key, fresh FMP ids that are not newer
+# than the floor, or the cooldown ending. While the live move is NOT material (below
+# Notable and below the floor, flat, or an unusable quote — the direction is unknown),
+# only earnings breaks a hold: move mode needs a live class ≥ Notable, so any other
+# regeneration could only write a general card, which the writer refuses as a downgrade
+# of the held one (`insight_move.is_move_downgrade`) after paying for the model call.
+# The market scope never holds. Caps, the pre-market reserve, MWCB and the cooldowns
+# bind every breaker exactly as they bind any other regeneration.
+#
+# A held card that no breaker moves is skipped with one of two reasons:
+REASON_MOVE_HELD = "move_card_held"          # a company or market card: verified current
+# A no-cause card while the search for a cause goes on: NOT current (the footer keeps
+# reading "checking for updates"). The caller decides when the search is over and then
+# passes ``move_search_exhausted=True``, which turns it into `REASON_MOVE_HELD`.
+REASON_NO_CAUSE_WAITING = "no_cause_waiting"
+MOVE_HOLD_NEWS_SPACING_SECONDS = 45 * 60
+MOVE_HOLD_COMPANY_NEWS_SPACING_SECONDS = 60 * 60
+# The lead of a state row's `last_error` when its last attempt judged nothing (see above).
+# Written by the sweeper (`updates_insight_sweeper._finish_claim`'s caller), read here only.
+UNJUDGED_FAILURE_PREFIX = "unjudged: "
+# A fresh-news stamp further in the future than this is a bad clock, never fresh news
+# (it would otherwise break the hold after every attempt). Mirrors `insight_move`.
+_FRESH_NEWS_FUTURE_SKEW_SECONDS = 5 * 60
+# The canonical classes that make a live move material for a hold (`canonical_band`).
+_MOVING_CLASSES = frozenset({"notable", "unusual", "extreme"})
+
+# ── Market confirmation (2026-11-27, owner: "Yes, when code confirms it") ──
+# A big mover's card may blame the market only when the CODE confirms the move was
+# market- or group-wide (`market_confirmation`). Never for the market scope or a coin.
+#   * INDEX: the S&P 500 (SPY, a session-stamped row) moved the same way by at least
+#     1.5% — SPY's σ is about 0.83-1% a day and its Notable band is 1%, so 1.5% is a
+#     top-decile session — and the stock moved at most 6x the index (a +25% name on a
+#     +1.6% day is its own story). CRWV 2026-11-23: +22% on +4.7% = 4.7x.
+#   * BREADTH: at least 6 OTHER live equity jumpers moved the same way, they are at
+#     least 80% of the other live jumpers with a usable change, and the stock moved at
+#     most 6x the median same-way peer. Breadth gives only the confirmed no-cause
+#     wording: general news cannot be tied to a group of stocks (`MarketContext`).
+MARKET_CONFIRM_INDEX_PCT = 1.5
+MARKET_CONFIRM_MAX_MULTIPLE = 6.0
+MARKET_CONFIRM_BREADTH_MIN = 6
+MARKET_CONFIRM_BREADTH_SHARE = 0.8
+# Float slack for the inclusive boundaries (1.5% exactly, 6.0x exactly confirm).
+_CONFIRM_EPS = 1e-9
 
 
 def daily_cap_for(
@@ -627,7 +724,9 @@ def move_score(band_or_tier: str, change_percent: Any) -> float:
     pct = abs(finite(change_percent) or 0.0)
     if band_or_tier in (TIER_EXTREME, BAND_EXTREME):
         return 20.0 + pct
-    if band_or_tier == TIER_UNUSUAL:
+    # The ≥10% floor (`JUMP_FLOOR`, a `jump_band` label only) ranks like Unusual: a
+    # +10% that is Typical for a σ-12% name is still a jump the owner wants explained.
+    if band_or_tier in (TIER_UNUSUAL, JUMP_FLOOR):
         return 15.0 + pct
     if band_or_tier in (TIER_NOTABLE, BAND_NOTABLE):
         return 10.0 + pct
@@ -636,11 +735,25 @@ def move_score(band_or_tier: str, change_percent: Any) -> float:
 
 # ── Jumps ─────────────────────────────────────────────────────────────
 
+# The ≥10% session floor (owner 2026-11-27: "Also count 10% or more"). PLUG +8.9% on
+# 2026-11-27 (σ ≈ 4.7%) was only Notable, so it got no search, no move mode and no
+# reserve; a name whose own σ is 12% would read Typical at +11%. `jump_band` returns this
+# label when — and only when — the σ class is not already a jump and the current
+# session's move is at least `JUMP_FLOOR_SESSION_PCT` in either direction. It is a
+# `jump_band` label ONLY: it never reaches `classify_move`, `canonical_band`, the
+# fingerprint or `last_price_band`. On the fixed-band fallback (no σ — coins included) any
+# ≥10% move is already `BAND_EXTREME`, so the floor is a no-op there. The report's own
+# floor (`price_volatility.FLOOR_SESSION_MOVE_PCT`) is the same number, kept separate on
+# purpose: the report section and the Updates gate change independently.
+JUMP_FLOOR = "floor"
+JUMP_FLOOR_SESSION_PCT = 10.0
+
 # The move classes that make a ticker JUMPING: the jump reserve, the decoupled
 # `ticker_move` alert, the faster news pass and the web search for the reason.
 # Includes the fixed-band EXTREME so a thin-history name (no σ → fallback band),
-# the population most prone to violent moves, is not treated as ordinary.
-JUMP_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME)
+# the population most prone to violent moves, is not treated as ordinary, and the
+# ≥10% floor (2026-11-27), which "counts as a jump" for every one of those.
+JUMP_TIERS = (TIER_UNUSUAL, TIER_EXTREME, BAND_EXTREME, JUMP_FLOOR)
 
 
 def mwcb_in_force(market_change_percent: Any) -> bool:
@@ -666,6 +779,9 @@ def jump_band(
     STALE ``last_price_band`` when the quote is unusable and would make yesterday's
     move a jump this morning. A finite move that rounds to 0.00% is not a jump, the
     market scope never jumps, and the class must be in `JUMP_TIERS`.
+
+    A move of at least `JUMP_FLOOR_SESSION_PCT` (10%) whose σ class is NOT a jump
+    returns `JUMP_FLOOR` (2026-11-27); a σ jump keeps its own label (Unusual/Extreme).
     """
     if is_market_scope:
         return None
@@ -673,7 +789,88 @@ def jump_band(
     if pct is None or round(pct, 2) == 0.0:
         return None
     band = classify_move(pct, sigma_daily, market_cap=market_cap)
-    return band if band in JUMP_TIERS else None
+    if band in JUMP_TIERS:
+        return band
+    if abs(pct) >= JUMP_FLOOR_SESSION_PCT:
+        return JUMP_FLOOR
+    return None
+
+
+def _plain_number(value: Any) -> Optional[float]:
+    """A finite int/float (never a bool, a string or anything else), else None.
+
+    Stricter than `finite`, which also parses numeric strings: the market confirmation
+    is fed only by the sweeper's parsed quote rows, so a string there is junk."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    return f if math.isfinite(f) else None
+
+
+def market_confirmation(
+    change_percent: Any,
+    index_change_percent: Any,
+    peer_changes: Mapping,
+    *,
+    index_session_ok: bool = True,
+    is_market_scope: bool = False,
+    is_crypto: bool = False,
+) -> Optional[str]:
+    """Did the CODE confirm that this stock's move was market- or group-wide?
+
+    Returns `insight_move.MARKET_BASIS_INDEX`, `insight_move.MARKET_BASIS_BREADTH` or
+    None (owner decision 2026-11-27: a market cause only "when code confirms it"):
+
+    * INDEX — ``index_session_ok`` is True (the caller holds a SPY row stamped with the
+      CURRENT session), the index moved the same way by at least
+      `MARKET_CONFIRM_INDEX_PCT`, and ``|stock| <= MARKET_CONFIRM_MAX_MULTIPLE x |index|``.
+    * BREADTH — ``peer_changes`` maps the OTHER live equity jumpers to their session
+      changes (the caller excludes the stock itself): at least
+      `MARKET_CONFIRM_BREADTH_MIN` of them moved the same way, they are at least
+      `MARKET_CONFIRM_BREADTH_SHARE` of every peer with a usable change, and
+      ``|stock| <= MARKET_CONFIRM_MAX_MULTIPLE x`` the median same-way peer.
+
+    The index wins when both hold. None for the market scope, a coin (SPY does not trade
+    overnight and "other watched stocks" says nothing about a coin), a stock move that
+    is unusable or rounds to 0.00%, and any junk input — NaN, inf, None, bools and
+    strings never raise and never confirm. All arguments are percents (``4.7`` = 4.7%).
+    """
+    try:
+        if is_market_scope or is_crypto:
+            return None
+        stock = _plain_number(change_percent)
+        direction = direction_of(stock)
+        if stock is None or direction is None:
+            return None
+        limit = abs(stock) - _CONFIRM_EPS
+
+        index = _plain_number(index_change_percent)
+        if (
+            index_session_ok is True
+            and index is not None
+            and direction_of(index) == direction
+            and abs(index) >= MARKET_CONFIRM_INDEX_PCT - _CONFIRM_EPS
+            and limit <= MARKET_CONFIRM_MAX_MULTIPLE * abs(index)
+        ):
+            return MARKET_BASIS_INDEX
+
+        if not isinstance(peer_changes, Mapping):
+            return None
+        usable = [v for v in (_plain_number(p) for p in peer_changes.values()) if v is not None]
+        same_way = [abs(v) for v in usable if direction_of(v) == direction]
+        if (
+            len(same_way) >= MARKET_CONFIRM_BREADTH_MIN
+            and len(same_way) >= MARKET_CONFIRM_BREADTH_SHARE * len(usable) - _CONFIRM_EPS
+            and limit <= MARKET_CONFIRM_MAX_MULTIPLE * statistics.median(same_way)
+        ):
+            return MARKET_BASIS_BREADTH
+        return None
+    except Exception as e:  # defensive: a pure check must never raise (a broken Mapping)
+        logger.exception(
+            "market_confirmation raised (treated as unconfirmed): %s: %s",
+            type(e).__name__, e,
+        )
+        return None
 
 
 # ── Fingerprint ───────────────────────────────────────────────────────
@@ -741,6 +938,54 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
+def _valid_held(held_move: Any) -> Optional[MoveTag]:
+    """The held move card when ``held_move`` is a `MoveTag` with a known kind and
+    direction; None for anything else (a raw string, a dict, an unknown kind)."""
+    if not isinstance(held_move, MoveTag):
+        return None
+    if held_move.kind not in MOVE_KINDS or held_move.direction not in MOVE_DIRECTIONS:
+        return None
+    return held_move
+
+
+def failure_unjudged(last_error: Any) -> bool:
+    """True when a state row's ``last_error`` says its last attempt judged nothing (it leads
+    with `UNJUDGED_FAILURE_PREFIX`). Strict: anything but such a string is False."""
+    return isinstance(last_error, str) and last_error.startswith(UNJUDGED_FAILURE_PREFIX)
+
+
+def _evidence_floor(
+    last_gen: Optional[datetime], last_failure: Optional[datetime],
+) -> Optional[datetime]:
+    """The later of the last success and the last JUDGED failure (None when neither is
+    known): evidence older than this already had its attempt. The caller passes
+    ``last_failure=None`` when the last failure judged nothing (`failure_unjudged`)."""
+    stamps = [t for t in (last_gen, last_failure) if t is not None]
+    return max(stamps) if stamps else None
+
+
+def _fresh_news_breaks(
+    fresh_news_at: Any, floor: Optional[datetime], now: datetime, kind: str,
+) -> bool:
+    """Does fresh news break a held move card? The newest news-bearing row must be newer
+    than the evidence floor, and the floor at least the kind's spacing old (60 min for a
+    company card, 45 min for a market or no-cause card), so fresh wire stories buy at
+    most one attempt per spacing however the attempts end. A stamp beyond clock skew in
+    the future is a bad clock, never fresh news."""
+    fresh = _parse_ts(fresh_news_at)
+    if fresh is None:
+        return False
+    if (fresh - now).total_seconds() > _FRESH_NEWS_FUTURE_SKEW_SECONDS:
+        return False
+    if floor is None:
+        return True
+    spacing = (
+        MOVE_HOLD_COMPANY_NEWS_SPACING_SECONDS if kind == KIND_COMPANY
+        else MOVE_HOLD_NEWS_SPACING_SECONDS
+    )
+    return fresh > floor and (now - floor).total_seconds() >= spacing
+
+
 def decide(
     *,
     scope: str,
@@ -763,6 +1008,10 @@ def decide(
     web_refreshed_at: Optional[datetime] = None,
     web_result_count: int = 0,
     web_only_ok: bool = False,
+    held_move: Optional[MoveTag] = None,
+    fresh_news_at: Optional[datetime] = None,
+    move_search_exhausted: bool = False,
+    index_against_held: bool = False,
 ) -> Decision:
     """Decide whether ``scope``'s Insights card should be regenerated.
 
@@ -801,9 +1050,36 @@ def decide(
       may an EMPTY corpus continue past `no_corpus`, and only with a kept page set
       (``web_result_count`` > 0 and a parseable ``web_refreshed_at``). Such a decision
       is always tagged `WEB_ONLY_REASON`; each page set is tried once (a failure at or
-      after ``web_refreshed_at`` → `web_only_retried`) and at most
+      after ``web_refreshed_at`` → `web_only_retried`; a held move card's outage gives it
+      no turn) and at most
       `WEB_ONLY_FAILURE_CAP` failures a day are spent on it (`web_only_failure_cap`).
       The fingerprint stays `compute_inputset_id([], band, model)`: no web data in it.
+
+    The move-card inputs (2026-11-27) are no-ops at their defaults too — with
+    ``held_move=None`` every other input decides exactly as before:
+
+    * ``held_move`` — the move card the scope holds TODAY, as
+      `insight_move.held_move(state["last_trigger_reason"], state["last_generated_at"],
+      now)` returns it (the caller restricts it to the current ET day). Anything but a
+      `MoveTag` with a known kind and direction is read as None, and the market scope
+      never holds. A held card is regenerated only by a breaker (see the move-card
+      section above): a reversal (reason ``reversal <old>-><new>``), a new page set,
+      earnings landing or fresh news — never past the caps, MWCB or the cooldowns. Held
+      otherwise: `REASON_MOVE_HELD` (company / market) or `REASON_NO_CAUSE_WAITING`
+      (a no-cause card).
+    * ``fresh_news_at`` — when the newest NEWS-BEARING row of the scope's move corpus
+      ARRIVED: the later of its publication and when it reached the corpus (price-only
+      recaps excluded by the caller, `updates_insight_sweeper._newest_arrival`). Read only
+      for a held card.
+
+    A held card's floor ignores a failure whose ``state["last_error"]`` leads with
+    `UNJUDGED_FAILURE_PREFIX` (an outage judged nothing, so it consumes no evidence).
+    * ``move_search_exhausted`` — strictly True once the caller's search for a cause
+      is over for this move; a held no-cause card then reads `REASON_MOVE_HELD`.
+    * ``index_against_held`` — strictly True when the scope holds a MARKET card and the
+      S&P 500's session-stamped change now has the other sign (the caller's rule): while
+      the stock still moves materially that breaks the hold (reason ``market_turned``),
+      so move mode can replace the market card.
     """
     try:
         return _decide_inner(
@@ -820,6 +1096,10 @@ def decide(
             web_refreshed_at=web_refreshed_at,
             web_result_count=web_result_count,
             web_only_ok=web_only_ok,
+            held_move=held_move,
+            fresh_news_at=fresh_news_at,
+            move_search_exhausted=move_search_exhausted,
+            index_against_held=index_against_held,
         )
     except Exception as e:  # pragma: no cover - defensive
         logger.exception(
@@ -851,15 +1131,22 @@ def _decide_inner(
     web_refreshed_at: Optional[datetime] = None,
     web_result_count: int = 0,
     web_only_ok: bool = False,
+    held_move: Optional[MoveTag] = None,
+    fresh_news_at: Optional[datetime] = None,
+    move_search_exhausted: bool = False,
+    index_against_held: bool = False,
 ) -> Decision:
     state = state or {}
-    # A ticker-only concept: the market scope has no earnings date and never jumps.
+    # A ticker-only concept: the market scope has no earnings date, never jumps and
+    # never holds a move card.
     if is_market_scope:
         report_day = earnings_pending_today = False
         earnings_reported_at = None
         jumping = False
         web_refreshed_at = None
         web_only_ok = False
+        held_move = None
+    held = _valid_held(held_move)
 
     # The jump's kept web pages: when this process last found a NEW set, and how many.
     # Read BEFORE step 0, because a page set is what lets an empty corpus continue.
@@ -895,6 +1182,18 @@ def _decide_inner(
         market_cap=quote.get("marketCap"),
         is_index=is_market_scope,
     )
+    # A held move card reads the LIVE move — its class BEFORE the `last_price_band`
+    # fallback below (a stale band must never look like a live move) and its sign, which
+    # the fingerprint deliberately drops. Material = at least Notable, or the ≥10% floor.
+    live_dir: Optional[str] = None
+    moving = False
+    if held is not None:
+        live_pct = finite(change_pct)
+        live_dir = direction_of(live_pct)
+        moving = live_dir is not None and (
+            canonical_band(band) in _MOVING_CLASSES
+            or abs(live_pct) >= JUMP_FLOOR_SESSION_PCT
+        )
     if band == BAND_UNKNOWN:
         # An ABSENT price signal must be neutral to the gate, not a change event.
         # The band feeds the fingerprint, so letting `flat -> unknown` through
@@ -929,17 +1228,58 @@ def _decide_inner(
         last_gen is None or last_gen < web_at
     )
 
+    # A HELD move card (2026-11-27): which breakers apply. Each but the reversal is
+    # measured against the EVIDENCE FLOOR — the later of the last success and the last
+    # JUDGED failure — so a kept or refused attempt consumes the evidence that bought it
+    # (the writer's downgrade refusal is recorded as a failure), while an outage (the
+    # sweeper leads its `last_error` with `UNJUDGED_FAILURE_PREFIX`) consumes nothing: its
+    # retry waits only for the failure cooldown below. The earnings and web triggers are
+    # replaced by their floor-measured breakers, so the short-circuit below and the
+    # reason text stay honest for a held card. Without a held card nothing here runs.
+    reversal = False
+    market_turned = False
+    hold_broken = False
+    if held is not None:
+        judged_failure = (
+            None if failure_unjudged(state.get("last_error"))
+            else _parse_ts(state.get("last_failure_at"))
+        )
+        floor = _evidence_floor(last_gen, judged_failure)
+        reversal = moving and live_dir != held.direction
+        earnings_trigger = reported_at is not None and (floor is None or floor < reported_at)
+        web_trigger = (
+            moving and web_at is not None and web_count > 0
+            and (floor is None or floor < web_at)
+        )
+        news_break = moving and _fresh_news_breaks(
+            fresh_news_at, floor, now, held.kind,
+        )
+        # A held MARKET card whose S&P 500 has turned the other way (the sweeper's
+        # ``index_against_held``, session-stamped SPY only): its "moves with the broader
+        # market" sentence no longer holds while the stock still moves. A state, not an
+        # event, so no evidence floor: the rewrite in move mode replaces the market card
+        # (`insight_move.market_card_lost`), after which no market card is held.
+        market_turned = (
+            moving and held.kind == KIND_MARKET and index_against_held is True
+        )
+        hold_broken = (
+            reversal or market_turned or earnings_trigger or web_trigger or news_break
+        )
+
     # ── 1. Fingerprint short-circuit — the money-saver ──
     # Checked BEFORE every other branch: if the inputs are identical the output
     # is provably identical, so there is nothing to buy at any price. The
     # exceptions are `earnings_trigger` — the inputs the fingerprint covers are
-    # identical, but the prompt's EARNINGS line is not — and `web_trigger`, whose
-    # new pages are an input the fingerprint deliberately does not cover.
+    # identical, but the prompt's EARNINGS line is not — `web_trigger`, whose
+    # new pages are an input the fingerprint deliberately does not cover, and a held
+    # move card's `reversal`, whose sign the fingerprint deliberately drops.
     stale_refresh = False
     if (
         inputset_id == state.get("last_inputset_id")
         and not earnings_trigger
         and not web_trigger
+        and not reversal
+        and not market_turned
     ):
         # Max-staleness floor for the MARKET default tab: if the card is older
         # than MAX_STALENESS_SECONDS, DON'T short-circuit — fall through to the
@@ -1033,6 +1373,17 @@ def _decide_inner(
             action=ACTION_SKIP, reason="earnings_reserved",
             inputset_id=inputset_id, price_band=band,
         )
+    # A held move card (2026-11-27) that no breaker moved: a changed fingerprint (fresh
+    # ids, a window re-key, a band change) is not a reason to replace it. After the caps,
+    # so the reason that lasts all day is still reported; before the cooldowns, which
+    # would promise a retry that is not coming.
+    if held is not None and not hold_broken:
+        waiting = held.kind == KIND_NONE and move_search_exhausted is not True
+        return Decision(
+            action=ACTION_SKIP,
+            reason=REASON_NO_CAUSE_WAITING if waiting else REASON_MOVE_HELD,
+            inputset_id=inputset_id, price_band=band,
+        )
     # Web-only bounds (2026-11-12). Neither ever gates a decision with articles.
     if web_only:
         # At most `WEB_ONLY_FAILURE_CAP` failures a day go to the web-only path, so a real
@@ -1049,8 +1400,12 @@ def _decide_inner(
             )
         # One try per page set: a failure at or after the set was found means this set
         # has had its turn (the failing attempt held the same pages). A NEW set — a later
-        # `web_refreshed_at` — gets one try of its own.
+        # `web_refreshed_at` — gets one try of its own. For a HELD move card an outage gave
+        # the set no turn (the evidence floor above ignores it too); the failure cooldown and
+        # `WEB_ONLY_FAILURE_CAP` still bound its retries. Untagged scopes are unchanged.
         failed_at = _parse_ts(state.get("last_failure_at"))
+        if held is not None and failure_unjudged(state.get("last_error")):
+            failed_at = None
         if failed_at is not None and web_at <= failed_at:
             return Decision(
                 action=ACTION_SKIP, reason="web_only_retried",
@@ -1104,6 +1459,13 @@ def _decide_inner(
         reasons.append("stale_refresh")
     if earnings_trigger and state.get("last_inputset_id") is not None:
         reasons.append("earnings_reported")
+    if reversal:
+        # The held card's direction, then the live one: the reason the sweeper's
+        # admission reads as urgent. With it, a moved fingerprint is not reported as
+        # "new_articles" — the reversal is why this card is rewritten.
+        reasons.append(f"reversal {held.direction}->{live_dir}")
+    if market_turned and not reversal:
+        reasons.append("market_turned")
     # With the web trigger alone (an unchanged corpus), the new pages ARE the
     # reason; "new_articles" would claim a corpus change that did not happen.
     # A web-only card ALWAYS carries `WEB_ONLY_REASON` (cold start and band change
@@ -1139,8 +1501,21 @@ __all__ = [
     "REPORT_DAY_AFTERHOURS_COOLDOWN_SECONDS",
     "JUMP_RESERVE",
     "JUMP_TIERS",
+    "JUMP_FLOOR",
+    "JUMP_FLOOR_SESSION_PCT",
     "WEB_ONLY_REASON",
     "WEB_ONLY_FAILURE_CAP",
+    "REASON_MOVE_HELD",
+    "REASON_NO_CAUSE_WAITING",
+    "MOVE_HOLD_NEWS_SPACING_SECONDS",
+    "MOVE_HOLD_COMPANY_NEWS_SPACING_SECONDS",
+    "UNJUDGED_FAILURE_PREFIX",
+    "failure_unjudged",
+    "MARKET_CONFIRM_INDEX_PCT",
+    "MARKET_CONFIRM_MAX_MULTIPLE",
+    "MARKET_CONFIRM_BREADTH_MIN",
+    "MARKET_CONFIRM_BREADTH_SHARE",
+    "market_confirmation",
     "jump_band",
     "mwcb_in_force",
     "daily_cap_for",

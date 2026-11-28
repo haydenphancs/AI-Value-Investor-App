@@ -27,8 +27,11 @@ THE ANSWER LADDER — free, licensed data only
      (earnings / analyst / company news / group move / gap), arithmetic and string matching
      over data already paid for, plus the session's Updates Insights card when its net
      sentiment leans the way an Unusual move went (`daily_move_attribution.detect_news_lean`,
-     2026-10-14). Free; the one model-written input is a stored card reprinted behind that
-     gate, never generated on this path.
+     2026-10-14) — or, since 2026-11-27 ("Trust move cards"), when it is a company or market
+     MOVE card in the move's direction, whatever σ says (its writer ran the headline check and
+     a cause judge; a no-cause move card is never a cause; a market card not while the S&P 500
+     has turned ≥ 0.5% the other way). Free; the one model-written input
+     is a stored card reprinted behind that gate, never generated on this path.
   2. The ticker's 6h-cached news corpus. Free — FMP's "Market News" package IS on the Order
      Form, unlike the quote and market-performance families.
 
@@ -858,8 +861,9 @@ async def explain_price_move(
         out["important"] = conflict
     if a.tag in _LEAN_TAGS:
         # The cause is the day's Insights card, not a dated event: its NET sentiment leaned
-        # the way an Unusual move went. Say so, or the model presents a news summary as a
-        # confirmed single catalyst.
+        # the way an Unusual move went — or, since 2026-11-27, it is a same-session company or
+        # market move card in the move's direction, whatever σ says (Appendix B 2026-11-27).
+        # Say so, or the model presents a news summary as a confirmed single catalyst.
         out["explanation_basis"] = (
             "news_lean: the day's Updates AI Insights summary leans the same way the stock "
             "moved. Present it as what the day's news was about, not as a confirmed single "
@@ -928,7 +932,9 @@ def _bottom_line(exp: Any, news: Dict[str, Any]) -> str:
         # `*_available` flags exist to prevent.
         return f"{move} {poss_cap} news could not be checked, so do not say there was none."
     # The day's Insights card leaned the way the stock moved, but its headline was withheld
-    # (the move was not Unusual, or the headline failed `usable_lean_headline`). "No single
+    # (the move was not Unusual, or the headline failed `usable_lean_headline`; for a move card,
+    # its shape check, the after-close report-day rule, or a market card whose S&P 500 turned
+    # ≥ 0.5% the other way — `detect_news_lean`). "No single
     # catalyst stands out" alone would read as contradicting the Bearish card the app shows;
     # the lean is true and claims no cause. Same sentence shape the widget prints.
     leaned = getattr(getattr(exp, "attribution", None), "lean", None)

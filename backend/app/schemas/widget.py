@@ -22,9 +22,12 @@ So the payload now carries two separate things instead of one ambiguous string:
 `cause` (established from dated, structured data — earnings today, an analyst action
 today, a classified headline, an industry move — or, behind a strict gate, the session's
 Insights card when its sentiment leans the way an Unusual move went: "Bearish News",
-2026-10-14) and `context` (pure arithmetic — the σ multiple, the overnight gap split, the
-industry delta). `cause.note` repeats that arithmetic as one sentence under an established
-cause. `cause.kind == "none"` is a real, common, useful answer, not a failure.
+2026-10-14 — or, since 2026-11-27, a same-session company or market move card in the move's
+direction, whatever σ says, a market card only while the S&P 500 has not turned ≥ 0.5% the
+other way; Appendix B 2026-11-27) and `context` (pure arithmetic — the σ multiple, the
+overnight gap split, the industry delta). `cause.note` repeats that arithmetic as one
+sentence under an established cause. `cause.kind == "none"` is a real, common, useful
+answer, not a failure.
 
 CONTRACT NOTES
 --------------
@@ -176,7 +179,12 @@ class WidgetCauseResponse(BaseModel):
     multi-day rally narrative can never appear here — the bug that motivated the rebuild.
     The news lean is the Insights card written during the session described, admitted only
     when its sentiment agrees with an Unusual move and its headline passes
-    `usable_lean_headline` (no window, price, schedule or relative-day wording).
+    `usable_lean_headline` (no window, price, schedule or relative-day wording). The one
+    exception (owner, 2026-11-27: "Trust move cards"): a company or market MOVE card in the
+    move's direction is printed as-is, whatever σ says — its writer already ran that headline
+    check and a cause judge (a market card not while the S&P 500 has turned ≥ 0.5% the other
+    way). A no-cause move card is never a cause or a lean. Same kind and
+    tag either way, so no installed build needs an update.
     """
 
     # 'earnings' | 'analyst' | 'company_news' | 'sector' | 'market' | 'none'. The news lean

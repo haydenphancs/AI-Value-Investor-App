@@ -2179,3 +2179,420 @@ def test_a_malformed_lean_degrades_rather_than_breaking_the_widget():
 
 def test_the_lean_tags_are_the_two_the_chat_pins():
     assert NEWS_LEAN_TAGS == {"bearish": "Bearish News", "bullish": "Bullish News"}
+
+
+# ── Trusted move cards (owner, 2026-11-27: "Trust move cards") ──────────────────────
+#
+# A company or market MOVE card (`insight_move`) in the move's direction prints its headline
+# as-is: no z ≥ 2 gate, no subject or wording check (its writer ran `usable_lean_headline` with
+# its own names and a cause judge). Kept: sentiment agreeing with the move, the marker agreeing
+# with the move, the after-close report-day rule, and a shape check. A no-cause ("none") move
+# card is never a cause and never a lean. The ACHR / CRWV / INTC tests above are unedited.
+
+import dataclasses  # noqa: E402
+import logging  # noqa: E402
+
+from app.services import daily_move_attribution as _dma  # noqa: E402
+
+_UP_HEADLINE = "CoreWeave wins a new capacity contract with OpenAI"
+_MARKET_HEADLINE = "CoreWeave moves with the broader market after Nvidia reinstated its CEO"
+_NONE_HEADLINES = (
+    "No news yet explains CoreWeave's move",
+    "CoreWeave moves with the broader market; no company news explains it yet",
+)
+
+
+def _move_lean(kind, direction, **kw):
+    return dataclasses.replace(_lean(**kw), move_kind=kind, move_direction=direction)
+
+
+@pytest.fixture(autouse=False)
+def fresh_move_log():
+    _dma._MOVE_CARD_REFUSALS_LOGGED.clear()
+    yield
+    _dma._MOVE_CARD_REFUSALS_LOGGED.clear()
+
+
+def _up(**kw):
+    """CRWV +22.0% at z 1.6 (a held / 10%-floor move card's shape), industry +4.0%."""
+    kw.setdefault("change_percent", 22.0)
+    kw.setdefault("z", 1.6)
+    kw.setdefault("industry_change_percent", 4.0)
+    return _crwv(**kw)
+
+
+def _same(a, b):
+    return (a.kind, a.tag, a.detail, a.note, a.lean, a.move_card) == (
+        b.kind, b.tag, b.detail, b.note, b.lean, b.move_card)
+
+
+def test_p1_a_company_move_card_prints_its_headline_below_two_sigma_with_symbol_only_terms():
+    card = _move_lean("company", "up", headline=_UP_HEADLINE, sentiment="Bullish", terms=("CRWV",))
+    a = _up(news_lean=card)
+    assert a.kind is CauseKind.COMPANY_NEWS and a.tag == "Bullish News"
+    assert a.detail == _UP_HEADLINE + "."
+    assert a.move_card == "company" and a.lean == "bullish"
+    assert a.note == "Software - Infrastructure rose 4.0%."
+    assert a.considered == []
+    # CONTROL: the same card without the marker is withheld by the 2σ gate ...
+    plain = _up(news_lean=dataclasses.replace(card, move_kind=None, move_direction=None))
+    assert plain.kind is CauseKind.NONE and plain.move_card is None
+    assert plain.detail.endswith("Today's news leaned bullish."), plain.detail
+    # ... and above 2σ by the subject check (the symbol-only terms do not hold "CoreWeave").
+    named = _up(z=2.5, news_lean=dataclasses.replace(card, move_kind=None, move_direction=None))
+    assert named.kind is CauseKind.NONE and named.detail.endswith("Today's news leaned bullish.")
+
+
+def test_p2_a_market_move_card_is_shown_without_sigma_under_the_five_percent_floor():
+    card = _move_lean("market", "up", headline=_MARKET_HEADLINE, sentiment="Bullish",
+                      terms=("CRWV",))
+    a = _up(change_percent=4.0, z=None, industry_change_percent=1.0, news_lean=card)
+    assert a.kind is CauseKind.COMPANY_NEWS and a.tag == "Bullish News"
+    assert a.detail == _MARKET_HEADLINE + "." and a.move_card == "market"
+    plain = _up(change_percent=4.0, z=None, industry_change_percent=1.0,
+                news_lean=dataclasses.replace(card, move_kind=None, move_direction=None))
+    assert plain.kind is CauseKind.NONE and plain.detail.endswith("Today's news leaned bullish.")
+
+
+@pytest.mark.parametrize("z", [None, 0.0, 1.99, float("nan"), float("inf"), 50.0])
+@pytest.mark.parametrize("chg", [10.0, -99.9, 0.006])
+def test_p3_the_trust_holds_at_every_z_and_magnitude(z, chg):
+    up = chg > 0
+    card = _move_lean("company", "up" if up else "down",
+                      headline=_UP_HEADLINE if up else CRWV_HEADLINE,
+                      sentiment="Bullish" if up else "Bearish")
+    a = _crwv(change_percent=chg, z=z, industry_change_percent=None, news_lean=card)
+    assert a.kind is CauseKind.COMPANY_NEWS, (z, chg, a.detail)
+    assert a.move_card == "company"
+
+
+@pytest.mark.parametrize("sentiment", ["Neutral", "Bullish", "Bearish"])
+@pytest.mark.parametrize("headline", _NONE_HEADLINES)
+@pytest.mark.parametrize("chg,ind", [(-15.46, -4.0), (15.46, 4.0)])
+def test_p4_a_no_cause_move_card_is_never_a_cause_or_a_lean(sentiment, headline, chg, ind):
+    direction = "up" if chg > 0 else "down"
+    a = _crwv(change_percent=chg, z=3.0, industry_change_percent=ind,
+              news_lean=_move_lean("none", direction, headline=headline, sentiment=sentiment))
+    assert a.kind is CauseKind.NONE, a.detail
+    assert a.lean is None and a.move_card is None
+    assert a.detail.endswith("No clear catalyst in today's news."), a.detail
+    hit, leaned = detect_news_lean(
+        "CRWV", chg, 3.0, LEAN_DAY,
+        _move_lean("none", direction, headline=headline, sentiment=sentiment))
+    assert (hit, leaned) == (None, None)
+
+
+@pytest.mark.parametrize("extra", [
+    dict(earnings_row=_CRWV_EARNINGS_MISS),
+    dict(grade_rows=_CRWV_DOWNGRADE),
+    dict(change_percent=-4.2, industry_change_percent=-4.0),          # a sector move
+    dict(classified_news=[("Guidance Cut", "CoreWeave lowers guidance")]),
+])
+def test_p5_a_no_cause_card_leaves_every_dated_answer_exactly_as_with_no_card(extra):
+    kw = dict(z=3.0, **extra)
+    with_card = _crwv(**kw, news_lean=_move_lean("none", "down", headline=_NONE_HEADLINES[0],
+                                                 sentiment="Bearish"))
+    without = _crwv(**kw, news_lean=None)
+    assert with_card.kind is not CauseKind.NONE
+    assert _same(with_card, without)
+
+
+def test_p6_a_marker_for_the_other_direction_is_refused_exactly_like_no_card():
+    """ACHR's shape: a Bullish card under −5.02%, now with an 'up' move marker."""
+    achr = dict(ticker="ACHR", change_percent=-5.02152, sigma_daily=0.0454823,
+                industry_name="Aerospace & Defense", industry_change_percent=-1.23,
+                market_change_percent=-0.15, had_news=True)
+    marked = NewsLean(headline="Archer Aviation explores new markets and strategic growth",
+                      sentiment="Bullish", subject_terms=("ACHR", "archer"),
+                      move_kind="company", move_direction="up")
+    assert _same(_attr(**achr, news_lean=marked), _attr(**achr))
+    assert _attr(**achr, news_lean=marked).kind is CauseKind.NONE
+    # The mirror: a Bearish 'down' card under +8%.
+    kw = dict(change_percent=8.0, z=3.0, industry_change_percent=4.0)
+    assert _same(_crwv(**kw, news_lean=_move_lean("company", "down")), _crwv(**kw, news_lean=None))
+
+
+def test_p7_a_marker_that_disagrees_while_the_sentiment_agrees_is_an_ordinary_card():
+    """Drift: sentiment Bearish under −8% but the marker says 'up'. Not trusted — the strict
+    gate decides, unchanged."""
+    kw = dict(change_percent=-8.0, industry_change_percent=-1.0)
+    shown = _crwv(z=3.0, news_lean=_move_lean("company", "up"), **kw)
+    assert shown.kind is CauseKind.COMPANY_NEWS and shown.move_card is None
+    assert shown.detail == CRWV_HEADLINE + "."
+    routine = _crwv(z=1.5, news_lean=_move_lean("company", "up"), **kw)
+    assert routine.kind is CauseKind.NONE and routine.detail.endswith("Today's news leaned bearish.")
+    refused = _crwv(z=3.0, news_lean=_move_lean(
+        "company", "up", headline="Investors Weigh Rising Bond Yields"), **kw)
+    assert refused.kind is CauseKind.NONE and refused.detail.endswith("Today's news leaned bearish.")
+
+
+@pytest.mark.parametrize("kind,direction", [
+    ("company", None), (None, "up"), ("Company", "up"), ("company", "UP"), ("bogus", "up"),
+    (3, "up"), (["company"], "up"), ("market", "sideways"),
+])
+def test_p8_a_malformed_marker_is_an_ordinary_card(kind, direction):
+    card = _move_lean(kind, direction, headline="CoreWeave Wins Major OpenAI Capacity Contract",
+                      sentiment="Bullish")
+    a = _up(change_percent=8.0, z=1.5, news_lean=card)
+    assert a.kind is CauseKind.NONE and a.move_card is None
+    assert a.detail.endswith("Today's news leaned bullish."), a.detail
+    # CONTROL: the well-formed marker is trusted on the same inputs.
+    ok = _up(change_percent=8.0, z=1.5, news_lean=_move_lean(
+        "company", "up", headline="CoreWeave Wins Major OpenAI Capacity Contract",
+        sentiment="Bullish"))
+    assert ok.kind is CauseKind.COMPANY_NEWS and ok.move_card == "company"
+
+
+def _trusted_down(**kw):
+    return _move_lean("company", "down", **kw)
+
+
+def test_p9_the_after_close_report_day_rule_still_applies_to_a_move_card():
+    late = _crwv(z=1.5, earnings_row=_AMC_TODAY,
+                 news_lean=_trusted_down(generated_at="2026-10-14T20:35:00Z"))
+    assert late.kind is CauseKind.NONE
+    assert late.detail.endswith("Today's news leaned bearish."), late.detail
+    inside = _crwv(z=1.5, earnings_row=_AMC_TODAY,
+                   news_lean=_trusted_down(generated_at="2026-10-14T19:59:00Z"))
+    assert inside.kind is CauseKind.COMPANY_NEWS and inside.move_card == "company"
+    ok = _crwv(z=1.5, earnings_row=_AMC_TODAY,
+               news_lean=_trusted_down(generated_at="2026-10-14T20:15:00Z"))
+    over = _crwv(z=1.5, earnings_row=_AMC_TODAY,
+                 news_lean=_trusted_down(generated_at="2026-10-14T20:16:00Z"))
+    assert ok.kind is CauseKind.COMPANY_NEWS and over.kind is CauseKind.NONE
+
+
+def test_p9_a_before_the_open_reporters_late_card_is_withheld_too():
+    """Documented residual: the widget cannot tell a card about the session from one about
+    the print, so a 16:35 card on any report day is withheld — the earnings detector answers."""
+    bmo = {"date": "2026-10-14", "time": "bmo", "epsActual": -0.21, "epsEstimated": 0.05}
+    a = _crwv(z=1.5, earnings_row=bmo, news_lean=_trusted_down(generated_at="2026-10-14T20:35:00Z"))
+    assert a.kind is CauseKind.EARNINGS and a.move_card is None and a.lean is None
+
+
+@pytest.mark.parametrize("stamp", [None, "", "garbage"])
+def test_p9_an_unplaceable_move_card_on_a_report_day_is_withheld(stamp):
+    a = _crwv(z=1.5, earnings_row=_AMC_TODAY, news_lean=_trusted_down(generated_at=stamp))
+    assert a.kind is CauseKind.NONE and a.detail.endswith("Today's news leaned bearish.")
+
+
+def test_p9_a_late_move_card_with_no_report_is_shown():
+    a = _crwv(z=1.5, news_lean=_trusted_down(generated_at="2026-10-14T22:30:00Z"))
+    assert a.kind is CauseKind.COMPANY_NEWS and a.move_card == "company"
+
+
+def test_p10_a_round_the_clock_move_card_has_no_close_to_be_after():
+    a = _crwv(ticker="BTCUSD", change_percent=3.0, z=0.8, industry_change_percent=None,
+              earnings_row={"date": "2026-10-14", "time": "amc", "epsActual": 1.0},
+              news_lean=_move_lean("company", "up", headline="Hong Kong approves new spot Bitcoin funds",
+                                   sentiment="Bullish", terms=("BTCUSD",),
+                                   generated_at="2026-10-14T23:30:00Z", rolling=True))
+    assert a.kind is CauseKind.COMPANY_NEWS and a.move_card == "company", a.detail
+
+
+@pytest.mark.parametrize("headline,code", [
+    ("CoreWeave " + "x" * 91, "length"),                  # 101 characters
+    ("CoreWeave x", "length"),                            # 11 characters
+    ("x" * 10_000, "length"),
+    ("CoreWeave wins a contract with OpenAI and…", "clipped"),
+    ("CoreWeave wins a contract with OpenAI and...", "clipped"),
+    ("CoreWeave wins a contract with OpenAI today", "relative_day"),
+    ("CoreWeave wins a contract with OpenAI?", "ending"),
+    ("CoreWeave wins a contract with OpenAI!", "ending"),
+    (42, "not_text"),
+    (None, "not_text"),
+])
+def test_p11_a_trusted_card_that_drifted_from_its_shape_is_withheld_and_logged_once(
+        headline, code, caplog, fresh_move_log):
+    card = _move_lean("company", "up", headline=headline, sentiment="Bullish")
+    with caplog.at_level(logging.WARNING, logger=_dma.__name__):
+        first = _up(news_lean=card)
+        second = _up(news_lean=card)                     # the head row's aged second pass
+    for a in (first, second):
+        assert a.kind is CauseKind.NONE and a.move_card is None
+        assert a.detail.endswith("Today's news leaned bullish."), a.detail
+    records = [r for r in caplog.records if "move card for CRWV withheld" in r.getMessage()]
+    assert len(records) == 1, [r.getMessage() for r in caplog.records]
+    msg = records[0].getMessage()
+    assert f"({code}," in msg and "company" in msg
+    if isinstance(headline, str) and len(headline) > 15:
+        assert headline[:15] not in msg and "OpenAI" not in msg
+
+
+@pytest.mark.parametrize("headline,want", [
+    ("CoreWeave " + "x" * 90, "CoreWeave " + "x" * 90 + "."),        # exactly 100
+    ("CoreWeave Go", "CoreWeave Go."),                                 # exactly 12
+    ("  CoreWeave   wins\n a  contract ", "CoreWeave wins a contract."),
+    ("CoreWeave wins a contract.", "CoreWeave wins a contract."),      # no double full stop
+    ("CoreWeave  " + "x" * 90, "CoreWeave " + "x" * 90 + "."),       # collapses to 100
+])
+def test_p11_the_shape_check_passes_its_boundaries(headline, want, fresh_move_log):
+    a = _up(news_lean=_move_lean("company", "up", headline=headline, sentiment="Bullish"))
+    assert a.kind is CauseKind.COMPANY_NEWS and a.detail == want
+
+
+def test_p12_a_trusted_card_outranks_the_dated_causes_below_two_sigma():
+    for a in (
+        _crwv(z=1.5, earnings_row=_CRWV_EARNINGS_MISS, news_lean=_trusted_down()),
+        _crwv(z=1.5, grade_rows=_CRWV_DOWNGRADE, news_lean=_trusted_down()),
+        _crwv(z=1.5, classified_news=[("Guidance Cut", "CoreWeave lowers guidance")],
+              news_lean=_trusted_down()),
+    ):
+        assert a.kind is CauseKind.COMPANY_NEWS and a.tag == "Bearish News"
+        assert a.detail == CRWV_HEADLINE + "." and a.move_card == "company"
+        assert a.note == "Software - Infrastructure fell 4.0%."
+
+
+def test_p13_intc_a_move_card_leads_ahead_of_the_earnings_beat_below_two_sigma():
+    day = date(2026, 10, 30)
+    headline = "Intel's weak PC outlook and guidance overshadows strong data center results"
+    inputs = dict(
+        ticker="INTC", change_percent=-30.6, today=day, z=1.5,
+        industry_name="Semiconductors", industry_change_percent=-8.7,
+        earnings_row={"date": "2026-10-29", "time": "amc", "epsActual": 0.23, "epsEstimated": 0.18},
+        had_news=True,
+    )
+    card = NewsLean(headline=headline, sentiment="Bearish", subject_terms=("INTC", "intel"),
+                    generated_at="2026-10-30T17:51:00Z", day=day,
+                    move_kind="company", move_direction="down")
+    a = attribute(**inputs, news_lean=card)
+    assert a.kind is CauseKind.COMPANY_NEWS and a.detail == headline + "."
+    assert a.note == "Semiconductors fell 8.7%."
+    # The same card without the marker is withheld at z 1.5 and the earnings answer.
+    plain = dataclasses.replace(card, move_kind=None, move_direction=None)
+    assert attribute(**inputs, news_lean=plain).tag == "Earnings Beat"
+
+
+def test_p14_flat_or_unreadable_moves_never_reach_the_trust():
+    card = _move_lean("company", "up", headline=_UP_HEADLINE, sentiment="Bullish")
+    assert detect_news_lean("CRWV", 0.004, 3.0, LEAN_DAY, card) == (None, None)
+    assert detect_news_lean("CRWV", float("nan"), 3.0, LEAN_DAY, card) == (None, None)
+    assert _crwv(change_percent=float("nan"), news_lean=card) is None
+
+
+def test_an_ordinary_lean_never_sets_move_card():
+    a = _crwv()
+    assert a.kind is CauseKind.COMPANY_NEWS and a.move_card is None
+
+
+# ── P15: sentiment must still agree with the move (review 2026-11-27) ────────────────
+#
+# The trust skips the σ and headline checks only; a well-formed marker in the move's direction
+# never rescues a card whose own sentiment is Neutral or points the other way.
+
+
+@pytest.mark.parametrize("kind", ["company", "market"])
+@pytest.mark.parametrize("direction,change,sentiment", [
+    ("up", 22.0, "Neutral"), ("up", 22.0, "Bearish"),
+    ("down", -22.0, "Neutral"), ("down", -22.0, "Bullish"),
+])
+def test_p15_a_trusted_marker_never_overrides_a_disagreeing_sentiment(
+        kind, direction, change, sentiment):
+    headline = _MARKET_HEADLINE if kind == "market" else _UP_HEADLINE
+    card = _move_lean(kind, direction, headline=headline, sentiment=sentiment)
+    a = _up(change_percent=change, industry_change_percent=4.0 if change > 0 else -4.0,
+            news_lean=card)
+    assert a.kind is CauseKind.NONE, a.detail
+    assert a.tag is None and a.move_card is None and a.lean is None
+    assert "leaned" not in a.detail, a.detail
+    assert detect_news_lean("CRWV", change, 1.6, LEAN_DAY, card) == (None, None)
+    # CONTROL: the agreeing sentiment on the same inputs is trusted.
+    agree = dataclasses.replace(card, sentiment="Bullish" if change > 0 else "Bearish")
+    ok = _up(change_percent=change, industry_change_percent=4.0 if change > 0 else -4.0,
+             news_lean=agree)
+    assert ok.kind is CauseKind.COMPANY_NEWS and ok.move_card == kind
+
+
+# ── P16: a market card whose index turned the other way (review 2026-11-27) ──────────
+#
+# Its "moves with the broader market" sentence is false once the S&P 500 moves ≥ 0.5% the
+# other way — the writer's own rule (`insight_move.market_card_lost`). The writer rewrites it only
+# while the scope stays in move mode, so a faded stock can keep it stored; the widget withholds
+# it (the lean stays), trusted or not. A company card is unaffected.
+
+
+def test_p16_the_threshold_is_the_sweepers():
+    from app.services import updates_insight_sweeper as sweeper
+
+    assert _dma._MARKET_CARD_AGAINST_MIN_PCT == sweeper._INDEX_AGAINST_MIN_PCT
+
+
+def _market_card(direction="up", sentiment="Bullish", headline=_MARKET_HEADLINE):
+    return _move_lean("market", direction, headline=headline, sentiment=sentiment)
+
+
+@pytest.mark.parametrize("z", [0.6, 2.5, None])
+@pytest.mark.parametrize("spy", [-0.9, -0.5, -3.0])
+def test_p16_a_market_card_under_an_index_moving_the_other_way_only_leans(z, spy):
+    a = _up(change_percent=1.2 if z == 0.6 else 6.0, z=z, industry_change_percent=None,
+            market_change_percent=spy, news_lean=_market_card())
+    assert a.kind is CauseKind.NONE and a.move_card is None, a.detail
+    assert a.lean == "bullish" and a.detail.endswith("Today's news leaned bullish."), a.detail
+    assert a.context.market_change_percent == spy
+    hit, leaned = detect_news_lean("CRWV", 1.2, z, LEAN_DAY, _market_card(), market_change=spy)
+    assert hit is None and leaned == "bullish"
+
+
+def test_p16_a_withheld_market_card_falls_through_to_the_dated_answers():
+    """Withheld like any lean: an in-line industry is then the cause, exactly as with no card."""
+    kw = dict(change_percent=1.2, z=0.6, industry_change_percent=1.0, market_change_percent=-0.9)
+    a = _up(news_lean=_market_card(), **kw)
+    assert a.kind is CauseKind.SECTOR and a.move_card is None
+    assert _same(a, _up(news_lean=None, **kw))
+
+
+def test_p16_the_mirror_a_down_market_card_under_a_rising_index_only_leans():
+    card = _market_card("down", "Bearish",
+                        "CoreWeave moves with the broader market after a tariff announcement")
+    a = _crwv(change_percent=-3.0, z=0.8, industry_change_percent=-1.0,
+              market_change_percent=0.9, news_lean=card)
+    assert a.kind is CauseKind.NONE and a.detail.endswith("Today's news leaned bearish."), a.detail
+    shown = _crwv(change_percent=-3.0, z=0.8, industry_change_percent=-1.0,
+                  market_change_percent=-0.9, news_lean=card)
+    assert shown.kind is CauseKind.COMPANY_NEWS and shown.move_card == "market"
+
+
+@pytest.mark.parametrize("spy", [-0.49, -0.3, 0.0, 0.2, 1.5, None, float("nan"), float("inf"),
+                                 "junk"])
+def test_p16_an_index_the_same_way_under_the_line_or_unknown_keeps_the_market_card(spy):
+    a = _up(change_percent=1.2, z=0.6, industry_change_percent=1.0,
+            market_change_percent=spy, news_lean=_market_card())
+    assert a.kind is CauseKind.COMPANY_NEWS and a.move_card == "market", (spy, a.detail)
+    assert a.detail == _MARKET_HEADLINE + "."
+    hit, _ = detect_news_lean("CRWV", 1.2, 0.6, LEAN_DAY, _market_card(), market_change=spy)
+    assert hit is not None and hit.move_card == "market"
+
+
+@pytest.mark.parametrize("spy", [-0.9, -5.0])
+def test_p16_a_company_move_card_is_unaffected_by_the_index(spy):
+    card = _move_lean("company", "up", headline=_UP_HEADLINE, sentiment="Bullish")
+    a = _up(change_percent=1.2, z=0.6, market_change_percent=spy, news_lean=card)
+    assert a.kind is CauseKind.COMPANY_NEWS and a.move_card == "company"
+    assert a.detail == _UP_HEADLINE + "."
+
+
+def test_p16_an_ordinary_card_is_unaffected_by_the_index():
+    """Only the market sentence is about the index: an ordinary card keeps the strict gate's
+    answer whatever SPY did."""
+    assert _same(_crwv(market_change_percent=0.9), _crwv())
+    assert _crwv(market_change_percent=0.9).kind is CauseKind.COMPANY_NEWS
+
+
+def test_p16_a_market_marker_for_the_other_direction_is_withheld_under_a_turned_index():
+    """Drift (P7's shape, market kind): marker 'up', Bearish card under −8% at z 3. Above 2σ the
+    strict gate would print it, but its market sentence is false while SPY rises."""
+    card = _market_card("up", "Bearish",
+                        "CoreWeave moves with the broader market after a tariff announcement")
+    kw = dict(change_percent=-8.0, z=3.0, industry_change_percent=-1.0)
+    against = _crwv(market_change_percent=0.9, news_lean=card, **kw)
+    assert against.kind is CauseKind.NONE
+    assert against.detail.endswith("Today's news leaned bearish."), against.detail
+    ordinary = _crwv(market_change_percent=None, news_lean=card, **kw)
+    assert ordinary.kind is CauseKind.COMPANY_NEWS and ordinary.move_card is None
+
+
+def test_p16_a_no_cause_card_stays_no_lean_under_a_turned_index():
+    card = _move_lean("none", "up", headline=_NONE_HEADLINES[1], sentiment="Bullish")
+    a = _up(change_percent=1.2, z=0.6, market_change_percent=-0.9, news_lean=card)
+    assert a.kind is CauseKind.NONE and a.lean is None
+    assert detect_news_lean("CRWV", 1.2, 0.6, LEAN_DAY, card, market_change=-0.9) == (None, None)

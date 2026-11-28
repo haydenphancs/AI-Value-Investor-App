@@ -37,6 +37,24 @@ card was Bullish under −5.02%, so the gate refuses it and the tile still reads
 more. No clear catalyst in today's news." An agreeing card that fails the rest of the gate
 reads "Today's news leaned bearish." instead.
 
+TRUSTED MOVE CARDS (owner, 2026-11-27: "Trust move cards")
+----------------------------------------------------------
+A same-session company or market MOVE card (`insight_move`; the server-only `card["move"]`
+marker, read by `_card_move_tag`) in the move's direction prints its headline as-is: no z ≥ 2
+check and no subject or wording check — its writer already ran `usable_lean_headline` with its
+own names and the cause judge. Only a shape check remains (length, clipping, no relative day).
+Kept: the session gate (`had_news`), AI cards only, the web-only hold (`cards_for_caller`),
+sentiment and marker agreeing with the move, and the after-close report-day rule (the widget
+cannot prove a post-close card describes the session). Same kind and tag as any lean
+(`company_news`, "Bullish News" / "Bearish News"), so installed builds render it and the note
+stays. A no-cause move card ("No news yet explains …") is never a cause, a lean or a classified
+headline: the tile keeps "<Industry> rose 13.2%. No clear catalyst in today's news." A move card
+for the other direction is an ordinary card, which its own sentiment refuses. A MARKET card is
+withheld (the lean stays) while the session's S&P 500 — `ctx.market_change`, the figure the
+tile's own context prints — moves ≥ 0.5% the other way: its "moves with the broader market"
+no longer stands (the writer's `market_card_lost`), and the writer rewrites it only while the
+scope stays in move mode.
+
 THE REBUILD: ATTRIBUTION, NOT GENERATION
 ----------------------------------------
 "Why did it move today" has a small enumerable answer set, and almost none of it needs
@@ -127,6 +145,7 @@ from app.services.news_insight_service import (
     price_terms,
     web_only_card_visible,
 )
+from app.services.insight_move import KIND_NONE, MoveTag, format_move_tag, parse_move_tag
 from app.services.updates_materiality import classify_move, finite, move_z
 from app.services.volatility_cache_service import get_volatility_cache_service
 from app.utils.market_hours import (
@@ -876,7 +895,9 @@ def _classified_today_news(
       finding and may be stated.
     * `checked=True, had_news=True` — news exists; whether it explains the move is the
       classifier's business, then the news lean's (`_session_news_lean`, which reads the
-      same card behind this verdict and adds no gate of its own).
+      same card behind this verdict and adds no gate of its own). A NO-CAUSE move card
+      (`_card_move_tag` kind "none", 2026-11-27) is news that explains nothing: never
+      classified, so the tile says "No clear catalyst".
 
     A card generated AFTER the session is the fourth case, and it is `checked=False`.
     Pre-market the payload describes yesterday's session, while the sweeper's news pass
@@ -897,6 +918,13 @@ def _classified_today_news(
     headline = str(card.get("headline") or "").strip()
     if not headline:
         return [], False, True
+    move = _card_move_tag(card)
+    if move is not None and move.kind == KIND_NONE:
+        # A NO-CAUSE move card (owner 2026-11-27): its code-owned headline ("No news yet
+        # explains …") is never classified into a catalyst. It is still the session's news,
+        # so the tile reads "No clear catalyst in today's news." — and `detect_news_lean`
+        # never makes it a cause or a lean either.
+        return [], True, True
 
     try:
         from app.services.agents.ticker_report_data_collector import (
@@ -968,6 +996,48 @@ _LEAN_BRAND_ALIASES: Dict[str, Tuple[str, ...]] = {
 }
 
 
+# (scope, generated_at) pairs whose malformed move marker was already logged — once per card
+# (builds repeat every 60 s). Bounded like `news_insight_service`'s logged-once sets.
+_MALFORMED_MOVE_LOGGED: set = set()
+_MALFORMED_MOVE_LOG_MAX = 256
+
+
+def _card_move_tag(card: Any) -> Optional[MoveTag]:
+    """The card's server-only MOVE marker (`news_insight_service._row_to_card` sets
+    `card["move"] = {"kind", "direction"}` from the tag leading its stored reason), or None.
+
+    Accepted only as a dict both closed vocabularies accept (`insight_move.format_move_tag`,
+    then `parse_move_tag`: case-sensitive). No marker → None, silently. A malformed one (not a
+    dict, a missing or unknown kind or direction) → None and ONE warning per card: the card is
+    then read as an ordinary card, behind the strict news-lean gate.
+
+    ⚠️ NO DATE CHECK, on purpose — the same rule as `_session_news_lean`: `had_news` is the one
+    session gate. `move_card_today` / `move_card_current` gate on NOW's ET day, which would
+    refuse yesterday's move card on a pre-market tile that describes yesterday.
+    """
+    if not isinstance(card, dict):
+        return None
+    marker = card.get("move")
+    if marker is None:
+        return None
+    tag: Optional[MoveTag] = None
+    if isinstance(marker, dict):
+        tag = parse_move_tag(format_move_tag(marker.get("direction"), marker.get("kind")))
+    if tag is None:
+        scope = card.get("scope")
+        key = (str(scope), str(card.get("generated_at")))
+        if key not in _MALFORMED_MOVE_LOGGED:
+            if len(_MALFORMED_MOVE_LOGGED) >= _MALFORMED_MOVE_LOG_MAX:
+                _MALFORMED_MOVE_LOGGED.clear()
+            _MALFORMED_MOVE_LOGGED.add(key)
+            logger.warning(
+                "widget: malformed move marker on the Insights card for %s (%s) — read as an "
+                "ordinary card behind the strict news-lean gate",
+                scope, type(marker).__name__,
+            )
+    return tag
+
+
 def _session_news_lean(
     card: Optional[Dict[str, Any]],
     had_news: bool,
@@ -988,7 +1058,9 @@ def _session_news_lean(
     Only an AI card (`ai_generated is True`): the Updates screen's non-AI fallback card
     ("Latest … headlines") never reaches `get_cards`, but a row shaped like one must not
     pose as a summary. Neutral and unknown sentiments are passed through as-is and refused
-    by `detect_news_lean`, which owns the whole gate.
+    by `detect_news_lean`, which owns the whole gate — including the move-card trust (owner
+    2026-11-27, "Trust move cards"): this only copies the card's marker (`_card_move_tag`)
+    into `move_kind` / `move_direction` and adds no gate of its own.
     """
     if not had_news or not isinstance(card, dict):
         return None
@@ -1007,6 +1079,7 @@ def _session_news_lean(
         )
         terms = (ticker,)
     terms = terms + _LEAN_BRAND_ALIASES.get((ticker or "").upper(), ())
+    move = _card_move_tag(card)
     return NewsLean(
         headline=headline,
         sentiment=sentiment,
@@ -1014,6 +1087,8 @@ def _session_news_lean(
         generated_at=card.get("generated_at"),
         rolling=rolling,
         day=day,
+        move_kind=move.kind if move is not None else None,
+        move_direction=move.direction if move is not None else None,
     )
 
 

@@ -47,6 +47,15 @@ CRWV −15.46% on 2026-10-14 (z 2.57, a Bearish 13:09 ET card) is the case it ex
 ACHR's all-bullish card under −5.02% is the case it must keep refusing
 (`test_daily_move_attribution.py`).
 
+TRUSTED MOVE CARDS (owner, 2026-11-27: "Trust move cards"). A MOVE card (`insight_move`: the
+Updates writer's company or market cause for a big move, judged by its cause judge, its
+headline already run through `usable_lean_headline` with the writer's own subject names) whose
+direction is the move's skips the Unusual and headline checks: its headline is printed as-is,
+behind a shape check only (`_move_card_headline`). Kept for it: the caller's session gate, an
+AI card, the web-only hold, sentiment agreeing with the move, and the after-close report-day
+rule. A no-cause move card ("No news yet explains …") is never a cause and never a lean,
+whatever its sentiment; a move card for the other direction is an ordinary card.
+
 PRECEDENCE
 ----------
 The news lean first, whenever its gate passes: the card is the session's own account of the
@@ -135,6 +144,11 @@ _LEAN_MIN_CHARS = 12
 _LEAN_MAX_CHARS = 100
 # A card written this long after the bell, on a day the company reported, is about the print.
 _POST_CLOSE_SLACK_MINUTES = 15
+# A MARKET move card ("moves with the broader market …") no longer stands once the S&P 500
+# moves the other way by at least this much — the writer's own line
+# (`updates_insight_sweeper._INDEX_AGAINST_MIN_PCT`, private to the Insights session's file and
+# not imported here: the sweeper is a heavy module). Pinned equal by test.
+_MARKET_CARD_AGAINST_MIN_PCT = 0.5
 
 # ⚠️ These tables are a DENYLIST over model text, and the 2026-10-14 review found natural
 # phrasings past every first draft of them ("Falls for Third Straight Session", "Gives Back
@@ -444,6 +458,10 @@ class Attribution:
     # "bearish" / "bullish" when the session's Insights card leaned the way the stock moved —
     # whether or not its headline was shown. Lets Ask Cay word a withheld lean honestly.
     lean: Optional[str] = None
+    # "company" / "market" when the cause is a TRUSTED move card (`detect_news_lean`, owner
+    # 2026-11-27: "Trust move cards") — its headline printed without the Unusual and headline
+    # checks. None otherwise, an ordinary card's lean included. Never rendered, not on the wire.
+    move_card: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -468,6 +486,13 @@ class NewsLean:
     # The day the caller gated the card on (the ET calendar day for a 24/7 row, else the
     # session). A headline naming any OTHER weekday is a story about another day.
     day: Optional[date] = None
+    # The card's server-only MOVE marker (`news_insight_service._row_to_card` → `card["move"]`,
+    # parsed by `widget_movers_service._card_move_tag`): "company" / "market" / "none" and
+    # "up" / "down". None for an ordinary card. Only `detect_news_lean` reads them: a company
+    # or market card whose direction is the move's is TRUSTED (owner 2026-11-27, "Trust move
+    # cards"), and a "none" card is never a cause or a lean.
+    move_kind: Optional[str] = None
+    move_direction: Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -924,6 +949,59 @@ def _written_after_close(generated_at: Any, today: date) -> bool:
     return minute > _close_minute(today) + _POST_CLOSE_SLACK_MINUTES
 
 
+def _move_card_headline(headline: Any) -> Tuple[Optional[str], Optional[str]]:
+    """A TRUSTED move card's headline, whitespace-collapsed, or `(None, code)`.
+
+    A SHAPE check only, never a content check: the writer already ran `usable_lean_headline`
+    with its own subject names, the 100-character limit and the cause judge
+    (`news_insight_service._generate_move_card`), so a failure here means the stored card has
+    drifted from the writer's contract. Codes: `not_text`; `length` (outside 12-100 — 100 is
+    where the medium tile cuts off; checked before any scan, so a huge stored string costs one
+    linear pass); `clipped` ("…" or a trailing "..." would print a cut sentence); `ending` (a
+    "?" or "!" would read "…?." once the detail's full stop is added); `relative_day` (the
+    headline is reused verbatim as `detail_aged`, so it may name no relative day).
+    """
+    if not isinstance(headline, str):
+        return None, "not_text"
+    h = re.sub(r"\s+", " ", headline).strip()
+    if not (_LEAN_MIN_CHARS <= len(h) <= _LEAN_MAX_CHARS):
+        return None, "length"
+    if "…" in h or h.endswith("..."):
+        return None, "clipped"
+    if h.endswith("?") or h.endswith("!"):
+        return None, "ending"
+    if _LEAN_RELATIVE_DAY_RE.search(h):
+        return None, "relative_day"
+    return h, None
+
+
+# (ticker, generated_at) pairs whose trusted move card was already logged as withheld — once
+# per card: the head row runs `attribute` twice per build and builds repeat every 60 s. Bounded
+# like `news_insight_service`'s logged-once sets (cleared when full: a log aid, not state).
+_MOVE_CARD_REFUSALS_LOGGED: set = set()
+_MOVE_CARD_REFUSALS_LOG_MAX = 256
+
+
+def _log_move_card_refusal(
+    ticker: str, kind: Any, code: Optional[str], headline: Any, generated_at: Any,
+) -> None:
+    """WARNING, once per card, for a trusted move card whose headline failed its shape check.
+    Never the headline text: a web-only card's text comes from third-party pages."""
+    key = (str(ticker), str(generated_at))
+    if key in _MOVE_CARD_REFUSALS_LOGGED:
+        return
+    if len(_MOVE_CARD_REFUSALS_LOGGED) >= _MOVE_CARD_REFUSALS_LOG_MAX:
+        _MOVE_CARD_REFUSALS_LOGGED.clear()
+    _MOVE_CARD_REFUSALS_LOGGED.add(key)
+    size = len(headline) if isinstance(headline, str) else type(headline).__name__
+    logger.warning(
+        "daily_move_attribution: %s move card for %s withheld (%s, headline length %s, "
+        "generated_at %s) — the stored card drifted from the writer's contract; the tile "
+        "states the lean instead",
+        kind, ticker, code, size, generated_at,
+    )
+
+
 def detect_news_lean(
     ticker: str,
     change: float,
@@ -931,30 +1009,63 @@ def detect_news_lean(
     today: date,
     lean: Optional[NewsLean],
     earnings_row: Optional[Dict[str, Any]] = None,
+    *,
+    market_change: Optional[float] = None,
 ) -> Tuple[Optional[Attribution], Optional[str]]:
     """The session's Insights card as the reason — `(attribution, leaned)`.
 
     `leaned` is "bearish" / "bullish" whenever the card's sentiment points the way the stock
     moved, shown or not; `attribution` is set only when the headline may stand as the cause.
-    The gate, in order (owner, 2026-10-14):
+    `market_change` is the S&P 500's change for the session described, as the caller prints it
+    beside the move (`MoveContext.market_change_percent`; None for SPY itself and for a coin
+    beside a closed equity session). The gate, in order (owner, 2026-10-14; move cards
+    2026-11-27):
 
     1. a card, already session-gated by the caller;
-    2. sentiment Bearish or Bullish — Neutral never (balanced news under −8.84% reads as a
-       cause it is not);
-    3. the stock moved (not flat) and in the card's direction — ACHR's all-bullish card
-       under −5.02% fails here, the first build's bug;
-    4. an Unusual move: z ≥ 2, or ≥ 5% when σ is unknown;
-    5. an equity card written after the close on a day the company reported is about the
-       print, which cannot explain the session before it (`detect_earnings`' rule);
-    6. `usable_lean_headline`.
+    2. the stock moved (not flat);
+    3. a NO-CAUSE move card ("none") is never a cause and never a lean, whatever its
+       sentiment — `(None, None)`;
+    4. sentiment Bearish or Bullish — Neutral never (balanced news under −8.84% reads as a
+       cause it is not) — in the move's direction: ACHR's all-bullish card under −5.02%
+       fails here, the first build's bug;
+    5. a MARKET move card ("moves with the broader market …") while the S&P 500 moved the
+       other way by ≥ `_MARKET_CARD_AGAINST_MIN_PCT` is withheld, trusted or not: its writer
+       treats that sentence as no longer standing (`insight_move.market_card_lost`, the
+       sweeper's `_index_against`) but rewrites it only while the scope is still in move mode,
+       so a faded stock can keep it stored all day. An index the same way, under the
+       threshold, or unknown keeps the card (the sweeper's "not against");
+    6. TRUSTED: a company or market move card whose marker direction is the move's (owner,
+       "Trust move cards"). A marker for the other direction, or a malformed one, is an
+       ordinary card;
+    7. an ordinary card only: an Unusual move, z ≥ 2, or ≥ 5% when σ is unknown;
+    8. both: an equity card written after the close on a day the company reported is about
+       the print, which cannot explain the session before it (`detect_earnings`' rule). Kept
+       for a move card too: the widget cannot prove the card describes the session move (the
+       sweeper's report time never reaches the card);
+    9. a trusted card: `_move_card_headline` (shape only — its writer ran the subject and
+       wording checks and the cause judge); an ordinary card: `usable_lean_headline`.
 
-    Steps 4-6 withhold the headline but keep `leaned`: the reader then gets "Today's news
-    leaned bearish." — true, and the same lean the app shows — never "No clear catalyst".
+    Steps 5 and 7-9 withhold the headline but keep `leaned`: the reader then gets "Today's
+    news leaned bearish." — true, and the same lean the app shows — never "No clear catalyst".
     """
     if lean is None:
         return None, None
     c = _finite(change)
     if c is None or abs(c) < _FLAT_PCT:
+        return None, None
+    # stdlib-only, imported lazily like this module's other service imports
+    from app.services.insight_move import (
+        DIRECTION_DOWN,
+        DIRECTION_UP,
+        KIND_COMPANY,
+        KIND_MARKET,
+        KIND_NONE,
+    )
+
+    move_kind = getattr(lean, "move_kind", None)
+    if not isinstance(move_kind, str):
+        move_kind = None
+    if move_kind == KIND_NONE:
         return None, None
     sentiment = str(getattr(lean, "sentiment", "") or "").strip().lower()
     tag = NEWS_LEAN_TAGS.get(sentiment)
@@ -962,12 +1073,22 @@ def detect_news_lean(
         return None, None
     leaned = sentiment
 
-    zf = _finite(z)
-    if zf is not None:
-        if zf < _LEAN_MIN_Z:
+    if move_kind == KIND_MARKET:
+        m = _finite(market_change)
+        if m is not None and abs(m) >= _MARKET_CARD_AGAINST_MIN_PCT and (m < 0) != (c < 0):
             return None, leaned
-    elif abs(c) < _LEAN_MIN_PCT_NO_SIGMA:
-        return None, leaned
+
+    trusted = move_kind in (KIND_COMPANY, KIND_MARKET) and getattr(
+        lean, "move_direction", None
+    ) == (DIRECTION_DOWN if c < 0 else DIRECTION_UP)
+
+    if not trusted:
+        zf = _finite(z)
+        if zf is not None:
+            if zf < _LEAN_MIN_Z:
+                return None, leaned
+        elif abs(c) < _LEAN_MIN_PCT_NO_SIGMA:
+            return None, leaned
 
     if not getattr(lean, "rolling", False) and isinstance(earnings_row, dict):
         if _parse_day(earnings_row.get("date")) == today and _written_after_close(
@@ -975,16 +1096,28 @@ def detect_news_lean(
         ):
             return None, leaned
 
-    h = usable_lean_headline(
-        getattr(lean, "headline", None),
-        ticker,
-        getattr(lean, "subject_terms", ()) or (),
-        getattr(lean, "day", None) or today,
-    )
-    if h is None:
-        return None, leaned
+    raw = getattr(lean, "headline", None)
+    if trusted:
+        h, code = _move_card_headline(raw)
+        if h is None:
+            _log_move_card_refusal(
+                ticker, move_kind, code, raw, getattr(lean, "generated_at", None)
+            )
+            return None, leaned
+    else:
+        h = usable_lean_headline(
+            raw,
+            ticker,
+            getattr(lean, "subject_terms", ()) or (),
+            getattr(lean, "day", None) or today,
+        )
+        if h is None:
+            return None, leaned
     detail = h if h.endswith(".") else h + "."
-    return Attribution(kind=CauseKind.COMPANY_NEWS, tag=tag, detail=detail, lean=leaned), leaned
+    return Attribution(
+        kind=CauseKind.COMPANY_NEWS, tag=tag, detail=detail, lean=leaned,
+        move_card=move_kind if trusted else None,
+    ), leaned
 
 
 def describe_context(
@@ -1116,9 +1249,14 @@ def attribute(
 
     Precedence: the news lean > earnings > analyst > classified company news > group move >
     none. The lean leads (owner, 2026-10-30; see the module's PRECEDENCE) but only behind its
-    own unchanged gate, so a card that disagrees with the move, a routine move, or an
-    after-close card on a report day still falls through to the dated detectors. Nothing is
-    lost when it wins: the note keeps the industry arithmetic, "moved with it" included.
+    own gate, so a card that disagrees with the move, a routine move, or an after-close card
+    on a report day still falls through to the dated detectors. Since 2026-11-27 a trusted
+    move card (company or market, in the move's direction — "Trust move cards") skips the
+    routine-move and headline checks and leads the same way (`move_card` says so); a market
+    card only while the S&P 500 (`market_change_percent`) has not turned ≥ 0.5% the other way,
+    since its "moves with the broader market" sentence then no longer stands; a no-cause
+    move card never leads and never words the NONE sentence as a lean. Nothing is lost when
+    the card wins: the note keeps the industry arithmetic, "moved with it" included.
     """
     change = _finite(change_percent)
     if change is None:
@@ -1147,7 +1285,8 @@ def attribute(
     leaned: Optional[str] = None
     try:
         lean_hit, leaned = detect_news_lean(
-            ticker, change, z, today, news_lean, earnings_row
+            ticker, change, z, today, news_lean, earnings_row,
+            market_change=ctx.market_change_percent,
         )
     except Exception as e:  # a malformed card must never break the widget
         logger.warning(
@@ -1165,6 +1304,7 @@ def attribute(
             considered=[],
             note=context_note(ticker, ctx),
             lean=leaned,
+            move_card=lean_hit.move_card,
         )
 
     considered: List[str] = []

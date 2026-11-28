@@ -124,6 +124,13 @@ def test_the_lean_helper_adds_no_second_date_gate():
     code = "\n".join(l.split("#", 1)[0] for l in src.splitlines())
     assert "_et_date(" not in code
     assert "generated_at\")" not in code.replace('card.get("generated_at")', "")
+    # 2026-11-27 ("Trust move cards"): the move marker adds no date gate either. The feed's
+    # helpers gate on NOW's ET day and would refuse yesterday's move card on a pre-market tile
+    # that describes yesterday.
+    for fn in (_session_news_lean, wm._card_move_tag):
+        fn_code = "\n".join(l.split("#", 1)[0] for l in inspect.getsource(fn).splitlines())
+        for banned in ("move_card_today(", "move_card_current(", "held_move(", "et_date("):
+            assert banned not in fn_code, (fn.__name__, banned)
 
 
 # ── the widget payload ───────────────────────────────────────────────────────────
